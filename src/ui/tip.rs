@@ -24,6 +24,9 @@ thread_local! {
     /// Until when a tooltip shows at once: a moment past the last one
     /// that was showing.
     static WARM_UNTIL: Cell<Option<Instant>> = const { Cell::new(None) };
+    /// Whether a tooltip met while a control's content was updated is under
+    /// the pointer: each says so as it is updated, for the one round it.
+    static INNER_OVER: Cell<bool> = const { Cell::new(false) };
 }
 
 fn warm(now: Instant) -> bool {
@@ -131,6 +134,23 @@ impl<Message> Widget<Message, Theme, Renderer> for Tip<'_, Message> {
         shell: &mut Shell<'_, Message>,
         viewport: &Rectangle,
     ) {
+        // What it names first, and whether a tooltip in it is under the
+        // pointer: the innermost names what the pointer is on. A tab's ×
+        // showed its "Close" and, over it, the tab's own name at once.
+        let before = INNER_OVER.replace(false);
+        self.content.as_widget_mut().update(
+            &mut tree.children[0],
+            event,
+            layout,
+            cursor,
+            renderer,
+            clipboard,
+            shell,
+            viewport,
+        );
+        let inner = INNER_OVER.get();
+        let on = cursor.position_over(layout.bounds()).is_some();
+        INNER_OVER.set(before || inner || on);
         if matches!(
             event,
             Event::Mouse(_) | Event::Window(window::Event::RedrawRequested(_))
@@ -138,8 +158,7 @@ impl<Message> Widget<Message, Theme, Renderer> for Tip<'_, Message> {
             let state = tree.state.downcast_mut::<State>();
             let now = Instant::now();
             let moved = matches!(event, Event::Mouse(mouse::Event::CursorMoved { .. }));
-            let on = cursor.position_over(layout.bounds()).is_some();
-            let over = rests(*state, on, moved);
+            let over = rests(*state, on && !inner, moved);
             // A press on it puts its tip away whether or not the pointer
             // rested there first: a control come up under a still pointer,
             // clicked, showed its tip at the first nudge after the click.
@@ -157,16 +176,6 @@ impl<Message> Widget<Message, Theme, Renderer> for Tip<'_, Message> {
                 shell.request_redraw_at(at + DELAY);
             }
         }
-        self.content.as_widget_mut().update(
-            &mut tree.children[0],
-            event,
-            layout,
-            cursor,
-            renderer,
-            clipboard,
-            shell,
-            viewport,
-        );
     }
 
     fn mouse_interaction(

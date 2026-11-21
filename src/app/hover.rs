@@ -144,6 +144,7 @@ impl App {
             x,
             y,
             text: None,
+            prepared: Vec::new(),
             // The Explain one-liner is cached, so attach it synchronously;
             // any LSP text arrives later and renders below it.
             summary: self.hover_summary(pane, line, col),
@@ -163,7 +164,8 @@ impl App {
                 .session
                 .as_ref()
                 .filter(|s| s.status == DebugStatus::Stopped)
-            && let (Some(client), Some(frame)) = (session.client.clone(), session.frames.first())
+            && let (Some(client), Some(frame)) =
+                (session.client.clone(), self.evaluation_frame(session))
         {
             let frame_id = frame.id;
             if let Some(word) = self
@@ -190,6 +192,7 @@ impl App {
                                 .ok()
                                 .filter(|v| !v.is_empty())
                                 .map(|v| format!("{w} = {v}")),
+                            markdown: false,
                         })
                     },
                 );
@@ -210,13 +213,20 @@ impl App {
             .and_then(Option::as_ref)
             .and_then(|v| v.lang_key)
             .is_some_and(|lang| matches!(self.proj.link.lsp.get(lang), Some(LspSlot::Ready(_))));
+        // The peek is Markdown — a Python docstring's sections, a Rust doc
+        // comment's code — and set as the server's answer is: shown as plain
+        // text, its `**Args**` and backticks were read as written.
+        let mut highlight = Task::none();
         if let Some(text) = local {
+            let (prepared, task) = self.prepare_segments(&text);
             if let Some(h) = &mut self.proj.hover {
-                h.text = Some(text);
+                h.text = None;
+                h.prepared = prepared;
             }
             if !ready {
-                return Task::none();
+                return task;
             }
+            highlight = task;
         }
         // With a server, it is asked all the same, and its answer replaces
         // the peek: the peek knows the token's name, the server which symbol
@@ -243,11 +253,11 @@ impl App {
         };
         let client = match self.proj.link.lsp.get(lang) {
             Some(LspSlot::Ready(c)) => c.clone(),
-            _ => return Task::none(),
+            _ => return highlight,
         };
         // The display column, in the server's own position encoding.
         let character = viewer::Col(col).to_offset(&source_line, client.encoding);
-        Task::perform(
+        let asked = Task::perform(
             async move { client.hover(&path, line, character).await },
             move |result| {
                 Message::Hover(HoverMsg::Answered {
@@ -256,12 +266,14 @@ impl App {
                     line,
                     col,
                     text: result.ok().flatten().map(|text| match &structure {
-                        Some(structure) => format!("{text}\n\n{structure}"),
+                        Some(structure) => format!("{text}\n\n```text\n{structure}\n```"),
                         None => text,
                     }),
+                    markdown: true,
                 })
             },
-        )
+        );
+        Task::batch([highlight, asked])
     }
 
     pub(crate) fn on_hover_cleared(&mut self) -> Task<Message> {
@@ -317,7 +329,12 @@ impl App {
         {
             parts.push(doc.clone());
         }
-        parts.extend(self.local_structure(pane, line, col));
+        // The type's relations as they are, not as Markdown: set as the
+        // server's answer sets them.
+        parts.extend(
+            self.local_structure(pane, line, col)
+                .map(|structure| format!("```text\n{structure}\n```")),
+        );
         (!parts.is_empty()).then(|| parts.join("\n\n"))
     }
 
@@ -426,8 +443,14 @@ impl App {
             // Severity 1 is error (most severe) → lowest number sorts first.
             .min_by_key(|d| d.severity)
             .map(|d| {
-                // The server's message as it sent it, under our label.
-                let message = d.message.trim();
+                // The server's message as it sent it, under our label, and
+                // who said it under what code (`rustc(E0308)`): what to look
+                // it up by.
+                let message = match d.origin() {
+                    Some(origin) => format!("{} {origin}", d.message.trim()),
+                    None => d.message.trim().to_string(),
+                };
+                let message = message.as_str();
                 match d.severity {
                     1 => tr!("Error: {message}", message = message),
                     2 => tr!("Warning: {message}", message = message),
@@ -477,6 +500,7 @@ impl App {
             served,
             by_pointer: true,
             line_top: None,
+            in_test: self.test_at(pane, line + 1).is_some(),
         });
         // The menu acts where it was opened: the caret goes there, as a
         // click puts it — the code said nothing of what it would act on. A
@@ -613,21 +637,30 @@ impl App {
                 line,
                 col,
                 text,
+                markdown,
                 ..
             } => {
                 // The peek this text was fetched for must still be the open
                 // one; line/col stays as a cheap consistency check.
-                if hover_gen == self.proj.hover_gen
-                    && let Some(h) = &mut self.proj.hover
-                    && h.line == line
-                    && h.col == col
-                {
-                    // No answer leaves the local peek shown, if there is one.
-                    if text.is_some() {
-                        h.text = text;
-                    }
+                let open = hover_gen == self.proj.hover_gen
+                    && self
+                        .proj
+                        .hover
+                        .as_ref()
+                        .is_some_and(|h| h.line == line && h.col == col);
+                // No answer leaves the local peek shown, if there is one.
+                let Some(text) = text.filter(|_| open) else {
+                    return Task::none();
+                };
+                let (prepared, task) = match markdown {
+                    true => self.prepare_segments(&text),
+                    false => (Vec::new(), Task::none()),
+                };
+                if let Some(h) = &mut self.proj.hover {
+                    h.text = (!markdown).then_some(text);
+                    h.prepared = prepared;
                 }
-                Task::none()
+                task
             }
             HoverMsg::Cleared => self.on_hover_cleared(),
             HoverMsg::Gutter { pane, line, x, y } => self.on_gutter_hover(pane, line, x, y),

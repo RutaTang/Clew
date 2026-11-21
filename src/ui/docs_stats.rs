@@ -73,6 +73,8 @@ pub(crate) enum PaneCover<'a> {
     WeakSpots,
     /// The project glossary.
     Glossary,
+    /// The page a plugin's command showed.
+    Plugin(&'a crate::app::plugins::PluginPage),
 }
 
 impl PaneCover<'_> {
@@ -116,6 +118,8 @@ pub(crate) fn pane_cover(app: &App) -> Option<PaneCover<'_>> {
         PaneCover::WeakSpots
     } else if app.proj.glossary.showing {
         PaneCover::Glossary
+    } else if let Some(page) = &app.proj.plugin_page {
+        PaneCover::Plugin(page)
     } else {
         return None;
     })
@@ -131,6 +135,13 @@ pub(crate) fn pane_area(app: &App) -> Element<'_, Message> {
             PaneCover::Stats => stats_home(app),
             PaneCover::WeakSpots => super::weakspots::weak_home(app),
             PaneCover::Glossary => glossary_home(app),
+            PaneCover::Plugin(page) => {
+                let running = app.plugin_run().is_some();
+                let its_own = running
+                    && page.again.is_some()
+                    && app.plugins.running_again.as_ref() == page.again.as_ref();
+                super::plugins::plugin_page(page, running, its_own)
+            }
         };
         // The Ask pill floats over a page's foot at its right: the page
         // ends above it, so no row is under it, scrolled to its end or
@@ -231,6 +242,7 @@ pub(crate) fn kind_badge(kind: &str) -> &str {
         "class" => "class",
         "constant" | "const" => "const",
         "theorem" => "thm",
+        "example" => "ex",
         "instance" => "inst",
         "inductive" => "ind",
         "module" | "mod" | "namespace" => "mod",
@@ -266,7 +278,7 @@ pub(crate) fn docs_tab(app: &App) -> Element<'_, Message> {
                 Glyph::Note,
                 tr!("Nothing documented"),
                 tr!("No doc comments were found in this project's code."),
-                Some((tr!("Look again"), Message::Docs(DocsMsg::Refresh))),
+                Some((tr!("Scan again"), Message::Docs(DocsMsg::Refresh))),
             )
         } else {
             // Nothing was built to build again: the project is read for its
@@ -275,7 +287,7 @@ pub(crate) fn docs_tab(app: &App) -> Element<'_, Message> {
                 Glyph::Note,
                 tr!("No documentation"),
                 "",
-                Some((tr!("Look again"), Message::Docs(DocsMsg::Refresh))),
+                Some((tr!("Scan again"), Message::Docs(DocsMsg::Refresh))),
             )
         };
     }
@@ -543,17 +555,30 @@ pub(crate) fn docs_page<'a>(page: &'a crate::DocPage) -> Element<'a, Message> {
         .width(Fill)
         .style(theme::editor);
 
-        let doc: Element<'a, Message> = if e.doc_items.is_empty() {
-            text(tr!("No documentation."))
-                .size(ts::BODY)
-                .color(theme::dim())
-                .into()
+        // A member field or constant says what it is in its signature: a
+        // "No documentation." under each of a model's fields was most of
+        // its page.
+        let quiet = idx > 0 && !crate::notes::is_read_through(&e.kind);
+        let doc: Option<Element<'a, Message>> = if !e.doc_items.is_empty() {
+            Some(
+                iced::widget::markdown::view(&e.doc_items, theme::markdown_settings())
+                    .map(|url| Message::Content(ContentMsg::OpenLink(url.to_string()))),
+            )
+        } else if quiet {
+            None
         } else {
-            iced::widget::markdown::view(&e.doc_items, theme::markdown_settings())
-                .map(|url| Message::Content(ContentMsg::OpenLink(url.to_string())))
+            Some(
+                text(tr!("No documentation."))
+                    .size(ts::BODY)
+                    .color(theme::dim())
+                    .into(),
+            )
         };
 
-        let block = column![title, signature, doc].spacing(8);
+        let mut block = column![title, signature].spacing(8);
+        if let Some(doc) = doc {
+            block = block.push(doc);
+        }
         // Indent members under their type.
         let indent = e.depth as f32 * 18.0;
         blocks.push(
@@ -598,36 +623,22 @@ pub(crate) fn docs_page<'a>(page: &'a crate::DocPage) -> Element<'a, Message> {
 }
 
 /// The architecture-overview "home": the module map and, under it, the
-/// written overview — or what it is waiting for. Writing it, and writing it
-/// again, is one icon beside the close button, as the chrome's actions are:
-/// a primary button floated alone under the map, and the page was replaced
-/// by a line of words while it wrote.
+/// written overview — or, in a card where it will be, what it is and the
+/// one step that gets there ([`overview_to_write`]). Writing it again is
+/// one icon beside the close button, as the chrome's actions are, turning
+/// while it writes: the page was replaced by a line of words.
 pub(crate) fn overview_home(app: &App) -> Element<'_, Message> {
     let close = || Message::Overview(OverviewMsg::Close);
     let generated = app.proj.overview.markdown.is_some();
     let generating = app.proj.overview.generating;
-    let ready = app.llm_available && !app.proj.explain.cache.is_empty();
 
-    // Named by its tooltip, turning while it writes; the height of the
-    // header's title line, so the page below sits where it did.
-    let write = (generated || generating || ready).then(|| {
-        let (glyph, name, tip) = if generated {
-            (
-                Glyph::Refresh,
-                tr!("Regenerate overview"),
-                tr!("Regenerate overview with AI (one AI call)"),
-            )
-        } else {
-            (
-                Glyph::Sparkle,
-                tr!("Generate overview"),
-                tr!("Generate overview with AI (one AI call)"),
-            )
-        };
+    // Named by its tooltip; the height of the header's title line, so the
+    // page below sits where it did.
+    let write = generated.then(|| {
         super::toolbar::busy_action_tip(
-            glyph,
-            name,
-            tip,
+            Glyph::Refresh,
+            tr!("Regenerate overview"),
+            tr!("Regenerate overview with AI (one AI call)"),
             Some(Message::Overview(OverviewMsg::Generate)),
             generating,
         )
@@ -645,21 +656,9 @@ pub(crate) fn overview_home(app: &App) -> Element<'_, Message> {
 
     // The architecture, drawn from the imports, before any prose about it.
     let mut items: Vec<Element<'_, Message>> = Vec::new();
-    let map = module_map(app);
-    let has_map = map.is_some();
-    items.extend(map);
+    items.extend(module_map(app));
     if generated {
         items.extend(render_prepared(app, &app.proj.overview.prepared));
-    } else if generating {
-        items.push(
-            container(
-                text(tr!("Generating architecture overview…"))
-                    .size(ts::BODY)
-                    .color(theme::dim()),
-            )
-            .center_x(Fill)
-            .into(),
-        );
     } else if app.no_code() {
         // No code: nothing to explain — Explain All here said there was
         // nothing for it to do — and a page as every empty one is, with the
@@ -674,68 +673,8 @@ pub(crate) fn overview_home(app: &App) -> Element<'_, Message> {
                 Message::Project(ProjectMsg::OpenFolderPressed),
             )),
         ));
-    } else if !ready {
-        // What it is written from, and the one step that gets there — a
-        // way each: the page was a dead end ("Run Explain All first.").
-        let step = |label: &'static str, msg: Message| {
-            // Explain All spends AI calls: marked so, as everywhere.
-            let face: Element<'_, Message> = if label == tr!("Explain All…") {
-                super::toolbar::ai_words(label, ts::BODY, theme::on_accent())
-            } else {
-                text(label).size(ts::BODY).into()
-            };
-            button(face)
-                .style(theme::primary_button)
-                .padding([5, 14])
-                .on_press(super::heard::said(label, msg))
-        };
-        let (why, action) = if !app.llm_available {
-            (
-                tr!("The overview is written by the AI model you choose in Settings."),
-                step(
-                    tr!("Add an API Key…"),
-                    Message::Settings(SettingsMsg::OpenAt(crate::SettingsPage::LanguageModel)),
-                ),
-            )
-        } else {
-            (
-                tr!(
-                    "The overview is written from the project's explanations, which Explain All writes."
-                ),
-                step(
-                    tr!("Explain All…"),
-                    super::toolbar::explain_all_message(app),
-                ),
-            )
-        };
-        items.push(
-            container(
-                column![
-                    text(why)
-                        .size(ts::BODY)
-                        .color(theme::fg_muted())
-                        .align_x(iced::Center),
-                    action,
-                ]
-                .spacing(12)
-                .align_x(iced::Center)
-                .max_width(560),
-            )
-            .center_x(Fill)
-            .into(),
-        );
-    } else if !has_map {
-        // Nothing drawn and nothing written yet: the page says so, and
-        // the icon above writes it.
-        items.push(
-            container(
-                text(tr!("No overview yet."))
-                    .size(ts::BODY)
-                    .color(theme::dim()),
-            )
-            .center_x(Fill)
-            .into(),
-        );
+    } else {
+        items.push(overview_to_write(app));
     }
 
     container(
@@ -757,6 +696,99 @@ pub(crate) fn overview_home(app: &App) -> Element<'_, Message> {
     .height(Fill)
     .padding([20, 28])
     .into()
+}
+
+/// Where the written overview will be, while it is not: what it is, and
+/// the one step that gets there — a key, Explain All, writing it, or
+/// writing it again after a failure — in a card under the map, as the
+/// map's own place is. A sentence and a filled button floated alone under
+/// the map read as stray, the button the loudest thing on the page; and
+/// writing it was an icon in the header the reader had to find.
+fn overview_to_write(app: &App) -> Element<'_, Message> {
+    let overview = &app.proj.overview;
+    let step = |label: &'static str, msg: Message, ai: bool| -> Element<'_, Message> {
+        // What spends AI calls is marked so, as everywhere.
+        let face: Element<'_, Message> = if ai {
+            super::toolbar::ai_words_one_line(label, ts::BODY, theme::fg())
+        } else {
+            text(label)
+                .size(ts::BODY)
+                .wrapping(iced::widget::text::Wrapping::None)
+                .into()
+        };
+        button(face)
+            .style(theme::secondary_button)
+            .padding([6, 14])
+            .on_press(super::heard::said(label, msg))
+            .into()
+    };
+    let generate = || Message::Overview(OverviewMsg::Generate);
+    let (says, action): (String, Option<Element<'_, Message>>) = if overview.generating {
+        (tr!("Generating architecture overview…").to_string(), None)
+    } else if !app.llm_available {
+        (
+            tr!(
+                "A short tour of this project's main parts and how they fit together, written by an AI model. It needs an API key."
+            )
+            .to_string(),
+            Some(step(
+                tr!("Add an API Key…"),
+                Message::Settings(SettingsMsg::OpenAt(crate::SettingsPage::LanguageModel)),
+                false,
+            )),
+        )
+    } else if app.proj.explain.cache.is_empty() {
+        (
+            tr!(
+                "A short tour of this project's main parts and how they fit together, written by an AI model from the project's explanations. Run Explain All first to write them."
+            )
+            .to_string(),
+            Some(step(
+                tr!("Explain All…"),
+                super::toolbar::explain_all_message(app),
+                true,
+            )),
+        )
+    } else if let Some(reason) = &overview.failed {
+        (
+            tr!("Could not generate the overview: {error}", error = reason),
+            Some(step(tr!("Try again"), generate(), true)),
+        )
+    } else {
+        (
+            tr!(
+                "A short tour of this project's main parts and how they fit together, written by an AI model from the project's explanations."
+            )
+            .to_string(),
+            Some(step(tr!("Generate overview"), generate(), true)),
+        )
+    };
+    let icon = if overview.generating {
+        super::meter::spinning(Glyph::Sparkle, theme::accent(), 16.0)
+    } else {
+        glyph::icon(Glyph::Sparkle, theme::accent(), 16.0)
+    };
+    let words = column![
+        text(tr!("Written overview"))
+            .size(ts::BODY)
+            .font(crate::fonts::UI_MEDIUM)
+            .color(theme::fg()),
+        text(says)
+            .size(ts::BODY)
+            .color(theme::dim())
+            .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
+    ]
+    .spacing(3)
+    .width(Fill);
+    let mut line = row![icon, words].spacing(12).align_y(iced::Center);
+    if let Some(action) = action {
+        line = line.push(action);
+    }
+    container(line)
+        .padding([14, 16])
+        .width(Fill)
+        .style(theme::form_card)
+        .into()
 }
 
 /// The overview's module map — the project's most connected files and the
@@ -998,15 +1030,20 @@ pub(crate) fn stats_home(app: &App) -> Element<'_, Message> {
             .color(theme::fg_muted())
             .width(Length::Fixed(w))
     };
+    // Counts set right, as a table's numbers are: their digits in
+    // columns, the larger read as larger at a glance.
+    let right = iced::alignment::Horizontal::Right;
+    let num = |s: String, w: f32, color: iced::Color| cell(s, w, color).align_x(right);
+    let head_num = |s: &'static str, w: f32| head(s, w).align_x(right);
     let table_header = row![
         // Match the color swatch's width so headers line up with the cells below.
         space().width(10),
         head(tr!("programming language\u{4}Language"), LANG_COL_W),
-        head(tr!("Files"), 70.0),
-        head(tr!("Code"), 90.0),
-        head(tr!("Comments"), 90.0),
-        head(tr!("Blanks"), 80.0),
-        head(tr!("Share"), 70.0),
+        head_num(tr!("Files"), 70.0),
+        head_num(tr!("Code"), 90.0),
+        head_num(tr!("Comments"), 90.0),
+        head_num(tr!("Blanks"), 80.0),
+        head_num(tr!("Share"), 70.0),
     ]
     .spacing(8)
     .align_y(iced::Center);
@@ -1024,11 +1061,11 @@ pub(crate) fn stats_home(app: &App) -> Element<'_, Message> {
                     theme::fg(),
                 )
                 .wrapping(Wrapping::None),
-                cell(fmt_thousands(l.files), 70.0, theme::fg_muted()),
-                cell(fmt_thousands(l.code), 90.0, theme::fg()),
-                cell(fmt_thousands(l.comments), 90.0, theme::fg_muted()),
-                cell(fmt_thousands(l.blanks), 80.0, theme::fg_muted()),
-                cell(share_label(share), 70.0, theme::dim()),
+                num(fmt_thousands(l.files), 70.0, theme::fg_muted()),
+                num(fmt_thousands(l.code), 90.0, theme::fg()),
+                num(fmt_thousands(l.comments), 90.0, theme::fg_muted()),
+                num(fmt_thousands(l.blanks), 80.0, theme::fg_muted()),
+                num(share_label(share), 70.0, theme::dim()),
             ]
             .spacing(8)
             .align_y(iced::Center),
@@ -1042,7 +1079,9 @@ pub(crate) fn stats_home(app: &App) -> Element<'_, Message> {
     // cells inside their padding.
     let files_header = row![
         space().width(Fill),
-        head(tr!("Lines"), 80.0),
+        head_num(tr!("Lines"), 80.0),
+        // Apart from the count beside it, as the table's columns are.
+        space().width(8),
         head(tr!("programming language\u{4}Language"), 90.0),
     ]
     .spacing(8)
@@ -1054,7 +1093,9 @@ pub(crate) fn stats_home(app: &App) -> Element<'_, Message> {
     })
     .align_y(iced::Center);
     let mut files = Column::new().spacing(2).push(files_header);
-    for f in &report.top_files {
+    // An empty file is no "largest" one: a package's bare `__init__.py`
+    // listed at 0 lines.
+    for f in report.top_files.iter().filter(|f| f.lines > 0) {
         let inner = row![
             text(f.rel.clone())
                 .size(ts::BODY)
@@ -1064,7 +1105,9 @@ pub(crate) fn stats_home(app: &App) -> Element<'_, Message> {
             text(fmt_thousands(f.lines))
                 .size(ts::BODY)
                 .color(theme::fg_muted())
-                .width(Length::Fixed(80.0)),
+                .width(Length::Fixed(80.0))
+                .align_x(right),
+            space().width(8),
             text(f.lang.clone())
                 .size(ts::SMALL)
                 .color(theme::dim())
@@ -1160,15 +1203,15 @@ pub(crate) fn glossary_home(app: &App) -> Element<'_, Message> {
             (
                 tr!("No terms found"),
                 tr!(
-                    "The glossary is made from doc comments and explanations; this project has none yet."
+                    "The glossary is made from doc comments and explanations. This project has none yet."
                 ),
-                Some((tr!("Look again"), Message::Docs(DocsMsg::Refresh))),
+                Some((tr!("Scan again"), Message::Docs(DocsMsg::Refresh))),
             )
         } else {
             (
                 tr!("No terms yet"),
                 "",
-                Some((tr!("Look again"), Message::Docs(DocsMsg::Refresh))),
+                Some((tr!("Scan again"), Message::Docs(DocsMsg::Refresh))),
             )
         };
         return container(
@@ -1274,8 +1317,8 @@ pub(crate) fn glossary_home(app: &App) -> Element<'_, Message> {
         if of_kind.len() > GLOSSARY_ROWS_SHOWN {
             rows.push(
                 text(trn!(
-                    "1 more — narrow the filter to see it",
-                    "{n} more — narrow the filter to see them",
+                    "1 more. Narrow the filter to see it.",
+                    "{n} more. Narrow the filter to see them.",
                     of_kind.len() - GLOSSARY_ROWS_SHOWN
                 ))
                 .size(ts::CAPTION)

@@ -10,6 +10,7 @@
 use std::path::{Path, PathBuf};
 
 use clew_core::leanproof::{self, ProofStep};
+use clew_core::lsp::client::LeanGoal;
 
 use crate::app::prelude::*;
 use crate::*;
@@ -34,6 +35,32 @@ pub struct ProofWalk {
     /// Which asking the answer must be for: a later one replaces it.
     pub(crate) token: u64,
 }
+
+/// The margin's Goals tab: the Lean server's goals where the cursor rests
+/// in a Lean file, and the file's messages on that line — asked again as
+/// the cursor moves, and as the server checks more of the file.
+#[derive(Debug, Clone)]
+pub struct LeanGoals {
+    /// The file asked about.
+    pub(crate) abs: PathBuf,
+    /// The 0-based line and display column asked about.
+    pub(crate) line: usize,
+    pub(crate) col: usize,
+    /// The server's diagnostics version when asked: moved on, the file has
+    /// been checked further, and what it says there may have changed.
+    pub(crate) checked: u64,
+    /// Which asking is the latest: an answer for an older one is dropped.
+    pub(crate) token: u64,
+    /// Asked and not yet answered (or about to be: the cursor is resting).
+    pub(crate) asking: bool,
+    /// The last answer, and the line it was for: kept while the next one
+    /// is asked, so the goals do not blink away at every keystroke.
+    pub(crate) answer: Option<(usize, Result<Option<LeanGoal>, String>)>,
+}
+
+/// How long the cursor rests before the goals there are asked for: moving
+/// line by line asks once, where it stops.
+const GOALS_REST: std::time::Duration = std::time::Duration::from_millis(180);
 
 impl ProofWalk {
     /// The goals after step `i`, when known.
@@ -66,6 +93,122 @@ pub(crate) fn proof_at(
         .map(|(_, name, steps)| (name, steps))
 }
 
+/// Mathlib's build cache for the project: wanted, being got, or neither.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum MathlibCache {
+    /// Not looked at yet.
+    #[default]
+    Unknown,
+    /// Nothing to get: no Mathlib, its build in place, or a project on
+    /// another host.
+    Ready,
+    /// The project uses Mathlib and its build is not there.
+    Missing,
+    /// `lake exe cache get` at work: the last line it said.
+    Getting(String),
+    /// It failed: its last words.
+    Failed(String),
+    /// Missing, and put by for now ("Not now"): the palette still offers it.
+    Dismissed,
+}
+
+/// How often, at most, a line `lake exe cache get` says is passed on: it
+/// redraws its progress many times a second.
+const MATHLIB_SAID_EVERY: std::time::Duration = std::time::Duration::from_millis(150);
+
+/// Run `lake exe cache get` in `root` with `lake`, passing on what it says
+/// (`said`, at most every [`MATHLIB_SAID_EVERY`]); its last words when it
+/// fails.
+pub(crate) fn get_mathlib_cache(
+    lake: &Path,
+    root: &Path,
+    said: &dyn Fn(String),
+) -> Result<(), String> {
+    use std::io::Read;
+    use std::process::Stdio;
+    let mut command = clew_core::spawn::command(lake);
+    command
+        .args(["exe", "cache", "get"])
+        .current_dir(root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    // The toolchain's own `lean` beside its `lake`, first.
+    if let Some(dir) = lake.parent() {
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let dirs = std::iter::once(dir.to_path_buf()).chain(std::env::split_paths(&path));
+        if let Ok(joined) = std::env::join_paths(dirs) {
+            command.env("PATH", joined);
+        }
+    }
+    let mut child = command.spawn().map_err(|e| e.to_string())?;
+    // Both streams, as they come, into lines: progress is redrawn with `\r`.
+    let (lines, heard) = std::sync::mpsc::channel::<String>();
+    let readers: Vec<_> = [
+        child
+            .stdout
+            .take()
+            .map(|o| Box::new(o) as Box<dyn Read + Send>),
+        child
+            .stderr
+            .take()
+            .map(|e| Box::new(e) as Box<dyn Read + Send>),
+    ]
+    .into_iter()
+    .flatten()
+    .map(|mut stream| {
+        let lines = lines.clone();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            let mut line = Vec::new();
+            while let Ok(n) = stream.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                for &b in &buf[..n] {
+                    if b == b'\n' || b == b'\r' {
+                        if !line.is_empty() {
+                            let _ = lines.send(String::from_utf8_lossy(&line).into_owned());
+                            line.clear();
+                        }
+                    } else if line.len() < 4096 {
+                        line.push(b);
+                    }
+                }
+            }
+            if !line.is_empty() {
+                let _ = lines.send(String::from_utf8_lossy(&line).into_owned());
+            }
+        })
+    })
+    .collect();
+    drop(lines);
+    let mut last = String::new();
+    let mut passed = std::time::Instant::now() - MATHLIB_SAID_EVERY;
+    for line in heard {
+        let line = line.trim().to_string();
+        if line.is_empty() {
+            continue;
+        }
+        last = line;
+        if passed.elapsed() >= MATHLIB_SAID_EVERY {
+            passed = std::time::Instant::now();
+            said(last.clone());
+        }
+    }
+    for reader in readers {
+        let _ = reader.join();
+    }
+    let status = child.wait().map_err(|e| e.to_string())?;
+    if status.success() {
+        Ok(())
+    } else if last.is_empty() {
+        Err(format!("lake exited with {status}"))
+    } else {
+        Err(last)
+    }
+}
+
 impl App {
     /// Step Through Proof from the context menu: the proof of the
     /// declaration it was opened on, asked of the Lean server step by step.
@@ -81,7 +224,7 @@ impl App {
         }
         let Some((name, steps)) = proof_at(&v.source, &v.symbols, menu.line) else {
             self.status =
-                tr!("No tactic proof here: put the cursor in a theorem proved `by` tactics").into();
+                tr!("No tactic proof here. Put the cursor in a theorem proved with `by`.").into();
             return Task::none();
         };
         let abs = v.abs.clone();
@@ -89,14 +232,13 @@ impl App {
             Some(LspSlot::Ready(c)) => c.clone(),
             Some(LspSlot::Starting | LspSlot::AwaitingConsent) => {
                 self.status =
-                    tr!("The Lean server is still starting — ask again once it is ready").into();
+                    tr!("The Lean server is still starting. Ask again once it's ready.").into();
                 return Task::none();
             }
             _ => {
-                self.status = tr!(
-                    "The Lean server is not running — start it from the language servers panel"
-                )
-                .into();
+                self.status =
+                    tr!("The Lean server isn't running. Start it from the language servers panel.")
+                        .into();
                 return Task::none();
             }
         };
@@ -163,7 +305,7 @@ impl App {
             Ok(goals) => {
                 walk.goals = Some(goals);
                 walk.at = 0;
-                self.status = tr!("Proof ready — step through it below").into();
+                self.status = tr!("Proof ready. Step through it below.").into();
                 self.proof_show_step()
             }
             Err(why) => {
@@ -196,9 +338,335 @@ impl App {
         (walk.abs == abs).then(|| walk.steps.get(walk.at).map(|s| s.first + 1))?
     }
 
+    /// The margin tab shown: the one chosen, but the notes for Goals beside
+    /// a file that is not Lean.
+    pub(crate) fn margin_tab_shown(&self) -> crate::MarginTab {
+        match self.margin_tab {
+            crate::MarginTab::Goals if !self.reading_lean() => crate::MarginTab::Notes,
+            tab => tab,
+        }
+    }
+
+    /// Whether the file being read is Lean.
+    pub(crate) fn reading_lean(&self) -> bool {
+        self.active_viewer()
+            .is_some_and(|v| v.lang_key == Some("lean"))
+    }
+
+    /// Keep the margin's Goals up with where the cursor is: the first Lean
+    /// file read turns the margin to them (once — the tab is the reader's
+    /// after that); while they are shown, the cursor resting somewhere new,
+    /// or the server having checked more of the file, asks the server
+    /// again. Run after every update ([`App::update`]).
+    /// The Lean file being read: the active one, else any open.
+    pub(crate) fn lean_file(&self) -> Option<PathBuf> {
+        self.active_viewer()
+            .filter(|v| v.lang_key == Some("lean"))
+            .or_else(|| {
+                self.proj
+                    .panes
+                    .iter()
+                    .flatten()
+                    .find(|v| v.lang_key == Some("lean"))
+            })
+            .map(|v| v.abs.clone())
+    }
+
+    /// A Lean file of another Lake project than the one Lean's server was
+    /// started in: the server is started again in that one, where its
+    /// imports resolve (a repository's proofs and its extracted code are
+    /// often two). `None` while it is where it should be.
+    fn sync_lean_root(&mut self) -> Option<Task<Message>> {
+        if self.connection.is_remote() || !self.reading_lean() {
+            return None;
+        }
+        if !matches!(self.proj.link.lsp.get("lean"), Some(LspSlot::Ready(_))) {
+            return None;
+        }
+        let lake = self.lake_of_lean_file()?;
+        let started = self.proj.link.lean_root.as_ref()?;
+        if *started == lake {
+            return None;
+        }
+        self.reset_lsp("lean");
+        self.proj.lean_goals = None;
+        Some(self.ensure_lsp("lean"))
+    }
+
+    /// The Lake project of the Lean file read — the folder of the nearest
+    /// lakefile above it in the project, else the project — looked for on
+    /// disk once per file: this runs on every message while one is read.
+    fn lake_of_lean_file(&mut self) -> Option<PathBuf> {
+        let file = self.lean_file()?;
+        if let Some((known, lake)) = &self.proj.lean_lake
+            && *known == file
+        {
+            return Some(lake.clone());
+        }
+        let root = self.proj.project.as_ref()?.root.clone();
+        let lake = clew_core::lake_root(&root, &file);
+        self.proj.lean_lake = Some((file, lake.clone()));
+        Some(lake)
+    }
+
+    pub(crate) fn sync_lean_goals(&mut self) -> Option<Task<Message>> {
+        if let Some(restart) = self.sync_lean_root() {
+            return Some(restart);
+        }
+        // Whether the Lake project of the file read wants Mathlib's build
+        // cache: looked at once per Lake project, when a file of it is first
+        // read. The opened folder's was looked at, and a repository whose
+        // proofs are a Lake project of their own in `verification/` was
+        // never offered the cache: Lean built all of Mathlib, for hours.
+        if self.reading_lean() && !matches!(self.proj.mathlib, MathlibCache::Getting(_)) {
+            if self.connection.is_remote() {
+                if self.proj.mathlib == MathlibCache::Unknown {
+                    self.proj.mathlib = MathlibCache::Ready;
+                }
+            } else if let Some(lake) = self.lake_of_lean_file()
+                && self.proj.mathlib_root.as_ref() != Some(&lake)
+            {
+                self.proj.mathlib = match clew_core::mathlib_build_missing(&lake) {
+                    Some(_) => MathlibCache::Missing,
+                    None => MathlibCache::Ready,
+                };
+                self.proj.mathlib_root = Some(lake);
+            }
+        }
+        if self.reading_lean() && !self.lean_goals_offered {
+            self.lean_goals_offered = true;
+            if self.margin_tab == crate::MarginTab::Notes {
+                self.margin_tab = crate::MarginTab::Goals;
+            }
+        }
+        if self.margin_tab_shown() != crate::MarginTab::Goals || !crate::ui::right_panel_shown(self)
+        {
+            return None;
+        }
+        let v = self.active_viewer()?;
+        let (line, col) = v.caret.unwrap_or((0, 0));
+        let abs = v.abs.clone();
+        if !matches!(self.proj.link.lsp.get("lean"), Some(LspSlot::Ready(_))) {
+            return None;
+        }
+        let checked = match self.proj.link.lsp_snapshots.get("lean") {
+            Some(Ok(snapshot)) => snapshot.diag_version,
+            _ => 0,
+        };
+        if self
+            .proj
+            .lean_goals
+            .as_ref()
+            .is_some_and(|g| g.abs == abs && g.line == line && g.col == col && g.checked == checked)
+        {
+            return None;
+        }
+        self.lean_goals_seq += 1;
+        let token = self.lean_goals_seq;
+        // What was said is kept for the same file while the next is asked.
+        let answer = self
+            .proj
+            .lean_goals
+            .take()
+            .filter(|g| g.abs == abs)
+            .and_then(|g| g.answer);
+        self.proj.lean_goals = Some(LeanGoals {
+            abs,
+            line,
+            col,
+            checked,
+            token,
+            asking: true,
+            answer,
+        });
+        Some(Task::perform(tokio::time::sleep(GOALS_REST), move |()| {
+            Message::Proof(ProofMsg::GoalsDue { token })
+        }))
+    }
+
+    /// The cursor has rested: ask the Lean server for the goals there.
+    fn on_goals_due(&mut self, token: u64) -> Task<Message> {
+        let Some(goals) = self.proj.lean_goals.as_ref().filter(|g| g.token == token) else {
+            return Task::none();
+        };
+        let Some(LspSlot::Ready(client)) = self.proj.link.lsp.get("lean") else {
+            return Task::none();
+        };
+        let client = client.clone();
+        let (abs, line, col) = (goals.abs.clone(), goals.line, goals.col);
+        let Some(v) = self.proj.panes.iter().flatten().find(|v| v.abs == abs) else {
+            return Task::none();
+        };
+        let source_line = v.source_line(line).unwrap_or("").to_string();
+        let character = crate::editor::viewer::Col(col).to_offset(&source_line, client.encoding);
+        let stamp = self.stamp();
+        Task::perform(
+            async move { client.lean_goal(&abs, line, character).await },
+            move |result| {
+                Message::Proof(ProofMsg::Goals {
+                    stamp: stamp.clone(),
+                    token,
+                    result,
+                })
+            },
+        )
+    }
+
+    /// Get Mathlib's build cache: `lake exe cache get` in the project, with
+    /// the project's `lake` — what Lean's own extension offers a Mathlib
+    /// project, whose first file opened otherwise had Lean build all of
+    /// Mathlib, for hours, with nothing said of it.
+    fn on_get_mathlib_cache(&mut self) -> Task<Message> {
+        use iced::futures::channel::mpsc;
+        if matches!(self.proj.mathlib, MathlibCache::Getting(_)) || self.connection.is_remote() {
+            return Task::none();
+        }
+        // In the Lake project whose Mathlib is missing: `lake exe cache get`
+        // in a folder with no lakefile finds no Mathlib to get.
+        let Some(root) = self
+            .proj
+            .mathlib_root
+            .clone()
+            .or_else(|| self.proj.project.as_ref().map(|p| p.root.clone()))
+        else {
+            return Task::none();
+        };
+        let lake = match self
+            .effective_server("lean")
+            .map(|server| clew_core::lsp::store::locate(&server))
+        {
+            Some(clew_core::lsp::store::Located::Ready(lake)) => lake,
+            _ => {
+                self.status = tr!("Lean's lake wasn't found. Install Lean with elan.").into();
+                return Task::none();
+            }
+        };
+        self.proj.mathlib = MathlibCache::Getting(String::new());
+        let stamp = self.stamp();
+        let (tx, rx) = mpsc::unbounded::<Message>();
+        std::thread::spawn(move || {
+            let said_stamp = stamp.clone();
+            let said = tx.clone();
+            let result = get_mathlib_cache(&lake, &root, &move |line| {
+                let _ = said.unbounded_send(Message::Proof(ProofMsg::MathlibSaid {
+                    stamp: said_stamp.clone(),
+                    line,
+                }));
+            });
+            let _ = tx.unbounded_send(Message::Proof(ProofMsg::MathlibGot { stamp, result }));
+        });
+        Task::run(rx, std::convert::identity)
+    }
+
+    /// `lake exe cache get` ended: Mathlib's build is looked for again, and
+    /// the open Lean files are checked afresh against it.
+    fn on_mathlib_got(&mut self, result: Result<(), String>) -> Task<Message> {
+        let root = self
+            .proj
+            .mathlib_root
+            .clone()
+            .or_else(|| self.proj.project.as_ref().map(|p| p.root.clone()));
+        let still_missing = root.is_some_and(|r| clew_core::mathlib_build_missing(&r).is_some());
+        self.proj.mathlib = match result {
+            Err(why) => MathlibCache::Failed(why),
+            Ok(()) if still_missing => MathlibCache::Failed(
+                tr!("lake exe cache get finished, but Mathlib's compiled files are still missing. This version of Mathlib may have no cache.").into(),
+            ),
+            Ok(()) => MathlibCache::Ready,
+        };
+        if self.proj.mathlib == MathlibCache::Ready {
+            self.status = tr!("Mathlib's build cache is in place").into();
+            let lean: Vec<(PathBuf, std::sync::Arc<String>)> = self
+                .proj
+                .panes
+                .iter()
+                .flatten()
+                .filter(|v| v.lang_key == Some("lean"))
+                .map(|v| (v.abs.clone(), v.source.clone()))
+                .collect();
+            if let Some(LspSlot::Ready(client)) = self.proj.link.lsp.get("lean") {
+                let client = client.clone();
+                for (abs, source) in lean {
+                    client.did_close(&abs);
+                    self.lsp_doc_rev += 1;
+                    client.did_open(&abs, "lean", self.lsp_doc_rev, &source);
+                    self.proj.link.lsp_opened.insert(abs);
+                }
+                self.proj.lean_goals = None;
+            }
+        }
+        Task::none()
+    }
+
+    /// Restart File: the Lean server checks the open Lean file afresh, as
+    /// closing and opening it again does — against its imports as they are
+    /// built now. What Lean asks for once a file's imports changed ("Imports
+    /// are out of date and must be rebuilt").
+    fn on_lean_restart_file(&mut self) -> Task<Message> {
+        let Some(v) = self.active_viewer().filter(|v| v.lang_key == Some("lean")) else {
+            return Task::none();
+        };
+        let (abs, source) = (v.abs.clone(), v.source.clone());
+        let client = match self.proj.link.lsp.get("lean") {
+            Some(LspSlot::Ready(c)) => c.clone(),
+            Some(LspSlot::Starting | LspSlot::AwaitingConsent) => {
+                self.status =
+                    tr!("The Lean server is still starting. Ask again once it's ready.").into();
+                return Task::none();
+            }
+            _ => {
+                self.status =
+                    tr!("The Lean server isn't running. Start it from the language servers panel.")
+                        .into();
+                return Task::none();
+            }
+        };
+        client.did_close(&abs);
+        self.lsp_doc_rev += 1;
+        client.did_open(&abs, "lean", self.lsp_doc_rev, &source);
+        self.proj.link.lsp_opened.insert(abs.clone());
+        // Asked again once the file is checked anew; said meanwhile.
+        self.proj.lean_goals = None;
+        let checked = match self.proj.link.lsp_snapshots.get("lean") {
+            Some(Ok(snapshot)) => snapshot.diag_version,
+            _ => 0,
+        };
+        self.proj.lean_restarting = Some((abs.clone(), checked));
+        let name = abs
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        self.status = tr!("Lean is checking {file} again…", file = name);
+        Task::none()
+    }
+
+    /// The Lean server's goals at the cursor, for asking `token`.
+    fn on_goals(&mut self, token: u64, result: Result<Option<LeanGoal>, String>) -> Task<Message> {
+        if let Some(goals) = self.proj.lean_goals.as_mut().filter(|g| g.token == token) {
+            goals.asking = false;
+            goals.answer = Some((goals.line, result));
+        }
+        Task::none()
+    }
+
     /// Handle a [`ProofMsg`].
     pub(crate) fn update_proof(&mut self, message: ProofMsg) -> Task<Message> {
         match message {
+            ProofMsg::GoalsDue { token } => self.on_goals_due(token),
+            ProofMsg::Goals { token, result, .. } => self.on_goals(token, result),
+            ProofMsg::RestartFile => self.on_lean_restart_file(),
+            ProofMsg::GetMathlibCache => self.on_get_mathlib_cache(),
+            ProofMsg::DismissMathlibCache => {
+                self.proj.mathlib = MathlibCache::Dismissed;
+                Task::none()
+            }
+            ProofMsg::MathlibSaid { line, .. } => {
+                if let MathlibCache::Getting(said) = &mut self.proj.mathlib {
+                    *said = line;
+                }
+                Task::none()
+            }
+            ProofMsg::MathlibGot { result, .. } => self.on_mathlib_got(result),
             ProofMsg::FromMenu => self.on_proof_from_menu(),
             ProofMsg::Answered { token, result, .. } => self.on_proof_answered(token, result),
             ProofMsg::Step(forward) => {

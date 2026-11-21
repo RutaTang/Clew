@@ -8,14 +8,14 @@
 # macOS and Windows alike) and `clew-speak` (answers read aloud by an
 # on-device voice, in a process of its own beside the client).
 [workspace]
-members = ["crates/clew-core", "crates/clew-protocol", "crates/clew-rules", "crates/clew-server", "crates/clew-speak", "crates/clew-voice"]
+members = ["crates/clew-core", "crates/clew-plugin", "crates/clew-plugin-sdk", "crates/clew-protocol", "crates/clew-rules", "crates/clew-server", "crates/clew-speak", "crates/clew-voice"]
 # Third-party crates carried with a fix of clew's (see vendor/README.md): built
 # as dependencies, not linted, formatted or tested as clew's own.
 exclude = ["vendor"]
 
 [package]
 name = "clew"
-version = "0.2.5"
+version = "0.3.0"
 edition = "2024"
 # The MSRV cargo enforces; kept equal to rust-toolchain.toml's channel.
 rust-version = "1.95"
@@ -24,6 +24,7 @@ rust-version = "1.95"
 clew-core = { path = "crates/clew-core" }
 clew-protocol = { path = "crates/clew-protocol" }
 clew-rules = { path = "crates/clew-rules" }
+clew-plugin = { path = "crates/clew-plugin" }
 # Voice: the microphone, and whisper.cpp's speech recognition on this machine.
 clew-voice = { path = "crates/clew-voice" }
 # `access(2)` / `getuid(2)` for the self-update and SSH control-socket checks.

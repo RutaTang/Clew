@@ -8,6 +8,11 @@
 //! the project's cached explanations. All of them only read, and every path
 //! they take is confined to the project, as in a turn.
 //!
+//! It also serves the plugin tools (`clew_plugin::tools`): an agent writes
+//! a plugin's source and builds it here, and asks Clew's window, which has
+//! the plugin runtime and the user, to try a build on the open project or
+//! to ask the user to install it (`clew_plugin::requests`).
+//!
 //! Run from the project (or with `--root <dir>`), it serves that project until
 //! the client closes its input. The file list is rescanned when it is a few
 //! seconds old, so files created meanwhile are found. Language servers the
@@ -30,12 +35,25 @@ use crate::agent_lsp::LspPool;
 /// How old the file list may be before a call rescans it.
 const FILES_FRESH_FOR: Duration = Duration::from_secs(5);
 
+/// How long a request may wait for a Clew window to take it before the
+/// agent is told no window is open for it.
+const TAKE_WITHIN: Duration = Duration::from_secs(8);
+
+/// How long a try waits for Clew's window: a command is stopped after 30 s,
+/// a graph after 60 s.
+const TRY_WAIT: Duration = Duration::from_secs(90);
+
+/// How long an install waits for the user to answer.
+const INSTALL_WAIT: Duration = Duration::from_secs(15 * 60);
+
 /// The project the server serves, and what its tools share.
 struct CodeTools {
     root: PathBuf,
     files: Mutex<(Instant, Arc<Vec<FileEntry>>)>,
     lsp: Arc<LspPool>,
     rt: tokio::runtime::Handle,
+    /// The client's name, for the user to see who asked for an install.
+    client: Mutex<String>,
 }
 
 impl CodeTools {
@@ -61,7 +79,7 @@ impl Host for CodeTools {
             .unwrap_or_default();
         (
             "clew".into(),
-            env!("CARGO_PKG_VERSION").into(),
+            clew_version().into(),
             Some(format!(
                 "Code-intelligence tools for the project \"{name}\" ({}). Paths are \
                  project-relative. Prefer `definition`/`references`/`hover` (language-server \
@@ -80,8 +98,25 @@ impl Host for CodeTools {
                 title: None,
                 description: t.description,
                 input_schema: t.parameters,
+                read_only: true,
             })
+            .chain(
+                clew_plugin::tools::tool_defs(clew_plugin::tools::Caller::Outside)
+                    .into_iter()
+                    .map(|t| Tool {
+                        name: t.name.into(),
+                        title: None,
+                        description: format!("[Clew plugins] {}", t.description),
+                        input_schema: t.schema,
+                        read_only: t.read_only,
+                    }),
+            )
             .collect()
+    }
+
+    fn client(&self, name: &str) {
+        *self.client.lock().unwrap_or_else(PoisonError::into_inner) =
+            name.chars().filter(|c| !c.is_control()).take(80).collect();
     }
 
     fn call(
@@ -90,6 +125,13 @@ impl Host for CodeTools {
         args: &serde_json::Value,
         stop: &AtomicBool,
     ) -> Result<ToolOutput, String> {
+        if clew_plugin::tools::is_plugin_tool(name) {
+            let (text, is_error) = match self.plugin_call(name, args, stop) {
+                Ok(text) => (text, false),
+                Err(why) => (why, true),
+            };
+            return Ok(ToolOutput { text, is_error });
+        }
         let text = agent::run_code_tool(
             self.root.clone(),
             self.files(),
@@ -106,6 +148,117 @@ impl Host for CodeTools {
             is_error: false,
         })
     }
+}
+
+impl CodeTools {
+    /// A plugin tool: done here, or asked of Clew's window.
+    fn plugin_call(
+        &self,
+        name: &str,
+        args: &serde_json::Value,
+        stop: &AtomicBool,
+    ) -> Result<String, String> {
+        use clew_plugin::requests::{Answer, Ask, Waited};
+        use clew_plugin::tools::Step;
+        let data =
+            clew_core::lsp::store::data_root().ok_or("Clew has no data folder on this machine")?;
+        let agent = {
+            let client = self.client.lock().unwrap_or_else(PoisonError::into_inner);
+            // Unnamed, the window says "an agent" in the user's language.
+            client.clone()
+        };
+        // What an install says once the user allowed it: by the plugin's
+        // manifest, its commands named as the window's palette names them.
+        let mut installed = None;
+        let (ask, wait) = match clew_plugin::tools::call(&data, name, args, stop) {
+            Step::Done(result) => return result,
+            Step::Try {
+                built,
+                command,
+                graph,
+                file,
+                line,
+                input,
+            } => (
+                Ask::Try {
+                    plugin: built.inspected.manifest.plugin.id.clone(),
+                    sha256: clew_plugin::inspect::hex(&built.inspected.sha256),
+                    command,
+                    graph,
+                    root: self.root.to_string_lossy().into_owned(),
+                    file,
+                    line,
+                    input,
+                },
+                TRY_WAIT,
+            ),
+            Step::Install { built } => {
+                let manifest = &built.inspected.manifest;
+                installed = Some(manifest.clone());
+                (
+                    Ask::Install {
+                        plugin: manifest.plugin.id.clone(),
+                        sha256: clew_plugin::inspect::hex(&built.inspected.sha256),
+                    },
+                    INSTALL_WAIT,
+                )
+            }
+        };
+        let installing = matches!(ask, Ask::Install { .. });
+        let nonce = clew_plugin::requests::file(&data, ask, &agent)?;
+        // A window takes a request within a second of it being filed: one
+        // not taken in a few means none is open for it, said now rather
+        // than after the whole wait.
+        match clew_plugin::requests::wait_taken(&data, &nonce, TAKE_WITHIN, wait, stop) {
+            Waited::Answered(Answer::Tried { result }) => Ok(result),
+            Waited::Answered(Answer::Installed { palette, .. }) => Ok(installed
+                .map(|m| m.installed_words_as(&palette))
+                .unwrap_or_default()),
+            Waited::Answered(Answer::Declined) => Ok("The user chose not to install it.".into()),
+            Waited::Answered(Answer::Failed { why }) => Err(why),
+            Waited::NotTaken if installing => Err(
+                "Clew is not open, so the user could not be asked. Ask them to open Clew, \
+                 then try again."
+                    .into(),
+            ),
+            Waited::NotTaken => Err(format!(
+                "No Clew window has this project open, so the test run did not start. Ask the user to open {} in Clew, then try again.",
+                self.root.display()
+            )),
+            Waited::NoAnswer if installing => Err(
+                "The user did not answer in Clew, so the install was withdrawn. Ask them \
+                 whether they want it, then try again."
+                    .into(),
+            ),
+            Waited::NoAnswer => Err("The test run did not finish in time.".into()),
+        }
+    }
+}
+
+/// Clew's release version, as its workspace's root package gives it: this
+/// crate's own version is an internal 0.1.0, which an agent took for
+/// Clew's.
+fn clew_version() -> &'static str {
+    package_version(include_str!("../../../Cargo.toml")).unwrap_or(env!("CARGO_PKG_VERSION"))
+}
+
+/// The `version` of a `Cargo.toml`'s `[package]`.
+fn package_version(manifest: &str) -> Option<&str> {
+    let mut in_package = false;
+    for line in manifest.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_package = line == "[package]";
+            continue;
+        }
+        if in_package
+            && let Some(rest) = line.strip_prefix("version")
+            && let Some(value) = rest.trim_start().strip_prefix('=')
+        {
+            return value.trim().strip_prefix('"')?.split('"').next();
+        }
+    }
+    None
 }
 
 /// The project root `args` name (`--root <dir>`), else the working directory.
@@ -142,6 +295,7 @@ pub async fn serve_mcp(root: &Path) {
         files: Mutex::new((Instant::now(), Arc::new(files))),
         lsp: lsp.clone(),
         rt,
+        client: Mutex::new(String::new()),
     });
     clew_core::mcp::serve::serve(host, tokio::io::stdin(), tokio::io::stdout()).await;
     lsp.close();
@@ -149,6 +303,17 @@ pub async fn serve_mcp(root: &Path) {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_server_says_clews_release_version() {
+        let manifest = "[workspace]\nmembers = []\n\n[package]\nname = \"clew\"\nversion = \"0.2.5\"\n\n[dependencies]\nx = { version = \"1\" }\n";
+        assert_eq!(package_version(manifest), Some("0.2.5"));
+        assert_eq!(package_version("[dependencies]\nversion = \"9\"\n"), None);
+        let real = clew_version();
+        assert!(real.split('.').count() == 3, "{real}");
+        assert_ne!(real, "0.1.0", "the root package's, not this crate's");
+    }
+
     use super::*;
 
     #[test]
@@ -183,10 +348,27 @@ mod tests {
             lsp: Arc::new(LspPool::new(root.clone(), Default::default())),
             rt: tokio::runtime::Handle::current(),
             root,
+            client: Mutex::new(String::new()),
         };
         let names: Vec<String> = host.tools().into_iter().map(|t| t.name).collect();
         assert!(names.contains(&"search".to_string()) && names.contains(&"read".to_string()));
         assert!(!names.contains(&"answer".to_string()));
+        // The plugin tools are served beside the code tools; those that do
+        // more than read say so, for the client to ask before them.
+        let tools = host.tools();
+        let read_only = |name: &str| tools.iter().find(|t| t.name == name).unwrap().read_only;
+        assert!(read_only("search") && read_only("plugin_guide"));
+        assert!(!read_only("plugin_write") && !read_only("plugin_install"));
+        for plugin_tool in [
+            "plugin_guide",
+            "plugin_new",
+            "plugin_build",
+            "plugin_install",
+        ] {
+            assert!(names.contains(&plugin_tool.to_string()), "{plugin_tool}");
+        }
+        host.client("Claude Code\n");
+        assert_eq!(*host.client.lock().unwrap(), "Claude Code");
         let host = Arc::new(host);
         let h = host.clone();
         let found = tokio::task::spawn_blocking(move || {

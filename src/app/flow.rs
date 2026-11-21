@@ -351,7 +351,7 @@ impl App {
             Some(LspSlot::Ready(c)) => c.clone(),
             _ => {
                 self.status = tr!(
-                    "No {language} server ready — a value trace needs one",
+                    "No {language} server is ready. Tracing a value needs one.",
                     language = crate::app::languages::language_name(lang)
                 );
                 return Task::none();
@@ -458,20 +458,20 @@ impl App {
             .len();
         if total > MAX_FLOW_NODES {
             tree.note = Some(tr!(
-                "{total} occurrences; the first {shown} are shown",
+                "Showing the first {shown} of {total} occurrences",
                 total = total,
                 shown = MAX_FLOW_NODES
             ));
         } else if !local && !to_read.is_empty() {
             tree.note = Some(trn!(
-                "1 occurrence in a file that is not open is shown by location only; open the file to see how it is used",
-                "{n} occurrences in files that are not open are shown by location only; open a file to see how they are used",
+                "1 occurrence in a file that isn't open is shown by location only. Open the file to see how it's used.",
+                "{n} occurrences in files that aren't open are shown by location only. Open a file to see how they're used.",
                 to_read.len()
             ));
         }
         self.status = trn!(
-            "`{symbol}`: 1 occurrence",
-            "`{symbol}`: {n} occurrences",
+            "1 occurrence of `{symbol}`",
+            "{n} occurrences of `{symbol}`",
             n,
             symbol = symbol
         );
@@ -776,8 +776,8 @@ impl App {
             tree.set_children(id, children);
         }
         self.status = trn!(
-            "`{symbol}`: 1 occurrence",
-            "`{symbol}`: {n} occurrences",
+            "1 occurrence of `{symbol}`",
+            "{n} occurrences of `{symbol}`",
             n,
             symbol = followed.symbol
         );

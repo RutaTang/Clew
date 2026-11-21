@@ -194,7 +194,7 @@ fn read_store() -> Result<Store, String> {
     };
     match crate::statefile::read_capped_checked(&path, MAX_RESPONSE_BYTES) {
         Ok(Some(text)) => serde_json::from_str(&text)
-            .map_err(|e| format!("{} cannot be read ({e}) — fix or remove it", path.display())),
+            .map_err(|e| format!("{} cannot be read ({e}). Fix or remove it", path.display())),
         Ok(None) => Ok(Store::default()),
         Err(e) => Err(format!("{} cannot be read: {e}", path.display())),
     }
@@ -230,7 +230,7 @@ fn write_store(store: &Store) -> Result<(), String> {
     let path = store_path().ok_or("no data directory")?;
     let text = serde_json::to_string_pretty(store).map_err(|e| e.to_string())?;
     if text.len() as u64 > MAX_RESPONSE_BYTES {
-        return Err("too much sign-in data to save — sign out of an MCP server".into());
+        return Err("too much sign-in data to save. Sign out of an MCP server".into());
     }
     crate::statefile::write_atomic_secret(&path, text.as_bytes()).map_err(|e| e.to_string())
 }
@@ -363,7 +363,7 @@ fn check_endpoint(url: &str) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!(
-            "{url}: an authorization endpoint must be https — refusing to send credentials in the clear"
+            "{url}: an authorization endpoint must use https. Clew will not send credentials unencrypted"
         ))
     }
 }
@@ -843,15 +843,18 @@ pub fn sign_in(
     // nothing of the response — its error included — is acted on.
     match params.get("iss") {
         Some(iss) if iss != &named_issuer => {
-            return Err("the sign-in came back from another authorization server — refused".into());
+            return Err(
+                "the sign-in came back from another authorization server, so it was rejected"
+                    .into(),
+            );
         }
         None if iss_supported => {
-            return Err("the sign-in response did not say who sent it — refused".into());
+            return Err("the sign-in response did not say who sent it, so it was rejected".into());
         }
         _ => {}
     }
     if params.get("state") != Some(&state) {
-        return Err("the sign-in response does not match the request — refused".into());
+        return Err("the sign-in response does not match the request, so it was rejected".into());
     }
     if let Some(error) = params.get("error") {
         return Err(match params.get("error_description") {

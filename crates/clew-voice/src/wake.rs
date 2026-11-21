@@ -337,9 +337,8 @@ impl Spotter {
             .spawn(move || {
                 for line in BufReader::new(stdout).lines() {
                     let answer = match line {
-                        Ok(line) => serde_json::from_str::<Answer>(&line).map_err(|e| {
-                            format!("the keyword spotter said something unreadable: {e}")
-                        }),
+                        Ok(line) => serde_json::from_str::<Answer>(&line)
+                            .map_err(|e| format!("the keyword spotter sent an invalid reply: {e}")),
                         Err(e) => Err(format!(
                             "the reply from the keyword spotter could not be read: {e}"
                         )),
@@ -381,10 +380,10 @@ impl Spotter {
             Err(mpsc::RecvTimeoutError::Disconnected)
                 if spotter.child.wait().ok().and_then(|s| s.code()) == Some(USAGE) =>
             {
-                Err("the clew-speak beside Clew is older than it and cannot listen for the wake phrase".into())
+                Err("the clew-speak installed with Clew is older than Clew and cannot listen for the wake phrase".into())
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
-                Err("the keyword spotter stopped while starting — it may be damaged".into())
+                Err("the keyword spotter stopped while starting. It may be damaged".into())
             }
         }
     }
@@ -454,7 +453,7 @@ impl Spotter {
         match self.lines.try_send(line) {
             Ok(()) => Ok(()),
             Err(mpsc::TrySendError::Full(_)) => {
-                Err("the keyword spotter could not keep up — this computer may be too busy".into())
+                Err("the keyword spotter could not keep up. This computer may be too busy".into())
             }
             Err(mpsc::TrySendError::Disconnected(_)) => {
                 Err("the keyword spotter stopped accepting audio".into())

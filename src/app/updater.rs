@@ -24,8 +24,11 @@ impl App {
             Some(reason) => Task::done(Message::Updater(UpdaterMsg::Installed(Err(reason)))),
             None => Task::none(),
         };
+        // The price list a fetch kept on an earlier day, if newer than the
+        // one built in: a local file, read before anything is priced.
+        crate::app::prices::load_kept();
         let check = match updater::auto_check_preference() {
-            Some(true) => updater::check_task(false),
+            Some(true) => Task::batch([updater::check_task(false), fetch_prices(false)]),
             Some(false) => Task::none(),
             None => {
                 // Asked once the window has settled (`ask_update_consent`).
@@ -61,7 +64,7 @@ impl App {
         }
         self.update.checking = true;
         self.status = tr!("Checking for updates…").into();
-        updater::check_task(true)
+        Task::batch([updater::check_task(true), fetch_prices(true)])
     }
 
     /// A version check finished.
@@ -104,7 +107,7 @@ impl App {
                     let running = self.update.available.as_ref().map(|u| u.version);
                     self.status = match running {
                         Some(running) if release.version > running => tr!(
-                            "Clew {version} is available — install it once the update to {running} finishes",
+                            "Clew {version} is available. Install it once the update to {running} finishes",
                             version = release.version,
                             running = running
                         ),
@@ -179,7 +182,7 @@ impl App {
         // it points at this project's releases, over https.
         if let Err(e) = updater::validate_dmg_url(&url) {
             self.status = tr!(
-                "Not downloading the update ({error}) — opening the release page",
+                "Clew won't download the update ({error}). Opening the release page instead",
                 error = e
             );
             return Task::done(Message::Content(ContentMsg::OpenLink(release_page)));
@@ -191,7 +194,7 @@ impl App {
         // after clew has quit for a swap that cannot happen.
         if let Some(reason) = self.self_install_blocker() {
             self.status = tr!(
-                "Clew can't update itself here: {reason} — opening the release page",
+                "Opening the release page because Clew can't update itself here: {reason}",
                 reason = reason
             );
             return Task::done(Message::Content(ContentMsg::OpenLink(release_page)));
@@ -353,7 +356,7 @@ impl App {
     pub(crate) fn on_quit_cancelled(&mut self) {
         if self.update.phase == UpdatePhase::Installing {
             let kept = tr!(
-                "Clew stayed open, so the update is not installed yet — quit Clew within a minute to finish, or install it again later"
+                "Clew stayed open, so the update isn't installed yet. Quit Clew within a minute to finish, or install it again later"
             );
             self.update.phase = UpdatePhase::Failed(kept.into());
             self.update.progress = None;
@@ -425,6 +428,24 @@ impl App {
             UpdaterMsg::SetAuto(enabled) => self.on_set_auto_update(enabled),
         }
     }
+}
+
+/// Fetch Clew's price list from its repository, off the UI thread: when
+/// `now` (a check the reader asked for), or else once a day at most.
+/// Asked only where an update check is: with the reader's consent, from the
+/// same host.
+fn fetch_prices(now: bool) -> Task<Message> {
+    if !now && !crate::app::prices::refresh_due() {
+        return Task::none();
+    }
+    Task::perform(
+        async {
+            tokio::task::spawn_blocking(crate::app::prices::fetch)
+                .await
+                .unwrap_or_else(|e| Err(e.to_string()))
+        },
+        |fetched| Message::Usage(UsageMsg::PricesFetched(fetched)),
+    )
 }
 
 #[cfg(test)]
@@ -591,7 +612,11 @@ mod tests {
 
         assert_eq!(app.update.generation, generation, "no download may start");
         assert_eq!(app.update.phase, UpdatePhase::Idle);
-        assert!(app.status.contains("Not downloading"), "{}", app.status);
+        assert!(
+            app.status.contains("Clew won't download the update"),
+            "{}",
+            app.status
+        );
     }
 
     /// A copy that cannot replace itself (here: a test binary, not an

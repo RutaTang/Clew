@@ -11,12 +11,27 @@ use clew_protocol::{CommitDetail, LogCommit, RefKind};
 use iced::widget::{column, row};
 
 /// A commit's row: its subject over who and when.
-const ROW_H: f32 = 44.0;
+pub(crate) const ROW_H: f32 = 44.0;
+/// A commit row's two lines — its subject (with the names on it), what
+/// commit it is under that — and the room between them: set heights, for
+/// its dot to be drawn on the subject's line.
+const SUBJECT_LINE_H: f32 = 18.0;
+const META_LINE_H: f32 = 15.0;
+const LINES_GAP: f32 = 3.0;
+/// Where a commit's dot sits down its row: on its subject's line, the two
+/// lines centred in the row. In the row's middle, it stood between the
+/// subject and the line under it, beside neither.
+pub(crate) const DOT_Y: f32 =
+    (ROW_H - (SUBJECT_LINE_H + LINES_GAP + META_LINE_H)) / 2.0 + SUBJECT_LINE_H / 2.0;
 /// The space a lane takes, and the most lanes drawn (more run on unseen).
 const LANE_W: f32 = 12.0;
 const MAX_LANES: usize = 8;
 /// The lanes' space before the first.
 const LANE_PAD: f32 = 6.0;
+/// The lanes' width with one lane: before any commit is drawn.
+const ONE_LANE_W: f32 = LANE_PAD * 2.0 + LANE_W;
+/// The uncommitted row's clock.
+const CLOCK: f32 = 13.0;
 
 /// The History view.
 pub(crate) fn history_tab(app: &App) -> Element<'_, Message> {
@@ -36,7 +51,7 @@ pub(crate) fn history_tab(app: &App) -> Element<'_, Message> {
         let (title, said): (&str, String) = match &h.error {
             Some(e) if e.contains("not a git repository") => (
                 tr!("Not a git repository"),
-                tr!("This project's history is not kept in git.").into(),
+                tr!("This project isn't tracked in git.").into(),
             ),
             Some(e) => (tr!("Could not read the history"), e.clone()),
             None if h.loading || !h.asked => (tr!("Reading the history…"), String::new()),
@@ -73,9 +88,10 @@ pub(crate) fn history_tab(app: &App) -> Element<'_, Message> {
             .padding([12, 12])
             .into()
         };
-        let mut col = column![changes_rows(app, h), by_id_row(app, h), note];
-        col = col.spacing(2);
-        col.into()
+        column![changes_rows(app, h, ONE_LANE_W), by_id_row(app, h), note]
+            .spacing(2)
+            .padding([0.0, super::sidebar::SIDE_PAD])
+            .into()
     } else {
         commit_list(app, h)
     };
@@ -93,7 +109,7 @@ fn header<'a>(app: &'a App, h: &'a HistoryView) -> Element<'a, Message> {
     } else {
         tr!("Message, @author or commit id")
     };
-    let field = super::sidebar::filter_field(
+    let field = super::sidebar::filter_box(
         hint,
         &h.query,
         None,
@@ -154,9 +170,9 @@ fn header<'a>(app: &'a App, h: &'a HistoryView) -> Element<'a, Message> {
     let _ = app;
     head.padding(Padding {
         top: 0.0,
-        right: 10.0,
+        right: super::sidebar::SIDE_PAD,
         bottom: 0.0,
-        left: 10.0,
+        left: super::sidebar::SIDE_PAD,
     })
     .into()
 }
@@ -177,8 +193,9 @@ fn commit_list<'a>(app: &'a App, h: &'a HistoryView) -> Element<'a, Message> {
     let lanes_w = LANE_PAD * 2.0 + lanes as f32 * LANE_W;
     // What a row has for its words, right of its lanes: cut to it with an
     // ellipsis, not clipped mid-letter.
-    let room = (app.sidebar_width - lanes_w - ROW_PAD_R - 2.0).max(0.0);
-    let mut rows: Vec<Element<'a, Message>> = vec![changes_rows(app, h), by_id_row(app, h)];
+    let room = (list_w(app) - lanes_w - ROW_PAD_R - 2.0).max(0.0);
+    let mut rows: Vec<Element<'a, Message>> =
+        vec![changes_rows(app, h, lanes_w), by_id_row(app, h)];
     for (c, g) in h.commits.iter().zip(&h.graph) {
         let open = h.open.as_deref() == Some(c.sha.as_str());
         rows.push(commit_row(c, g, lanes_w, room, open, now));
@@ -234,16 +251,23 @@ fn commit_list<'a>(app: &'a App, h: &'a HistoryView) -> Element<'a, Message> {
         space().height(0).into()
     };
     rows.push(container(foot).padding([8, 12]).into());
-    scrollable(Column::with_children(rows).width(Fill))
-        .direction(thin_scroll())
-        .style(theme::overlay_scrollbar)
-        .on_scroll(|viewport| {
-            Message::History(HistoryMsg::Scrolled {
-                near_end: viewport.relative_offset().y > 0.9,
-            })
+    // Its rows' bands at the sidebar's line for boxes, as the views' switch
+    // above them: the graph's rail began at the panel's edge, its clock
+    // standing out left of everything over it.
+    scrollable(
+        Column::with_children(rows)
+            .width(Fill)
+            .padding([0.0, super::sidebar::SIDE_PAD]),
+    )
+    .direction(thin_scroll())
+    .style(theme::overlay_scrollbar)
+    .on_scroll(|viewport| {
+        Message::History(HistoryMsg::Scrolled {
+            near_end: viewport.relative_offset().y > 0.9,
         })
-        .height(Fill)
-        .into()
+    })
+    .height(Fill)
+    .into()
 }
 
 /// One commit's row: its lane, its names, its subject, who and when.
@@ -289,13 +313,21 @@ fn commit_row<'a>(
         ago = crate::i18n::ago(c.time, now)
     );
     let words = column![
-        container(first).clip(true).width(Fill),
-        text(cut(&said, room, ts::SMALL, crate::fonts::UI))
-            .size(ts::SMALL)
-            .color(theme::dim())
-            .wrapping(Wrapping::None),
+        container(first)
+            .clip(true)
+            .width(Fill)
+            .height(SUBJECT_LINE_H)
+            .align_y(iced::Center),
+        container(
+            text(cut(&said, room, ts::SMALL, crate::fonts::UI))
+                .size(ts::SMALL)
+                .color(theme::dim())
+                .wrapping(Wrapping::None),
+        )
+        .height(META_LINE_H)
+        .align_y(iced::Center),
     ]
-    .spacing(3);
+    .spacing(LINES_GAP);
     let msg = super::heard::row(
         || c.subject.clone(),
         Message::History(HistoryMsg::Toggle(c.sha.clone())),
@@ -381,10 +413,16 @@ fn badge_width(kind: RefKind, name: &str) -> f32 {
     super::steady::width_of(name, ts::CAPTION, crate::fonts::UI) + 10.0 + mark
 }
 
+/// How wide the list's rows are: the sidebar less its room each side.
+fn list_w(app: &App) -> f32 {
+    app.sidebar_width - 2.0 * super::sidebar::SIDE_PAD
+}
+
 /// Widest a branch or tag's name reads on a commit's row before it is cut.
 const BADGE_NAME_MAX: f32 = 110.0;
-/// Room right of a commit's words, to the panel's edge.
-const ROW_PAD_R: f32 = 10.0;
+/// Room right of a commit's words, to its band's edge: they end where the
+/// sidebar's words do, its controls' and counts'.
+const ROW_PAD_R: f32 = super::sidebar::SIDE_TEXT_X - super::sidebar::SIDE_PAD;
 
 /// An opened commit: its message's body, its parents, the files it
 /// changed — each read at this commit in Time Travel.
@@ -610,7 +648,7 @@ fn file_row<'a>(sha: &str, f: &'a clew_protocol::CommitFile, room: f32) -> Eleme
 
 /// The working tree's changes, above the commits: a row that opens to the
 /// files changed, each opened in its Diff.
-fn changes_rows<'a>(app: &'a App, h: &'a HistoryView) -> Element<'a, Message> {
+fn changes_rows<'a>(app: &'a App, h: &'a HistoryView, lanes_w: f32) -> Element<'a, Message> {
     let mut changed: Vec<(&String, &char)> = app
         .proj
         .git_status
@@ -627,20 +665,27 @@ fn changes_rows<'a>(app: &'a App, h: &'a HistoryView) -> Element<'a, Message> {
     // What git tracks first, then the files it does not: one real change
     // came last, under nine untracked build files.
     changed.sort_by_key(|(rel, letter)| (**letter == 'U', rel.as_str()));
-    let room = (app.sidebar_width - 34.0 - 12.0 - 12.0 - 4.0 - 2.0).max(0.0);
+    let room = (list_w(app) - lanes_w - 12.0 - 12.0 - 4.0 - 2.0).max(0.0);
     // On one line at any width: the count whole, the words cut with an
     // ellipsis — each wrapped on to two lines in a narrow sidebar.
     let count = trn!("1 file", "{n} files", changed.len());
-    let words_room = (app.sidebar_width
-        - 2.0 * 12.0
-        - 13.0
-        - 2.0 * 8.0
+    let words_room = (list_w(app)
+        - lanes_w
+        - ROW_PAD_R
+        - 8.0
         - super::steady::width_of(&count, ts::SMALL, crate::fonts::UI)
         - crate::ui::SCROLLBAR_W)
         .max(0.0);
+    // Laid out as a commit's row: its clock on the graph's first lane,
+    // where the commits' dots and rail are, and its words where their
+    // subjects begin — the clock stood off the rail, the words off the
+    // subjects under them.
+    let clock_left = LANE_PAD + LANE_W / 2.0 - CLOCK / 2.0;
     let head = button(
         row![
-            glyph::icon(Glyph::Clock, theme::accent(), 13.0),
+            space().width(clock_left),
+            glyph::icon(Glyph::Clock, theme::accent(), CLOCK),
+            space().width(lanes_w - clock_left - CLOCK),
             text(super::steady::cut(
                 tr!("Uncommitted changes"),
                 words_room,
@@ -651,16 +696,21 @@ fn changes_rows<'a>(app: &'a App, h: &'a HistoryView) -> Element<'a, Message> {
             .color(theme::fg())
             .wrapping(Wrapping::None),
             space().width(Fill),
+            space().width(8),
             text(count)
                 .size(ts::SMALL)
                 .color(theme::dim())
                 .wrapping(Wrapping::None),
         ]
-        .spacing(8)
         .align_y(iced::Center),
     )
     .style(theme::list_row(h.changes_open))
-    .padding([8, 12])
+    .padding(Padding {
+        top: 8.0,
+        right: ROW_PAD_R,
+        bottom: 8.0,
+        left: 0.0,
+    })
     .width(Fill)
     .on_press(super::heard::said(
         tr!("Uncommitted changes"),
@@ -718,11 +768,12 @@ fn changes_rows<'a>(app: &'a App, h: &'a HistoryView) -> Element<'a, Message> {
             .align_y(iced::Center),
         )
         .style(theme::menu_row)
+        // Under the words above them, where a commit's files begin.
         .padding(Padding {
             top: 3.0,
             right: 12.0,
             bottom: 3.0,
-            left: 34.0,
+            left: lanes_w,
         })
         .width(Fill)
         .on_press_maybe((!gone && !binary).then(|| {
@@ -730,7 +781,7 @@ fn changes_rows<'a>(app: &'a App, h: &'a HistoryView) -> Element<'a, Message> {
         }));
         col = col.push(if binary {
             let bubble = container(
-                text(tr!("A binary file: Clew shows text files only."))
+                text(tr!("Binary file. Clew shows only text files."))
                     .size(ts::SMALL)
                     .color(theme::fg()),
             )
@@ -825,7 +876,7 @@ fn by_id_row<'a>(app: &'a App, h: &'a HistoryView) -> Element<'a, Message> {
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |t| t.as_secs() as i64);
     // Its words in the row less its padding, cut with an ellipsis.
-    let room = (app.sidebar_width - 24.0 - 2.0).max(0.0);
+    let room = (list_w(app) - 24.0 - 2.0).max(0.0);
     let cut_in_row = subject_cut(&subject, room);
     let said = tr!(
         "{sha} by {author}, {ago}",
@@ -947,7 +998,7 @@ impl iced::widget::canvas::Program<Message> for Lanes {
             }
             return vec![frame.into_geometry()];
         }
-        let mid = h / 2.0;
+        let mid = DOT_Y.min(h);
         let col = self.row.col.min(MAX_LANES - 1);
         // A line between two columns bends halfway: down, across, down.
         let bend = |from: (f32, f32), to: (f32, f32)| {

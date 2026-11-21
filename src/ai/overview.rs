@@ -163,14 +163,12 @@ pub fn module_layout_inputs(
     let top: Vec<&PathBuf> = ranked.into_iter().take(MAX_NODES).collect();
     let idx: HashMap<&PathBuf, usize> = top.iter().enumerate().map(|(i, f)| (*f, i)).collect();
 
+    let labels = module_labels(&top);
     let nodes: Vec<crate::graphlayout::NodeInput> = top
         .iter()
-        .map(|f| crate::graphlayout::NodeInput {
-            label: f
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("?")
-                .to_string(),
+        .zip(labels)
+        .map(|(f, label)| crate::graphlayout::NodeInput {
+            label,
             file: (*f).clone(),
             line: 1,
             weight: deg(f) as f32,
@@ -191,9 +189,81 @@ pub fn module_layout_inputs(
     (nodes.len() >= 3 && !edges.is_empty()).then_some((nodes, edges))
 }
 
+/// Each file's name on the module graph, as its module is called: a
+/// package's `__init__.py`, a Rust `mod.rs`, a JavaScript `index.js` by
+/// their folder — "__init__" named no package of the project's — and
+/// `__main__.py` by its package, as `python -m` runs it. Two files of one
+/// name ("utils") are told apart by their folders.
+fn module_labels(files: &[&PathBuf]) -> Vec<String> {
+    let name_of = |p: Option<&Path>| {
+        p.and_then(Path::file_name)
+            .and_then(|n| n.to_str())
+            .map(str::to_string)
+    };
+    // Each file's name, and the folder that tells two of one name apart.
+    let named: Vec<(String, Option<String>)> = files
+        .iter()
+        .map(|f| {
+            let stem = f.file_stem().and_then(|s| s.to_str()).unwrap_or("?");
+            let dir = f.parent();
+            let package = name_of(dir).filter(|_| matches!(stem, "__init__" | "mod" | "index"));
+            let main = name_of(dir).filter(|_| stem == "__main__");
+            match (package, main) {
+                (Some(package), _) => (package, name_of(dir.and_then(Path::parent))),
+                (_, Some(package)) => (
+                    format!("{package}.__main__"),
+                    name_of(dir.and_then(Path::parent)),
+                ),
+                _ => (stem.to_string(), name_of(dir)),
+            }
+        })
+        .collect();
+    named
+        .iter()
+        .map(|(name, folder)| {
+            let twice = named.iter().filter(|(other, _)| other == name).count() > 1;
+            match (twice, folder) {
+                (true, Some(folder)) => format!("{folder}/{name}"),
+                _ => name.clone(),
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A package's `__init__.py` is named by its package, `__main__.py` as
+    /// `python -m` runs it, and two files of one name by their folders.
+    #[test]
+    fn modules_are_named_as_they_are_imported() {
+        let files: Vec<PathBuf> = [
+            "src/library/__init__.py",
+            "src/library/__main__.py",
+            "src/library/services/loans.py",
+            "src/library/models/utils.py",
+            "src/library/services/utils.py",
+            "src/shapes/mod.rs",
+            "web/widgets/index.ts",
+        ]
+        .iter()
+        .map(PathBuf::from)
+        .collect();
+        let refs: Vec<&PathBuf> = files.iter().collect();
+        assert_eq!(
+            module_labels(&refs),
+            [
+                "library",
+                "library.__main__",
+                "loans",
+                "models/utils",
+                "services/utils",
+                "shapes",
+                "widgets",
+            ]
+        );
+    }
 
     #[test]
     fn layout_inputs_from_imports_or_none() {

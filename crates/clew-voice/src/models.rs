@@ -99,7 +99,7 @@ pub const MODELS: &[Model] = &[
         bytes: None,
         checksum: Checksum::Sha1("c78c86eb1a8faa21b369bcd33207cc90d64ae9df"),
         english_only: true,
-        about: "Fastest; fine for short commands on a slow machine.",
+        about: "Fastest. Fine for short commands on a slow computer.",
     },
     Model {
         id: "base.en",
@@ -395,7 +395,7 @@ impl Install {
         let expected = self.expected.checksum;
         if let Some(bytes) = self.expected.bytes.filter(|b| *b != self.written) {
             return Err(format!(
-                "the download does not match the published {} ({} bytes, not {bytes}) — it was discarded",
+                "the download does not match the published {} ({} bytes, not {bytes}), so it was discarded",
                 self.expected.name, self.written
             ));
         }
@@ -403,7 +403,7 @@ impl Install {
         let digest = hasher.finish();
         if digest != expected.hex() {
             return Err(format!(
-                "the download does not match the published {} (its {} is {digest}, not {}) — it was discarded",
+                "the download does not match the published {} (its {} is {digest}, not {}), so it was discarded",
                 self.expected.name,
                 expected.name(),
                 expected.hex()

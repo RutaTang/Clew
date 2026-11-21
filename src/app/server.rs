@@ -343,7 +343,7 @@ impl App {
         if self.connection.is_remote() {
             self.pending_scan_root = None;
             self.scanning = false;
-            self.status = tr!("{reason} — use Connect to reconnect.", reason = reason);
+            self.status = tr!("{reason}. Use Connect to reconnect.", reason = reason);
             self.handshake_failure = Some(self.status.clone());
             return Task::none();
         }
@@ -414,11 +414,8 @@ impl App {
         self.conn_respawn = true;
         let dropped = self.drop_connection_state();
         self.status = match reason {
-            Some(why) => tr!(
-                "clew-server disconnected ({why}) — reconnecting…",
-                why = why
-            ),
-            None => tr!("clew-server disconnected — reconnecting…").into(),
+            Some(why) => tr!("clew-server disconnected ({why}). Reconnecting…", why = why),
+            None => tr!("clew-server disconnected. Reconnecting…").into(),
         };
         dropped
     }
@@ -649,7 +646,7 @@ impl App {
             // refresh sent nothing while it did.
             let _ = self.end_awaited(
                 id,
-                Some(tr!("not sent again: clew-server took no request").into()),
+                Some(tr!("not resent because clew-server did not accept the request").into()),
             );
             return Task::none();
         };
@@ -709,7 +706,7 @@ impl App {
             Err(SendError::NoServer) => false,
             Err(SendError::Full) => {
                 self.status = tr!(
-                    "clew-server is not taking requests (its queue is full) — a request was dropped"
+                    "clew-server is not accepting requests (its queue is full), so a request was dropped"
                 )
                 .into();
                 false
@@ -1420,11 +1417,11 @@ impl App {
                         self.server.lsp_procs.retain(|_, p| *p != proc);
                         self.status = match languages.first() {
                             Some(lang) => tr!(
-                                "Stopped the {lang} language server: its output was not being read. It restarts on next use.",
+                                "Stopped the {lang} language server because its output was not being read. It restarts on next use.",
                                 lang = crate::app::languages::language_name(lang)
                             ),
                             None => {
-                                tr!("Stopped a background process: its output was not being read.")
+                                tr!("Stopped a background process because its output was not being read.")
                                     .into()
                             }
                         };
@@ -1506,7 +1503,7 @@ impl App {
             } => {
                 if protocol != clew_protocol::PROTOCOL_VERSION {
                     return self.on_handshake_failed(tr!(
-                        "clew-server speaks protocol v{server}, this Clew speaks v{client} — update the server (local: rebuild; remote: it redeploys on reconnect)",
+                        "clew-server uses protocol v{server}, but this Clew uses v{client}. Update the server (rebuild it if it is local, or reconnect to redeploy it if it is remote).",
                         server = protocol,
                         client = clew_protocol::PROTOCOL_VERSION
                     ));
@@ -1517,7 +1514,7 @@ impl App {
                 // as one clear error, instead of a session of silent drops.
                 if fingerprint != clew_protocol::SCHEMA_FINGERPRINT {
                     return self.on_handshake_failed(tr!(
-                        "clew-server was built from different protocol sources (server {server}, this Clew {client}) — rebuild the server (remote: reconnect to redeploy)",
+                        "clew-server was built from different protocol sources (server {server}, this Clew {client}). Rebuild the server, or reconnect to redeploy it if it is remote.",
                         server = fingerprint,
                         client = clew_protocol::SCHEMA_FINGERPRINT
                     ));

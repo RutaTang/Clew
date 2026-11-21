@@ -285,6 +285,88 @@ pub fn extract(source: &str, lang_key: &str) -> Vec<Symbol> {
         .collect()
 }
 
+/// A Rust `impl` block as the outline heads the items in it: its first and
+/// last lines, and what it implements — `Display for Point` for `impl
+/// fmt::Display for Point`, `Stack<T>` for `impl<T> Stack<T>` (the row's
+/// kind says `impl`). A method's name alone did not say whose it is: a
+/// file's two `new`s read as one name twice, and `fmt` as nobody's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImplBlock {
+    pub line: usize,
+    pub end_line: usize,
+    pub label: String,
+}
+
+/// The `impl` blocks of Rust `source`, in order: a module's, and those
+/// inside a function or another block too.
+pub fn rust_impl_blocks(source: &str) -> Vec<ImplBlock> {
+    let Some(tree) = crate::highlight::parse(source, Lang::Rust) else {
+        return Vec::new();
+    };
+    // Each name as the reader calls it in the file: `std::fmt::Display` is
+    // `Display`, as a `use` brings it in (and a path ran the label past the
+    // sidebar's edge).
+    let text = |node: Node| -> Option<String> {
+        let words: Vec<&str> = source.get(node.byte_range())?.split_whitespace().collect();
+        Some(unqualified(&words.join(" ")))
+    };
+    let mut out = Vec::new();
+    let mut cursor = tree.walk();
+    'walk: loop {
+        let node = cursor.node();
+        if node.kind() == "impl_item"
+            && let Some(ty) = node.child_by_field_name("type").and_then(text)
+        {
+            let negative = (0..node.child_count())
+                .filter_map(|i| node.child(i as u32))
+                .any(|c| c.kind() == "!");
+            let label = match node.child_by_field_name("trait").and_then(text) {
+                Some(t) if negative => format!("!{t} for {ty}"),
+                Some(t) => format!("{t} for {ty}"),
+                None => ty,
+            };
+            out.push(ImplBlock {
+                line: node.start_position().row + 1,
+                end_line: node.end_position().row + 1,
+                label,
+            });
+        }
+        if cursor.goto_first_child() {
+            continue;
+        }
+        while !cursor.goto_next_sibling() {
+            if !cursor.goto_parent() {
+                break 'walk;
+            }
+        }
+    }
+    out
+}
+
+/// `text` with every path's qualifiers dropped: `std::fmt::Display` as
+/// `Display`, `Vec<crate::Item>` as `Vec<Item>`.
+fn unqualified(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut word = String::new();
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c.is_alphanumeric() || c == '_' {
+            word.push(c);
+            continue;
+        }
+        if c == ':' && chars.peek() == Some(&':') && !word.is_empty() {
+            chars.next();
+            word.clear();
+            continue;
+        }
+        out.push_str(&word);
+        word.clear();
+        out.push(c);
+    }
+    out.push_str(&word);
+    out
+}
+
 /// [`extract`] with the structural facts of [`Located`].
 pub fn extract_located(source: &str, lang_key: &str) -> Vec<Located> {
     try_extract_located(source, lang_key).unwrap_or_default()
@@ -903,9 +985,12 @@ fn shape_of(def: Node, lang: Lang) -> (usize, Option<(usize, usize)>) {
             "method_declaration" if def.child_by_field_name("body").is_none() => (first(def), None),
             _ => (first(def), whole),
         },
-        Lang::Rust | Lang::Python | Lang::JavaScript | Lang::Sql | Lang::Lean => {
-            (first(def), whole)
-        }
+        // A trait's required method (`fn area(&self) -> f64;`) has no body.
+        Lang::Rust => match def.kind() {
+            "function_signature_item" => (first(def), None),
+            _ => (first(def), whole),
+        },
+        Lang::Python | Lang::JavaScript | Lang::Sql | Lang::Lean => (first(def), whole),
         Lang::Ruby | Lang::Erlang | Lang::Haskell | Lang::Zig => (first(def), whole),
         Lang::Json | Lang::Bash | Lang::Yaml | Lang::Toml | Lang::Html | Lang::Css => {
             (first(def), whole)
@@ -1026,7 +1111,10 @@ fn template_wrapper(node: Node) -> Node {
 fn container_of(def: Node, lang: Lang) -> Option<Container> {
     match lang {
         Lang::Rust => {
-            if !matches!(def.kind(), "function_item" | "type_item") {
+            if !matches!(
+                def.kind(),
+                "function_item" | "function_signature_item" | "type_item"
+            ) {
                 return None;
             }
             let list = def.parent().filter(|p| p.kind() == "declaration_list")?;
@@ -4146,6 +4234,37 @@ fn build_inner() -> B { B }
         );
     }
 
+    /// A Python class's fields — a dataclass's, a model's, an enum's
+    /// members — are its items, as a module's assignments are the module's;
+    /// a function's local and a method's assignment to `self` are not.
+    #[test]
+    fn python_class_fields_and_module_constants_are_outlined() {
+        let src = "MAX_RETRIES = 3\nlogger = make()\n\n\
+                   @dataclass\nclass Point:\n    x: float\n    y: float = 0.0\n    label = 'p'\n\n    \
+                   def norm(self):\n        total = self.x + self.y\n        self.cached = total\n        return total\n\n\
+                   class Colour(Enum):\n    RED = 1\n    GREEN = 2\n";
+        let symbols = extract(src, "python");
+        let seen: Vec<(&str, &str)> = symbols
+            .iter()
+            .map(|s| (s.name.as_str(), s.kind.as_str()))
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                ("MAX_RETRIES", "constant"),
+                ("logger", "constant"),
+                ("Point", "class"),
+                ("x", "field"),
+                ("y", "field"),
+                ("label", "field"),
+                ("norm", "function"),
+                ("Colour", "class"),
+                ("RED", "field"),
+                ("GREEN", "field"),
+            ]
+        );
+    }
+
     #[test]
     fn rust_methods_know_their_container() {
         let src = "trait T {\n  fn provided(&self) {}\n  fn required(&self);\n}\nstruct S;\nimpl T for S {\n  fn required(&self) {}\n}\nimpl S {\n  fn inherent(&self) {}\n}\nfn free() {}\n";
@@ -4155,10 +4274,12 @@ fn build_inner() -> B { B }
             .iter()
             .filter(|l| l.symbol.name == "required")
             .collect();
-        // The trait's own `fn required(&self);` is not a function_item, so only
-        // the implementation is an outline entry.
-        assert_eq!(required.len(), 1, "{items:?}");
-        assert_eq!(required[0].container, Some(Container::TraitImpl));
+        // The trait's own `fn required(&self);` is its item too, declared
+        // without a body; then the implementation's.
+        assert_eq!(required.len(), 2, "{items:?}");
+        assert!(required[0].is_bodyless_callable(), "{items:?}");
+        assert_eq!(required[0].container, Some(Container::Trait));
+        assert_eq!(required[1].container, Some(Container::TraitImpl));
         assert_eq!(find(&items, "inherent").container, Some(Container::Impl));
         assert_eq!(find(&items, "free").container, None);
 
@@ -4293,6 +4414,8 @@ fn build_inner() -> B { B }
                    class Shape (α : Type) where\n  area : α → Nat\n\
                    inductive Color where\n  | red\n  | green\n\
                    axiom choice : True\n\
+                   example : 2 + 2 = 4 := by\n  decide\n\
+                   instance : Inhabited Point := ⟨⟨0, 0⟩⟩\n\
                    end Geo\n";
         let items = extract_located(src, "lean");
         let got: Vec<(&str, &str)> = items
@@ -4317,6 +4440,10 @@ fn build_inner() -> B { B }
                 ("red", "constructor"),
                 ("green", "constructor"),
                 ("choice", "axiom"),
+                // Listed too, where they are: an example as itself, an
+                // instance with no name by its class.
+                ("example", "example"),
+                ("Inhabited Point", "instance"),
             ],
             "{items:#?}"
         );
@@ -4328,6 +4455,14 @@ fn build_inner() -> B { B }
         );
         assert_eq!(signature(find("hidden")), "private def hidden");
         assert_eq!(signature(find("Point")), "structure Point");
+        assert_eq!(signature(find("example")), "example : 2 + 2 = 4");
+        assert_eq!(
+            find("Inhabited Point").symbol.line,
+            src.lines()
+                .position(|l| l.starts_with("instance :"))
+                .unwrap()
+                + 1
+        );
     }
 
     /// Mathlib's way of writing Lean: a command the grammar does not know
@@ -4538,5 +4673,41 @@ mod language_tests {
         assert!(is_test_fn(&none, 1, "test_price", "ruby"));
         assert!(is_test_fn(&none, 1, "price_test", "erlang"));
         assert!(!is_test_fn(&none, 1, "price", "erlang"));
+    }
+
+    /// A Rust file's `impl` blocks, each with what it says — whose they
+    /// are, and the trait, negative ones too — and where it runs, one in a
+    /// function's body and one in an inline module among them.
+    #[test]
+    fn a_rust_files_impl_blocks_say_whose_they_are() {
+        let src = "struct Point;\n\
+                   impl Point {\n    fn new() -> Self { Point }\n}\n\
+                   impl std::fmt::Display for Point {\n    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {\n        Ok(())\n    }\n}\n\
+                   impl<T: Clone>\n    From<Vec<T>> for Point {\n    fn from(_: Vec<T>) -> Self { Point }\n}\n\
+                   impl !Send for Point {}\n\
+                   mod inner {\n    struct Q;\n    impl Q {}\n}\n\
+                   fn f() {\n    struct L;\n    impl L { fn g(&self) {} }\n}\n";
+        let blocks = rust_impl_blocks(src);
+        let seen: Vec<(&str, usize, usize)> = blocks
+            .iter()
+            .map(|b| (b.label.as_str(), b.line, b.end_line))
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                ("Point", 2, 4),
+                ("Display for Point", 5, 9),
+                ("From<Vec<T>> for Point", 10, 13),
+                ("!Send for Point", 14, 14),
+                ("Q", 17, 17),
+                ("L", 21, 21),
+            ]
+        );
+        assert!(rust_impl_blocks("").is_empty());
+        assert_eq!(unqualified("Vec<crate::a::Item>"), "Vec<Item>");
+        assert_eq!(
+            unqualified("<T as core::ops::Add>::Output"),
+            "<T as Add>::Output"
+        );
     }
 }

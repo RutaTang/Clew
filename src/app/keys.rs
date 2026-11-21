@@ -37,7 +37,8 @@ impl App {
         self.jump = Some(String::new());
         self.pending_g = false;
         self.pending_z = false;
-        self.status = tr!("Type the code on a control to press it — Esc to stop").into();
+        self.status =
+            tr!("Type the code shown on a control to click it. Press Esc to stop.").into();
         operation::focus(nowhere())
     }
 
@@ -883,6 +884,14 @@ impl App {
             ToggleAsk => self.update(Message::Ask(AskMsg::Toggle)),
             Run => self.update(Message::Debug(DebugMsg::Run)),
             StartDebug => self.update(Message::Debug(DebugMsg::Start)),
+            RunTest => self.update(Message::Debug(DebugMsg::RunTest {
+                line: None,
+                no_debug: true,
+            })),
+            DebugTest => self.update(Message::Debug(DebugMsg::RunTest {
+                line: None,
+                no_debug: false,
+            })),
             WeakSpots => self.update(Message::Weak(WeakMsg::Show)),
             Jump => self.start_jump(),
             CallGraph => self.update(Message::Graph(GraphMsg::OpenOverlay(Overlay::ProjectCalls))),

@@ -201,9 +201,7 @@ impl Adapter {
                     }
                 }
                 None => Err(
-                    "this Xdebug cannot pause a running PHP program: it takes no command \
-                     while the program runs (supports_async is off), and has no control \
-                     socket (Xdebug 3.4 and later, on Linux)"
+                    "this Xdebug cannot pause a running PHP program. It takes no commands while the program runs (supports_async is off), and it has no control socket (Xdebug 3.4 and later, on Linux)"
                         .into(),
                 ),
             },
@@ -301,20 +299,20 @@ impl Adapter {
                 Ok(Ok((stream, _))) => stream,
                 Ok(Err(e)) => return Err(format!("Xdebug did not connect: {e}")),
                 Err(_) => return Err(format!(
-                    "Xdebug did not connect within {} s — is it Xdebug 3, and enabled for {}?",
+                    "Xdebug did not connect within {} s. Is it Xdebug 3, and is it enabled for {}?",
                     CONNECT_TIMEOUT.as_secs(),
                     self.php.display()
                 )),
             },
             _ = exited.wait_for(Option::is_some) => {
-                return Err("the program ended before Xdebug connected — see its output".into());
+                return Err("the program ended before Xdebug connected. See its output".into());
             }
         };
         let (read, write) = stream.into_split();
         let mut dbgp = Dbgp::new(read, write);
         let init = dbgp.packet().await?;
         if init.name != "init" {
-            return Err(format!("Xdebug sent <{}> where <init> was due", init.name));
+            return Err(format!("Xdebug sent <{}> instead of <init>", init.name));
         }
         for (feature, value) in [
             ("max_depth", "1".to_string()),
@@ -783,8 +781,7 @@ async fn xdebug_loaded(php: &Path) -> Result<(), String> {
     match tokio::time::timeout(PROBE_TIMEOUT, probe).await {
         Ok(Ok(status)) if status.success() => Ok(()),
         Ok(Ok(_)) => Err(format!(
-            "Xdebug is not loaded in {} — install it (pecl install xdebug, or your system's \
-             php-xdebug package) and enable it",
+            "Xdebug is not loaded in {}. Install it (pecl install xdebug, or your system's php-xdebug package) and enable it",
             php.display()
         )),
         Ok(Err(e)) => Err(format!("cannot run {}: {e}", php.display())),

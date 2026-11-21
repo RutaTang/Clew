@@ -208,7 +208,7 @@ impl Judge {
                 for line in BufReader::new(stdout).lines() {
                     let answer = match line {
                         Ok(line) => serde_json::from_str::<Answer>(&line)
-                            .map_err(|e| format!("{} said something unreadable: {e}", MODEL.name)),
+                            .map_err(|e| format!("{} sent an invalid reply: {e}", MODEL.name)),
                         Err(e) => Err(format!(
                             "the reply from {} could not be read: {e}",
                             MODEL.name
@@ -243,12 +243,12 @@ impl Judge {
                 if judge.child.wait().ok().and_then(|s| s.code()) == Some(USAGE) =>
             {
                 Err(format!(
-                    "the clew-speak beside Clew is older than it and cannot run {}",
+                    "the clew-speak installed with Clew is older than Clew and cannot run {}",
                     MODEL.name
                 ))
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => Err(format!(
-                "{} stopped while starting — its model may be damaged",
+                "{} stopped while starting. Its model may be damaged",
                 MODEL.name
             )),
         }
@@ -293,7 +293,7 @@ impl Judge {
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
                     return Err(Process(format!(
-                        "{} ended while it was judging a pause",
+                        "{} ended while checking whether you had finished speaking",
                         MODEL.name
                     )));
                 }
@@ -530,7 +530,7 @@ mod tests {
             "echo 'usage: clew-speak supertonic|qwen3 <model dir>' >&2; exit 2",
         );
         let error = Judge::start(&program, &model).err().unwrap();
-        assert!(error.contains("older than it"), "{error}");
+        assert!(error.contains("older than Clew"), "{error}");
         assert!(!error.contains("damaged"), "{error}");
     }
 

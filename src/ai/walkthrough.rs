@@ -270,7 +270,7 @@ pub fn edit_library(
             let mut merged = fallback.to_vec();
             change(&mut merged);
             let err = std::io::Error::other(tr!(
-                "cannot lock the walkthrough library ({error}) — left untouched",
+                "cannot lock the walkthrough library ({error}), so it was left unchanged",
                 error = e
             ));
             return (merged, Err(err));
@@ -283,8 +283,7 @@ pub fn edit_library(
         let mut merged = fallback.to_vec();
         change(&mut merged);
         let err = std::io::Error::other(tr!(
-            "cannot settle a pending remote edit of the walkthrough library ({error}) — left \
-             untouched",
+            "can't finish a pending remote edit of the walkthrough library ({error}), so nothing was changed",
             error = e
         ));
         return (merged, Err(err));
@@ -298,7 +297,8 @@ pub fn edit_library(
         Err(why) => {
             let mut merged = fallback.to_vec();
             change(&mut merged);
-            let err = std::io::Error::other(tr!("{error} — left untouched", error = why));
+            let err =
+                std::io::Error::other(tr!("{error} (the library was left unchanged)", error = why));
             (merged, Err(err))
         }
     }
@@ -828,13 +828,13 @@ impl Anchor {
         let symbol = step.symbol.as_deref().map(str::trim).unwrap_or_default();
         match self {
             Anchor::NotFound => Some(tr!(
-                "Walkthrough step {step}: location not found — “{symbol}” is not in {file}",
+                "Couldn't find “{symbol}” in {file} (walkthrough step {step})",
                 step = step_no,
                 symbol = symbol,
                 file = step.file
             )),
             Anchor::Fallback(line) => Some(tr!(
-                "Walkthrough step {step}: “{symbol}” is not in {file} — showing line {line}",
+                "Couldn't find “{symbol}” in {file} (walkthrough step {step}). Showing line {line} instead.",
                 step = step_no,
                 symbol = symbol,
                 file = step.file,
@@ -1143,7 +1143,7 @@ mod tests {
             let mine = vec![tour("mine")];
             let (merged, saved) = edit_library(&root, &mine, |lib| lib.push(tour("new")));
             let err = saved.expect_err("the unreadable library is not overwritten");
-            assert!(err.to_string().contains("left untouched"), "{err}");
+            assert!(err.to_string().contains("left unchanged"), "{err}");
             let scopes: Vec<_> = merged.iter().map(|w| w.scope.as_str()).collect();
             assert_eq!(
                 scopes,
@@ -1278,11 +1278,13 @@ mod tests {
         let s = step(Some(" Parser::parse "), Some(12));
         assert_eq!(
             Anchor::NotFound.note(3, &s).as_deref(),
-            Some("Walkthrough step 3: location not found — “Parser::parse” is not in src/a.rs")
+            Some("Couldn't find “Parser::parse” in src/a.rs (walkthrough step 3)")
         );
         assert_eq!(
             Anchor::Fallback(12).note(3, &s).as_deref(),
-            Some("Walkthrough step 3: “Parser::parse” is not in src/a.rs — showing line 12")
+            Some(
+                "Couldn't find “Parser::parse” in src/a.rs (walkthrough step 3). Showing line 12 instead."
+            )
         );
         for landed in [Anchor::Symbol(4), Anchor::Line(4), Anchor::File] {
             assert_eq!(landed.note(3, &s), None);

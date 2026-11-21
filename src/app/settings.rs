@@ -140,6 +140,46 @@ impl App {
         self.settings.connection_tests += 1;
     }
 
+    /// The model list goes with the provider, key or address it was read
+    /// for: another's models are not this one's to pick.
+    fn forget_model_list(&mut self) {
+        self.settings.models = crate::app::state::ModelList::Unasked;
+        self.settings.model_lists += 1;
+    }
+
+    /// Ask the provider the form names which models its key can call: a
+    /// plain read of the account, no AI call, nothing spent.
+    pub(crate) fn on_list_models(&mut self) -> Task<Message> {
+        use crate::app::state::ModelList;
+        let cfg = llm::Config::from_form(
+            self.settings.provider,
+            self.settings.key.clone(),
+            self.settings.model.clone(),
+            self.settings.base_url.clone(),
+        );
+        if cfg.base_url.is_empty() {
+            self.settings.models = ModelList::Failed(tr!("Enter the base URL first.").into());
+            return Task::none();
+        }
+        if cfg.api_key.trim().is_empty() && cfg.provider != llm::Provider::Custom {
+            self.settings.models = ModelList::Failed(tr!("Enter the API key first.").into());
+            return Task::none();
+        }
+        self.settings.model_lists += 1;
+        let number = self.settings.model_lists;
+        self.settings.models = ModelList::Listing(number);
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    llm::list_models(&cfg).map_err(|e| e.to_string())
+                })
+                .await
+                .unwrap_or_else(|_| Err(tr!("an internal task failed").into()))
+            },
+            move |result| Message::Settings(SettingsMsg::ModelsListed { number, result }),
+        )
+    }
+
     pub(crate) fn on_open_settings(&mut self) -> Task<Message> {
         // Open already (⌘, again, or an action that asks for a key opens
         // it): the form as it stands. Filled anew, a key typed and not yet
@@ -307,8 +347,8 @@ impl App {
                 }
                 self.status = if !fields.is_empty() {
                     trn!(
-                        "Settings saved — {fields} was changed in another window, so that value was kept",
-                        "Settings saved — {fields} were changed in another window, so those values were kept",
+                        "Settings saved. {fields} was changed in another window, so the value from that window was kept.",
+                        "Settings saved. {fields} were changed in another window, so the values from that window were kept.",
                         fields.len(),
                         fields = fields.join(", ")
                     )
@@ -316,17 +356,18 @@ impl App {
                     // Not in parentheses: a provider's name may have its own
                     // ("Custom (OpenAI-compatible)").
                     tr!(
-                        "Settings saved — using {provider}",
+                        "Settings saved. Now using {provider}.",
                         provider = crate::i18n::lookup(cfg.provider.label())
                     )
                 } else {
-                    tr!("Settings saved — add an API key to use Explain").to_string()
+                    tr!("Settings saved. Add an API key to use Explain.").to_string()
                 };
                 if dropped {
-                    self.status = tr!(
-                        "{status} — the semantic index was cleared because the embedding \
-                         settings changed; rebuild it",
-                        status = self.status
+                    self.status = crate::i18n::sentences(
+                        &self.status,
+                        tr!(
+                            "The embedding settings changed, so the semantic index was cleared and needs to be rebuilt."
+                        ),
                     );
                 }
                 // The server holds a copy for server-endpoint AI calls (Ask's
@@ -406,12 +447,18 @@ impl App {
         }
         self.settings.open = false;
         self.settings.key_asked = false;
+        self.settings.shortcuts_filter.clear();
+        self.forget_model_list();
         self.rebinding = None;
         self.keymap_notice = None;
         // A model's failed download is said under it, in here; once
         // Settings is closed it has been read, and it goes.
         self.voice.download_errors.clear();
         self.voice.speech.download_errors.clear();
+        // So is a plugin's that could not be installed, turned on or off,
+        // or removed: left, it stood there at the next visit, after
+        // whatever had been done since.
+        self.plugins.failure = None;
         // Back to reading, as the finder's close does: the motions the
         // form took from the code are the code's again.
         self.code_focused = true;
@@ -637,13 +684,17 @@ impl App {
                     } else {
                         Task::none()
                     };
-                Task::batch([
-                    opened,
-                    self.sync_server_listing(),
-                    settings_to_top(),
-                    key,
-                    usage,
-                ])
+                // Opened about one plugin: at its row, after the top.
+                let place = match self.plugins.reveal_in_settings.take() {
+                    Some(spot) if page == SettingsPage::Plugins => {
+                        settings_to_top().chain(ui::reveal_container(
+                            ui::settings_scroll_id(),
+                            ui::plugin_settings_spot_id(&spot),
+                        ))
+                    }
+                    _ => settings_to_top(),
+                };
+                Task::batch([opened, self.sync_server_listing(), place, key, usage])
             }
             SettingsMsg::Fix(field) => {
                 use crate::app::state::LlmField;
@@ -678,9 +729,13 @@ impl App {
             SettingsMsg::Page(page) => {
                 let other = self.settings.page != page;
                 self.settings.page = page;
-                // A shortcut half rebound stays with the page it was on.
+                // A shortcut half rebound stays with the page it was on;
+                // so does what its list was narrowed to.
                 self.rebinding = None;
                 self.keymap_notice = None;
+                if other {
+                    self.settings.shortcuts_filter.clear();
+                }
                 // Another page opens at its top: the scroll is one for
                 // every page, and kept where the last page was left — the
                 // Integrations page opened half way down, mid-form.
@@ -695,6 +750,19 @@ impl App {
                     Task::none()
                 };
                 Task::batch([self.sync_server_listing(), top, usage])
+            }
+            SettingsMsg::ShortcutsFilter(filter) => {
+                self.settings.shortcuts_filter = filter;
+                Task::none()
+            }
+            // The Escape that empties a filled filter does only that, as the
+            // Files filter's does: the same press closed Settings with it.
+            SettingsMsg::ShortcutsFilterEscaped => {
+                if !self.settings.shortcuts_filter.is_empty() {
+                    self.settings.shortcuts_filter.clear();
+                    self.escape_taken = true;
+                }
+                Task::none()
             }
             SettingsMsg::Close => self.close_settings(),
             SettingsMsg::Discard => {
@@ -717,6 +785,7 @@ impl App {
                 }
                 self.settings.provider = p;
                 self.forget_connection_test();
+                self.forget_model_list();
                 // Back to the provider Settings opened on: its model and base
                 // URL as they were then, so a wrong pick undone costs nothing.
                 // Another provider: its defaults (the user can still edit
@@ -748,6 +817,7 @@ impl App {
             SettingsMsg::KeyChanged(s) => {
                 self.settings.key = s;
                 self.forget_connection_test();
+                self.forget_model_list();
                 Task::none()
             }
             SettingsMsg::ModelChanged(s) => {
@@ -758,6 +828,23 @@ impl App {
             SettingsMsg::BaseUrlChanged(s) => {
                 self.settings.base_url = s;
                 self.forget_connection_test();
+                self.forget_model_list();
+                Task::none()
+            }
+            SettingsMsg::ListModels => self.on_list_models(),
+            SettingsMsg::ModelsListed { number, result } => {
+                use crate::app::state::ModelList;
+                if self.settings.models == ModelList::Listing(number) {
+                    self.settings.models = match result {
+                        Ok(models) if models.is_empty() => {
+                            ModelList::Failed(tr!("The provider listed no models.").into())
+                        }
+                        Ok(models) => ModelList::Listed(models),
+                        Err(e) => {
+                            ModelList::Failed(tr!("Couldn't list the models: {error}", error = e))
+                        }
+                    };
+                }
                 Task::none()
             }
             SettingsMsg::TestConnection => self.on_test_connection(),
@@ -850,7 +937,7 @@ pub(crate) fn connection_failure_said(
             if is_about_billing(&detail) =>
         {
             tr!(
-                "The provider refused for your account's quota or credit ({detail}). Check your plan.",
+                "The provider refused the request because of your account's quota or credit ({detail}). Check your plan.",
                 detail = crate::app::tasks::plain_detail(&detail)
             )
         }
@@ -1063,7 +1150,7 @@ mod tests {
             "results ranked in the old space stayed on screen"
         );
         assert!(
-            app.status.contains("rebuild it"),
+            app.status.contains("needs to be rebuilt"),
             "the drop was not explained: {}",
             app.status
         );
@@ -1150,8 +1237,8 @@ mod tests {
                 assert_eq!(
                     app.status,
                     trn!(
-                        "Settings saved — {fields} was changed in another window, so that value was kept",
-                        "Settings saved — {fields} were changed in another window, so those values were kept",
+                        "Settings saved. {fields} was changed in another window, so the value from that window was kept.",
+                        "Settings saved. {fields} were changed in another window, so the values from that window were kept.",
                         1,
                         fields = field
                     ),

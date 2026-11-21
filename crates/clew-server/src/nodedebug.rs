@@ -1203,8 +1203,7 @@ fn strip_types_flags(version: (u32, u32)) -> Result<Vec<&'static str>, String> {
         (22, minor) if minor >= 18 => Ok(vec![]),
         (22, minor) if minor >= 6 => Ok(vec!["--experimental-strip-types"]),
         (major, minor) => Err(format!(
-            "a TypeScript program needs Node 22.6 or later, which strips its types; \
-             this host has {major}.{minor} — run its compiled JavaScript instead"
+            "a TypeScript program needs Node 22.6 or later, which strips its types, but this host has {major}.{minor}. Run its compiled JavaScript instead"
         )),
     }
 }

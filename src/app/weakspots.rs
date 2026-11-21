@@ -93,6 +93,7 @@ impl App {
         self.proj.stats.showing = false;
         self.proj.glossary.showing = false;
         self.proj.docs.page = None;
+        self.proj.plugin_page = None;
         let fresh =
             self.proj.weak.spots.is_some() && self.proj.weak.rev == self.proj.registry.revision();
         if fresh {
@@ -280,13 +281,13 @@ impl App {
                     spot.reasons.iter().map(crate::ui::reason_words).collect();
                 self.proj.ask_input = if spot.name.is_empty() {
                     tr!(
-                        "Review the notes left in {place} ({reasons}): what do they say is wrong, and does the code bear it out?",
+                        "Review the notes left in {place} ({reasons}). What do they say is wrong, and does the code bear it out?",
                         place = place,
                         reasons = reasons.join(", ")
                     )
                 } else {
                     tr!(
-                        "Review {name} at {place} ({reasons}): is it risky, what could go wrong, and how could it be made safer or simpler?",
+                        "Review {name} at {place} ({reasons}). Is it risky, what could go wrong, and how could it be made safer or simpler?",
                         name = spot.name,
                         place = place,
                         reasons = reasons.join(", ")

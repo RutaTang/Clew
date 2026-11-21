@@ -136,7 +136,7 @@ pub fn from_table(agents: &toml::Table) -> (Vec<AgentConfig>, Vec<String>) {
 
 fn agent_from_toml(name: &str, entry: &toml::Value) -> Result<AgentConfig, String> {
     if !crate::mcp::config::valid_name(name) {
-        return Err("a name is letters, digits, `-` and `_`".into());
+        return Err("a name can use only letters, digits, `-` and `_`".into());
     }
     let entry = entry.as_table().ok_or("not a table")?;
     let command = entry

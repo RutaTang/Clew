@@ -409,7 +409,7 @@ impl Lang {
     fn tags_parts(self) -> &'static [&'static str] {
         match self {
             Lang::Rust => &[RUST_TAGS],
-            Lang::Python => &[tree_sitter_python::TAGS_QUERY],
+            Lang::Python => &[tree_sitter_python::TAGS_QUERY, PYTHON_EXTRA_TAGS],
             Lang::JavaScript => &[tree_sitter_javascript::TAGS_QUERY, JS_EXTRA_TAGS],
             // The crate's bundled TAGS_QUERY only captures declaration-file
             // constructs (function_signature, method_signature, interface, …),
@@ -763,6 +763,18 @@ const JS_EXTRA_TAGS: &str = r#"
   value: [(arrow_function) (function_expression)]) @definition.method
 "#;
 
+/// Added to tree-sitter-python's own tags query, which has a module's
+/// assignments, its classes and its functions: a class's fields — a
+/// dataclass's, a pydantic or Django model's, an enum's members, each an
+/// assignment in the class's body. A model read in the outline showed its
+/// methods and none of what it holds.
+const PYTHON_EXTRA_TAGS: &str = r#"
+(class_definition
+  body: (block
+    (expression_statement
+      (assignment left: (identifier) @name) @definition.field)))
+"#;
+
 /// Added to tree-sitter-java's own tags query, which has no constructors: the
 /// calls a constructor makes had no function to belong to, and `new Foo()` had
 /// nothing to resolve to.
@@ -776,7 +788,10 @@ const JAVA_EXTRA_TAGS: &str = r#"
 /// (same patterns / order, so method-vs-function dedup is unchanged) but tags
 /// each ADT and traits with their real kind. A function is a method in an
 /// `impl` or a trait only: any `declaration_list` — an inline `mod`'s body,
-/// an `extern` block's — made the functions of a module methods.
+/// an `extern` block's — made the functions of a module methods. A trait's
+/// required methods (`fn area(&self) -> f64;`) are its items too, declared
+/// without a body as an interface's are: a trait's outline listed only the
+/// methods it provides.
 const RUST_TAGS: &str = r#"
 (struct_item name: (type_identifier) @name) @definition.struct
 (enum_item name: (type_identifier) @name) @definition.enum
@@ -786,6 +801,8 @@ const RUST_TAGS: &str = r#"
     (function_item name: (identifier) @name) @definition.method))
 (trait_item body: (declaration_list
     (function_item name: (identifier) @name) @definition.method))
+(trait_item body: (declaration_list
+    (function_signature_item name: (identifier) @name) @definition.method))
 (function_item name: (identifier) @name) @definition.function
 (trait_item name: (type_identifier) @name) @definition.trait
 (mod_item name: (identifier) @name) @definition.module

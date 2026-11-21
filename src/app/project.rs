@@ -17,7 +17,7 @@ pub(crate) fn scan_status(files: usize, truncated: bool, report: &fs_scan::ScanR
         trn!("1 file", "{n} files", files)
     };
     match scan_summary(report) {
-        Some(summary) => format!("{size} — {summary}"),
+        Some(summary) => crate::i18n::sentences(&size, &summary),
         None => size,
     }
 }
@@ -62,7 +62,9 @@ fn scan_summary(report: &fs_scan::ScanReport) -> Option<String> {
             error = error
         ));
     }
-    (!parts.is_empty()).then(|| parts.join("; "))
+    parts
+        .into_iter()
+        .reduce(|said, part| crate::i18n::sentences(&said, &part))
 }
 
 /// The status line for a project's file set: "120 files, 1042 symbols".
@@ -162,7 +164,9 @@ impl App {
             // to have there. Park the request for the reconnect instead.
             if self.connection.is_remote() {
                 self.pending_scan_root = Some(root);
-                self.status = tr!("Lost the remote host — reopening once reconnected…").into();
+                self.status =
+                    tr!("Lost the connection to the remote host. Reopening once reconnected…")
+                        .into();
                 return Task::none();
             }
         } else {
@@ -290,7 +294,7 @@ impl App {
             return Task::batch(again);
         }
         let why = tr!(
-            "clew-server could not open {path} ({error}) — scanning it here",
+            "clew-server could not open {path} ({error}). Scanning it locally instead.",
             path = root.display(),
             error = message
         );
@@ -623,6 +627,16 @@ impl App {
         // debug run of the next — a remote project with the same paths as a
         // local one drew, and sent its debugger, the local one's.
         self.debug.breakpoints.clear();
+        // A plugin command run on it, and one asking what to run with (at
+        // one of its lines, perhaps): the run's end is dropped by its
+        // stamp, and left set, "still running" refused every command after.
+        self.plugins.running = None;
+        self.plugins.progress = None;
+        self.plugins.prompt = None;
+        // The run itself stops: it read the project left.
+        if let Some(stop) = self.plugins.stop.take() {
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         // So does the sheet asking about it ("Set Up Project…", Explain All
         // asking first): left up, its Apply acted on whatever project was
         // open by then, at a cost the user had not seen. A first open's sheet
@@ -667,7 +681,10 @@ impl App {
         if discarded.is_empty() {
             return None;
         }
-        self.status = discarded.join("; ");
+        self.status = discarded
+            .into_iter()
+            .reduce(|said, part| crate::i18n::sentences(&said, &part))
+            .unwrap_or_default();
         Some(self.status.clone())
     }
 
@@ -727,6 +744,9 @@ impl App {
         // The LSP refine holds CLONES of the old project's language-server
         // clients, so dropping them with the session does not stop it.
         self.abort_refine();
+        // A plugin graph being built reads the old project for up to a
+        // minute, with its memory, for nobody.
+        self.stop_plugin_map_builds(None);
         // The agent runs ON THE SERVER against the old root. Its cancel flag
         // lives in the server's map keyed by the stream id, so forgetting the
         // id locally would leave it looping with no way to stop it. (The
@@ -954,7 +974,7 @@ impl App {
 
         if !problems.is_empty() {
             self.status = tr!(
-                "Some saved state was left as is because it could not be read: {problems} — fix or remove the file to use it",
+                "Some saved state could not be read and was left as is ({problems}). Fix or remove the file to use it.",
                 problems = problems.join("; ")
             );
         }
@@ -970,6 +990,10 @@ impl App {
         for language in std::mem::take(&mut self.proj.inflight.deferred_lsp) {
             tasks.push(self.ensure_lsp(&language));
         }
+        // An agent's plugin try may have waited for this project: the
+        // watch says only what changes, and a try left for another window
+        // stays as it was.
+        tasks.push(crate::app::plugins::pending_requests());
         Task::batch(tasks)
     }
 
@@ -1017,7 +1041,7 @@ impl App {
         if let Some(p) = &self.proj.project {
             let size = size_status(p.files.len(), self.symbol_count());
             self.status = match scan_summary(&report) {
-                Some(summary) => format!("{size} — {summary}"),
+                Some(summary) => crate::i18n::sentences(&size, &summary),
                 None => size,
             };
         }
@@ -1117,9 +1141,10 @@ impl App {
         if matches!(act, TreeAct::CopyPath | TreeAct::CopyRelativePath)
             && menu.rel.chars().any(char::is_control)
         {
-            self.status =
-                tr!("Didn't copy it: its name has a line break or another control character")
-                    .to_string();
+            self.status = tr!(
+                "Didn't copy the path because it contains a line break or another control character"
+            )
+            .to_string();
             return Task::none();
         }
         match act {
@@ -1305,7 +1330,7 @@ impl App {
                 // A dialog that could not open before may now: the line that
                 // said so is taken down as another is tried.
                 self.settle_status(&[tr!(
-                    "No file dialog could open here — install xdg-desktop-portal or zenity"
+                    "No file dialog could open here. Install xdg-desktop-portal or zenity."
                 )]);
                 pick_folder(self.main_window, tr!("Open a project folder").into()).map(|picked| {
                     match picked {

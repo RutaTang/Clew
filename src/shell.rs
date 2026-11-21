@@ -541,34 +541,25 @@ impl Clew {
     /// (used for the first window at launch); otherwise the window starts empty,
     /// ready for the user to open a folder — the standard "New Window".
     fn open_window(&mut self, restore: bool) -> Task<Shell> {
-        // What the windows already open run on: the process-wide appearance
-        // and the keymap. Building an `App` loads both from `config.toml`
-        // (`theme::init` writes the palette every window paints with), so a
-        // later window reverted an appearance being previewed, or a binding
-        // whose save failed, under the others, which were never told — and
-        // then fired different chords than they did. It joins them instead —
-        // and their voice settings, which a later window read from the file
-        // too: one whose save failed went back to what the file said, and
-        // the new window's next voice change carried that to every window.
-        let live = self.windows.values().next().map(|app| {
-            (
-                crate::theme::current_light().id,
-                crate::theme::current_dark().id,
-                crate::theme::current_pref(),
-                app.keymap.clone(),
-                app.voice.prefs.clone(),
-            )
-        });
+        // What the windows already open run on: the keymap and the voice
+        // settings. Building an `App` loads both from `config.toml`, so a
+        // later window fired other chords than they did after a binding's
+        // save failed, and went back to what the file said for a voice
+        // setting whose save failed — and its next voice change carried that
+        // to every window. It joins them instead. (The appearance it joins
+        // by itself: `theme::init` applies the saved one once, for the first
+        // window.)
+        let live = self
+            .windows
+            .values()
+            .next()
+            .map(|app| (app.keymap.clone(), app.voice.prefs.clone()));
         let (mut app, init) = if restore {
             App::new()
         } else {
             (App::blank(), Task::none())
         };
-        if let Some((light, dark, pref, keymap, voice)) = live {
-            crate::theme::set_light_theme(light);
-            crate::theme::set_dark_theme(dark);
-            crate::theme::apply_pref(pref);
-            app.theme_pref = pref;
+        if let Some((keymap, voice)) = live {
             app.keymap = keymap;
             app.voice.prefs = voice;
         }
@@ -1305,6 +1296,12 @@ pub fn update(clew: &mut Clew, message: Shell) -> Task<Shell> {
             // the others', which listened for the old one and, saving any
             // voice setting of their own, wrote it back over the choice.
             let voice_before = clew.windows.get(&id).map(|app| app.voice.prefs.clone());
+            // And the plugins: one installed, turned off or removed in one
+            // window was still offered — and run — in the others.
+            let plugins_before = crate::app::plugins::store_revision();
+            // And Rust for building plugins, set up or removed in one window
+            // while another offered to install it again.
+            let toolchain_before = crate::app::plugins::toolchain_revision();
             // And the language, which the menu bar is built in.
             #[cfg(target_os = "macos")]
             let lang_before = crate::i18n::current();
@@ -1362,6 +1359,40 @@ pub fn update(clew: &mut Clew, message: Shell) -> Task<Shell> {
                     })
                     .collect();
                 Task::batch([task, Task::batch(resync)])
+            };
+            let task = if crate::app::plugins::store_revision() == plugins_before {
+                task
+            } else {
+                let reload: Vec<Task<Shell>> = clew
+                    .windows
+                    .keys()
+                    .copied()
+                    .filter(|other| *other != id)
+                    .map(|other| {
+                        Task::done(Shell::Window(
+                            other,
+                            Message::Plugin(crate::app::plugins::PluginMsg::StoreChanged),
+                        ))
+                    })
+                    .collect();
+                Task::batch([task, Task::batch(reload)])
+            };
+            let task = if crate::app::plugins::toolchain_revision() == toolchain_before {
+                task
+            } else {
+                let recheck: Vec<Task<Shell>> = clew
+                    .windows
+                    .keys()
+                    .copied()
+                    .filter(|other| *other != id)
+                    .map(|other| {
+                        Task::done(Shell::Window(
+                            other,
+                            Message::Plugin(crate::app::plugins::PluginMsg::ToolchainChanged),
+                        ))
+                    })
+                    .collect();
+                Task::batch([task, Task::batch(recheck)])
             };
             // It may have been the host's answer a close or a quit waits on.
             Task::batch([task, clew.settle(id)])
@@ -2394,6 +2425,56 @@ mod tests {
         );
     }
 
+    /// A plugin turned off, removed or installed in one window is every
+    /// window's: the others read the list as they opened, and went on
+    /// offering — and running — a plugin turned off in another.
+    #[tokio::test]
+    async fn a_plugin_turned_off_in_one_window_is_off_in_the_others() {
+        let data = clew_core::testutil::TempDir::new("plugin-other-window");
+        let _env = crate::app::tests::data_dir_override(data.path());
+        clew_plugin::store::Store::update(data.path(), |store| {
+            store.plugin.insert(
+                "word-count".into(),
+                crate::app::tests::installed_plugin(true).record,
+            );
+            Ok(())
+        })
+        .unwrap();
+        let mut rt = Runtime::new();
+        let mut stale = blank_app();
+        stale.plugins.installed = vec![crate::app::tests::installed_plugin(true)];
+        let first = rt.window(blank_app());
+        let second = rt.window(stale);
+        let enabled = |rt: &Runtime, window| {
+            rt.clew.windows[&window]
+                .plugins
+                .get("word-count")
+                .map(|p| p.record.enabled)
+        };
+        assert_eq!(enabled(&rt, second), Some(true));
+        rt.send(Shell::Window(
+            first,
+            Message::Plugin(crate::app::plugins::PluginMsg::SetEnabled(
+                "word-count".into(),
+                false,
+            )),
+        ));
+        rt.settle();
+        assert_eq!(enabled(&rt, first), Some(false));
+        assert_eq!(
+            enabled(&rt, second),
+            Some(false),
+            "the other window kept it on"
+        );
+        // Removed there: gone here too.
+        rt.send(Shell::Window(
+            first,
+            Message::Plugin(crate::app::plugins::PluginMsg::Remove("word-count".into())),
+        ));
+        rt.settle();
+        assert_eq!(enabled(&rt, second), None, "the other window kept it");
+    }
+
     /// The exit waits for the last window's teardown — every clew-server
     /// reaped, or the grace over — and a window opened meanwhile (New Window
     /// works from the menu with none open) keeps clew running.
@@ -2829,12 +2910,12 @@ mod tests {
         let b = rt.window(second);
         let c = rt.window(third);
         let status = |rt: &Runtime, id: window::Id| rt.clew.windows[&id].status.clone();
-        let waits = |n: &str| format!("Quitting — waiting for the host to confirm {n}…");
+        let waits = |n: &str| format!("Waiting for the host to confirm {n} before quitting…");
         rt.send(Shell::Quit);
         assert_eq!(status(&rt, a), waits("2 changes"));
         assert_eq!(status(&rt, b), waits("1 change"));
         let c_said = status(&rt, c);
-        assert!(!c_said.starts_with("Quitting"), "{c_said}");
+        assert!(!c_said.ends_with("before quitting…"), "{c_said}");
         let [one, other] = on_the_wire(&rt, a)[..] else {
             panic!("the quit sent the first window's edits");
         };
@@ -2889,8 +2970,7 @@ mod tests {
         let a = rt.window(first);
         let b = rt.window(second);
         let status = |rt: &Runtime| rt.clew.windows[&a].status.clone();
-        let not_saved =
-            |rt: &Runtime| status(rt).starts_with("Could not save .clew/bookmarks.json");
+        let not_saved = |rt: &Runtime| status(rt).contains("in .clew/bookmarks.json");
         rt.send(Shell::Quit);
         let [x, y] = on_the_wire(&rt, a)[..] else {
             panic!("the quit sent both edits");
@@ -2952,7 +3032,7 @@ mod tests {
         assert_eq!(on_the_wire(&rt, window).len(), 2);
         assert_eq!(
             rt.clew.windows[&window].status,
-            "Closing — waiting for the host to confirm 1 change…"
+            "Waiting for the host to confirm 1 change before closing…"
         );
     }
 
@@ -2975,7 +3055,7 @@ mod tests {
         assert_eq!(rt.asked().len(), 1);
         rt.send(Shell::CloseRequested(b));
         assert!(
-            status(&rt, b).starts_with("Closing — waiting"),
+            status(&rt, b).starts_with("Waiting for the host to confirm"),
             "{}",
             status(&rt, b)
         );
@@ -2995,7 +3075,7 @@ mod tests {
         );
         assert_eq!(
             status(&rt, c),
-            "Quitting — waiting for the host to confirm 1 change…"
+            "Waiting for the host to confirm 1 change before quitting…"
         );
     }
 
@@ -3265,8 +3345,8 @@ mod tests {
         assert_eq!(
             question.message,
             format!(
-                "The host could not save the change to the bookmark at a.rs:1 in {project}: it \
-                 is lost."
+                "The host could not save the change to the bookmark at a.rs:1 in {project}, so \
+                 it is lost."
             )
         );
         rt.answer(0, false);
@@ -3556,7 +3636,7 @@ mod tests {
         rt.send(Shell::CloseRequested(window));
         assert_eq!(
             status(&rt),
-            "Closing — waiting for the host to confirm 3 changes…"
+            "Waiting for the host to confirm 3 changes before closing…"
         );
         let [first, second, _] = on_the_wire(&rt, window)[..] else {
             panic!("the close sent all three");
@@ -3564,12 +3644,12 @@ mod tests {
         host_answers(&mut rt, window, first, false);
         assert_eq!(
             status(&rt),
-            "Closing — waiting for the host to confirm 2 changes…"
+            "Waiting for the host to confirm 2 changes before closing…"
         );
         host_answers(&mut rt, window, second, true);
         assert!(
             status(&rt).starts_with(
-                "Could not save .clew/bookmarks.json yet: the change to the bookmark at b.rs:2"
+                "Could not save the change to the bookmark at b.rs:2 in .clew/bookmarks.json yet"
             ),
             "{}",
             status(&rt)
@@ -3582,7 +3662,7 @@ mod tests {
         rt.send(Shell::Window(window, Message::Noop));
         assert_eq!(
             status(&rt),
-            "Closing — waiting for the host to confirm 1 change…"
+            "Waiting for the host to confirm 1 change before closing…"
         );
         tokio::time::sleep(Duration::from_millis(300)).await;
         rt.settle();
@@ -3597,7 +3677,7 @@ mod tests {
         rt.send(Shell::Quit);
         assert_eq!(
             status(&rt),
-            "Quitting — waiting for the host to confirm 2 changes…"
+            "Waiting for the host to confirm 2 changes before quitting…"
         );
     }
 

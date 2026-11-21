@@ -216,13 +216,18 @@ impl CitationIndex {
 
 /// The reading panel's views (the margin beside the code): notes on what is
 /// read, the calls around the function the caret is in, and its history —
-/// the file's. Ask is the whole project's: it floats in the window's corner.
+/// the file's — and, in a Lean file, the proof's goals where the cursor is.
+/// Ask is the whole project's: it floats in the window's corner.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum MarginTab {
     #[default]
     Notes,
     Calls,
     History,
+    /// The Lean server's goals at the cursor and its messages there, kept
+    /// up as the cursor moves — Lean's infoview. Lean files only: beside
+    /// another, the margin shows the notes.
+    Goals,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -837,19 +842,38 @@ pub enum GotoKind {
 }
 
 /// An active hover tooltip.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct HoverState {
     pub line: usize,
     pub col: usize,
     pub x: f32,
     pub y: f32,
     pub text: Option<String>,
+    /// The language server's answer, markdown, prepared as the insight
+    /// popups' answers are — its signature and examples highlighted as code,
+    /// its docs set as text — and shown in place of `text`. Shown raw, a
+    /// fence and a `---` were read as code; asked for as plain text,
+    /// rust-analyzer ran an example's code into its heading
+    /// ("Exampleslet a = area(1.0);").
+    pub prepared: Vec<PreparedSeg>,
     /// The cached one-line LLM summary of the hovered symbol, if it's an
     /// explained function/method. Set synchronously; shown above the LSP text.
     pub summary: Option<String>,
     /// The LSP diagnostic (error/warning) under the cursor, if any — so hovering
     /// a red-underlined symbol shows *what* the problem is, not just the squiggle.
     pub diagnostic: Option<String>,
+}
+
+impl HoverState {
+    /// Whether the peek has anything to say. The server's answer and the
+    /// local peek are `prepared`, not `text`: asked only of `text`, every
+    /// language server's hover went unshown.
+    pub fn says_something(&self) -> bool {
+        self.diagnostic.is_some()
+            || self.summary.is_some()
+            || self.text.is_some()
+            || !self.prepared.is_empty()
+    }
 }
 
 /// The "Why is this here?" popup: an LLM explanation of why a line/selection
@@ -1026,6 +1050,9 @@ pub struct ContextMenu {
     /// coordinates. With no room below the line, the menu opens above it —
     /// flipped up from under it, it covered the line it was for.
     pub line_top: Option<f32>,
+    /// The line is in a test Run Test runs (a Rust or Python test): the
+    /// menu offers Run Test and Debug Test.
+    pub in_test: bool,
 }
 
 /// What a language can say about the code under the cursor that no other
@@ -1089,12 +1116,12 @@ impl InsightKind {
         match self {
             InsightKind::ExpandMacro => tr!("No macro here, and nothing on this line expands."),
             InsightKind::GoalState => tr!(
-                "No goal here: the Lean server has no proof state or expected type at this point."
+                "No goal here. The Lean server has no proof state or expected type at this point."
             ),
             InsightKind::TypeAtPoint => tr!("The language server has no type for this name."),
             InsightKind::MemoryLayout => {
                 tr!(
-                    "No type here whose layout rust-analyzer knows: put the cursor on a type's name."
+                    "rust-analyzer has no layout for anything here. Put the cursor on a type's name."
                 )
             }
             InsightKind::RelatedTests => {
@@ -1696,9 +1723,13 @@ impl LspSlot {
             LspSlot::Ready(_) => match snapshot {
                 Some(Ok(s)) => match &s.error {
                     Some(e) => format!("⚠ {}", lsp_error_summary(e)),
-                    None => s.progress.clone().unwrap_or_else(|| tr!("ready").into()),
+                    None => s
+                        .progress
+                        .clone()
+                        .or_else(|| checking_label(s))
+                        .unwrap_or_else(|| tr!("ready").into()),
                 },
-                Some(Err(_)) => tr!("⚠ internal error — restart this language server").into(),
+                Some(Err(_)) => tr!("⚠ internal error (restart this language server)").into(),
                 None => tr!("ready").into(),
             },
             LspSlot::Failed(e) => tr!("error: {error}", error = e),
@@ -1708,6 +1739,19 @@ impl LspSlot {
             LspSlot::AwaitingConsent => tr!("waiting for your answer").into(),
         }
     }
+}
+
+/// What a server still checking files says of them on the status bar
+/// (Lean's `$/lean/fileProgress`): "checking Basic.lean", "checking
+/// Basic.lean and 2 more" — the first by path, so the name holds still.
+fn checking_label(s: &lsp::client::Snapshot) -> Option<String> {
+    let mut files: Vec<&std::path::Path> = s.checking_files().collect();
+    files.sort();
+    let name = files.first()?.file_name()?.to_string_lossy();
+    Some(match files.len() - 1 {
+        0 => tr!("checking {file}", file = name),
+        more => tr!("checking {file} and {n} more", file = name, n = more),
+    })
 }
 
 /// What a language's [`LspSlot::AwaitingConsent`] slot waits on
@@ -1800,12 +1844,16 @@ impl<T> Questions<T> {
     /// Ask `question`, in place of the waiting one it is the `same` question
     /// as, if any — under a number of its own either way: a question replaced
     /// asks about what would run now, and is read again before it is
-    /// answered.
-    fn ask(&mut self, question: T, same: impl Fn(&T, &T) -> bool) {
+    /// answered. The one replaced, given back: whoever asked it is owed an
+    /// answer.
+    fn ask(&mut self, question: T, same: impl Fn(&T, &T) -> bool) -> Option<T> {
         let number = LAST_QUESTION.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
         match self.waiting.iter().position(|(_, q)| same(q, &question)) {
-            Some(at) => self.waiting[at] = (number, question),
-            None => self.waiting.push_back((number, question)),
+            Some(at) => Some(std::mem::replace(&mut self.waiting[at], (number, question)).1),
+            None => {
+                self.waiting.push_back((number, question));
+                None
+            }
         }
     }
 
@@ -1845,6 +1893,28 @@ impl<T> Questions<T> {
     pub fn iter(&self) -> impl Iterator<Item = &T> {
         self.waiting.iter().map(|(_, q)| q)
     }
+
+    /// Ask again each question `change` gives a new form of — under a new
+    /// number, so what changed on it is read again before it can be
+    /// answered.
+    pub fn renew(&mut self, mut change: impl FnMut(&T) -> Option<T>) {
+        for (number, question) in self.waiting.iter_mut() {
+            if let Some(new) = change(question) {
+                *number = LAST_QUESTION.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                *question = new;
+            }
+        }
+    }
+
+    /// Take the questions no longer to be asked (`gone`) away, and give
+    /// them back: whoever asked one is owed nothing more, or an answer.
+    pub fn withdraw(&mut self, gone: impl Fn(&T) -> bool) -> Vec<T> {
+        let (out, kept) = std::mem::take(&mut self.waiting)
+            .into_iter()
+            .partition(|(_, q)| gone(q));
+        self.waiting = kept;
+        out.into_iter().map(|(_, q)| q).collect()
+    }
 }
 
 /// The provisionings awaiting the user's consent, asked one at a time in
@@ -1864,7 +1934,21 @@ impl CommandQueue {
     /// Queue `pending`. A newer question for a language already waiting
     /// replaces that one in place: it asks about what would run now.
     pub fn offer(&mut self, pending: PendingLspCommand) {
-        self.ask(pending, |waiting, new| waiting.language == new.language);
+        let _ = self.ask(pending, |waiting, new| waiting.language == new.language);
+    }
+}
+
+impl Questions<crate::app::plugins::PendingInstall> {
+    /// Queue `pending`. A newer build of a plugin already waiting replaces
+    /// that one in place: the question asks about what would be installed.
+    /// The one replaced is given back, for its asker to be told.
+    pub(crate) fn offer(
+        &mut self,
+        pending: crate::app::plugins::PendingInstall,
+    ) -> Option<crate::app::plugins::PendingInstall> {
+        self.ask(pending, |waiting, new| {
+            waiting.inspected.manifest.plugin.id == new.inspected.manifest.plugin.id
+        })
     }
 }
 
@@ -1875,7 +1959,7 @@ impl ConsentQueue {
     /// newer description (and, for a remote install, the newer digest the
     /// server will check), a new debug run the newer session.
     pub fn offer(&mut self, consent: LspConsent) {
-        self.ask(consent, LspConsent::same_request);
+        let _ = self.ask(consent, LspConsent::same_request);
     }
 }
 
@@ -1909,6 +1993,9 @@ pub enum Question {
     /// Letting the agent turn `stream` run the tool call `key` asks for (an
     /// approval card in the Ask panel).
     Approval { stream: u64, key: ApprovalKey },
+    /// Installing the plugin asked about under this number
+    /// (`app::plugins::PendingInstall`).
+    Plugin(u64),
 }
 
 /// The question within the user's reach, and since when: on top of every
@@ -2007,7 +2094,7 @@ impl LspConsent {
                 tool = i.tool
             ),
             LspProvision::Remote { describe, .. } => {
-                tr!("{install} — on the remote host", install = shown(describe))
+                tr!("{install} (on the remote host)", install = shown(describe))
             }
             LspProvision::DebugAdapter { install, .. } => install.describe(),
             // The question says it runs the project's own code; where is
@@ -2235,11 +2322,12 @@ mod tests {
     #[test]
     fn an_answer_counts_for_the_question_it_names() {
         let mut questions = Questions::default();
-        questions.ask("a", |_, _| false);
-        questions.ask("b", |_, _| false);
+        let _ = questions.ask("a", |_, _| false);
+        let _ = questions.ask("b", |_, _| false);
         let a = questions.asked().unwrap();
-        // "a" asked again, about something else: under a new number.
-        questions.ask("a2", |q, _| q.starts_with('a'));
+        // "a" asked again, about something else: under a new number, the
+        // one replaced given back for its asker to be told.
+        assert_eq!(questions.ask("a2", |q, _| q.starts_with('a')), Some("a"));
         let a2 = questions.asked().unwrap();
         assert_ne!(a, a2);
         assert_eq!(questions.answer(a), None, "an answer to the replaced one");
@@ -2249,5 +2337,30 @@ mod tests {
         assert_eq!(questions.answer(a2), None, "answered twice");
         assert_eq!(questions.answer(b), Some("b"));
         assert!(questions.is_empty() && questions.asked().is_none());
+    }
+
+    /// A question whose subject changed while it waited is asked again in
+    /// its new form, under a new number, where it stood: an answer given to
+    /// what it said before answers nothing. One that did not change keeps
+    /// its number.
+    #[test]
+    fn a_question_renewed_is_asked_again() {
+        let mut questions = Questions::default();
+        let _ = questions.ask("update a", |_, _| false);
+        let _ = questions.ask("install b", |_, _| false);
+        let first = questions.asked().unwrap();
+        questions.renew(|q| (*q == "install b").then_some("update b"));
+        assert_eq!(questions.asked(), Some(first), "unchanged, same number");
+        assert_eq!(
+            questions.iter().copied().collect::<Vec<_>>(),
+            ["update a", "update b"],
+            "in its place"
+        );
+        questions.renew(|q| (*q == "update a").then_some("install a"));
+        let renewed = questions.asked().unwrap();
+        assert_ne!(renewed, first);
+        assert_eq!(questions.answer(first), None, "answered as it was");
+        assert_eq!(questions.answer(renewed), Some("install a"));
+        assert_eq!(questions.front(), Some(&"update b"));
     }
 }

@@ -16,11 +16,13 @@ pub(crate) fn short_kind(kind: &str) -> &'static str {
         "module" => "mod",
         "macro" => "macro",
         "constant" => "const",
+        "field" => "field",
         "type" => "type",
         "table" => "table",
         "view" => "view",
         "trigger" => "trig",
         "theorem" => "thm",
+        "example" => "ex",
         "instance" => "inst",
         "inductive" => "ind",
         "axiom" => "axiom",
@@ -135,6 +137,47 @@ pub(crate) fn head_shown(head: &clew_protocol::HeadName) -> String {
 /// The branch checked out, after the place the code is read from — or the
 /// commit a detached HEAD is at — with the whole of it where the pointer
 /// rests. Nothing outside a repository.
+/// In a Lean file whose Goals are not on screen — another margin tab, the
+/// margin closed, or no room for it (a split, a narrow window) — the way to
+/// them: Lean's one view of a proof was gone, with nothing to say where.
+/// It opens the Goals tab where the margin fits, else the goal at the
+/// cursor in a popup (Show Goal).
+fn goals_chip(app: &App) -> Option<Element<'_, Message>> {
+    if !app.reading_lean()
+        || (super::panes::right_panel_shown(app)
+            && app.margin_tab_shown() == crate::MarginTab::Goals)
+    {
+        return None;
+    }
+    let fits = !app.proj.split && app.window_width >= super::panes::RIGHT_PANEL_MIN_WINDOW_W;
+    let (msg, why) = match fits {
+        true => (
+            Message::Window(WindowMsg::MarginTabPicked(crate::MarginTab::Goals)),
+            tr!("Show the goals at the cursor beside the code"),
+        ),
+        false => (
+            Message::Hover(HoverMsg::InsightAtCursor),
+            tr!("Show the goal at the cursor"),
+        ),
+    };
+    let face = row![
+        glyph::icon(Glyph::Turnstile, theme::dim(), 12.0),
+        status_text(tr!("Goals").to_string()),
+    ]
+    .spacing(5)
+    .align_y(iced::Center);
+    let chip = button(face)
+        .style(theme::icon_button(false))
+        .padding([2, 6])
+        .on_press(super::heard::said(tr!("Goals"), msg));
+    Some(super::toolbar::tip_at(
+        chip,
+        why,
+        None,
+        tooltip::Position::Top,
+    ))
+}
+
 fn branch_item(app: &App) -> Option<Element<'_, Message>> {
     let head = app.proj.head.as_ref()?;
     let about = match head {
@@ -142,7 +185,7 @@ fn branch_item(app: &App) -> Option<Element<'_, Message>> {
             tr!("On branch {branch}", branch = name.as_str())
         }
         clew_protocol::HeadName::Detached(sha) => tr!(
-            "Not on a branch: at commit {commit}",
+            "Not on a branch (at commit {commit})",
             commit = super::panes::short_sha(sha)
         ),
     };
@@ -292,11 +335,17 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
     if super::heard::gathering() {
         drop(status_left(app, f32::INFINITY));
     }
-    let said_row = container(iced::widget::responsive(move |room| {
-        status_left(app, room.width)
-    }))
-    .width(Fill)
-    .height(Length::Fixed(STATUS_LINE_H));
+    // Where the pointer is on it, a failure standing there holds still
+    // (`FailureNotice::held`).
+    let said_row = mouse_area(
+        container(iced::widget::responsive(move |room| {
+            status_left(app, room.width)
+        }))
+        .width(Fill)
+        .height(Length::Fixed(STATUS_LINE_H)),
+    )
+    .on_enter(Message::Window(WindowMsg::StatusHover(true)))
+    .on_exit(Message::Window(WindowMsg::StatusHover(false)));
     // The place, its scan's state, then the branch: "Local · Up to date ·
     // ⎇ main", the state still read as the place's.
     let mut left = row![conn_indicator, sync];
@@ -311,6 +360,9 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
     ]
     .align_y(iced::Center);
     if let Some(chip) = refresh_chip(app) {
+        bar = bar.push(chip);
+    }
+    if let Some(chip) = goals_chip(app) {
         bar = bar.push(chip);
     }
 
@@ -575,11 +627,13 @@ const STATUS_LINE_H: f32 = 20.0;
 /// The least room what Clew says is given beside the chips: below it, the
 /// chips are said short, and with less still, it is not said.
 const SAID_MIN_W: f32 = 120.0;
-/// The most room kept beside a standing failure for what Clew says next —
-/// half the bar, up to this: kept whatever is said, so the failure's
-/// controls do not move, and enough for what is under way to be said
-/// whole ("Working out what discounts does…" was cut to "Working out wh…"
-/// beside an older failure given the rest).
+/// The most room a standing failure gives what Clew says beside it — half
+/// the bar, up to this, whatever is said: enough for what is under way to
+/// be said whole ("Working out what discounts does…" was cut to "Working
+/// out wh…" beside an older failure given the rest). With nothing said
+/// beside it, the failure has the room, and is said whole where it fits:
+/// kept empty for what might be said, it was cut to "Oldest TODO did not
+/// finish…" beside nothing.
 const SAID_KEPT_MAX_W: f32 = 320.0;
 /// What a chip takes beside its words: its mark, the room after it, and its
 /// padding.
@@ -619,14 +673,26 @@ fn status_left(app: &App, room: f32) -> Element<'_, Message> {
     };
     // A failure stands first, in the danger colour, with what to do about
     // it — what fits of it beside the least of its words, its dismissal
-    // always — at a width that does not change with what else is said:
-    // after the chips, and shortened to make room for the next message,
-    // its Try again, Settings and × moved under the pointer, and a click
-    // meant for Settings landed on words.
+    // always. It gives room to what is said beside it, and takes it back
+    // when that goes; but not while the pointer is on the line: after the
+    // chips, and shortened to make room for the next message, its Try
+    // again, Settings and × moved under the pointer, and a click meant for
+    // Settings landed on words (`FailureNotice::held`).
     let failure = app.failure_shown();
     let setup = setup_label(app);
     let explain = explain_label(app);
-    let full_chips: f32 = setup.as_ref().map_or(0.0, |(l, _)| width(l) + CHIP_EXTRA_W)
+    // A plugin's command running is laid out with the other chips: laid
+    // out after a failure standing, with what room it left, its Stop was
+    // gone beside a long one, and nothing said a command ran.
+    let run_chip = plugin_run_chip(app);
+    // The live session's chip too: left uncounted, it took the room the
+    // run's chip — its Stop — was given.
+    let session = session_chip(app);
+    let rust = rust_setup_chip(app);
+    let full_chips: f32 = run_chip.as_ref().map_or(0.0, |chip| chip.1)
+        + session.as_ref().map_or(0.0, |chip| chip.1)
+        + rust.as_ref().map_or(0.0, |chip| chip.1)
+        + setup.as_ref().map_or(0.0, |(l, _)| width(l) + CHIP_EXTRA_W)
         + explain.as_ref().map_or(0.0, |(_, widest)| {
             // One node's chip has no bar: counted with one, it gave way
             // to "…" with room to spare.
@@ -637,12 +703,25 @@ fn status_left(app: &App, room: f32) -> Element<'_, Message> {
             };
             width(widest) + EXPLAIN_EXTRA_W - bar
         });
-    let chips_n = usize::from(setup.is_some()) + usize::from(explain.is_some());
+    let chips_n = usize::from(setup.is_some())
+        + usize::from(explain.is_some())
+        + usize::from(session.is_some())
+        + usize::from(rust.is_some())
+        + usize::from(run_chip.is_some());
     // What is under way now comes before an older failure: its chip keeps
     // its words, and the failure's give way (whole where the pointer
     // rests). Beside a run's failure, Explain's progress was squeezed to
     // "✦ … ×".
     let chips_w = full_chips + STATUS_GAP * chips_n as f32;
+    // What the offer to set servers up gives back said short — its mark
+    // and count, the whole where the pointer rests. An offer waits; what
+    // failed, beside it, was cut to "Oldest TO…" with the offer said whole.
+    let setup_saving = match &setup {
+        Some((whole, true)) => {
+            (width(whole) - width(&app.missing_setup().len().to_string())).max(0.0)
+        }
+        _ => 0.0,
+    };
     let mut used = 0.0;
     if let Some(failure) = failure
         && room >= least
@@ -651,11 +730,7 @@ fn status_left(app: &App, room: f32) -> Element<'_, Message> {
         let (controls, controls_w) = failure_controls(failure, room - least - STATUS_GAP);
         // What failed: its words before the reason — ": ", or the
         // full-width "：" Chinese and Japanese write.
-        let head = [": ", "："]
-            .iter()
-            .filter_map(|sep| whole.find(sep))
-            .min()
-            .map_or(whole.as_str(), |at| &whole[..at]);
+        let head = failure_head(&whole, failure.subject.as_deref());
         // While the codes are up, what to do with them is said whole —
         // after the failure's words it was cut to "Type the code on a…" —
         // and what failed is said before its controls, in what room is
@@ -682,13 +757,30 @@ fn status_left(app: &App, room: f32) -> Element<'_, Message> {
             row = row.push(controls);
             used += controls_w + STATUS_GAP;
         } else {
-            // Half of what is free is kept for what is said next, up to
-            // `SAID_KEPT_MAX_W`; the failure keeps at least what failed
-            // (its words before the reason), its reason whole where the
-            // pointer rests.
+            // With something said beside it, half of what is free is kept
+            // for that, up to `SAID_KEPT_MAX_W`; the failure keeps at least
+            // what failed (its words before the reason), its reason whole
+            // where the pointer rests. With nothing, all of it is the
+            // failure's. Laid out as it was when the pointer came, while
+            // the pointer is on the line.
+            // What failed counts on the offer to set up said short, where
+            // it would not be said whole beside the offer said whole — and,
+            // with nothing beside it, so does its reason: an offer waits.
+            let beside = failure.held.unwrap_or_else(|| app.said_beside_failure());
+            let least_beside = if beside { SAID_MIN_W } else { 0.0 };
+            let head_w = width(head) + width("…");
+            let needs = if beside { head_w } else { width(&whole) };
             let free = room - controls_w - 2.0 * STATUS_GAP - chips_w;
-            let kept = (free / 2.0).clamp(SAID_MIN_W, SAID_KEPT_MAX_W);
-            let floor = (width(head) + width("…")).min(free - SAID_MIN_W);
+            let free = match needs > free - least_beside {
+                true => free + setup_saving,
+                false => free,
+            };
+            let kept = if beside {
+                (free / 2.0).clamp(SAID_MIN_W, SAID_KEPT_MAX_W)
+            } else {
+                0.0
+            };
+            let floor = head_w.min(free - least_beside);
             let words = (free - kept).max(floor).max(least).min(width(&whole));
             row = row.push(line_of(whole, words, Some(theme::danger())));
             row = row.push(controls);
@@ -697,26 +789,6 @@ fn status_left(app: &App, room: f32) -> Element<'_, Message> {
     }
     let room = (room - used).max(0.0);
     let mut used = 0.0;
-    let short = full_chips + STATUS_GAP * chips_n as f32 + SAID_MIN_W > room;
-    // A chip short of room even shortened is left out: laid out clipped to
-    // nothing, it was a control no one saw that the keyboard's ring still
-    // stopped on (its Set up is in the command bar, its pass's progress in
-    // the margin).
-    if let Some(chip) = setup_chip(app, short).filter(|chip| used + chip.1 <= room) {
-        used += chip.1 + STATUS_GAP;
-        row = row.push(chip.0);
-    }
-    if let Some(chip) = explain_chip(app, short).filter(|chip| used + chip.1 <= room) {
-        used += chip.1 + STATUS_GAP;
-        row = row.push(chip.0);
-    }
-    // A session going on behind the hidden panel, said, and a way back to
-    // it: hidden while paused, nothing showed one was live, and Debug
-    // started a second copy of the program.
-    if let Some(chip) = session_chip(app).filter(|chip| used + chip.1 <= room) {
-        used += chip.1 + STATUS_GAP;
-        row = row.push(chip.0);
-    }
     // What Clew says besides a failure that stands: the failure keeps its
     // own place, and what is said after it (a file copied, a search done)
     // goes beside it rather than over it — said over it, the red Explain
@@ -755,6 +827,49 @@ fn status_left(app: &App, room: f32) -> Element<'_, Message> {
             counts
         })
     };
+    // The offer to set servers up is said short first — for the least room
+    // what is said needs, and for what is said to be said whole: an offer
+    // waits, what was just said goes ("TODO count is installed: its
+    // commands are in the comma…" beside the offer said whole) — and what
+    // is under way (Explain's pass) only when even that leaves too little.
+    // Nothing said, nothing is made room for: beside a failure said whole,
+    // the offer was said short for the room of words that were not there.
+    let gaps = STATUS_GAP * chips_n as f32;
+    let said_w = said.as_deref().map_or(0.0, width);
+    let said_least = if said.is_some() { SAID_MIN_W } else { 0.0 };
+    let setup_short = full_chips + gaps + said_least.max(said_w) > room;
+    let short =
+        full_chips - if setup_short { setup_saving } else { 0.0 } + gaps + said_least > room;
+    // A chip short of room even shortened is left out: laid out clipped to
+    // nothing, it was a control no one saw that the keyboard's ring still
+    // stopped on (its Set up is in the command bar, its pass's progress in
+    // the margin).
+    // A command running first: its Stop is the one control here that
+    // ends what the user set going, and left for last it was the one left
+    // out when room ran short.
+    if let Some(chip) = run_chip.filter(|chip| used + chip.1 <= room) {
+        used += chip.1 + STATUS_GAP;
+        row = row.push(chip.0);
+    }
+    if let Some(chip) = setup_chip(app, setup_short).filter(|chip| used + chip.1 <= room) {
+        used += chip.1 + STATUS_GAP;
+        row = row.push(chip.0);
+    }
+    if let Some(chip) = explain_chip(app, short).filter(|chip| used + chip.1 <= room) {
+        used += chip.1 + STATUS_GAP;
+        row = row.push(chip.0);
+    }
+    // A session going on behind the hidden panel, said, and a way back to
+    // it: hidden while paused, nothing showed one was live, and Debug
+    // started a second copy of the program.
+    if let Some(chip) = session.filter(|chip| used + chip.1 <= room) {
+        used += chip.1 + STATUS_GAP;
+        row = row.push(chip.0);
+    }
+    if let Some(chip) = rust.filter(|chip| used + chip.1 <= room) {
+        used += chip.1 + STATUS_GAP;
+        row = row.push(chip.0);
+    }
     let left = room - used;
     if let Some(said) = said
         && left >= least
@@ -767,6 +882,23 @@ fn status_left(app: &App, room: f32) -> Element<'_, Message> {
         .align_y(iced::Center)
         .clip(true)
         .into()
+}
+
+/// What failed, of a failure's words: its words before the reason — ": ",
+/// or the full-width "：" Chinese and Japanese write — after what failed
+/// where its words name it (`subject`): a plugin's command is named "TODO
+/// count: List TODOs", and cut at its own ": " what failed read "TODO
+/// count".
+pub(crate) fn failure_head<'a>(whole: &'a str, subject: Option<&str>) -> &'a str {
+    let after = subject
+        .filter(|s| !s.is_empty())
+        .and_then(|s| whole.find(s).map(|at| at + s.len()))
+        .unwrap_or(0);
+    [": ", "："]
+        .iter()
+        .filter_map(|sep| whole[after..].find(sep).map(|at| after + at))
+        .min()
+        .map_or(whole, |at| &whole[..at])
 }
 
 /// What a failure on the status line offers (`App::failure_notice`): try
@@ -817,12 +949,17 @@ fn failure_controls(
     }
     if with_settings {
         // At the field it is about, where it is about one.
+        // At what it is about there: a plugin's row (its log, what fixes
+        // it), or Rust's setup.
         row = row.push(link(
             tr!("Settings"),
-            Message::Settings(match failure.about {
-                Some(field) => SettingsMsg::Fix(field),
-                None => SettingsMsg::OpenAt(crate::app::state::SettingsPage::LanguageModel),
-            }),
+            match (failure.about, &failure.spot) {
+                (Some(field), _) => Message::Settings(SettingsMsg::Fix(field)),
+                (None, Some(spot)) => {
+                    Message::Plugin(crate::app::plugins::PluginMsg::ShowInSettings(spot.clone()))
+                }
+                (None, None) => Message::Settings(SettingsMsg::OpenAt(failure.of.settings_page())),
+            },
         ));
         width += settings_w;
     }
@@ -860,10 +997,10 @@ fn session_chip(app: &App) -> Option<(Element<'_, Message>, f32)> {
     let paused = session.status == crate::DebugStatus::Stopped;
     let said = match (app.debug.no_debug, paused, file) {
         (true, _, Some(file)) => tr!("Running {file}", file = file),
-        (false, true, Some(file)) => tr!("Debugging {file} — paused", file = file),
+        (false, true, Some(file)) => tr!("Debugging {file} (paused)", file = file),
         (false, false, Some(file)) => tr!("Debugging {file}", file = file),
         (true, _, None) => tr!("Running").to_string(),
-        (false, true, None) => tr!("Debugging — paused").to_string(),
+        (false, true, None) => tr!("Debugging (paused)").to_string(),
         (false, false, None) => tr!("Debugging").to_string(),
     };
     let width = super::steady::width_of(&said, ts::SMALL, crate::fonts::UI) + CHIP_EXTRA_W;
@@ -893,6 +1030,113 @@ fn session_chip(app: &App) -> Option<(Element<'_, Message>, f32)> {
         ),
         width,
     ))
+}
+
+/// The most of its width a running command's name takes on its chip: a
+/// long one left no room for its Stop.
+const RUN_NAME_MAX_W: f32 = 200.0;
+
+/// A plugin's command running: its name, how far it has come when it says,
+/// and its Stop, for as long as it runs. Said on the status line, it went as
+/// soon as anything else was said, and could not be stopped.
+fn plugin_run_chip(app: &App) -> Option<(Element<'_, Message>, f32)> {
+    let (title, percent, stopping) = app.plugin_run()?;
+    let font = crate::fonts::UI;
+    let name = super::steady::cut(title, RUN_NAME_MAX_W, ts::SMALL, font);
+    let said = match (stopping, percent) {
+        (true, _) => tr!("Stopping {command}…", command = name.clone()),
+        (false, Some(p)) => tr!(
+            "Running {command}… {percent}%",
+            command = name.clone(),
+            percent = p
+        ),
+        (false, None) => tr!("Running {command}…", command = name.clone()),
+    };
+    // At its widest once it counts: it does not shift as the count grows.
+    // One that never counts keeps no room for a count (its Stop stood
+    // apart from its words).
+    let widest = match percent {
+        Some(_) if !stopping => tr!(
+            "Running {command}… {percent}%",
+            command = name.clone(),
+            percent = 100
+        ),
+        _ => said.clone(),
+    };
+    let words_w = super::steady::width_of(&widest, ts::SMALL, font).max(super::steady::width_of(
+        &said,
+        ts::SMALL,
+        font,
+    ));
+    let mut width = 11.0 + 5.0 + words_w;
+    let mut chip = row![
+        // Plugins' own mark (Settings → Plugins): the plug beside it is
+        // the language servers' setup.
+        container(glyph::icon(Glyph::Cube, theme::accent(), 11.0))
+            .width(Length::Fixed(11.0))
+            .height(Length::Fixed(11.0)),
+        container(
+            text(said)
+                .size(ts::SMALL)
+                .color(theme::accent())
+                .wrapping(iced::widget::text::Wrapping::None),
+        )
+        .width(Length::Fixed(words_w)),
+    ]
+    .spacing(5)
+    .align_y(iced::Center);
+    // Asked to stop, it is stopping: no second Stop.
+    if !stopping {
+        width += 5.0 + 19.0;
+        let stop = tr!("Stop {command}", command = title.to_string());
+        chip = chip.push(super::toolbar::tip_at(
+            button(glyph::icon(Glyph::Close, theme::dim(), 11.0))
+                .style(theme::icon_button(false))
+                .padding([1, 4])
+                .on_press(super::heard::said(
+                    &stop,
+                    Message::Plugin(crate::app::plugins::PluginMsg::StopRun),
+                )),
+            stop.clone(),
+            None,
+            tooltip::Position::Top,
+        ));
+    }
+    let chip: Element<'_, Message> = if name == title {
+        chip.into()
+    } else {
+        super::toolbar::tip_at(chip, title.to_string(), None, tooltip::Position::Top)
+    };
+    Some((chip, width))
+}
+
+/// Rust being set up for plugins, for as long as it takes — minutes, with
+/// Settings closed, and nothing said it went on — and the way back to it.
+fn rust_setup_chip(app: &App) -> Option<(Element<'_, Message>, f32)> {
+    use crate::app::plugins::{Building, PluginMsg, SettingsSpot};
+    if !matches!(app.plugins.building, Building::SettingUp { .. }) {
+        return None;
+    }
+    let said = tr!("Setting up Rust for plugins…");
+    let width = super::steady::width_of(said, ts::SMALL, crate::fonts::UI) + CHIP_EXTRA_W;
+    let chip = button(
+        row![
+            glyph::icon(Glyph::Cube, theme::accent(), 11.0),
+            text(said)
+                .size(ts::SMALL)
+                .color(theme::accent())
+                .wrapping(iced::widget::text::Wrapping::None),
+        ]
+        .spacing(5)
+        .align_y(iced::Center),
+    )
+    .style(theme::icon_button(false))
+    .padding([2, 8])
+    .on_press(super::heard::said(
+        said,
+        Message::Plugin(PluginMsg::ShowInSettings(SettingsSpot::Rust)),
+    ));
+    Some((chip.into(), width))
 }
 
 /// What the setting-up chip says, and whether it is a button: setting up,
@@ -1090,7 +1334,7 @@ fn explain_chip(app: &App, short: bool) -> Option<(Element<'_, Message>, f32)> {
                 tr!("Stop explaining"),
                 Message::Explain(ExplainMsg::Cancel),
             )),
-        tr!("Stop explaining (what is explained so far is kept)"),
+        tr!("Stop explaining and keep the explanations so far"),
         None,
         tooltip::Position::Top,
     ));
@@ -1252,6 +1496,23 @@ mod untagged_kind_tests {
     use std::path::Path;
 
     /// A README says it is Markdown; a file of no known kind is plain text.
+    #[test]
+    fn what_failed_is_cut_after_its_own_name() {
+        use super::failure_head;
+        let whole = "TODO count: List TODOs did not finish: it crashed: boom";
+        assert_eq!(failure_head(whole, None), "TODO count");
+        assert_eq!(
+            failure_head(whole, Some("TODO count: List TODOs")),
+            "TODO count: List TODOs did not finish"
+        );
+        // Named nowhere in its words (another language's): as before.
+        assert_eq!(failure_head(whole, Some("absent")), "TODO count");
+        assert_eq!(
+            failure_head("清单：列出待办 未完成：崩溃", Some("清单：列出待办")),
+            "清单：列出待办 未完成"
+        );
+    }
+
     #[test]
     fn a_readme_is_markdown() {
         assert_eq!(untagged_kind(Path::new("/p/README.md")), "Markdown");

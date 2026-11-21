@@ -234,7 +234,7 @@ impl App {
                 {
                     if !lsp::langenv::is_go_tag(tag) {
                         self.status = tr!(
-                            "{tag} is not a build tag: use only letters, digits, _ and .",
+                            "{tag} isn't a valid build tag. Use only letters, digits, _ and .",
                             tag = format!("{tag:?}")
                         );
                         return Task::none();

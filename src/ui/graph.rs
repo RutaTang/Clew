@@ -325,6 +325,12 @@ pub(crate) fn project_graph_modal(app: &App, overlay: crate::Overlay) -> Element
             crate::Overlay::ProjectMaps => project_maps_body(app),
         }
     };
+    // Over the graph or list shown in its place: what became of the graph
+    // picked last, in either view.
+    let body = match hidden_graph_note(app).filter(|_| overlay == crate::Overlay::ProjectMaps) {
+        Some(note) => column![container(note).padding([6, 8]), body].into(),
+        None => body,
+    };
     // The node picked: what it is and where, and the way into it.
     let picked = app.proj.graph_pick.as_ref().filter(|_| app.graph_mode).map(
         |pick| -> Element<'_, Message> {
@@ -579,6 +585,128 @@ pub(crate) fn graph_search_field(app: &App) -> Element<'_, Message> {
     .into()
 }
 
+/// A plugin's graph that could not be built: why, Try again (the same
+/// build), and See its log (Settings → Plugins, its log and what fixes it).
+/// `last_shown` when the last build that worked is still drawn.
+fn plugin_graph_failure(app: &App, why: &str, last_shown: bool) -> Element<'static, Message> {
+    use crate::app::plugins::PluginMsg;
+    let plugin = app.shown_graph_plugin_id();
+    // Its approved copy is gone or changed: building again fails the same
+    // way every time; installing it again (its row says so) is the fix.
+    let retry = !plugin
+        .as_ref()
+        .is_some_and(|id| app.plugins.damaged.contains(id));
+    let said = match last_shown {
+        false => tr!("This graph could not be built: {reason}", reason = why),
+        true => tr!(
+            "This graph could not be built again, so it shows the last build: {reason}",
+            reason = why
+        ),
+    };
+    row![
+        text(said)
+            .size(ts::CAPTION)
+            .color(theme::warning())
+            .width(Fill),
+        retry.then(|| {
+            button(text(tr!("Try again")).size(ts::SMALL))
+                .style(theme::secondary_button)
+                .padding([3, 10])
+                .on_press(super::heard::said(
+                    tr!("Try again"),
+                    Message::Plugin(PluginMsg::RebuildGraph),
+                ))
+        }),
+        // Try again alone left a graph that fails each time with nowhere
+        // to go.
+        button(text(tr!("See its log")).size(ts::SMALL))
+            .style(theme::secondary_button)
+            .padding([3, 10])
+            .on_press(super::heard::said(
+                tr!("See its log"),
+                // At its row, where its log is.
+                match plugin {
+                    Some(id) => Message::Plugin(crate::app::plugins::PluginMsg::ShowInSettings(
+                        crate::app::plugins::SettingsSpot::Plugin(id),
+                    )),
+                    None => Message::Settings(SettingsMsg::OpenAt(
+                        crate::app::state::SettingsPage::Plugins,
+                    )),
+                },
+            )),
+    ]
+    .spacing(8)
+    .align_y(iced::Center)
+    .into()
+}
+
+/// The graph picked last in Project Graphs, when its plugin no longer
+/// offers it: why, the way back while there is one (its plugin turned off),
+/// and a × that keeps the graph shown in its place. It went with no word,
+/// the first graph drawn as if picked.
+pub(crate) fn hidden_graph_note(app: &App) -> Option<Element<'static, Message>> {
+    use crate::app::plugins::{HiddenGraph, PluginMsg};
+    let hidden = app.hidden_plugin_graph()?;
+    let (said, item, turn_on) = match hidden {
+        HiddenGraph::TurnedOff {
+            plugin_id,
+            plugin,
+            graph,
+        } => (
+            tr!(
+                "“{graph}” is hidden because the plugin {plugin} is turned off.",
+                graph = graph,
+                plugin = plugin
+            ),
+            graph,
+            Some((plugin, plugin_id)),
+        ),
+        HiddenGraph::Dropped { plugin } => (
+            tr!(
+                "The graph you picked last is gone because the plugin {plugin} no longer adds it.",
+                plugin = plugin
+            ),
+            plugin,
+            None,
+        ),
+    };
+    let turn_on = turn_on.map(|(plugin, id)| {
+        button(text(tr!("Turn on")).size(ts::SMALL))
+            .style(theme::secondary_button)
+            .padding([3, 10])
+            .on_press(super::heard::said_to(
+                tr!("Turn on"),
+                &plugin,
+                Message::Plugin(PluginMsg::SetEnabled(id, true)),
+            ))
+    });
+    let dismiss = button(crate::glyph::icon(
+        crate::glyph::Glyph::Close,
+        theme::dim(),
+        10.0,
+    ))
+    .style(theme::toolbar_button)
+    .padding([4, 6])
+    .on_press(super::heard::said_to(
+        tr!("Dismiss"),
+        &item,
+        Message::Plugin(PluginMsg::ForgetHiddenGraph),
+    ));
+    Some(
+        row![text(said).size(ts::CAPTION).color(theme::fg()).width(Fill),]
+            .extend(turn_on.map(Into::into))
+            .push(super::toolbar::tip_at(
+                dismiss,
+                tr!("Dismiss"),
+                None,
+                iced::widget::tooltip::Position::Bottom,
+            ))
+            .spacing(8)
+            .align_y(iced::Center)
+            .into(),
+    )
+}
+
 /// The node-link map: a force-directed canvas plus a legend.
 pub(crate) fn graph_map_view(app: &App) -> Element<'_, Message> {
     let overlay = app.proj.overlay;
@@ -591,9 +719,28 @@ pub(crate) fn graph_map_view(app: &App) -> Element<'_, Message> {
     };
     // While the project is still being scanned/indexed the graph is legitimately
     // empty — say so, rather than "Nothing to show" (which reads as "no data").
+    // What a plugin answered in its own words instead of its graph.
+    let plugin_said = match app.plugin_map_status() {
+        Some(crate::app::plugins::PluginMapStatus::Said(said))
+            if overlay == Some(crate::Overlay::ProjectMaps) =>
+        {
+            Some(said)
+        }
+        _ => None,
+    };
     let empty_msg = if app.proj.project.is_none() {
         // Not "Nothing to show.", which reads as a project with nothing in it.
         tr!("Open a project to see its graph")
+    } else if overlay == Some(crate::Overlay::ProjectMaps)
+        && app.plugin_map_status() == Some(crate::app::plugins::PluginMapStatus::Building)
+    {
+        // A plugin's graph, asked of the plugin: the list says whose. It
+        // reads the files itself, so Clew's own indexing is not its news.
+        tr!("Building this graph…")
+    } else if let Some(said) = plugin_said.as_deref() {
+        // Its answer, as a command's is: not "could not be built" — nor
+        // "Indexing the project…", said over it while Clew indexed.
+        said
     } else if app.proj.project_calls.building {
         tr!("Building call graph…")
     } else if app.scanning || app.proj.indexing {
@@ -601,9 +748,39 @@ pub(crate) fn graph_map_view(app: &App) -> Element<'_, Message> {
     } else if app.proj.graph_layout_pending {
         // Laid out off the UI thread (`App::refresh_graph_layout`).
         tr!("Laying out the graph…")
+    } else if overlay == Some(crate::Overlay::ProjectMaps)
+        && app.plugin_map_status() == Some(crate::app::plugins::PluginMapStatus::Built)
+    {
+        // Whose empty graph it is, as the list says: "Nothing to show."
+        // read as Clew's own finding.
+        tr!("The plugin found nothing to draw.")
     } else {
         tr!("Nothing to show.")
     };
+    // A plugin's graph that failed says why, and what to do, here: "Switch
+    // to List to see why" sent the reader to another view for both.
+    let failed = match app.plugin_map_status() {
+        Some(crate::app::plugins::PluginMapStatus::Failed(why))
+            if overlay == Some(crate::Overlay::ProjectMaps) =>
+        {
+            Some(why)
+        }
+        _ => None,
+    };
+    let drawn = app
+        .proj
+        .graph_layout
+        .as_ref()
+        .is_some_and(|l| !l.nodes.is_empty());
+    if let Some(why) = &failed
+        && !drawn
+    {
+        return container(plugin_graph_failure(app, why, false))
+            .padding(8)
+            .width(Fill)
+            .height(Fill)
+            .into();
+    }
     let Some(layout) = &app.proj.graph_layout else {
         return hint(empty_msg);
     };
@@ -642,7 +819,16 @@ pub(crate) fn graph_map_view(app: &App) -> Element<'_, Message> {
     .height(Fill);
     // Clipped to its frame: a canvas draws where its geometry says, and a
     // map zoomed in drew its edges over the header above it.
-    super::clipped::Clipped::new(map).into()
+    let map = super::clipped::Clipped::new(map);
+    match failed {
+        // The last build that worked, drawn under why the next did not.
+        Some(why) => column![
+            container(plugin_graph_failure(app, &why, true)).padding(8),
+            map
+        ]
+        .into(),
+        None => map.into(),
+    }
 }
 
 /// A distinct base colour per graphed language (see `theme::language_hue`).
@@ -3206,13 +3392,13 @@ pub(crate) fn project_types_body(app: &App) -> Element<'_, Message> {
         } else if never_built && !app.server.is_up() {
             (
                 tr!(
-                    "The type graph is drawn from the project's API index, which Clew's server builds — and it is not running."
+                    "The type graph is drawn from the project's API index, which Clew's server builds. The server isn't running."
                 ),
                 false,
             )
         } else if never_built {
             (
-                tr!("The type graph is drawn from the project's API index, not built yet."),
+                tr!("The type graph is drawn from the project's API index, which isn't built yet."),
                 true,
             )
         } else {
@@ -3394,6 +3580,32 @@ pub(crate) fn project_maps_body(app: &App) -> Element<'_, Message> {
                 .into(),
         );
     }
+    // A plugin's graph: whose it is, and how its build stands.
+    if let Some(plugin) = app.shown_graph_plugin() {
+        use crate::app::plugins::PluginMapStatus;
+        rows.push(
+            text(tr!("Added by the plugin {plugin}", plugin = plugin))
+                .size(ts::CAPTION)
+                .color(theme::dim())
+                .into(),
+        );
+        match app.plugin_map_status() {
+            Some(PluginMapStatus::Building) if map.nodes.is_empty() => {
+                rows.push(hint(tr!("Building this graph…").into()));
+            }
+            Some(PluginMapStatus::Failed(why)) => {
+                rows.push(plugin_graph_failure(app, &why, !map.nodes.is_empty()));
+            }
+            // Its answer in its own words, as a command's is shown.
+            Some(PluginMapStatus::Said(said)) => {
+                rows.push(hint(said));
+            }
+            Some(PluginMapStatus::Built) if map.nodes.is_empty() => {
+                rows.push(hint(tr!("The plugin found nothing to draw.").into()));
+            }
+            _ => {}
+        }
+    }
     let mut out_edges: Vec<Vec<(usize, &str)>> = vec![Vec::new(); map.nodes.len()];
     for e in &map.edges {
         if let Some(list) = out_edges.get_mut(e.from)
@@ -3472,8 +3684,8 @@ pub(crate) fn project_maps_body(app: &App) -> Element<'_, Message> {
     if listed < map.nodes.len() {
         rows.push(
             text(trn!(
-                "1 more — the graph view shows every node",
-                "{n} more — the graph view shows every node",
+                "1 more. The graph view shows every node.",
+                "{n} more. The graph view shows every node.",
                 map.nodes.len() - listed
             ))
             .size(ts::CAPTION)

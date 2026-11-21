@@ -619,7 +619,7 @@ pub(crate) fn tour_prep_sheet<'a>(
     ]
     .align_y(iced::Center);
     let intro = text(tr!(
-        "The tour shows Clew on Tea Shop, a small project it comes with, in a window of its own. It needs a few things first."
+        "The tour runs in its own window on Tea Shop, a small project that comes with Clew. It needs a few things first."
     ))
     .size(ts::BASE)
     .color(theme::fg_muted())
@@ -746,9 +746,9 @@ pub(crate) fn tour_prep_sheet<'a>(
     let embeddings = if app.embed_available {
         tr!("All set.").to_string()
     } else if prep.skip_embeddings {
-        tr!("Skipped: the tour shows where it is, without results.").to_string()
+        tr!("Skipped. The tour shows where it is, but without results.").to_string()
     } else {
-        tr!("Search code by what it does. With a model on this computer, or a service.").to_string()
+        tr!("Search code by what it does, using a model on this computer or a service.").to_string()
     };
     let shop = match sample {
         None => tr!("Getting Tea Shop ready…").to_string(),

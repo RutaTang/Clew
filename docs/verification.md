@@ -89,6 +89,14 @@ The user, host and port in a key are the ones ssh connects with. With `CLEW_SSH`
 - While an answer is being written, a stop word stops it before any command is tried. The exceptions: a command waiting for a yes, which the stop word declines, and a question waiting with an answer by that name.
 - Every route ends in exactly one step that acts. It never takes a step whose subject isn't there, such as a waiting command or a waiting question.
 
+**Plugins: what a plugin is linked with, and where its things are kept** — `need_of`, `with_need`, `may_link`, `id_ok`, `nonce_ok`, `source_kind` and `key_name` in `crates/clew-rules/src/plugin.rs`, which `crates/clew-plugin` calls for each of these decisions, modelled in `Plugin.lean`. Every one is proved of the code itself (Aeneas), on the bytes of any input, and the theorems below are restated of the code (`verification/extracted/PluginEqual.lean`).
+- A plugin's permissions are what its code imports, not what it says of itself. It is linked exactly when no import is one Clew does not provide and every permission an import takes was granted. So a plugin that imports `clew:plugin/project` is never linked without *read*, one that imports `clew:plugin/git` never without *git*, and one that imports anything else (a network interface, say) is never linked at all, whatever was granted.
+- A plugin's or a command's id, and a request's nonce, are one plain name: no `/`, `\`, `:` or NUL, and never `.` or `..`. Joined to a folder, each resolves to exactly one folder below it. Every folder of a plugin's (its source, its build, its own store) is named through this check, so an id an agent passes is never a path.
+- What an agent may write in a plugin's source is `plugin.toml`, or a Rust file under `src/` whose every piece is a name that is not empty and does not start with `.`. Such a path passes `check_lexical`, so joined to the plugin's folder it never leaves it.
+- A key of a plugin's own store is kept in a file named by its bytes in hex and `.bin`. That name is a plain file name, and no two keys share one.
+
+Proving these found a hole: `write_file` checked a new `plugin.toml` only when the path was spelled exactly `plugin.toml`, but the path was also accepted as `./plugin.toml`. So a manifest written there skipped both the check and the rule that an id cannot change. Both now go through one decision, `source_kind`, on one spelling. Before the id check was in one place, too, a build's file was found under an id the agent passed (`last_build`), which could name a path.
+
 ## How the proofs reach the code
 
 A theorem is about a model. What connects each model to the code:
@@ -147,6 +155,8 @@ These are the places where Clew decides who may do what, or what to trust. Each 
 | Whether hovering may run the debugged program's code | `dap::hover_eval_allowed` | Proved of the code itself (Aeneas): `clew_rules::dap::hover_eval_allowed` |
 | An MCP server's request headers | `mcp::config::check_headers` | Proved of the code itself (Aeneas), on the UTF-8 bytes of any string |
 | Signing in to an MCP server | `mcp` OAuth | Proved. Its decisions, `clew_rules::oauth::{endpoint_allowed, fresh, take_stored, answers}`, of the code itself (Aeneas). The exchange itself is the network's |
+| What a plugin is linked with | `clew_plugin::inspect`, `Runtime::load` | Proved. What each import needs and whether the plugin may be linked, `clew_rules::plugin::{need_of, with_need, may_link}`, of the code itself (Aeneas). That the linker holds only the granted interfaces is wasmtime's `Linker`, tested |
+| The names of a plugin's folders and files | `store::checked_id`, `requests::is_nonce`, `authoring::source_file`, the runtime's store | Proved. `clew_rules::plugin::{id_ok, nonce_ok, source_kind, key_name}`, of the code itself (Aeneas): plain names, a source path that stays in the plugin's folder, store files no two keys share |
 
 ## The code that runs
 

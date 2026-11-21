@@ -409,10 +409,10 @@ impl App {
         // "… now ask your question" has been heeded: it stayed in the status
         // line under the answer.
         let heeded: Vec<String> =
-            std::iter::once(tr!("Added the selection to Ask — now ask your question").to_string())
+            std::iter::once(tr!("Added the selection to Ask. Type your question.").to_string())
                 .chain(self.proj.ask_pins.iter().map(|p| {
                     tr!(
-                        "Added line {line} to Ask — now ask your question",
+                        "Added line {line} to Ask. Type your question.",
                         line = p.line
                     )
                 }))
@@ -496,7 +496,7 @@ impl App {
             self.status = if ecfg.is_none() {
                 crate::app::embedding::why_no_embeddings()
             } else if self.proj.explain.running || self.proj.building_embeddings {
-                tr!("Building the semantic index — ask again when it's ready").into()
+                tr!("Building the semantic index. Ask again when it's ready.").into()
             } else {
                 tr!("Open a file to ask about it, or build the semantic index to ask about the whole project").into()
             };
@@ -618,7 +618,7 @@ impl App {
             {
                 self.proj.asking = false;
                 self.return_question(question, spoken);
-                self.status = tr!("The index changed — ask again when it's ready").into();
+                self.status = tr!("The index changed. Ask again when it's ready.").into();
                 return Task::none();
             }
         }
@@ -842,7 +842,7 @@ impl App {
         if messages.is_empty() {
             self.proj.asking = false;
             self.return_question(pending.question, pending.spoken);
-            self.status = tr!("Ask failed: the question's context could not be assembled").into();
+            self.status = tr!("Couldn't gather the context for this question").into();
             return Task::none();
         }
         let cfg = match self.require_llm() {
@@ -1050,6 +1050,9 @@ impl App {
         // what it finds and run the window's commands (`app::windowtools`).
         let mut tools = tools;
         tools.extend(crate::app::windowtools::window_tools());
+        // And the plugin tools: the agent can write the user a plugin
+        // (`app::plugins`).
+        tools.extend(crate::app::plugins::plugin_tools());
         // Client-side grounding the server can't see: the paused debugger state
         // and any pinned selections travel verbatim.
         let mut context = String::new();
@@ -1690,12 +1693,12 @@ impl App {
         let (pin, said) = match self.selection_pin(pane) {
             Some(pin) => (
                 Some(pin),
-                tr!("Added the selection to Ask — now ask your question").to_string(),
+                tr!("Added the selection to Ask. Type your question.").to_string(),
             ),
             None => match menu.and_then(|m| self.line_pin(m.pane, m.line)) {
                 Some(pin) => {
                     let said = tr!(
-                        "Added line {line} to Ask — now ask your question",
+                        "Added line {line} to Ask. Type your question.",
                         line = pin.line
                     );
                     (Some(pin), said)

@@ -117,7 +117,7 @@ impl Term {
     /// The one line the hover peek shows for this term: what it is, and
     /// where it is defined.
     pub(crate) fn peek_line(&self) -> String {
-        format!("{}: {} — {}", self.name, self.definition, self.location())
+        format!("{}: {} ({})", self.name, self.definition, self.location())
     }
 }
 
@@ -609,6 +609,7 @@ impl App {
                 self.proj.stats.showing = false;
                 self.proj.weak.showing = false;
                 self.proj.docs.page = None;
+                self.proj.plugin_page = None;
                 // The terms come from the docs index, which is only built
                 // on demand: bring it up to date for the page (single-flight,
                 // a no-op while it is fresh).
@@ -865,7 +866,7 @@ mod glossary_tests {
         );
         assert_eq!(
             g.lookup("Inner").unwrap().peek_line(),
-            "Inner: Nested state — src/net/client.rs:52"
+            "Inner: Nested state (src/net/client.rs:52)"
         );
         let module = g.lookup("net::client").unwrap();
         assert_eq!(module.definition, "Talks to the server");

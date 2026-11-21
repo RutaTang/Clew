@@ -760,8 +760,7 @@ impl Via {
             // may be right and the proxy have failed on its own.
             ProxyFault::LoginUnanswered if self.names_credentials() => {
                 return format!(
-                    " — if they are wrong, correct them in its setting ({}, {PERCENT_ENCODING}); \
-                     if they are right, try again later, or {bypass}",
+                    ". If they are wrong, correct them in its setting ({}, {PERCENT_ENCODING}). If they are right, try again later, or {bypass}",
                     self.example()
                 );
             }
@@ -769,23 +768,23 @@ impl Via {
             // logs in to the proxy for the clients it serves.
             ProxyFault::LoginScheme => {
                 return format!(
-                    " — set a local relay that can log in for Clew, such as cntlm or px, as the proxy instead, or {bypass}"
+                    ". Set a local relay that can log in for Clew, such as cntlm or px, as the proxy instead, or {bypass}"
                 );
             }
-            _ => return format!(" — to reach the host without the proxy, {bypass}"),
+            _ => return format!(". To reach the host without the proxy, {bypass}"),
         }
         let example = self.example();
         let give = if self.names_credentials() {
             format!("correct them in its setting ({example}, {PERCENT_ENCODING})")
         } else if let Some(system) = &self.system {
             format!(
-                "Clew cannot read proxy passwords from the keychain: put them in environment variables ({PERCENT_ENCODING}); Clew then uses those instead of all of the system's proxy settings, so set {}",
+                "Clew needs the user name and password in environment variables ({PERCENT_ENCODING}) because it cannot read proxy passwords from the keychain. It then uses those variables instead of all of the system's proxy settings, so set {}",
                 self.environment(system)
             )
         } else {
             format!("put them in its setting, as {example}")
         };
-        format!(" — {give}, or {bypass}")
+        format!(". To fix this, {give}, or {bypass}")
     }
 
     /// The failure of a request its http proxy answered with a `407` (Proxy
@@ -1280,7 +1279,7 @@ impl Socks {
         io::Error::new(
             e.kind(),
             format!(
-                "{e} — a {}:// proxy is handed the address Clew looks up here; for a name only the proxy's side of the network knows, set it as {instead}://, which hands the proxy the name",
+                "{e}. A {}:// proxy gets the address that Clew looks up on this computer. For a name that only the proxy's side of the network knows, use {instead}:// instead, which passes the name to the proxy",
                 self.version.scheme()
             ),
         )
@@ -1347,7 +1346,7 @@ impl Socks {
         self.answered(
             ProxyFault::LoginUnanswered,
             format!(
-                "gave no answer to the user name and password ({how}): it may have refused them"
+                "gave no answer to the user name and password ({how}) and may have refused them"
             ),
         )
     }
@@ -1529,10 +1528,12 @@ impl Socks {
             return Err(match reply[1] {
                 91 => self.answered(
                     ProxyFault::Unavailable,
-                    format!("could not reach {target} (SOCKS4 answer 91: rejected or failed)"),
+                    format!(
+                        "could not reach {target} (SOCKS4 code 91, request rejected or failed)"
+                    ),
                 ),
                 other => self.failed(format!(
-                    "refused the CONNECT to {target} (SOCKS4 answer {other})"
+                    "refused the CONNECT to {target} (SOCKS4 code {other})"
                 )),
             });
         }
@@ -2128,7 +2129,9 @@ pub(crate) fn request_uri(url: &str) -> Result<Uri, String> {
     let target = Target::of(&uri).map_err(|e| describe(&e))?;
     let host = target.host.trim_end_matches('.').to_ascii_lowercase();
     if read != Some((target.https, host, Some(target.port))) {
-        return Err(format!("{url}: not sent — its host name is ambiguous"));
+        return Err(format!(
+            "{url}: not sent because its host name is ambiguous"
+        ));
     }
     Ok(uri)
 }
@@ -2245,8 +2248,7 @@ impl Lookups {
         }
         if under_way.len() >= MAX_LOOKUPS {
             return Err(io::Error::other(format!(
-                "not looking up {name}: the system's resolver has yet to answer the lookups of \
-                 {} other names",
+                "did not look up {name} because the system's resolver is still looking up {} other names",
                 under_way.len()
             )));
         }
@@ -2804,7 +2806,7 @@ impl Socks {
             let name = host_port(&self.host, self.port);
             let why = match e.kind() {
                 io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => {
-                    format!("timed out: the SOCKS proxy {name} did not finish its handshake")
+                    format!("timed out because the SOCKS proxy {name} did not finish its handshake")
                 }
                 io::ErrorKind::UnexpectedEof => {
                     format!("the SOCKS proxy {name} closed the connection in its handshake")
@@ -2886,7 +2888,7 @@ impl Tcp {
                 };
                 io::Error::new(
                     io::ErrorKind::TimedOut,
-                    format!("timed out: the peer {what} for {seconds} s"),
+                    format!("timed out because the peer {what} for {seconds} s"),
                 )
                 .into()
             }
@@ -3650,7 +3652,7 @@ fn tunnel(
         match (&authorization, hung_up, how) {
             (Some(_), true, how) => proxy_failed(
                 format!(
-                    "the proxy {name} did not answer the CONNECT to {authority} ({}); it may have rejected the user name and password in its setting",
+                    "the proxy {name} did not answer the CONNECT to {authority} ({}). It may have rejected the user name and password in its setting",
                     how.unwrap_or_else(|| "the connection closed".into())
                 ),
                 ProxyFault::LoginUnanswered,
@@ -3724,7 +3726,7 @@ fn tunnel(
         }
         Some(status) if connect_unavailable(status) => (
             if status >= 500 {
-                format!("could not reach {authority}: it answered the CONNECT with {status_line}")
+                format!("could not reach {authority} (it answered the CONNECT with {status_line})")
             } else {
                 format!("could not take the CONNECT to {authority} now: {status_line}")
             },
@@ -4084,7 +4086,7 @@ impl Exchange {
         io::Error::new(
             io::ErrorKind::TimedOut,
             format!(
-                "timed out: the download stayed below {} KiB/s for {} s (after the first {} s)",
+                "timed out because the download stayed below {} KiB/s for {} s (after the first {} s)",
                 pace.floor.div_ceil(1024),
                 pace.window.as_secs_f32(),
                 pace.grace.as_secs_f32()
@@ -4457,7 +4459,7 @@ fn hop_agent(
 ) -> Result<(ureq::Agent, Option<Via>), String> {
     let https = url_scheme_host(url).is_some_and(|(scheme, _)| scheme == "https");
     if !https && !is_loopback_http(url) {
-        return Err(format!("refusing a non-HTTPS URL: {url}"));
+        return Err(format!("only HTTPS URLs are allowed: {url}"));
     }
     let via = via(url, proxies);
     let route = route(via.as_ref().map(|via| via.spec.as_str()))?;
@@ -4486,7 +4488,7 @@ fn redirect_target(current: &str, location: &str) -> Result<String, String> {
         .map_err(|e| format!("{current}: an unreadable redirect to {location:?} ({e})"))?;
     if next.scheme() != "https" {
         return Err(format!(
-            "{current}: refusing a redirect to a non-HTTPS URL: {next}"
+            "{current}: did not follow a redirect to a non-HTTPS URL: {next}"
         ));
     }
     Ok(next.to_string())
@@ -4894,7 +4896,7 @@ fn transfer_on(
         }
         let now = Instant::now();
         if now >= deadline {
-            return Err(format!("{url}: the transfer took too long — giving up"));
+            return Err(format!("{url}: the transfer took too long and was stopped"));
         }
         match rx.recv_timeout(POLL.min(deadline - now)) {
             Ok(Piece::Data(bytes)) => sink.write_all(&bytes).map_err(|e| e.to_string())?,
@@ -4943,7 +4945,9 @@ fn transfer_with(
             return Err(format!("{current}: download cancelled"));
         }
         if Instant::now() > deadline {
-            return Err(format!("{current}: the transfer took too long — giving up"));
+            return Err(format!(
+                "{current}: the transfer took too long and was stopped"
+            ));
         }
         left_origin |= !same_origin(&current, url);
         let hop_headers: Vec<(&str, &str)> = headers
@@ -5162,7 +5166,7 @@ fn copy_capped(
             return Err(format!("{url}: download cancelled"));
         }
         if Instant::now() > bounds.deadline {
-            return Err(format!("{url}: the transfer took too long — giving up"));
+            return Err(format!("{url}: the transfer took too long and was stopped"));
         }
         let n = match reader.read(&mut buf) {
             Ok(0) => break,
@@ -6864,10 +6868,10 @@ mod tests {
         let err = result.unwrap_err();
         assert!(sent.is_empty(), "{sent:?}");
         assert!(err.to_string().contains("no such host"), "{err}");
-        assert!(err.to_string().contains("set it as socks5h://"), "{err}");
+        assert!(err.to_string().contains("use socks5h:// instead"), "{err}");
         let (result, _) = run("socks4://proxy", "nowhere.example", 80, &[]);
         let err = result.unwrap_err();
-        assert!(err.to_string().contains("set it as socks4a://"), "{err}");
+        assert!(err.to_string().contains("use socks4a:// instead"), "{err}");
         // An abandon is only that.
         let ProxySetting::Socks(socks) = proxy("socks5://proxy").unwrap() else {
             panic!("a SOCKS proxy");
@@ -6980,7 +6984,7 @@ mod tests {
             (
                 "socks5h://u:p@proxy",
                 vec![5, 2],
-                "gave no answer to the user name and password (the connection closed): it \
+                "gave no answer to the user name and password (the connection closed) and \
                  may have refused them",
                 LoginUnanswered,
             ),
@@ -7008,13 +7012,13 @@ mod tests {
             (
                 "socks4a://proxy",
                 vec![0, 91, 0, 0, 0, 0, 0, 0],
-                "could not reach x.example:443 (SOCKS4 answer 91",
+                "could not reach x.example:443 (SOCKS4 code 91",
                 Unavailable,
             ),
             (
                 "socks4a://proxy",
                 vec![0, 93, 0, 0, 0, 0, 0, 0],
-                "refused the CONNECT to x.example:443 (SOCKS4 answer 93)",
+                "refused the CONNECT to x.example:443 (SOCKS4 code 93)",
                 Refused,
             ),
             // fixR5 #11: and SOCKS4's with its version (0).
@@ -7267,9 +7271,9 @@ mod tests {
         assert_eq!(
             unanswered.advice(ProxyFault::LoginUnanswered),
             format!(
-                " — if they are wrong, correct them in its setting \
+                ". If they are wrong, correct them in its setting \
                  (http://user:password@proxy.corp:3128, percent-encoding any character in them \
-                 that is not a letter or a digit); if they are right, try again later, or \
+                 that is not a letter or a digit). If they are right, try again later, or \
                  {ENV_BYPASS}"
             )
         );
@@ -7998,7 +8002,7 @@ mod tests {
             if err.kind() == io::ErrorKind::TimedOut {
                 waited += 1;
             } else {
-                assert!(err.to_string().contains("not looking up"), "{err}");
+                assert!(err.to_string().contains("did not look up"), "{err}");
                 refused += 1;
             }
         }
@@ -8052,7 +8056,7 @@ mod tests {
             began.elapsed()
         );
         assert!(
-            err.to_string().contains("not looking up new.example"),
+            err.to_string().contains("did not look up new.example"),
             "{err}"
         );
 
@@ -8171,7 +8175,7 @@ mod tests {
     /// the system's settings — `set`, as the environment names them.
     fn keychain(set: &str) -> String {
         format!(
-            " — Clew cannot read proxy passwords from the keychain: put them in environment variables (percent-encoding any character in them that is not a letter or a digit); Clew then uses those instead of all of the system's proxy settings, so set {set}"
+            ". To fix this, Clew needs the user name and password in environment variables (percent-encoding any character in them that is not a letter or a digit) because it cannot read proxy passwords from the keychain. It then uses those variables instead of all of the system's proxy settings, so set {set}"
         )
     }
 
@@ -8243,7 +8247,7 @@ mod tests {
             err,
             format!(
                 "{url} (through the proxy socks5h://{addr}): the SOCKS proxy {addr} asks for a \
-                 user name and password — put them in its setting, as \
+                 user name and password. To fix this, put them in its setting, as \
                  socks5h://user:password@{addr}, or {ENV_BYPASS}"
             )
         );
@@ -8256,7 +8260,7 @@ mod tests {
             err,
             format!(
                 "{url} (through the proxy socks5h://…@{addr}): the SOCKS proxy {addr} refused \
-                 the user name and password — correct them in its setting \
+                 the user name and password. To fix this, correct them in its setting \
                  (socks5h://user:password@{addr}, percent-encoding any character in them that \
                  is not a letter or a digit), or {ENV_BYPASS}"
             )
@@ -8295,7 +8299,7 @@ mod tests {
             format!(
                 "{url} (through the proxy http://…@{addr}): the proxy {addr} answered the \
                  CONNECT to models.lan.invalid:443 with HTTP/1.1 407 Refused: it refused the user \
-                 name and password — correct them in its setting (http://user:password@{addr}, \
+                 name and password. To fix this, correct them in its setting (http://user:password@{addr}, \
                  percent-encoding any character in them that is not a letter or a digit), or \
                  {ENV_BYPASS}"
             )
@@ -8319,7 +8323,7 @@ mod tests {
             format!(
                 "{url} (through the proxy http://…@{addr}): the proxy {addr} answered the \
                  CONNECT to models.lan.invalid:443 with HTTP/1.1 407 Refused: it accepts only \
-                 Negotiate or NTLM logins, which Clew does not support — set a local relay that can log in for Clew, such as cntlm or px, as the proxy instead, or \
+                 Negotiate or NTLM logins, which Clew does not support. Set a local relay that can log in for Clew, such as cntlm or px, as the proxy instead, or \
                  {ENV_BYPASS}"
             )
         );
@@ -8359,7 +8363,7 @@ mod tests {
             named.answered_407(&challenges),
             format!(
                 "the proxy http://…@proxy.corp:3128 answered HTTP 407 (Proxy Authentication \
-                 Required): it accepts only NTLM or Negotiate logins, which Clew does not support — set a local relay that can log in for Clew, such as cntlm or px, as the proxy instead, or {ENV_BYPASS}"
+                 Required): it accepts only NTLM or Negotiate logins, which Clew does not support. Set a local relay that can log in for Clew, such as cntlm or px, as the proxy instead, or {ENV_BYPASS}"
             )
         );
         challenges.append(
@@ -8367,9 +8371,9 @@ mod tests {
             "Basic realm=\"corp\"".parse().unwrap(),
         );
         assert!(
-            named
-                .answered_407(&challenges)
-                .contains("it refused the user name and password — correct them in its setting"),
+            named.answered_407(&challenges).contains(
+                "it refused the user name and password. To fix this, correct them in its setting"
+            ),
             "Basic is offered too"
         );
         assert_eq!(plain.answered_407(&challenges), asks);
@@ -9749,8 +9753,8 @@ mod tests {
         let (_, why) = open(plain, head(&["HTTP/1.1 502 Bad Gateway"]), None);
         assert_eq!(
             why,
-            "the proxy proxy.corp:3128 could not reach api.example.com:443: it answered the \
-             CONNECT with HTTP/1.1 502 Bad Gateway"
+            "the proxy proxy.corp:3128 could not reach api.example.com:443 (it answered the \
+             CONNECT with HTTP/1.1 502 Bad Gateway)"
         );
         let (_, why) = open(plain, head(&["HTTP/1.1 403 Forbidden"]), None);
         assert_eq!(
@@ -9820,7 +9824,7 @@ mod tests {
         // failure.
         let io_end = |kind: io::ErrorKind| Some(ureq::Error::from(io::Error::from(kind)));
         let closed = "the proxy proxy.corp:3128 did not answer the CONNECT to \
-                      api.example.com:443 (the connection closed); it may have rejected the \
+                      api.example.com:443 (the connection closed). It may have rejected the \
                       user name and password in its setting";
         let plain_closed = "the proxy proxy.corp:3128 closed the connection instead of \
                             answering the CONNECT";
@@ -9850,7 +9854,7 @@ mod tests {
             let (got, why) = open(named, vec![], Some(end.into()));
             assert_eq!(got, Some(LoginUnanswered), "{how}: {why}");
             assert!(
-                why.contains("it may have rejected the user name and password"),
+                why.contains("It may have rejected the user name and password"),
                 "{how}: {why}"
             );
         }
@@ -9987,7 +9991,7 @@ mod tests {
             failure(&failed(named, vec![answer], None), Some(&via)),
             format!(
                 "the proxy proxy.corp:3128 began to answer the CONNECT to api.example.com:443 \
-                 with a 407 and broke off (the connection closed): it accepts only NTLM logins, which Clew does not support — set a local relay that can log in for Clew, such as cntlm or px, as the proxy instead, or {ENV_BYPASS}"
+                 with a 407 and broke off (the connection closed): it accepts only NTLM logins, which Clew does not support. Set a local relay that can log in for Clew, such as cntlm or px, as the proxy instead, or {ENV_BYPASS}"
             )
         );
     }
@@ -10037,7 +10041,7 @@ mod tests {
                 failure(&err, Some(&via)),
                 format!(
                     "the proxy {addr} failed the CONNECT to api.example.invalid:443: timed out \
-                     connecting — to reach the host without the proxy, {ENV_BYPASS}"
+                     connecting. To reach the host without the proxy, {ENV_BYPASS}"
                 ),
                 "{login:?}"
             );

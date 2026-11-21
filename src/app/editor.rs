@@ -17,7 +17,7 @@ pub(crate) fn open_status(rel: &str, lang_key: Option<&str>) -> String {
     // only when there is something to say about it.
     match lang_key.and_then(highlight::highlight_error) {
         Some(e) => tr!(
-            "{file} — shown without highlighting: {error}",
+            "{file} is shown without highlighting: {error}",
             file = rel,
             error = e
         ),
@@ -98,6 +98,7 @@ impl App {
         }
         self.proj.glossary.showing = false;
         self.proj.docs.page = None;
+        self.proj.plugin_page = None;
         if self.proj.time_travel.take().is_some() {
             self.forget_failure_of(crate::app::state::FailureOf::Summary);
             self.forget_failure_of(crate::app::state::FailureOf::Story);
@@ -411,7 +412,7 @@ impl App {
         if self.connection.is_remote() {
             self.proj.link.pane_pending[pane] = None;
             self.status = tr!(
-                "Disconnected from the remote host — cannot open {file}",
+                "Can't open {file} because you're disconnected from the remote host",
                 file = rel
             );
             return Task::none();
@@ -781,7 +782,7 @@ impl App {
         // Purely lexical, so it is identical for local and remote and never
         // probes this machine's disk at a remote path.
         if !clew_core::statefile::safe_rel(&rel) {
-            self.status = tr!("Refused a path outside the project: {file}", file = rel);
+            self.status = tr!("Blocked a path outside the project: {file}", file = rel);
             return Task::none();
         }
         let abs = project.root.join(&rel);
@@ -1504,7 +1505,10 @@ impl App {
                     self.proj.diff = Some(d);
                 }
                 None => {
-                    self.status = tr!("No diff for {file} — it is not tracked by git", file = rel);
+                    self.status = tr!(
+                        "{file} isn't tracked by git, so there's no diff",
+                        file = rel
+                    );
                 }
             },
             Ok(Some(lines)) => {
@@ -2342,12 +2346,15 @@ impl App {
             EditorMsg::FontSizeDelta(delta) => {
                 let old = self.line_height();
                 // Never below the smallest text the UI draws anywhere.
-                self.font_size = (self.font_size + delta).clamp(theme::MIN_TEXT_SIZE, 22.0);
+                self.font_size =
+                    (self.font_size + delta).clamp(theme::MIN_TEXT_SIZE, MAX_FONT_SIZE);
+                self.keep_code_size();
                 self.rescale_scroll(old)
             }
             EditorMsg::FontSizeReset => {
                 let old = self.line_height();
                 self.font_size = DEFAULT_FONT_SIZE;
+                self.keep_code_size();
                 self.rescale_scroll(old)
             }
             EditorMsg::KeyPressed(key, modifiers) => self.handle_key(key, modifiers),

@@ -298,7 +298,7 @@ fn turn_rows_of(app: &App) -> Vec<Element<'_, Message>> {
         .into()
     };
     let about = tr!(
-        "Knows when you have finished speaking: a finished sentence is acted on at once, and a pause to think is waited through."
+        "Knows when you've finished speaking. It acts on a finished sentence at once and waits through a pause to think."
     );
     let mut rows = vec![form::item(MODEL.name, Some(about.to_string()), state)];
     let warning = |said: String| {
@@ -311,7 +311,7 @@ fn turn_rows_of(app: &App) -> Vec<Element<'_, Message>> {
     };
     if installed && app.voice.turn.judges.is_none() {
         rows.push(warning(
-            tr!("clew-speak, which runs it, is not installed beside Clew").into(),
+            tr!("This model needs clew-speak, which isn't installed alongside Clew").into(),
         ));
     }
     if let Some(e) = &app.voice.turn.error {
@@ -358,7 +358,7 @@ fn wake_model_rows(app: &App) -> Vec<Element<'_, Message>> {
         )
         .into()
     };
-    let about = tr!("Hears “Hey, Clew”, and nothing else.");
+    let about = tr!("Listens only for “Hey, Clew”.");
     let mut rows = vec![form::item(
         crate::i18n::lookup(MODEL.name),
         Some(about.to_string()),
@@ -374,7 +374,7 @@ fn wake_model_rows(app: &App) -> Vec<Element<'_, Message>> {
     };
     if installed && app.voice.wake.spotters.is_none() {
         rows.push(warning(
-            tr!("clew-speak, which runs it, is not installed beside Clew").into(),
+            tr!("This model needs clew-speak, which isn't installed alongside Clew").into(),
         ));
     }
     if let Some(e) = &app.voice.wake.error {
@@ -411,10 +411,8 @@ fn speaking_rows(app: &App) -> Vec<Element<'_, Message>> {
     let mut rows = vec![form::item(
         tr!("Read answers aloud"),
         Some(
-            tr!(
-                "Read on this computer: the answers to spoken questions only, or to every question."
-            )
-            .into(),
+            tr!("Read aloud on this computer, for spoken questions only or for every question.")
+                .into(),
         ),
         form::pick(
             tr!("Read answers aloud"),

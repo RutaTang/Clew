@@ -110,6 +110,10 @@ pub enum Message {
     /// The weak spots page. Handled in `app::weakspots`
     /// (`App::update_weak`).
     Weak(WeakMsg),
+    /// Plugins: running their commands, the pages they show, installing
+    /// them, their tools in agent turns. Handled in `app::plugins`
+    /// (`App::update_plugins`).
+    Plugin(crate::app::plugins::PluginMsg),
     /// The drop-down open in the window. Handled in `app::pickers`
     /// (`App::update_picker`).
     Picker(crate::app::pickers::PickerMsg),
@@ -683,6 +687,9 @@ pub enum HoverMsg {
         line: usize,
         col: usize,
         text: Option<String>,
+        /// Whether `text` is markdown (a language server's answer), to be
+        /// set as the insight popups' are; else plain (a debugger's value).
+        markdown: bool,
     },
 }
 
@@ -1831,6 +1838,10 @@ pub enum DebugMsg {
     /// Run the program the same way, without the debugger: the adapter is
     /// told `noDebug`, and no breakpoint is set in it.
     Run,
+    /// Run (`no_debug`) or debug the one test at a 1-based line of the
+    /// active file — the code menu's line — or, `None`, at the cursor: Run
+    /// Test, Debug Test.
+    RunTest { line: Option<usize>, no_debug: bool },
     /// The adapter is ready; carry its handle + the TCP address it announced
     /// (for child sessions).
     /// Every DAP-side message names the `run` it belongs to (`App::debug_run`):
@@ -1985,6 +1996,17 @@ pub enum DebugMsg {
         stop: u64,
         vals: Vec<(String, String)>,
     },
+    /// Cargo could not build the run's program: the run ends, its tab kept
+    /// with Cargo's errors in it — a failed start took the tab, and with it
+    /// the compiler's every word of why.
+    BuildFailed {
+        stamp: Stamp,
+        run: u64,
+        error: String,
+        /// Built, and what was asked of it could not be found in it: the
+        /// test was not run, and the build did not fail.
+        built: bool,
+    },
     /// Starting the debugger failed: the run's own start, which ends the run
     /// (a js-debug child that cannot start is `ChildFailed`).
     Failed {
@@ -2015,6 +2037,8 @@ pub enum DebugMsg {
     /// install itself is reported whatever the project).
     AdapterInstalled {
         stamp: Stamp,
+        /// It was pytest, which runs tests: no debug adapter.
+        test_runner: bool,
         result: Result<(), String>,
     },
 }
@@ -2200,6 +2224,10 @@ pub enum SettingsMsg {
     Discard,
     /// Show one of Settings' pages.
     Page(SettingsPage),
+    /// The Keyboard shortcuts page narrowed to what is typed in its filter;
+    /// Escape in the filter.
+    ShortcutsFilter(String),
+    ShortcutsFilterEscaped,
     /// Ask the model the Language model page's fields name for a word, to
     /// see that they reach it.
     TestConnection,
@@ -2209,6 +2237,13 @@ pub enum SettingsMsg {
     /// Settings, at the Language model field a failure is about, the
     /// keyboard in it (a failure's Settings on the status line).
     Fix(crate::app::state::LlmField),
+    /// Ask the provider the Language model page names which models its key
+    /// can call; what asking `number` found.
+    ListModels,
+    ModelsListed {
+        number: u64,
+        result: Result<Vec<String>, String>,
+    },
     /// What Test connection `number` found: the model's name, or why not.
     /// `saved`: of the model as saved ([`SettingsMsg::TestSavedConnection`]),
     /// not the form's fields.
@@ -2251,6 +2286,9 @@ pub enum UsageMsg {
     KeepFresh(bool),
     /// Whether Ask's questions to try are written by the model.
     SuggestQuestions(bool),
+    /// Clew's price list was fetched from its repository: whether a newer
+    /// one is now in use — or why it could not be fetched.
+    PricesFetched(Result<bool, String>),
 }
 
 /// Auto-update: checking, downloading and installing a release.
@@ -2343,6 +2381,9 @@ pub enum WindowMsg {
     FocusChanged(bool),
     /// The pointer entered or left the traffic-light cluster (shows the icons).
     ControlsHover(bool),
+    /// The pointer came onto the status line's words and chips, or left
+    /// them (`App::status_hovered`).
+    StatusHover(bool),
     /// Take the failure the status line stands for off it
     /// (`App::failure_notice`): read, and nothing more to do about it.
     DismissFailure,
@@ -2521,6 +2562,7 @@ impl Message {
             Message::Tutorial(m) => m.origin(),
             Message::Voice(m) => m.origin(),
             Message::Fake(m) => m.origin(),
+            Message::Plugin(m) => m.origin(),
             Message::Proof(m) => m.origin(),
             Message::Weak(m) => m.origin(),
             Message::Picker(_) => None,
@@ -3108,6 +3150,7 @@ impl DebugMsg {
             | DebugMsg::DapConfigured { run, .. }
             | DebugMsg::WatchesEvaluated { run, .. }
             | DebugMsg::VarChildren { run, .. }
+            | DebugMsg::BuildFailed { run, .. }
             | DebugMsg::Failed { run, .. }
             | DebugMsg::ChildFailed { run, .. }
             | DebugMsg::NeedsInstall { run, .. } => Some(*run),
@@ -3149,11 +3192,13 @@ impl DebugMsg {
             | DebugMsg::DapConfigured { stamp, .. }
             | DebugMsg::WatchesEvaluated { stamp, .. }
             | DebugMsg::VarChildren { stamp, .. }
+            | DebugMsg::BuildFailed { stamp, .. }
             | DebugMsg::Failed { stamp, .. }
             | DebugMsg::ChildFailed { stamp, .. }
             | DebugMsg::NeedsInstall { stamp, .. } => Some(Origin::Stamped(stamp)),
             DebugMsg::Start
             | DebugMsg::Run
+            | DebugMsg::RunTest { .. }
             | DebugMsg::Control(..)
             | DebugMsg::Stop
             | DebugMsg::ShowTab(..)
@@ -3308,6 +3353,10 @@ impl SettingsMsg {
             | SettingsMsg::Close
             | SettingsMsg::Discard
             | SettingsMsg::Page(..)
+            | SettingsMsg::ShortcutsFilter(..)
+            | SettingsMsg::ShortcutsFilterEscaped
+            | SettingsMsg::ListModels
+            | SettingsMsg::ModelsListed { .. }
             | SettingsMsg::ProviderPicked(..)
             | SettingsMsg::KeyChanged(..)
             | SettingsMsg::ModelChanged(..)
@@ -3332,7 +3381,8 @@ impl UsageMsg {
             | UsageMsg::EditPrices(..)
             | UsageMsg::PriceSaved(..)
             | UsageMsg::KeepFresh(..)
-            | UsageMsg::SuggestQuestions(..) => None,
+            | UsageMsg::SuggestQuestions(..)
+            | UsageMsg::PricesFetched(..) => None,
         }
     }
 }
@@ -3371,6 +3421,7 @@ impl WindowMsg {
             | WindowMsg::ResizeDragged(..)
             | WindowMsg::FocusChanged(..)
             | WindowMsg::ControlsHover(..)
+            | WindowMsg::StatusHover(..)
             | WindowMsg::DismissFailure
             | WindowMsg::RetryFailure
             | WindowMsg::Close
@@ -3564,14 +3615,48 @@ pub enum ProofMsg {
     Goto(usize),
     /// Put the proof away.
     Close,
+    /// The cursor has rested where the goals were last asked for: ask the
+    /// Lean server now, if `token` is still the latest asking.
+    GoalsDue { token: u64 },
+    /// The Lean server's goals at the cursor (`token`'s asking).
+    Goals {
+        stamp: Stamp,
+        token: u64,
+        result: Result<Option<clew_core::lsp::client::LeanGoal>, String>,
+    },
+    /// Restart File: the Lean server checks the open file afresh, against
+    /// its imports as they are now built.
+    RestartFile,
+    /// Get Mathlib's build cache (`lake exe cache get`).
+    GetMathlibCache,
+    /// Not now: the Goals tab stops offering Mathlib's build cache for this
+    /// Lake project (the palette still has it).
+    DismissMathlibCache,
+    /// A line `lake exe cache get` said.
+    MathlibSaid { stamp: Stamp, line: String },
+    /// `lake exe cache get` ended: its last words, if it failed.
+    MathlibGot {
+        stamp: Stamp,
+        result: Result<(), String>,
+    },
 }
 
 impl ProofMsg {
     /// Where the message comes from, for `dispatch`'s ownership check.
     pub fn origin(&self) -> Option<Origin<'_>> {
         match self {
-            ProofMsg::Answered { stamp, .. } => Some(Origin::Stamped(stamp)),
-            ProofMsg::FromMenu | ProofMsg::Step(_) | ProofMsg::Goto(_) | ProofMsg::Close => None,
+            ProofMsg::Answered { stamp, .. }
+            | ProofMsg::Goals { stamp, .. }
+            | ProofMsg::MathlibSaid { stamp, .. }
+            | ProofMsg::MathlibGot { stamp, .. } => Some(Origin::Stamped(stamp)),
+            ProofMsg::FromMenu
+            | ProofMsg::Step(_)
+            | ProofMsg::Goto(_)
+            | ProofMsg::Close
+            | ProofMsg::RestartFile
+            | ProofMsg::GetMathlibCache
+            | ProofMsg::DismissMathlibCache
+            | ProofMsg::GoalsDue { .. } => None,
         }
     }
 }

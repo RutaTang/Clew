@@ -489,7 +489,7 @@ async fn read_file_refuses_path_traversal() {
             )
             .await;
         assert!(
-            matches!(escaped, Some(Event::Error { ref message, .. }) if message.contains("escapes")),
+            matches!(escaped, Some(Event::Error { ref message, .. }) if message.contains("outside the project")),
             "{bad} must be refused, got {escaped:?}"
         );
     }
@@ -525,7 +525,7 @@ async fn confinement_holds_through_symlinks_for_every_path_request() {
         );
         match recv_reply(&mut rx, id).await {
             Event::Error { message, .. } => {
-                assert!(message.contains("escapes"), "{rel}: {message}")
+                assert!(message.contains("outside the project"), "{rel}: {message}")
             }
             other => panic!("{rel} must be refused, got {other:?}"),
         }
@@ -547,7 +547,7 @@ async fn confinement_holds_through_symlinks_for_every_path_request() {
     match recv_reply(&mut rx, 4).await {
         Event::Error { code, message } => {
             assert_eq!(code, clew_protocol::ErrorCode::Refused, "{message}");
-            assert!(message.contains("escapes"), "{message}");
+            assert!(message.contains("outside the project"), "{message}");
         }
         other => panic!("a GitInfo through a link out must be refused, got {other:?}"),
     }
@@ -592,7 +592,7 @@ async fn confinement_holds_through_symlinks_for_every_path_request() {
     match recv_reply(&mut rx, 6).await {
         Event::Error { message, .. } => {
             assert!(
-                message.starts_with("src/missing.rs:") && !message.contains("escapes"),
+                message.starts_with("src/missing.rs:") && !message.contains("outside the project"),
                 "{message}"
             )
         }
@@ -1296,7 +1296,7 @@ async fn a_replayed_state_edit_is_not_applied_twice_by_a_new_server() {
     match second.handle(4, toggle("../../x")).await {
         Some(Event::Error { code, message }) => {
             assert_eq!(code, clew_protocol::ErrorCode::Refused, "{message}");
-            assert!(message.contains("bad edit id"), "{message}");
+            assert!(message.contains("invalid edit id"), "{message}");
         }
         other => panic!("a malformed edit id must be refused, got {other:?}"),
     }
@@ -1421,7 +1421,7 @@ async fn a_state_write_for_another_project_is_refused() {
         .await;
     match refused {
         Some(Event::Error { message, .. }) => {
-            assert!(message.contains("refused: state"), "{message}")
+            assert!(message.contains("refused the state file"), "{message}")
         }
         other => panic!("expected a refusal, got {other:?}"),
     }
@@ -1528,7 +1528,7 @@ async fn hello_refuses_a_protocol_mismatch() {
             code: ErrorCode::Handshake,
             message,
         }) => {
-            assert!(message.contains("protocol mismatch"), "{message}");
+            assert!(message.contains("but this clew-server speaks"), "{message}");
         }
         other => panic!("expected a refusal, got {other:?}"),
     }
@@ -1573,7 +1573,10 @@ async fn hello_refuses_a_fingerprint_mismatch() {
             code: ErrorCode::Handshake,
             message,
         }) => {
-            assert!(message.contains("protocol build mismatch"), "{message}");
+            assert!(
+                message.contains("built from different protocol sources"),
+                "{message}"
+            );
         }
         other => panic!("expected a refusal, got {other:?}"),
     }

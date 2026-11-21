@@ -388,15 +388,14 @@ fn args_preview(args: &serde_json::Value) -> String {
     if total > MAX_DETAIL_CHARS {
         let shown: String = text.chars().take(MAX_DETAIL_CHARS).collect();
         let more = trn!(
-            "… 1 more character not shown — decline if you cannot tell what this does",
-            "… {n} more characters not shown — decline if you cannot tell what this does",
+            "… 1 more character not shown. Decline if you can't tell what this does.",
+            "… {n} more characters not shown. Decline if you can't tell what this does.",
             total - MAX_DETAIL_CHARS
         );
         format!("{shown}\n{more}")
     } else if cut {
-        let parts = tr!(
-            "(parts of the arguments are not shown — decline if you cannot tell what this does)"
-        );
+        let parts =
+            tr!("(Some of the arguments aren't shown. Decline if you can't tell what this does.)");
         format!("{text}\n{parts}")
     } else {
         text
@@ -441,7 +440,7 @@ impl App {
     fn mcp_servers(&mut self) -> Vec<mcp::ServerConfig> {
         let (servers, errors) = mcp::config::load();
         if let Some(error) = errors.first() {
-            self.status = tr!("{error} — fix it in config.toml", error = error);
+            self.status = tr!("{error}. Fix it in config.toml.", error = error);
         }
         servers.into_iter().filter(|s| s.enabled).collect()
     }
@@ -554,7 +553,7 @@ impl App {
         };
         if !self.server.is_up() {
             self.return_question(question, spoken);
-            self.status = tr!("clew-server went away — ask again once it is back").into();
+            self.status = tr!("clew-server isn't available. Ask again once it's back.").into();
             return Task::none();
         }
         self.start_agent_turn(question, spoken, tools, map)
@@ -572,6 +571,20 @@ impl App {
         // The window's own tools run here, without an MCP server.
         if crate::app::windowtools::is_window_tool(&tool) {
             return self.on_window_tool(stream, call, tool, args);
+        }
+        // So do the plugin tools: writing, building and trying a plugin is
+        // Clew's own work, and installing one is asked of the user here.
+        if clew_plugin::tools::is_plugin_tool(&tool) {
+            if self.proj.link.agent_stream != Some(stream) {
+                let _ = self.send_to_server(clew_protocol::Request::AgentToolResult {
+                    stream,
+                    call,
+                    content: "This turn has ended.".into(),
+                    is_error: true,
+                });
+                return Task::none();
+            }
+            return self.on_plugin_tool(stream, call, tool, args);
         }
         // A call of a turn the user stopped (it crossed the Cancel on its way)
         // is not run, nor asked about.
@@ -798,8 +811,10 @@ impl App {
                     // The turn went on without it: running it now would act
                     // for nothing.
                     self.set_step_state(stream, &id, StepState::Failed);
-                    self.status =
-                        tr!("That call waited too long — the agent went on without it").into();
+                    self.status = tr!(
+                        "That call waited too long for approval, so the agent continued without it"
+                    )
+                    .into();
                     return Task::none();
                 }
                 if option == "deny" {
@@ -867,6 +882,15 @@ impl App {
     /// waiting for approval (and their cards), its calls running.
     pub(crate) fn drop_turn_tools(&mut self, stream: u64) {
         self.proj.link.agent_tools.remove(&stream);
+        // A plugin build it started stops with it: one runs for minutes.
+        if let Some(cancel) = self.plugins.tool_cancels.remove(&stream) {
+            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        // Its install card goes with it: Install pressed after the turn
+        // ended installed for an agent no longer asking.
+        self.plugins.install.withdraw(|p| {
+            matches!(p.reply, crate::app::plugins::Reply::AskTool { stream: s, .. } if s == stream)
+        });
         self.proj.link.mcp_pending.retain(|(s, _), _| *s != stream);
         self.proj
             .link
@@ -881,6 +905,10 @@ impl App {
             for step in &mut turn.steps {
                 if matches!(step.state, StepState::Running | StepState::Waiting) {
                     step.state = StepState::Failed;
+                    // Said as ended: "Building a plugin…" stood beside its ✕.
+                    if step.tool == "plugin" {
+                        step.title = crate::app::plugins::plugin_step_cut_short(&step.title);
+                    }
                 }
             }
         }
@@ -975,7 +1003,7 @@ impl App {
         }
         let Some(config) = self.acp_agents.iter().find(|a| a.name == name).cloned() else {
             self.status = tr!(
-                "No ACP agent `{name}` is configured any more — pick another",
+                "The ACP agent `{name}` is no longer configured. Pick another one.",
                 name = name
             );
             self.ask_agent = None;
@@ -1378,7 +1406,7 @@ impl App {
         link.chosen = chosen;
         self.proj.acp = Some(link);
         self.status = tr!(
-            "{label} did not respond to Stop — restarting it",
+            "{label} did not respond to Stop, so Clew is restarting it",
             label = label
         );
         self.start_acp_agent(config, root)
@@ -1670,6 +1698,10 @@ impl App {
             for step in &mut turn.steps {
                 if matches!(step.state, StepState::Running | StepState::Waiting) {
                     step.state = StepState::Failed;
+                    // Said as ended: "Building a plugin…" stood beside its ✕.
+                    if step.tool == "plugin" {
+                        step.title = crate::app::plugins::plugin_step_cut_short(&step.title);
+                    }
                 }
             }
             let note = match &result {
@@ -1878,7 +1910,7 @@ impl App {
                 draft.new_mcp_extra = extra;
                 draft.mcp_add_error = None;
                 draft.note = Some(tr!(
-                    "Filled in from the registry: read the command, fill in what it needs, then Add server"
+                    "Filled in from the registry. Check the command, fill in what it needs, then click Add server."
                 ).to_string());
                 draft.registry.used = Some(entry);
                 return Task::none();
@@ -1952,16 +1984,16 @@ impl App {
             }
             IntegrationsMsg::McpTested { name, outcome } => Ok(Some(match outcome {
                 Ok((info, tools)) if info.name.is_empty() => trn!(
-                    "`{name}` works: version {version} (MCP {protocol}), 1 tool",
-                    "`{name}` works: version {version} (MCP {protocol}), {n} tools",
+                    "`{name}` works (version {version}, MCP {protocol}, 1 tool)",
+                    "`{name}` works (version {version}, MCP {protocol}, {n} tools)",
                     tools,
                     name = name,
                     version = info.version,
                     protocol = info.era.version()
                 ),
                 Ok((info, tools)) => trn!(
-                    "`{name}` works: {server} {version} (MCP {protocol}), 1 tool",
-                    "`{name}` works: {server} {version} (MCP {protocol}), {n} tools",
+                    "`{name}` works ({server} {version}, MCP {protocol}, 1 tool)",
+                    "`{name}` works ({server} {version}, MCP {protocol}, {n} tools)",
                     tools,
                     name = name,
                     server = info.name,
@@ -1984,7 +2016,7 @@ impl App {
                     return Task::none();
                 };
                 draft.note = Some(tr!(
-                    "Signing in to `{name}` — finish in your browser (within {minutes} minutes)…",
+                    "Signing in to `{name}`… Finish in your browser within {minutes} minutes.",
                     name = name,
                     minutes = mcp::oauth::SIGN_IN_TIMEOUT.as_secs() / 60
                 ));
@@ -2009,7 +2041,7 @@ impl App {
                 Ok(()) => {
                     mcp::hub::Hub::global().forget(&name);
                     Ok(Some(tr!(
-                        "Signed in to `{name}` — Test it, or just ask",
+                        "Signed in to `{name}`. Click Test, or ask a question.",
                         name = name
                     )))
                 }
@@ -2069,7 +2101,7 @@ impl App {
             IntegrationsMsg::AcpPreset(index) => match acp::config::PRESETS.get(index) {
                 Some(preset) => acp::config::save(&preset.config()).map(|()| {
                     Some(tr!(
-                        "Added {label} — pick it in the Ask panel",
+                        "Added {label}. Pick it in the Ask panel.",
                         label = preset.label
                     ))
                 }),
@@ -2131,7 +2163,7 @@ impl App {
             let name = draft.new_mcp_name.trim();
             if !mcp::config::valid_name(name) {
                 return Err(tr!(
-                    "give the server a name: letters, digits, - and _ (at most {n} characters)",
+                    "give the server a name using only letters, digits, - and _ (at most {n} characters)",
                     n = mcp::config::MAX_NAME_LEN
                 ));
             }
@@ -2169,7 +2201,7 @@ impl App {
                 && clew_core::linerpc::resolve_program(&launch.program).is_none()
             {
                 return Err(tr!(
-                    "`{program}` is not found on your PATH — give its full path",
+                    "`{program}` isn't on your PATH. Give its full path.",
                     program = launch.program
                 ));
             }
@@ -2196,7 +2228,7 @@ impl App {
         let draft = &mut self.settings.integrations;
         let name = draft.new_acp_name.trim().to_string();
         if !mcp::config::valid_name(&name) {
-            return Err(tr!("give the agent a name: letters, digits, - and _").into());
+            return Err(tr!("give the agent a name using only letters, digits, - and _").into());
         }
         let mut words = split_command_line(draft.new_acp_command.trim())?;
         if words.is_empty() {
@@ -2205,7 +2237,7 @@ impl App {
         let program = words.remove(0);
         if clew_core::linerpc::resolve_program(&program).is_none() {
             return Err(tr!(
-                "`{program}` is not found on your PATH — give its full path",
+                "`{program}` isn't on your PATH. Give its full path.",
                 program = program
             ));
         }
@@ -2222,7 +2254,7 @@ impl App {
         draft.new_acp_name.clear();
         draft.new_acp_command.clear();
         Ok(Some(tr!(
-            "Added agent `{name}` — pick it in the Ask panel",
+            "Added agent `{name}`. Pick it in the Ask panel.",
             name = name
         )))
     }
@@ -2306,12 +2338,12 @@ mod tests {
         let shown = args_preview(&padded);
         assert!(shown.contains("rm -rf ~"), "{shown}");
         assert!(shown.contains("4400 characters not shown"), "{shown}");
-        assert!(shown.contains("decline if you cannot tell"), "{shown}");
+        assert!(shown.contains("Decline if you can't tell"), "{shown}");
         // Nor the end of a long one.
         let long = format!("echo {}; rm -rf ~", "hi ".repeat(1000));
         let shown = args_preview(&serde_json::json!({ "command": long }));
         assert!(shown.contains("; rm -rf ~"), "{shown}");
-        assert!(shown.contains("decline if you cannot tell"), "{shown}");
+        assert!(shown.contains("Decline if you can't tell"), "{shown}");
         // Shown whole, nothing to warn about.
         let shown = args_preview(&serde_json::json!({ "command": "ls" }));
         assert!(!shown.contains("not shown"), "{shown}");

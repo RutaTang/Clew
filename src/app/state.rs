@@ -199,6 +199,11 @@ pub struct DebugState {
     /// without the debugger — the adapter is told `noDebug`, and no
     /// breakpoint is set in it, there at the start or added later.
     pub no_debug: bool,
+    /// How the run was asked for beyond its program: a Rust program Cargo
+    /// builds first, one test (Run Test) — what Run Again runs again, and
+    /// what its end is said as ("Test adds passed"). `None` for a run of
+    /// the launch file's program or a script as it is.
+    pub plan: Option<crate::app::runplan::RunPlan>,
     /// The last run's stops, in order (see [`TraceStop`]): what the program
     /// actually did, kept after the session ends so a walkthrough can be
     /// made of it; cleared when the next run starts.
@@ -265,6 +270,14 @@ pub struct DebugState {
     /// The tab of the bottom panel the session here is ([`RunTab::Real`]);
     /// 0 while there is none.
     pub tab: u64,
+    /// The tabs whose run ended with Cargo unable to build its program
+    /// (`DebugMsg::BuildFailed`): said "build failed", marked failed —
+    /// not "finished", as a program that ran and ended. A run that takes
+    /// the tab again takes the mark off.
+    pub build_failed: std::collections::HashSet<u64>,
+    /// The tabs whose program was built, and whose test was then not found
+    /// in it: said "not run" — "build failed" said of a build that worked.
+    pub not_run: std::collections::HashSet<u64>,
 }
 
 /// A tab of the bottom panel: a run of the program (Run or Debug), or one
@@ -301,6 +314,7 @@ pub struct ParkedDebug {
     pub stop: u64,
     pub session: Option<DebugSession>,
     pub no_debug: bool,
+    pub plan: Option<crate::app::runplan::RunPlan>,
     pub trace: Vec<TraceStop>,
     pub trace_cut: bool,
     pub trace_program: Option<String>,
@@ -571,6 +585,12 @@ pub struct OverviewState {
     pub prepared: Vec<PreparedSeg>,
     /// True while the overview is being generated.
     pub generating: bool,
+    /// Why the last generation failed, in words for the reader
+    /// (`tasks::ai_reason`): said where the overview will be, with Try
+    /// again, until one is asked for again. It went to the status line
+    /// alone, and the page offered the same step as if nothing had
+    /// happened.
+    pub failed: Option<String>,
     /// True when the main area shows the overview "home" (vs. code / empty).
     pub showing: bool,
     /// Prompt hash of the cached overview, so a re-explain regenerates it only
@@ -865,6 +885,17 @@ pub struct FailureNotice {
     /// keyboard: "check the base URL in Settings" opened the page and left
     /// the reader to find the field.
     pub about: Option<LlmField>,
+    /// What failed, as its words name it ("TODO count: List TODOs"): what
+    /// failed is cut after it, not at a ": " inside it.
+    pub subject: Option<String>,
+    /// Where in Settings → Plugins it is about: its Settings opens there.
+    pub spot: Option<crate::app::plugins::SettingsSpot>,
+    /// While the pointer is on the status line: whether something was said
+    /// beside the failure when it came there. The failure is laid out as
+    /// it was then until the pointer leaves, so its Try again, Settings
+    /// and × do not move under it as messages come and go
+    /// (`App::status_hovered`).
+    pub held: Option<bool>,
 }
 
 /// A field of Settings' Language model page a failure can be about.
@@ -925,6 +956,34 @@ pub enum FailureOf {
     /// An Ask answer, failed while Ask was put away to its pill: asked
     /// again, or answered, takes it away.
     Ask,
+    /// A plugin's command: one that finishes takes it away. Its Settings
+    /// is Settings → Plugins, where the plugin's log is.
+    PluginRun,
+    /// A plugin's install, failed after the user said Install: one
+    /// installed takes it away. Its Settings is Settings → Plugins.
+    PluginInstall,
+    /// Plugins cannot be built here (the agent's build failed for want of
+    /// Rust): Rust found ready takes it away. Its Settings is Settings →
+    /// Plugins, where Rust is set up.
+    PluginBuild,
+}
+
+impl FailureOf {
+    /// The page of Settings a failure of it is about, where no Language
+    /// model field is (`FailureNotice::about`).
+    pub fn settings_page(self) -> SettingsPage {
+        match self {
+            FailureOf::PluginRun | FailureOf::PluginInstall | FailureOf::PluginBuild => {
+                SettingsPage::Plugins
+            }
+            FailureOf::Explain
+            | FailureOf::Walkthrough
+            | FailureOf::Summary
+            | FailureOf::FakeRun
+            | FailureOf::Story
+            | FailureOf::Ask => SettingsPage::LanguageModel,
+        }
+    }
 }
 
 /// they stood when it was asked.
@@ -1093,6 +1152,29 @@ pub struct SettingsDraft {
     /// the Language model page says so above its fields — it opened with
     /// no word of why. Cleared as Settings closes.
     pub key_asked: bool,
+    /// What the Keyboard shortcuts page is narrowed to: some sixty rows,
+    /// and no way to find one but to read them all. Cleared as the page
+    /// or Settings closes.
+    pub shortcuts_filter: String,
+    /// The models the Language model page's key can call, as its provider
+    /// lists them, to pick from: the model was a field to type a name into,
+    /// with no way to learn the names but the provider's own pages.
+    pub models: ModelList,
+    /// The number of the last model list asked for.
+    pub model_lists: u64,
+}
+
+/// The models a key can call ([`SettingsDraft::models`]).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub enum ModelList {
+    /// Not asked for the fields as they stand.
+    #[default]
+    Unasked,
+    /// Asked: the number of the asking.
+    Listing(u64),
+    Listed(Vec<String>),
+    /// Why not, said.
+    Failed(String),
 }
 
 /// The fields of Settings that are kept as it closes, not as they change —
@@ -1147,6 +1229,7 @@ pub enum SettingsPage {
     Embeddings,
     Voice,
     Integrations,
+    Plugins,
     Languages,
     Shortcuts,
     Usage,
@@ -1156,12 +1239,13 @@ pub enum SettingsPage {
 impl SettingsPage {
     /// In the order the Settings list shows them: what a reader sets up
     /// first, Clew's own updates last.
-    pub const ALL: [SettingsPage; 9] = [
+    pub const ALL: [SettingsPage; 10] = [
         SettingsPage::Appearance,
         SettingsPage::LanguageModel,
         SettingsPage::Embeddings,
         SettingsPage::Voice,
         SettingsPage::Integrations,
+        SettingsPage::Plugins,
         SettingsPage::Languages,
         SettingsPage::Shortcuts,
         SettingsPage::Usage,
@@ -1177,6 +1261,7 @@ impl SettingsPage {
             SettingsPage::Embeddings => tr_noop!("Embeddings"),
             SettingsPage::Voice => tr_noop!("Voice"),
             SettingsPage::Integrations => tr_noop!("Integrations"),
+            SettingsPage::Plugins => tr_noop!("Plugins"),
             SettingsPage::Languages => tr_noop!("Language servers"),
             SettingsPage::Shortcuts => tr_noop!("Keyboard shortcuts"),
             SettingsPage::Usage => tr_noop!("Usage and cost"),
@@ -1217,6 +1302,9 @@ impl Default for SettingsDraft {
             integrations: Default::default(),
             page: SettingsPage::Appearance,
             key_asked: false,
+            shortcuts_filter: String::new(),
+            models: ModelList::Unasked,
+            model_lists: 0,
         }
     }
 }
@@ -1669,6 +1757,9 @@ pub struct App {
     /// What the AI key spends: the ledger as last read, the balance, the
     /// prices being typed (`app::usage`).
     pub usage: crate::app::usage::UsageState,
+    /// The plugins installed, the one running, the install asked about
+    /// (`app::plugins`).
+    pub plugins: crate::app::plugins::Plugins,
     /// Overlay view: `true` shows the node-link map, `false` the list.
     pub graph_mode: bool,
     /// Map projection: `true` renders the force graph in 3D (orbit + depth),
@@ -1702,10 +1793,15 @@ pub struct App {
     pub insight_seq: u64,
     /// Mints [`crate::app::proof::ProofWalk::token`], likewise.
     pub proof_seq: u64,
+    /// Mints [`crate::app::proof::LeanGoals::token`], likewise.
+    pub lean_goals_seq: u64,
+    /// The margin has been turned to the Lean goals once, for the first
+    /// Lean file read: after that, the tab is the reader's to choose.
+    pub lean_goals_offered: bool,
     /// The command palette's list, as last built (see `app::palette`).
     pub(crate) palette: Vec<crate::app::palette::PaletteCommand>,
-    /// The titles of the palette commands run last, most recent first.
-    pub palette_recent: Vec<String>,
+    /// The palette commands run last, most recent first.
+    pub(crate) palette_recent: Vec<crate::app::palette::Recent>,
     /// The command bar's suggestions, as last built: what it offers with
     /// nothing typed (see `app::palette`).
     pub(crate) palette_home: Vec<crate::app::palette::Suggestion>,
@@ -1830,6 +1926,9 @@ pub struct App {
     /// Whether the pointer is over the traffic-light cluster, so the icons show
     /// on all three (native behaviour), not just the hovered one.
     pub controls_hovered: bool,
+    /// Whether the pointer is on the status line's words and chips: a
+    /// failure standing there holds still meanwhile (`FailureNotice::held`).
+    pub status_hovered: bool,
     /// User-draggable panel sizes (px): left sidebar width, right context-panel
     /// width, and the bottom debug/ask panel height. See [`resize::Divider`].
     pub sidebar_width: f32,
@@ -2250,6 +2349,12 @@ pub struct ProjectSession {
     pub maps_error: Option<String>,
     /// The id of the map shown (`ProjectMap::id`), kept across rebuilds.
     pub maps_selected: Option<String>,
+    /// The project's own maps as last read; `maps` is these, then the
+    /// graphs the plugins add (`App::compose_maps`).
+    pub core_maps: Arc<Vec<clew_protocol::ProjectMap>>,
+    /// What each plugin graph built to, by its map id
+    /// (`plugins::map_id`).
+    pub plugin_maps: HashMap<String, crate::app::plugins::PluginMap>,
     /// The Imports overlay's counts and rankings, computed by the import job
     /// (off the UI thread) whenever the graph's structure changed.
     pub(crate) import_ranks: crate::ui::ImportRanks,
@@ -2525,12 +2630,35 @@ pub struct ProjectSession {
     pub fake: crate::app::fakerun::FakeRun,
     /// A Lean proof being stepped through (`app::proof`).
     pub proof: Option<crate::app::proof::ProofWalk>,
+    /// The Lean goals at the cursor, the margin's Goals tab
+    /// (`app::proof`).
+    pub lean_goals: Option<crate::app::proof::LeanGoals>,
+    /// Mathlib's build cache for the Lake project of the Lean file read,
+    /// wanted or being got (`app::proof`).
+    pub mathlib: crate::app::proof::MathlibCache,
+    /// The Lake project [`Self::mathlib`] is for: a repository's proofs in
+    /// `verification/` are their own Lake project, with their own Mathlib.
+    pub mathlib_root: Option<PathBuf>,
+    /// The Lake project of the Lean file last asked about: worked out once
+    /// per file, not with a look at the disk on every message.
+    pub lean_lake: Option<(PathBuf, PathBuf)>,
+    /// Restart File was asked for this file at this diagnostics version:
+    /// until Lean says more of it, the Goals tab says it is checking the
+    /// imports again, and offers no second restart.
+    pub lean_restarting: Option<(PathBuf, u64)>,
     /// The weak spots page (`app::weakspots`).
     pub weak: crate::app::weakspots::WeakSpots,
     /// The API documentation view's state (see [`DocsState`]).
     pub docs: DocsState,
     /// The Glossary page (`app::glossary`).
     pub glossary: crate::app::glossary::GlossaryState,
+    /// The page a plugin's command showed over the code
+    /// (`app::plugins`).
+    pub plugin_page: Option<crate::app::plugins::PluginPage>,
+    /// The plugin's page put away by opening one of its rows, to go back
+    /// to: put away for good, the next row meant running the command
+    /// again (`PluginMsg::BackToPage`).
+    pub last_plugin_page: Option<crate::app::plugins::PluginPage>,
     /// Auto-refresh throttle: when the last refresh pass began (`None` until the
     /// first). A watched-file change starts a pass only once the cooldown has
     /// lifted; a manual refresh ignores it. Runtime-only (not persisted).
@@ -2791,6 +2919,8 @@ impl Default for ProjectSession {
             maps_building: false,
             maps_error: None,
             maps_selected: None,
+            core_maps: Arc::default(),
+            plugin_maps: HashMap::new(),
             import_ranks: Default::default(),
             remote_import_meta: Default::default(),
             remote_manifests: Default::default(),
@@ -2880,9 +3010,16 @@ impl Default for ProjectSession {
             walk: Default::default(),
             fake: Default::default(),
             proof: None,
+            lean_goals: None,
+            mathlib: Default::default(),
+            mathlib_root: None,
+            lean_lake: None,
+            lean_restarting: None,
             weak: Default::default(),
             docs: Default::default(),
             glossary: Default::default(),
+            plugin_page: None,
+            last_plugin_page: None,
             last_auto_refresh: Default::default(),
             refresh_pending: Default::default(),
             embed_index: Default::default(),
@@ -3102,6 +3239,10 @@ pub struct ProjectLink {
     pub lsp_log: Option<LspLogTail>,
     /// Documents already sent to a server via didOpen.
     pub lsp_opened: HashSet<PathBuf>,
+    /// The Lake project the Lean server was started in
+    /// ([`clew_core::lake_root`]): a Lean file of another has it started
+    /// again there.
+    pub lean_root: Option<PathBuf>,
     /// Last diagnostics version seen per language, to gate refresh ticks.
     pub seen_diag_version: std::collections::HashMap<String, u64>,
     /// Last inlay-hint refresh epoch seen per language, so a server-requested
@@ -3174,6 +3315,10 @@ pub struct TimeStart {
 }
 
 pub const DEFAULT_FONT_SIZE: f32 = 13.0;
+/// The largest the zoom keys and Settings → Appearance set the code's text.
+pub const MAX_FONT_SIZE: f32 = 22.0;
+/// Where the code's text size is kept between launches (`config.toml`).
+pub const CODE_SIZE_KEY: &str = "code_text_size";
 
 /// What is typed into the Settings view's language fields, until used.
 #[derive(Debug, Default, Clone)]

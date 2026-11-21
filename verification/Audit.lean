@@ -84,3 +84,17 @@ the kernel did not check.
 #print axioms Clew.OAuth.answers_iff
 #print axioms Clew.Guards.launch_refused_iff
 #print axioms Clew.Guards.in_place_is_approved_and_private
+-- Plugins: what a plugin is linked with, and the names of its things
+#print axioms Clew.Plugin.link_iff
+#print axioms Clew.Plugin.project_needs_read
+#print axioms Clew.Plugin.git_needs_git
+#print axioms Clew.Plugin.unknown_never_links
+#print axioms Clew.Plugin.known_iff
+#print axioms Clew.Plugin.plain_is_one_down
+#print axioms Clew.Plugin.id_plain
+#print axioms Clew.Plugin.nonce_plain
+#print axioms Clew.Plugin.manifest_iff
+#print axioms Clew.Plugin.source_rust
+#print axioms Clew.Plugin.source_stays_inside
+#print axioms Clew.Plugin.keyName_injective
+#print axioms Clew.Plugin.keyName_plain

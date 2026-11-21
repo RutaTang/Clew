@@ -152,7 +152,7 @@ impl App {
                 return self.on_insight_answered(
                     token,
                     Err(tr!(
-                        "{server} is still starting — ask again once it is ready",
+                        "{server} is still starting. Ask again once it's ready.",
                         server = server
                     )),
                 );
@@ -161,7 +161,7 @@ impl App {
                 return self.on_insight_answered(
                     token,
                     Err(tr!(
-                        "{server} is not running — start it from the language servers panel",
+                        "{server} isn't running. Start it from the language servers panel.",
                         server = server
                     )),
                 );
@@ -414,7 +414,7 @@ pub(crate) fn c_answer(e: clew_protocol::MacroExpansion) -> InsightAnswer {
     if e.truncated {
         md.push_str(&format!(
             "\n\n*{}*",
-            tr!("Cut short: the expansion grew past Clew's limit.")
+            tr!("The expansion was cut short because it exceeded Clew's limit.")
         ));
     }
     InsightAnswer {
@@ -427,7 +427,7 @@ pub(crate) fn c_answer(e: clew_protocol::MacroExpansion) -> InsightAnswer {
 pub(crate) fn lean_answer(goal: LeanGoal) -> InsightAnswer {
     let markdown = match goal {
         LeanGoal::Tactic(goals) if goals.is_empty() => {
-            format!("*{}*", tr!("No goals: the proof is complete here."))
+            format!("*{}*", tr!("No goals left here."))
         }
         LeanGoal::Tactic(goals) => {
             let n = goals.len();

@@ -334,11 +334,32 @@ impl App {
             return Task::none();
         };
         let commands = self.palette_commands();
-        // Its exact title; or, failing that, one the words plainly name.
-        let command = commands
-            .iter()
-            .find(|c| c.title == title)
-            .or_else(|| crate::app::palette::command_said(&title, &commands).map(|i| &commands[i]));
+        // Its exact title; or, failing that, one the words plainly name —
+        // not one of several named alike, on a guess.
+        let named = match commands.iter().position(|c| c.title == title) {
+            Some(i) => crate::app::palette::Named::One(i),
+            None => crate::app::palette::command_named(&title, &commands),
+        };
+        if let crate::app::palette::Named::Alike(alike) = &named {
+            let titles: Vec<String> = alike
+                .iter()
+                .map(|&i| format!("“{}”", commands[i].title))
+                .collect();
+            self.window_tool_result(
+                stream,
+                call,
+                format!(
+                    "More than one command has that name: {}. Call `{RUN_COMMAND}` again with one of these titles, as written.",
+                    titles.join(", ")
+                ),
+                true,
+            );
+            return Task::none();
+        }
+        let command = match named {
+            crate::app::palette::Named::One(i) => Some(&commands[i]),
+            _ => None,
+        };
         let Some(command) = command else {
             self.window_tool_result(
                 stream,
@@ -409,7 +430,7 @@ impl App {
             },
         );
         self.status = tr!(
-            "The agent wants to run “{command}” — answer it in Ask",
+            "The agent wants to run “{command}”. Answer it in Ask",
             command = shown
         );
         self.reveal_ask();
@@ -429,7 +450,9 @@ impl App {
         let id = format!("window:{call}");
         if std::time::Instant::now() >= pending.deadline {
             self.set_step_state(stream, &id, StepState::Failed);
-            self.status = tr!("That command waited too long — the agent went on without it").into();
+            self.status =
+                tr!("That command waited too long for an answer, so the agent went on without it")
+                    .into();
             return Task::none();
         }
         if !allowed {

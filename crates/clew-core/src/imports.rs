@@ -229,6 +229,8 @@ pub fn is_haskell_manifest(name: &str) -> bool {
 pub fn bears_on_manifests(rel: &str) -> bool {
     let name = rel.rsplit(['/', '\\']).next().unwrap_or(rel);
     name == "composer.json"
+        || name == "Cargo.toml"
+        || name == "pyproject.toml"
         || is_haskell_manifest(name)
         || [".php", ".hs", ".lhs"]
             .iter()
@@ -238,22 +240,25 @@ pub fn bears_on_manifests(rel: &str) -> bool {
 /// What the project's package manifests, among its files `rels`, say of
 /// where its sources are: each `composer.json`'s PSR-4 map when the project
 /// has PHP, each Haskell package description's source directories when it
-/// has Haskell — only then, as `package.yaml` is pnpm's file too. The
-/// shallowest [`MAX_MANIFESTS`] of each kind, read bounded and
-/// plain-file-only, where the files live.
+/// has Haskell — only then, as `package.yaml` is pnpm's file too; each Cargo
+/// package's targets, and each `pyproject.toml`'s Python source roots. The
+/// shallowest [`MAX_MANIFESTS`] of each kind ([`MAX_CARGO_MANIFESTS`] of
+/// Cargo's: a workspace has one per crate), read bounded and plain-file-only,
+/// where the files live.
 pub fn source_manifests<S: AsRef<str>>(root: &Path, rels: &[S]) -> clew_protocol::SourceManifests {
     let rels: Vec<&str> = rels.iter().map(AsRef::as_ref).collect();
     let has = |exts: &[&str]| rels.iter().any(|r| exts.iter().any(|ext| r.ends_with(ext)));
-    let picked = |is_manifest: &dyn Fn(&str) -> bool| {
+    let picked_up_to = |is_manifest: &dyn Fn(&str) -> bool, most: usize| {
         let mut found: Vec<&str> = rels
             .iter()
             .copied()
             .filter(|r| is_manifest(r.rsplit(['/', '\\']).next().unwrap_or(r)))
             .collect();
         found.sort_by_key(|r| (r.split(['/', '\\']).count(), *r));
-        found.truncate(MAX_MANIFESTS);
+        found.truncate(most);
         found
     };
+    let picked = |is_manifest: &dyn Fn(&str) -> bool| picked_up_to(is_manifest, MAX_MANIFESTS);
     let mut out = clew_protocol::SourceManifests::default();
     if has(&[".php"]) {
         for rel in picked(&|name| name == "composer.json") {
@@ -273,7 +278,153 @@ pub fn source_manifests<S: AsRef<str>>(root: &Path, rels: &[S]) -> clew_protocol
             out.haskell.push((rel.to_string(), dirs));
         }
     }
+    for rel in picked_up_to(&|name| name == "Cargo.toml", MAX_CARGO_MANIFESTS) {
+        if let Some(package) = read_cargo_package(&root.join(rel)) {
+            out.cargo.push((rel.to_string(), package));
+        }
+    }
+    for rel in picked(&|name| name == "pyproject.toml") {
+        let roots = read_python_source_roots(&root.join(rel));
+        if !roots.is_empty() {
+            out.python.push((rel.to_string(), roots));
+        }
+    }
     out
+}
+
+/// Most `Cargo.toml`s [`source_manifests`] reads: more than of any other
+/// kind, as a workspace has one per crate and a large one hundreds.
+pub const MAX_CARGO_MANIFESTS: usize = 512;
+
+/// What the Cargo manifest at `path` says of its package's targets; `None`
+/// for one with no `[package]` (a workspace's own) or none readable. Bounded
+/// and plain-file-only for the same reason as [`read_go_module`].
+pub fn read_cargo_package(path: &Path) -> Option<clew_protocol::CargoTargets> {
+    let text = crate::statefile::read_capped(path, MAX_METADATA_BYTES)?;
+    cargo_package(&text)
+}
+
+fn cargo_package(text: &str) -> Option<clew_protocol::CargoTargets> {
+    let manifest: toml::Table = text.parse().ok()?;
+    let name = manifest.get("package")?.get("name")?.as_str()?;
+    let lib = manifest.get("lib").and_then(toml::Value::as_table);
+    let lib_str = |key: &str| lib.and_then(|l| l.get(key)).and_then(toml::Value::as_str);
+    let target_paths = ["bin", "example", "test", "bench"]
+        .iter()
+        .filter_map(|kind| manifest.get(*kind)?.as_array())
+        .flatten()
+        .filter_map(|target| target.get("path")?.as_str())
+        .filter(|path| plain_relative(path))
+        .map(str::to_string)
+        .collect();
+    Some(clew_protocol::CargoTargets {
+        lib_name: lib_str("name").unwrap_or(name).replace('-', "_"),
+        lib_path: lib_str("path")
+            .filter(|path| plain_relative(path))
+            .unwrap_or("src/lib.rs")
+            .to_string(),
+        target_paths,
+    })
+}
+
+/// The Python source roots the `pyproject.toml` at `path` names, relative to
+/// its directory. Bounded and plain-file-only for the same reason as
+/// [`read_go_module`].
+pub fn read_python_source_roots(path: &Path) -> Vec<String> {
+    crate::statefile::read_capped(path, MAX_METADATA_BYTES)
+        .map(|text| python_source_roots(&text))
+        .unwrap_or_default()
+}
+
+/// Where a `pyproject.toml` says its Python lives, as each tool writes it:
+/// setuptools' `packages.find.where` and `package-dir` root, Poetry's
+/// packages' `from`, Hatch's wheel packages' folders, PDM's `package-dir`,
+/// maturin's `python-source`, pytest's `pythonpath`, Pyright's (and
+/// basedpyright's) `extraPaths`, and mypy's `mypy_path`. In the order
+/// written, each once; `.` (the file's own folder) is left out, as the
+/// project's root is looked in anyway.
+fn python_source_roots(text: &str) -> Vec<String> {
+    let Ok(manifest) = text.parse::<toml::Table>() else {
+        return Vec::new();
+    };
+    let at = |path: &[&str]| -> Option<&toml::Value> {
+        let mut value = manifest.get("tool")?;
+        for key in path {
+            value = value.get(*key)?;
+        }
+        Some(value)
+    };
+    let strings = |value: Option<&toml::Value>| -> Vec<String> {
+        match value {
+            Some(toml::Value::String(s)) => vec![s.clone()],
+            Some(toml::Value::Array(items)) => items
+                .iter()
+                .filter_map(toml::Value::as_str)
+                .map(str::to_string)
+                .collect(),
+            _ => Vec::new(),
+        }
+    };
+    let mut roots: Vec<String> = Vec::new();
+    roots.extend(strings(at(&["setuptools", "packages", "find", "where"])));
+    roots.extend(strings(at(&["setuptools", "package-dir", ""])));
+    if let Some(packages) = at(&["poetry", "packages"]).and_then(toml::Value::as_array) {
+        roots.extend(
+            packages
+                .iter()
+                .filter_map(|p| p.get("from")?.as_str())
+                .map(str::to_string),
+        );
+    }
+    // Hatch names each package's own folder: its root is the one it is in.
+    for package in strings(at(&["hatch", "build", "targets", "wheel", "packages"])) {
+        let package = package.trim_end_matches('/');
+        if let Some((folder, _)) = package.rsplit_once('/') {
+            roots.push(folder.to_string());
+        }
+    }
+    roots.extend(strings(at(&["pdm", "build", "package-dir"])));
+    roots.extend(strings(at(&["maturin", "python-source"])));
+    // pytest's ini-style `pythonpath` may be one string of space-separated
+    // folders.
+    for path in strings(at(&["pytest", "ini_options", "pythonpath"])) {
+        roots.extend(path.split_whitespace().map(str::to_string));
+    }
+    for tool in ["pyright", "basedpyright"] {
+        roots.extend(strings(at(&[tool, "extraPaths"])));
+    }
+    for path in strings(at(&["mypy", "mypy_path"])) {
+        roots.extend(
+            path.split([',', ':'])
+                .map(str::trim)
+                .filter(|p| !p.is_empty() && !p.contains('$'))
+                .map(str::to_string),
+        );
+    }
+    let mut out: Vec<String> = Vec::new();
+    for root in roots {
+        let root = root.trim().trim_start_matches("./").trim_end_matches('/');
+        if root.is_empty() || root == "." || !plain_relative(root) {
+            continue;
+        }
+        if !out.iter().any(|r| r == root) {
+            out.push(root.to_string());
+        }
+    }
+    out
+}
+
+/// A path written in a manifest that names a place under the manifest's
+/// own folder: relative, and never climbing out of it.
+fn plain_relative(path: &str) -> bool {
+    let path = Path::new(path);
+    !path.has_root()
+        && path.components().all(|c| {
+            matches!(
+                c,
+                std::path::Component::Normal(_) | std::path::Component::CurDir
+            )
+        })
 }
 
 /// The source directories the Cabal package description at `path` names:
@@ -1829,6 +1980,122 @@ mod metadata_tests {
 
     fn dir(name: &str) -> crate::testutil::TempDir {
         crate::testutil::TempDir::new(name)
+    }
+
+    /// A Cargo manifest says what its package's library is called in code
+    /// (`[lib] name`, else the package's name with `-` as `_`), where it is,
+    /// and where its other targets are; a workspace's own manifest has no
+    /// package; a path that leaves the package is not taken.
+    #[test]
+    fn a_cargo_manifest_names_its_library_and_targets() {
+        let plain = cargo_package("[package]\nname = \"my-core\"\nversion = \"0.1.0\"\n").unwrap();
+        assert_eq!(plain.lib_name, "my_core");
+        assert_eq!(plain.lib_path, "src/lib.rs");
+        assert!(plain.target_paths.is_empty());
+        let own = cargo_package(
+            "[package]\nname = \"wire\"\n\n[lib]\nname = \"wire_proto\"\npath = \"lib/wire.rs\"\n\n\
+             [[bin]]\nname = \"gen\"\npath = \"tools/gen.rs\"\n\n[[bin]]\nname = \"plain\"\n\n\
+             [[example]]\nname = \"demo\"\npath = \"../outside/demo.rs\"\n\n\
+             [[test]]\nname = \"it\"\npath = \"checks/it.rs\"\n",
+        )
+        .unwrap();
+        assert_eq!(own.lib_name, "wire_proto");
+        assert_eq!(own.lib_path, "lib/wire.rs");
+        assert_eq!(own.target_paths, ["tools/gen.rs", "checks/it.rs"]);
+        let escaping =
+            cargo_package("[package]\nname = \"x\"\n[lib]\npath = \"/etc/lib.rs\"\n").unwrap();
+        assert_eq!(escaping.lib_path, "src/lib.rs");
+        assert_eq!(
+            cargo_package("[workspace]\nmembers = [\"crates/*\"]\n"),
+            None
+        );
+        assert_eq!(cargo_package("not toml ["), None);
+    }
+
+    /// Each tool's way of saying where a project's Python lives is read, in
+    /// the order written, each root once; the project's own folder and a
+    /// path out of it are left out.
+    #[test]
+    fn a_pyproject_names_its_python_source_roots() {
+        let roots = |text: &str| python_source_roots(text);
+        assert_eq!(
+            roots("[tool.setuptools.packages.find]\nwhere = [\"src\"]\n"),
+            ["src"]
+        );
+        assert_eq!(
+            roots("[tool.setuptools.package-dir]\n\"\" = \"lib\"\n"),
+            ["lib"]
+        );
+        assert_eq!(
+            roots(
+                "[tool.poetry]\npackages = [{ include = \"acme\", from = \"src\" }, \
+                 { include = \"extra\" }]\n"
+            ),
+            ["src"]
+        );
+        assert_eq!(
+            roots("[tool.hatch.build.targets.wheel]\npackages = [\"src/acme\", \"tools/\"]\n"),
+            ["src"]
+        );
+        assert_eq!(
+            roots("[tool.maturin]\npython-source = \"python\"\n"),
+            ["python"]
+        );
+        assert_eq!(
+            roots("[tool.pdm.build]\npackage-dir = \"pkgs\"\n"),
+            ["pkgs"]
+        );
+        assert_eq!(
+            roots("[tool.pytest.ini_options]\npythonpath = \"src tests/helpers\"\n"),
+            ["src", "tests/helpers"]
+        );
+        assert_eq!(
+            roots(
+                "[tool.pytest.ini_options]\npythonpath = [\".\", \"./src/\"]\n\
+                 [tool.pyright]\nextraPaths = [\"src\", \"vendor\", \"../shared\"]\n\
+                 [tool.mypy]\nmypy_path = \"stubs:$MYPY_CONFIG_FILE_DIR/x, extra\"\n"
+            ),
+            ["src", "vendor", "stubs", "extra"]
+        );
+        assert!(roots("[project]\nname = \"plain\"\n").is_empty());
+        assert!(roots("not toml [").is_empty());
+    }
+
+    /// The Cargo and pyproject manifests are read with the others, and their
+    /// changes ask for them again.
+    #[test]
+    fn cargo_and_pyproject_manifests_are_read_with_the_others() {
+        let dir = dir("cargo-pyproject-manifests");
+        std::fs::create_dir_all(dir.join("crates/core")).unwrap();
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/*\"]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("crates/core/Cargo.toml"),
+            "[package]\nname = \"acme-core\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("pyproject.toml"),
+            "[tool.setuptools.packages.find]\nwhere = [\"src\"]\n",
+        )
+        .unwrap();
+        let read = source_manifests(
+            &dir,
+            &["crates/core/Cargo.toml", "Cargo.toml", "pyproject.toml"],
+        );
+        assert_eq!(read.cargo.len(), 1, "the workspace's own has no package");
+        assert_eq!(read.cargo[0].0, "crates/core/Cargo.toml");
+        assert_eq!(read.cargo[0].1.lib_name, "acme_core");
+        assert_eq!(
+            read.python,
+            [("pyproject.toml".to_string(), vec!["src".to_string()])]
+        );
+        for rel in ["Cargo.toml", "crates/x/Cargo.toml", "pyproject.toml"] {
+            assert!(bears_on_manifests(rel), "{rel}");
+        }
     }
 
     /// `go.mod` and `pubspec.yaml` ship with the repository, so their type and

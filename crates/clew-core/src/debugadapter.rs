@@ -39,6 +39,10 @@ use crate::lsp::store;
 /// The debugpy release a consented install asks pip for.
 pub const DEBUGPY_VERSION: &str = "1.8.14";
 
+/// The pytest release a consented install asks pip for: what runs a Python
+/// project's tests when its interpreter has none.
+pub const PYTEST_VERSION: &str = "8.3.5";
+
 /// The vscode-js-debug release clew downloads, verified by digest.
 pub const JS_DEBUG_VERSION: &str = "1.117.0";
 
@@ -101,6 +105,10 @@ pub enum AdapterInstall {
     /// interpreter — the one the adapter will run under; `user` adds
     /// `--user` (not inside a virtualenv, where pip refuses it).
     Debugpy { python: PathBuf, user: bool },
+    /// `python -m pip install pytest==<PYTEST_VERSION>` into the interpreter
+    /// a test runs under: without it a test file only defines its tests, and
+    /// one test cannot be run alone at all.
+    Pytest { python: PathBuf, user: bool },
     /// Download the pinned vscode-js-debug, verify its SHA-256, and unpack it
     /// into clew's data directory.
     JsDebug,
@@ -111,6 +119,7 @@ impl AdapterInstall {
     pub fn name(&self) -> &'static str {
         match self {
             AdapterInstall::Debugpy { .. } => "debugpy",
+            AdapterInstall::Pytest { .. } => "pytest",
             AdapterInstall::JsDebug => "vscode-js-debug",
         }
     }
@@ -118,8 +127,15 @@ impl AdapterInstall {
     pub fn version(&self) -> &'static str {
         match self {
             AdapterInstall::Debugpy { .. } => DEBUGPY_VERSION,
+            AdapterInstall::Pytest { .. } => PYTEST_VERSION,
             AdapterInstall::JsDebug => JS_DEBUG_VERSION,
         }
+    }
+
+    /// Whether this installs what runs tests rather than a debugger: what
+    /// the consent prompt and the status line then name it.
+    pub fn is_test_runner(&self) -> bool {
+        matches!(self, AdapterInstall::Pytest { .. })
     }
 
     /// Exactly what [`Self::install_cancellable`] will do, for the consent
@@ -127,9 +143,16 @@ impl AdapterInstall {
     /// download.
     pub fn describe(&self) -> String {
         match self {
-            AdapterInstall::Debugpy { python, user } => {
-                format!("{} {}", python.display(), pip_args(*user).join(" "))
-            }
+            AdapterInstall::Debugpy { python, user } => format!(
+                "{} {}",
+                python.display(),
+                pip_args(*user, Pip::Debugpy).join(" ")
+            ),
+            AdapterInstall::Pytest { python, user } => format!(
+                "{} {}",
+                python.display(),
+                pip_args(*user, Pip::Pytest).join(" ")
+            ),
             AdapterInstall::JsDebug => format!(
                 "download {} (SHA-256 {}) into Clew's data directory",
                 JS_DEBUG.url, JS_DEBUG.sha256
@@ -150,7 +173,12 @@ impl AdapterInstall {
     /// everything it started.
     pub fn install_cancellable(&self, cancel: &AtomicBool) -> Result<(), String> {
         match self {
-            AdapterInstall::Debugpy { python, user } => install_debugpy(python, *user, cancel),
+            AdapterInstall::Debugpy { python, user } => {
+                install_with_pip(python, *user, Pip::Debugpy, cancel)
+            }
+            AdapterInstall::Pytest { python, user } => {
+                install_with_pip(python, *user, Pip::Pytest, cancel)
+            }
             AdapterInstall::JsDebug => install_js_debug(cancel).map(|_| ()),
         }
     }
@@ -193,9 +221,19 @@ pub fn resolve(
                 true => build_zig(&zig_for(choices)?, &in_dir(cwd, program), cwd)?,
                 false => PathBuf::from(program),
             };
+            // lldb-dap runs a command written `?command` without echoing it
+            // into the program's output; lldb-vscode, its name before LLVM
+            // 18, knows no such prefix.
+            let quiet = command
+                .file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with("lldb-dap"));
             let mut spec = native_spec(command, &binary.to_string_lossy(), args, cwd);
-            if dwarf_language(&in_dir(cwd, &binary.to_string_lossy())) == Some(DW_LANG_ZIG) {
-                spec.launch[NOTICE] = json!(ZIG_BACKEND_NOTICE);
+            match dwarf_language(&in_dir(cwd, &binary.to_string_lossy())) {
+                Some(DW_LANG_ZIG) => spec.launch[NOTICE] = json!(ZIG_BACKEND_NOTICE),
+                Some(DW_LANG_RUST) => {
+                    rust_setup(&mut spec.launch, rust_sysroot(cwd).as_deref(), quiet)
+                }
+                _ => {}
             }
             Ok(Resolution::Ready(spec))
         }
@@ -392,16 +430,69 @@ fn lldb_dap_names() -> Vec<String> {
 /// of the body before sending it.
 pub const NOTICE: &str = "__clewNotice";
 
+/// DWARF's language code for Rust (`DW_LANG_Rust`), which rustc puts on
+/// its compile units.
+const DW_LANG_RUST: u16 = 0x1c;
+
+/// The keys of a `launch` body that only a debugger's run reads — set to
+/// stop at what the reader did not ask to stop at (a Rust panic) — and
+/// that a run without the debugger leaves out: lldb-dap runs every program
+/// under the debugger, `noDebug` or not, and stopped a plain Run at its
+/// panic.
+pub const DEBUG_ONLY_KEYS: &[&str] = &["preRunCommands"];
+
+/// A Rust program debugged as `rust-lldb` sets lldb up for it: the type
+/// summaries Rust's toolchain ships (`Vec`, `String`, `HashMap`, `Option`…
+/// shown as their values — `size=2`, `"ada"` — not as their fields), read
+/// silently, from `sysroot`; and a stop where it panics, at the panic
+/// rather than after it, its stack the panic's — what the program did
+/// before it went wrong. `quiet`: the adapter runs `?`-prefixed commands
+/// without echoing them into the program's output (lldb-dap).
+fn rust_setup(launch: &mut serde_json::Value, sysroot: Option<&Path>, quiet: bool) {
+    let mark = if quiet { "?" } else { "" };
+    let etc = sysroot.map(|s| s.join("lib").join("rustlib").join("etc"));
+    let scripts = etc.as_ref().and_then(|etc| {
+        let lookup = etc.join("lldb_lookup.py");
+        let commands = etc.join("lldb_commands");
+        let quoted = |p: &Path| {
+            let p = p.to_string_lossy();
+            (!p.contains(['"', '\n', '\r'])).then(|| format!("\"{p}\""))
+        };
+        (lookup.is_file() && commands.is_file()).then(|| {
+            Some(vec![
+                format!("{mark}command script import {}", quoted(&lookup)?),
+                format!("{mark}command source -s 1 {}", quoted(&commands)?),
+            ])
+        })?
+    });
+    if let Some(scripts) = scripts {
+        launch["initCommands"] = json!(scripts);
+    }
+    launch["preRunCommands"] = json!([format!("{mark}breakpoint set --name rust_panic")]);
+}
+
+/// The sysroot of the Rust toolchain that builds the program in `cwd` —
+/// its `rust-toolchain.toml` honoured, as `rustc` there is rustup's — or
+/// `None` when there is no `rustc` or it does not answer in time.
+fn rust_sysroot(cwd: &Path) -> Option<PathBuf> {
+    let rustc = store::find_in_unresolved(&crate::linerpc::child_path(), "rustc")?;
+    let mut command = crate::spawn::command(rustc);
+    command
+        .args(["--print", "sysroot"])
+        .current_dir(cwd)
+        .env("PATH", crate::linerpc::child_path());
+    let out = store::run_bounded(command, std::time::Duration::from_secs(15)).ok()?;
+    let sysroot = PathBuf::from(String::from_utf8(out.stdout).ok()?.trim());
+    (out.status.success() && sysroot.is_absolute() && sysroot.is_dir()).then_some(sysroot)
+}
+
 /// DWARF's language code for Zig (`DW_LANG_Zig`), which Zig's own code
 /// generator — the default for Debug builds on x86-64 — puts on its compile
 /// units. lldb has no plugin for it and shows no variables there.
 const DW_LANG_ZIG: u16 = 0x27;
 
 /// What a Zig program built by Zig's own code generator is told.
-const ZIG_BACKEND_NOTICE: &str = "This program's debug information is Zig's own (from Zig's \
-     built-in code generator, the default for Debug builds on x86-64), and lldb reads no \
-     variables from it: breakpoints and stepping work, but no variables show. Build it with \
-     -fllvm (or .use_llvm = true in build.zig) to see them.";
+const ZIG_BACKEND_NOTICE: &str = "This program's debug information comes from Zig's built-in code generator (the default for Debug builds on x86-64), and lldb can't read variables from it. Breakpoints and stepping work, but no variables show. Build it with -fllvm (or .use_llvm = true in build.zig) to see them.";
 
 /// Whether the test file at `path` runs its own tests when run as a script
 /// — `unittest.main()`, or pytest's — as one written for `unittest` does.
@@ -409,11 +500,6 @@ fn runs_its_own_tests(path: &Path) -> bool {
     std::fs::read_to_string(path)
         .is_ok_and(|text| text.contains("unittest.main(") || text.contains("pytest.main("))
 }
-
-/// What a Python test file run without pytest is told.
-pub const NO_PYTEST_NOTICE: &str = "pytest is not installed for this Python, so this test file \
-     ran as a script: it defines its tests and runs none of them. Install pytest in the \
-     project's environment to run them.";
 
 /// How long building a Zig program for a session may take.
 const ZIG_BUILD_TIMEOUT: Duration = Duration::from_secs(600);
@@ -852,8 +938,16 @@ fn python_with(
     // the package sits in goes on the import path. One that imports its
     // siblings relatively (`from .models import …`) has no package at all
     // as a script, so it runs as Python runs a package's module: `-m`.
-    if let Some(package) = python_package(&in_dir(cwd, program)) {
-        let mut path = vec![package.root.clone()];
+    let package = python_package(&in_dir(cwd, program));
+    let mut path: Vec<PathBuf> = package.iter().map(|p| p.root.clone()).collect();
+    // A `src/` layout not installed (`src/library/…`, the tests beside it):
+    // its tests and programs import the package by name, and pytest run
+    // from the project's folder could not ("No module named 'library'").
+    // Its `src` goes on the path, as pytest's `pythonpath = ["src"]` puts it.
+    if let Some(src) = src_layout(cwd).filter(|src| !path.contains(src)) {
+        path.push(src);
+    }
+    if !path.is_empty() {
         path.extend(
             std::env::var_os("PYTHONPATH")
                 .map_or_else(Vec::new, |p| std::env::split_paths(&p).collect::<Vec<_>>()),
@@ -861,32 +955,45 @@ fn python_with(
         if let Ok(joined) = std::env::join_paths(path) {
             launch["env"]["PYTHONPATH"] = json!(joined.to_string_lossy());
         }
-        if package.relative_imports
-            && let Some(launch) = launch.as_object_mut()
-        {
-            launch.remove("program");
-            launch.insert("module".into(), json!(package.module));
-        }
+    }
+    if let Some(package) = package
+        && package.relative_imports
+        && let Some(launch) = launch.as_object_mut()
+    {
+        launch.remove("program");
+        launch.insert("module".into(), json!(package.module));
     }
     // A test file is run as its tests are: under pytest, which collects
     // and runs them. Run as a script it defined its tests and ended, and
     // Run picked the project's program instead, saying the test "does not
-    // run on its own".
-    if is_python_test(Path::new(program))
+    // run on its own". One of its tests, named by pytest's node id
+    // (`<file>::<Class>::<test>`), is run alone, in any file.
+    let one_test = args
+        .first()
+        .is_some_and(|first| names_a_test_of(first, program));
+    if (one_test || is_python_test(Path::new(program)))
         && let Some(launch) = launch.as_object_mut()
     {
         if probe.has_pytest {
             launch.remove("program");
             launch.insert("module".into(), json!("pytest"));
-            let mut test_args = vec![json!(program)];
+            let mut test_args = match one_test {
+                true => Vec::new(),
+                false => vec![json!(program)],
+            };
             test_args.extend(args.iter().map(|a| json!(a)));
             launch.insert("args".into(), json!(test_args));
-        } else if !runs_its_own_tests(Path::new(program)) {
-            // Without pytest it runs as a script, which only defines its
-            // tests: said, or the run ended having done nothing, with
-            // nothing said why. Not of one that runs them itself as a
-            // script (`unittest.main()`): told it ran none, it had.
-            launch.insert(NOTICE.into(), json!(NO_PYTEST_NOTICE));
+        } else if one_test || !runs_its_own_tests(&in_dir(cwd, program)) {
+            // Without pytest a test file runs as a script, which only
+            // defines its tests, and one test given by its node id ran the
+            // whole file as a script with the id as its argument: either
+            // ended "passed" having run no test. pytest is asked for, as
+            // debugpy is. One that runs its own tests as a script
+            // (`unittest.main()`) runs as it is.
+            return Ok(Resolution::NeedsInstall(AdapterInstall::Pytest {
+                python: python.to_path_buf(),
+                user: !probe.in_venv,
+            }));
         }
     }
     Ok(Resolution::Ready(AdapterSpec {
@@ -895,6 +1002,15 @@ fn python_with(
         launch,
         transport: AdapterTransport::Stdio,
     }))
+}
+
+/// Whether `arg` is pytest's node id of a test in `program`: the file as
+/// given, then `::` and the test's classes and name.
+fn names_a_test_of(arg: &str, program: &str) -> bool {
+    let normal = |p: &str| p.replace('\\', "/");
+    normal(arg)
+        .strip_prefix(&normal(program))
+        .is_some_and(|rest| rest.starts_with("::") && rest.len() > 2)
 }
 
 /// Whether `file` is a pytest test file by its name, as pytest finds them
@@ -949,6 +1065,23 @@ fn python_package(file: &Path) -> Option<PythonPackage> {
         relative_imports,
     })
 }
+
+/// The project's `src` folder, when it holds a package (`src/library/
+/// __init__.py`): the `src` layout, whose package is imported by name
+/// from beside it once installed — or once `src` is on the path.
+fn src_layout(root: &Path) -> Option<PathBuf> {
+    let src = root.join("src");
+    std::fs::read_dir(&src)
+        .ok()?
+        .flatten()
+        .take(MAX_SRC_ENTRIES)
+        .any(|entry| entry.path().join("__init__.py").is_file())
+        .then_some(src)
+}
+
+/// How many of `src`'s entries are looked at for a package: a `src` of
+/// thousands is no Python layout, and the look happens before each run.
+const MAX_SRC_ENTRIES: usize = 512;
 
 /// Dart's SDK ships a DAP adapter: `dart debug_adapter` over stdio.
 fn dart_spec(command: PathBuf, program: &str, args: &[String], cwd: &Path) -> AdapterSpec {
@@ -1084,7 +1217,24 @@ fn neutral(cmd: &mut Command) {
 
 /// pip's arguments for the debugpy install, pinned. Rendered into the
 /// consent prompt as they are passed.
-fn pip_args(user: bool) -> Vec<String> {
+/// What a consented pip install asks for.
+#[derive(Clone, Copy)]
+enum Pip {
+    Debugpy,
+    Pytest,
+}
+
+impl Pip {
+    /// The requirement pip is given: the package at its pinned release.
+    fn requirement(self) -> String {
+        match self {
+            Pip::Debugpy => format!("debugpy=={DEBUGPY_VERSION}"),
+            Pip::Pytest => format!("pytest=={PYTEST_VERSION}"),
+        }
+    }
+}
+
+fn pip_args(user: bool, package: Pip) -> Vec<String> {
     let mut args: Vec<String> = [
         "-m",
         "pip",
@@ -1098,19 +1248,25 @@ fn pip_args(user: bool) -> Vec<String> {
     if user {
         args.push("--user".into());
     }
-    args.push(format!("debugpy=={DEBUGPY_VERSION}"));
+    args.push(package.requirement());
     args
 }
 
-fn pip_command(python: &Path, user: bool) -> Command {
+fn pip_command(python: &Path, user: bool, package: Pip) -> Command {
     let mut cmd = crate::spawn::command(python);
-    cmd.args(pip_args(user));
+    cmd.args(pip_args(user, package));
     neutral(&mut cmd);
     cmd
 }
 
-fn install_debugpy(python: &Path, user: bool, cancel: &AtomicBool) -> Result<(), String> {
-    let out = store::run_bounded_cancellable(pip_command(python, user), PIP_TIMEOUT, cancel)?;
+fn install_with_pip(
+    python: &Path,
+    user: bool,
+    package: Pip,
+    cancel: &AtomicBool,
+) -> Result<(), String> {
+    let out =
+        store::run_bounded_cancellable(pip_command(python, user, package), PIP_TIMEOUT, cancel)?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
         let last = err
@@ -1119,16 +1275,22 @@ fn install_debugpy(python: &Path, user: bool, cancel: &AtomicBool) -> Result<(),
             .find(|l| !l.trim().is_empty())
             .unwrap_or("pip failed");
         return Err(format!(
-            "pip install debugpy=={DEBUGPY_VERSION}: {}",
+            "pip install {}: {}",
+            package.requirement(),
             last.trim()
         ));
     }
-    // Confirm with the interpreter the adapter will actually run under.
-    if probe_python(python)?.has_debugpy {
+    // Confirm with the interpreter the session will actually run under.
+    let probe = probe_python(python)?;
+    let (importable, name) = match package {
+        Pip::Debugpy => (probe.has_debugpy, "debugpy"),
+        Pip::Pytest => (probe.has_pytest, "pytest"),
+    };
+    if importable {
         Ok(())
     } else {
         Err(format!(
-            "installed debugpy but {} still can't import it",
+            "installed {name} but {} still can't import it",
             python.display()
         ))
     }
@@ -1267,7 +1429,7 @@ pub fn resolve_stdio(
             (_, None) => Err(tcp_refusal()),
         },
         Resolution::NeedsInstall(install) => Err(format!(
-            "{} is not installed on the remote host — install it there: {}",
+            "{} is not installed on the remote host. Install it there: {}",
             install.name(),
             install.describe()
         )),
@@ -1302,6 +1464,62 @@ mod tests {
     #[cfg(unix)]
     use crate::testutil::EnvVars;
     use crate::testutil::TempDir;
+
+    /// A Rust program is debugged as rust-lldb sets lldb up for it: the
+    /// toolchain's type summaries read silently from its sysroot, and a stop
+    /// at its panic — a key a run without the debugger leaves out.
+    #[test]
+    fn a_rust_program_is_debugged_with_rusts_type_summaries_and_its_panic() {
+        let dir = TempDir::new("rust-lldb-setup");
+        let etc = dir.path().join("lib/rustlib/etc");
+        std::fs::create_dir_all(&etc).unwrap();
+        std::fs::write(etc.join("lldb_lookup.py"), "").unwrap();
+        std::fs::write(etc.join("lldb_commands"), "").unwrap();
+        let mut launch = json!({"program": "/p/target/debug/app"});
+        rust_setup(&mut launch, Some(dir.path()), false);
+        assert_eq!(
+            launch["initCommands"],
+            json!([
+                format!(
+                    "command script import \"{}\"",
+                    etc.join("lldb_lookup.py").display()
+                ),
+                format!(
+                    "command source -s 1 \"{}\"",
+                    etc.join("lldb_commands").display()
+                ),
+            ])
+        );
+        assert_eq!(
+            launch["preRunCommands"],
+            json!(["breakpoint set --name rust_panic"])
+        );
+        assert!(DEBUG_ONLY_KEYS.contains(&"preRunCommands"));
+        // lldb-dap runs them without echoing them into the output.
+        let mut launch = json!({});
+        rust_setup(&mut launch, Some(dir.path()), true);
+        let quiet = |key: &str| {
+            launch[key]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|c| c.as_str().unwrap().starts_with('?'))
+        };
+        assert!(quiet("initCommands") && quiet("preRunCommands"), "{launch}");
+        // A toolchain without the scripts, or none found: the stop alone.
+        let mut launch = json!({});
+        rust_setup(&mut launch, Some(&dir.path().join("elsewhere")), false);
+        assert!(launch.get("initCommands").is_none(), "{launch}");
+        assert!(launch.get("preRunCommands").is_some());
+        let mut launch = json!({});
+        rust_setup(&mut launch, None, false);
+        assert!(launch.get("initCommands").is_none());
+        // rustc's own DWARF language code.
+        let (info, abbrev) = dwarf_unit(5, DW_LANG_RUST, 0x0b);
+        let app = dir.path().join("app");
+        std::fs::write(&app, elf_with(&info, &abbrev)).unwrap();
+        assert_eq!(dwarf_language(&app), Some(0x1c));
+    }
 
     /// A compile unit's DWARF: version 5 or 4, its language as `data1` or
     /// `data2`, after a `strp` producer, before an inline name.
@@ -1638,15 +1856,24 @@ mod tests {
     /// unpinned `pip install --user debugpy`, run with no prompt at all).
     #[test]
     fn the_pip_argv_is_what_the_consent_prompt_describes() {
-        for user in [true, false] {
+        for (user, package) in [true, false]
+            .into_iter()
+            .flat_map(|user| [(user, Pip::Debugpy), (user, Pip::Pytest)])
+        {
             let python = PathBuf::from("/opt/py/bin/python3");
-            let install = AdapterInstall::Debugpy {
-                python: python.clone(),
-                user,
+            let install = match package {
+                Pip::Debugpy => AdapterInstall::Debugpy {
+                    python: python.clone(),
+                    user,
+                },
+                Pip::Pytest => AdapterInstall::Pytest {
+                    python: python.clone(),
+                    user,
+                },
             };
             let describe = install.describe();
             let described: Vec<&str> = describe.split_whitespace().collect();
-            let cmd = pip_command(&python, user);
+            let cmd = pip_command(&python, user, package);
             assert_eq!(cmd.get_program(), python.as_os_str());
             assert_eq!(described.first(), Some(&"/opt/py/bin/python3"));
             for arg in cmd.get_args() {
@@ -1657,7 +1884,12 @@ mod tests {
                 );
             }
             let args: Vec<_> = cmd.get_args().map(|a| a.to_str().unwrap()).collect();
-            assert!(args.contains(&format!("debugpy=={DEBUGPY_VERSION}").as_str()));
+            let pinned = match package {
+                Pip::Debugpy => format!("debugpy=={DEBUGPY_VERSION}"),
+                Pip::Pytest => format!("pytest=={PYTEST_VERSION}"),
+            };
+            assert!(args.contains(&pinned.as_str()), "{args:?}");
+            assert_eq!(install.is_test_runner(), matches!(package, Pip::Pytest));
             assert_eq!(args.contains(&"--user"), user);
             // Never run from the project: `-m pip` imports from the cwd.
             let neutral = if cfg!(unix) {
@@ -1698,8 +1930,8 @@ mod tests {
 
     /// A test file runs its tests: under pytest, which is installed, with
     /// the file and the run's arguments its arguments. Run as a script it
-    /// defined its tests and ended. Without pytest, or for a file that is
-    /// no test, nothing changes.
+    /// defined its tests and ended. Without pytest, pytest is asked for; a
+    /// file that is no test, or runs its own tests, runs as it is.
     #[test]
     #[cfg(unix)]
     fn a_test_file_runs_under_pytest() {
@@ -1720,23 +1952,69 @@ mod tests {
         let script = launch(&with_pytest, "/p/main.py");
         assert_eq!(script["program"], "/p/main.py");
         assert!(script.get("module").is_none());
+        // One test, by its node id: alone, the file not given again — in a
+        // file named as tests are or not.
+        let one = |program: &str, node: &str| {
+            let Resolution::Ready(spec) =
+                python_with(&with_pytest, program, &[node.into()], Path::new("/p")).unwrap()
+            else {
+                panic!("not ready");
+            };
+            spec.launch
+        };
+        let test = one(
+            "/p/tests/test_pricing.py",
+            "/p/tests/test_pricing.py::TestTotal::test_adds",
+        );
+        assert_eq!(test["module"], "pytest");
+        assert_eq!(
+            test["args"],
+            json!(["/p/tests/test_pricing.py::TestTotal::test_adds"])
+        );
+        let test = one("/p/checks.py", "/p/checks.py::test_ok");
+        assert_eq!(test["module"], "pytest");
+        assert_eq!(test["args"], json!(["/p/checks.py::test_ok"]));
+        assert!(!names_a_test_of("/p/checks.py::", "/p/checks.py"));
+        assert!(!names_a_test_of("/p/other.py::test_ok", "/p/checks.py"));
         let dir = TempDir::new("dap-py-no-pytest");
-        let without = fake_python(&dir, "echo '1 1 0'");
-        let test = launch(&without, "/p/tests/test_pricing.py");
-        assert_eq!(test["program"], "/p/tests/test_pricing.py");
-        // Run as a script, it says why it runs no tests.
-        assert_eq!(test[NOTICE], NO_PYTEST_NOTICE);
-        assert!(script.get(NOTICE).is_none(), "a script runs as it is");
+        let without = fake_python(&dir, "echo '1 0 0'");
+        // Without pytest a test file, or one test of any file, asks for it:
+        // run as a script it ended "passed" having run no test.
+        let asks = |program: &str, args: &[String]| match python_with(
+            &without,
+            program,
+            args,
+            Path::new("/p"),
+        )
+        .unwrap()
+        {
+            Resolution::NeedsInstall(AdapterInstall::Pytest { python, user }) => {
+                assert_eq!(python, without);
+                assert!(user, "--user outside a virtualenv");
+                true
+            }
+            _ => false,
+        };
+        assert!(asks("/p/tests/test_pricing.py", &[]));
+        assert!(asks("/p/checks.py", &["/p/checks.py::test_ok".into()]));
+        assert!(
+            !dir.join("installed").exists(),
+            "resolving must not install"
+        );
         assert!(launch(&without, "/p/main.py").get(NOTICE).is_none());
-        // One that runs its own tests as a script is not told it runs none.
+        // One that runs its own tests as a script runs as it is, but not
+        // one of its tests by its node id, which only pytest reads.
         let own = dir.path().join("test_own.py");
         std::fs::write(
             &own,
             "import unittest\nclass T(unittest.TestCase):\n    def test_a(self): pass\nif __name__ == '__main__':\n    unittest.main()\n",
         )
         .unwrap();
-        let test = launch(&without, own.to_str().unwrap());
+        let own = own.to_str().unwrap();
+        let test = launch(&without, own);
+        assert_eq!(test["program"], own);
         assert!(test.get(NOTICE).is_none(), "{test}");
+        assert!(asks(own, &[format!("{own}::T::test_a")]));
         assert!(is_python_test(Path::new("a/b_test.py")));
         assert!(!is_python_test(Path::new("a/testing.py")));
         assert!(!is_python_test(Path::new("a/test_x.txt")));
@@ -1816,6 +2094,56 @@ mod tests {
             assert_eq!(launch["env"]["PYTHONDONTWRITEBYTECODE"], "1", "{launch}");
         }
         assert_eq!(python_package(&root.join("teashop/__init__.py")), None);
+    }
+
+    /// A `src` layout's tests and programs import its package by name: run
+    /// from the project's folder, its `src` is on the path — pytest said
+    /// "No module named 'library'" of an uninstalled project's every test.
+    /// A `src` of plain modules, no package, is no such layout.
+    #[test]
+    #[cfg(unix)]
+    fn a_src_layouts_package_is_on_the_path() {
+        let dir = TempDir::new("dap-py-src");
+        let python = fake_python(&dir, "echo '1 0 1'");
+        let root = dir.join("proj");
+        std::fs::create_dir_all(root.join("src/library/services")).unwrap();
+        std::fs::create_dir_all(root.join("tests")).unwrap();
+        std::fs::write(root.join("src/library/__init__.py"), "").unwrap();
+        std::fs::write(root.join("src/library/services/__init__.py"), "").unwrap();
+        std::fs::write(root.join("src/library/services/fines.py"), "X = 1\n").unwrap();
+        std::fs::write(
+            root.join("tests/test_fines.py"),
+            "from library.services.fines import X\n",
+        )
+        .unwrap();
+        let launch = |program: &str| {
+            let Resolution::Ready(spec) = python_with(&python, program, &[], &root).unwrap() else {
+                panic!("debugpy and pytest are present");
+            };
+            spec.launch
+        };
+        let paths = |launch: &serde_json::Value| -> Vec<PathBuf> {
+            launch["env"]["PYTHONPATH"]
+                .as_str()
+                .map(|p| std::env::split_paths(p).collect())
+                .unwrap_or_default()
+        };
+        let test = launch("tests/test_fines.py");
+        assert_eq!(test["module"], "pytest", "{test}");
+        assert_eq!(paths(&test).first(), Some(&root.join("src")), "{test}");
+        // The package's own module: its folder — `src` — once, not twice.
+        let module = launch("src/library/services/fines.py");
+        let src = root.join("src");
+        assert_eq!(
+            paths(&module).iter().filter(|p| **p == src).count(),
+            1,
+            "{module}"
+        );
+        // Plain modules in `src`: no layout, nothing added.
+        std::fs::remove_dir_all(root.join("src/library")).unwrap();
+        std::fs::write(root.join("src/tool.py"), "").unwrap();
+        let plain = launch("tests/test_fines.py");
+        assert!(plain["env"].get("PYTHONPATH").is_none(), "{plain}");
     }
 
     #[test]

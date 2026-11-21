@@ -28,10 +28,23 @@ fn turn_app(
             _ => None,
         })
         .expect("the turn was asked");
+    // The window's own tools first; then the tools that write plugins,
+    // which run here too (`app::plugins`).
     let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
-    assert_eq!(names, [OPEN_FILE, GO_TO_SYMBOL, LIST_COMMANDS, RUN_COMMAND]);
+    assert_eq!(
+        names[..4],
+        [OPEN_FILE, GO_TO_SYMBOL, LIST_COMMANDS, RUN_COMMAND]
+    );
+    let plugins: Vec<String> = crate::app::plugins::plugin_tools()
+        .into_iter()
+        .map(|t| t.name)
+        .collect();
+    assert!(!plugins.is_empty());
+    assert_eq!(names[4..], plugins);
     for tool in &tools {
         assert_eq!(tool.parameters["type"], "object", "{}", tool.name);
+    }
+    for tool in &tools[..4] {
         assert!(tool.description.starts_with("[The user's Clew window]"));
     }
     (app, stream, rx)
@@ -207,6 +220,31 @@ fn the_agent_lists_and_runs_the_windows_commands() {
     );
     assert!(app.proj.overview.showing);
     assert!(!results(&mut rx)[0].2);
+    // Two plugins' commands named alike, named without the id: neither run
+    // on a guess, and the titles to call it by said.
+    let (mut acme, mut beta) = (
+        crate::app::tests::installed_plugin(true),
+        crate::app::tests::installed_plugin(true),
+    );
+    acme.id = "acme-wc".into();
+    beta.id = "beta-wc".into();
+    app.plugins.installed = vec![acme, beta];
+    let _ = call(
+        &mut app,
+        stream,
+        6,
+        RUN_COMMAND,
+        json!({"title": "Word count: Count words"}),
+    );
+    let sent = results(&mut rx);
+    assert!(sent[0].2, "{sent:?}");
+    assert!(
+        sent[0].1.contains("“Word count: Count words (acme-wc)”")
+            && sent[0].1.contains("“Word count: Count words (beta-wc)”"),
+        "{}",
+        sent[0].1
+    );
+    app.plugins.installed.clear();
     // No such command: said, and how to find one.
     let _ = call(
         &mut app,

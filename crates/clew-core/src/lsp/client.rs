@@ -123,6 +123,26 @@ pub struct Diag {
     pub char_end: usize,
     pub severity: u8, // 1 error, 2 warning, 3 info, 4 hint
     pub message: String,
+    /// The last line it spans (0-based): `line` for one on one line.
+    pub end_line: usize,
+    /// What reported it (`rustc`, `clippy`, `Pyright`, `Lean 4`), and its
+    /// code there (`E0308`, `reportAttributeAccessIssue`), when the server
+    /// says: what to look it up by.
+    pub source: Option<String>,
+    pub code: Option<String>,
+}
+
+impl Diag {
+    /// Who said it and under what code, as editors write it after the
+    /// message: `rustc(E0308)`, `Pyright(reportOptionalMemberAccess)`,
+    /// `clippy`; `None` when the server said neither.
+    pub fn origin(&self) -> Option<String> {
+        match (self.source.as_deref(), self.code.as_deref()) {
+            (Some(source), Some(code)) => Some(format!("{source}({code})")),
+            (Some(one), None) | (None, Some(one)) => Some(one.to_string()),
+            (None, None) => None,
+        }
+    }
 }
 
 /// Diagnostics per file, shared rather than copied: a [`Snapshot`] holds the
@@ -130,6 +150,11 @@ pub struct Diag {
 /// copy-on-write (`Arc::make_mut`), so taking a snapshot never clones a
 /// diagnostic.
 pub type DiagMap = Arc<HashMap<PathBuf, Arc<[Diag]>>>;
+
+/// The files a server is still checking, each with the first 0-based line
+/// it has yet to finish (Lean's `$/lean/fileProgress`), shared as
+/// [`DiagMap`] is.
+pub type CheckingMap = Arc<HashMap<PathBuf, usize>>;
 
 /// Observable server state shared with the UI: logs, progress, diagnostics.
 #[derive(Default)]
@@ -139,6 +164,9 @@ pub struct ServerState {
     progress: Progress,
     /// Latest diagnostics per file.
     diagnostics: DiagMap,
+    /// The files the Lean server is still checking (`$/lean/fileProgress`),
+    /// each with the first line it has yet to finish: gone once done.
+    checking: CheckingMap,
     /// Bumped whenever diagnostics change, so the UI knows to refresh.
     pub diag_version: u64,
     /// Bumped when the server asks us to refresh inlay hints
@@ -210,7 +238,7 @@ pub struct StatePoisoned;
 
 impl std::fmt::Display for StatePoisoned {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Clew lost track of this language server after an internal error; restart it")
+        f.write_str("Clew lost track of this language server after an internal error. Restart it")
     }
 }
 
@@ -248,6 +276,7 @@ pub struct Snapshot {
     /// diagnostics unread: ✘ 0 for a file with two errors.
     pub awaiting_diagnostics: bool,
     diagnostics: DiagMap,
+    checking: CheckingMap,
 }
 
 /// The longest a window waits for the diagnostics of a document it sent:
@@ -259,6 +288,18 @@ impl Snapshot {
     /// This file's diagnostics as of the snapshot (empty if none).
     pub fn diagnostics(&self, path: &Path) -> &[Diag] {
         self.diagnostics.get(path).map_or(&[], |d| d)
+    }
+
+    /// The first 0-based line of `path` the server is still checking, as
+    /// it last said (Lean's `$/lean/fileProgress`); `None` once it is done,
+    /// or from a server that does not say.
+    pub fn checking(&self, path: &Path) -> Option<usize> {
+        self.checking.get(path).copied()
+    }
+
+    /// The files the server is still checking.
+    pub fn checking_files(&self) -> impl Iterator<Item = &Path> {
+        self.checking.keys().map(PathBuf::as_path)
     }
 }
 
@@ -325,6 +366,7 @@ impl ServerState {
                     .synced
                     .is_some_and(|at| at.elapsed() < DIAGNOSTICS_WAIT),
             diagnostics: Arc::clone(&self.diagnostics),
+            checking: Arc::clone(&self.checking),
         }
     }
 
@@ -1323,6 +1365,11 @@ fn initialize_params(
             },
             "textDocument": {
                 "definition": { "linkSupport": true },
+                // Hovers as markdown, which Clew sets as text: asked for
+                // nothing, rust-analyzer and pyright answer in plain text —
+                // rust-analyzer's with its examples' code run into their
+                // headings ("Exampleslet a = area(1.0);").
+                "hover": { "contentFormat": ["markdown", "plaintext"] },
                 // Declare inlay-hint support so the server provides them.
                 "inlayHint": { "dynamicRegistration": false },
                 // Declare call-hierarchy support. Some servers (e.g.
@@ -1731,6 +1778,43 @@ fn handle_notification(method: &str, value: &Value, state: &Arc<Mutex<ServerStat
             }
             s.diag_version = s.diag_version.wrapping_add(1);
         }
+        // Lean's report of how far it has checked a file: the ranges it is
+        // still elaborating, none once it is done. What a reader waits on
+        // while a goal is asked of a line not checked yet.
+        "$/lean/fileProgress" => {
+            let Some(path) = params
+                .and_then(|p| p.get("textDocument"))
+                .and_then(|d| d.get("uri"))
+                .and_then(Value::as_str)
+                .and_then(uri_to_path)
+            else {
+                return;
+            };
+            let first = params
+                .and_then(|p| p.get("processing"))
+                .and_then(Value::as_array)
+                .and_then(|ranges| {
+                    ranges
+                        .iter()
+                        .filter_map(|r| lsp_uint(r.get("range")?.get("start")?.get("line")))
+                        .min()
+                });
+            match first {
+                Some(line) => {
+                    if s.checking.get(&path) != Some(&line)
+                        && (s.checking.contains_key(&path) || s.checking.len() < MAX_DIAG_FILES)
+                    {
+                        Arc::make_mut(&mut s.checking).insert(path, line);
+                    }
+                }
+                None => {
+                    if s.checking.contains_key(&path) {
+                        Arc::make_mut(&mut s.checking).remove(&path);
+                    }
+                }
+            }
+            s.reports += 1;
+        }
         "$/progress" => {
             // Idle through the whole grace: loaded before this report, which
             // may begin work on the project as it changes.
@@ -1867,7 +1951,23 @@ fn parse_diag(v: &Value) -> Option<Diag> {
                 .to_string(),
             MAX_DIAG_MESSAGE,
         ),
+        end_line: end_line.max(line),
+        source: short_field(v.get("source")),
+        // A string or a number, as the protocol allows either.
+        code: short_field(v.get("code")),
     })
+}
+
+/// A short field of a diagnostic, a string or a number, as a string: empty,
+/// or longer than any code is, it is left out.
+fn short_field(v: Option<&Value>) -> Option<String> {
+    let text = match v? {
+        Value::String(s) => s.trim().to_string(),
+        Value::Number(n) => n.to_string(),
+        _ => return None,
+    };
+    (!text.is_empty() && text.chars().count() <= 64 && !text.contains(char::is_control))
+        .then_some(text)
 }
 
 /// Extract plain text from a hover response (MarkupContent | MarkedString[]).
@@ -2566,6 +2666,57 @@ mod tests {
         assert_eq!(hints[1].label, "count:");
     }
 
+    /// Lean's `$/lean/fileProgress` is kept per file — the first line it is
+    /// still checking — and the file leaves once Lean says it is done; a
+    /// snapshot taken before shows what was then.
+    #[test]
+    fn lean_file_progress_is_kept_until_the_file_is_checked() {
+        let state = Arc::new(Mutex::new(ServerState::default()));
+        let file = Path::new("/p/Demo/Basic.lean");
+        let progress = |ranges: Value| {
+            json!({
+                "method": "$/lean/fileProgress",
+                "params": {
+                    "textDocument": { "uri": path_to_uri(file), "version": 1 },
+                    "processing": ranges,
+                }
+            })
+        };
+        let range = |line: u64| {
+            json!({ "range": {
+            "start": { "line": line, "character": 0 },
+            "end": { "line": line + 4, "character": 0 } }, "kind": 1 })
+        };
+        let note = progress(json!([range(12), range(3)]));
+        handle_notification("$/lean/fileProgress", &note, &state);
+        let checking = snapshot_of(&state).unwrap();
+        assert_eq!(
+            checking.checking(file),
+            Some(3),
+            "the first line still checked"
+        );
+        assert_eq!(checking.checking_files().count(), 1);
+        let note = progress(json!([range(20)]));
+        handle_notification("$/lean/fileProgress", &note, &state);
+        assert_eq!(snapshot_of(&state).unwrap().checking(file), Some(20));
+        // Done: nothing left in progress.
+        handle_notification("$/lean/fileProgress", &progress(json!([])), &state);
+        let done = snapshot_of(&state).unwrap();
+        assert_eq!(done.checking(file), None);
+        assert_eq!(
+            checking.checking(file),
+            Some(3),
+            "a snapshot keeps what it saw"
+        );
+        // A malformed report changes nothing and does not panic.
+        handle_notification(
+            "$/lean/fileProgress",
+            &json!({ "method": "$/lean/fileProgress", "params": { "processing": [] } }),
+            &state,
+        );
+        assert_eq!(snapshot_of(&state).unwrap().checking_files().count(), 0);
+    }
+
     /// An inlay label is one line, however the server spelled it, and short.
     #[test]
     fn an_inlay_label_is_one_short_line() {
@@ -2711,6 +2862,37 @@ mod tests {
             (4, 8, 13, 1)
         );
         assert!(d.message.contains("cannot find"));
+        assert_eq!(d.origin(), None);
+        // Who said it and its code, a string or a number; across lines,
+        // where it ends.
+        let d = parse_diag(&json!({
+            "range": {"start": {"line": 4, "character": 8}, "end": {"line": 6, "character": 1}},
+            "message": "mismatched types",
+            "source": "rustc",
+            "code": "E0308"
+        }))
+        .unwrap();
+        assert_eq!((d.line, d.end_line), (4, 6));
+        assert_eq!(d.origin().as_deref(), Some("rustc(E0308)"));
+        let d = parse_diag(&json!({
+            "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}},
+            "message": "m",
+            "code": 2304
+        }))
+        .unwrap();
+        assert_eq!(d.origin().as_deref(), Some("2304"));
+        let d = parse_diag(&json!({
+            "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}},
+            "message": "m",
+            "source": "Pyright",
+            "code": "x\ny"
+        }))
+        .unwrap();
+        assert_eq!(
+            d.origin().as_deref(),
+            Some("Pyright"),
+            "no control characters"
+        );
     }
 
     /// F9: positions are the server's numbers. `character + 1` on
@@ -3125,6 +3307,11 @@ mod session_tests {
         // Server-initiated progress is advertised; without it servers report
         // none, and "indexing" looks the same as "no answer".
         assert_eq!(params["capabilities"]["window"]["workDoneProgress"], true);
+        // Hovers are asked for as markdown, which Clew sets as text.
+        assert_eq!(
+            params["capabilities"]["textDocument"]["hover"]["contentFormat"][0],
+            "markdown"
+        );
     }
 
     /// The project root is the one workspace folder, in `initialize` and
@@ -3610,7 +3797,7 @@ mod session_tests {
         assert_eq!(client.logs(), Err(StatePoisoned));
         assert_eq!(client.log_tail(2), Err(StatePoisoned));
         let error = client.error().expect("poisoning is reported as an error");
-        assert!(error.contains("restart"), "{error}");
+        assert!(error.contains("Restart"), "{error}");
     }
 
     #[tokio::test]

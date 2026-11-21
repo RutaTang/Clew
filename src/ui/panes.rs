@@ -286,7 +286,7 @@ pub(crate) fn time_travel_banner<'a>(
             .width(Fill),
             chrome_tip(
                 again,
-                tr!("Say what this commit changed and why, with AI (one AI call)"),
+                tr!("Describe what this commit changed and why, with AI (one AI call)"),
                 None,
             ),
         ]
@@ -319,7 +319,7 @@ pub(crate) fn time_travel_banner<'a>(
         ));
         chrome_tip(
             what_why,
-            tr!("Say what this commit changed and why, with AI (one AI call)"),
+            tr!("Describe what this commit changed and why, with AI (one AI call)"),
             None,
         )
     };
@@ -1473,7 +1473,7 @@ pub(crate) fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element
     // functions, the Notes open beside the code: it said the same twice.
     let file_node = crate::explain::Node::File(v.abs.clone());
     let margin_says_it = right_panel_shown(app)
-        && app.margin_tab == crate::app::model::MarginTab::Notes
+        && app.margin_tab_shown() == crate::app::model::MarginTab::Notes
         && app.proj.explain.view.as_ref() == Some(&file_node);
     let banner = if app.show_file_banner && !margin_says_it {
         app.proj
@@ -1564,8 +1564,13 @@ pub(crate) fn margin_w(app: &App) -> f32 {
 /// a Docs page): its notes are of the file under it, and the sheet's
 /// header, whose View menu shows and hides it, is not drawn there either.
 pub(crate) fn right_panel_shown(app: &App) -> bool {
-    app.show_right_panel
-        && !app.proj.split
+    app.show_right_panel && right_panel_fits(app)
+}
+
+/// Whether the margin has a place to be shown, asked for or not: a file
+/// open alone (not split, not covered), in a window wide enough.
+pub(crate) fn right_panel_fits(app: &App) -> bool {
+    !app.proj.split
         && app.window_width >= RIGHT_PANEL_MIN_WINDOW_W
         && app.active_viewer().is_some()
         && super::docs_stats::pane_cover(app).is_none()
@@ -1579,10 +1584,11 @@ pub(crate) fn right_panel(app: &App) -> Option<Element<'_, Message>> {
     if !right_panel_shown(app) {
         return None;
     }
-    let body: Element<'_, Message> = match app.margin_tab {
+    let body: Element<'_, Message> = match app.margin_tab_shown() {
         crate::MarginTab::Notes => margin_notes(app),
         crate::MarginTab::Calls => margin_calls(app),
         crate::MarginTab::History => margin_history(app),
+        crate::MarginTab::Goals => margin_goals(app),
     };
     Some(
         container(body)
@@ -1928,6 +1934,8 @@ fn notes_beside_code<'a>(
         // whatever of the diff was there.
         let replaced = code_replaced(app, v);
         let mut notes: Vec<(f32, f32, Element<'_, Message>)> = Vec::new();
+        // Where the caret's card is kept at the foot, its function below.
+        let mut below: Option<f32> = None;
         // A file with nothing in it has no note to offer: its card offered
         // Explain and Ask of an empty file.
         if matches!(active, Some(Node::File(_))) && !v.source.trim().is_empty() {
@@ -1944,10 +1952,17 @@ fn notes_beside_code<'a>(
             notes.push((
                 0.0,
                 h,
-                active_note(app, name, tr!("file").into(), NoteOf::File, size.width),
+                active_note(
+                    app,
+                    name,
+                    tr!("file").into(),
+                    NoteOf::File,
+                    size.width,
+                    None,
+                ),
             ));
         }
-        for (sym, &ordinal) in v.symbols.iter().zip(&ordinals) {
+        for (index, (sym, &ordinal)) in v.symbols.iter().zip(&ordinals).enumerate() {
             if !matches!(sym.kind.as_str(), "function" | "method") {
                 continue;
             }
@@ -1961,8 +1976,8 @@ fn notes_beside_code<'a>(
             if replaced && !is_active {
                 continue;
             }
-            // Only what is in view is looked up (the raised card, once its
-            // height is known, below).
+            // Only what is in view is looked up: the raised card is kept on
+            // screen wherever its function is (below).
             if !replaced && !is_active && (y + NOTE_H < 0.0 || y > size.height) {
                 continue;
             }
@@ -1986,11 +2001,26 @@ fn notes_beside_code<'a>(
             } else {
                 (NOTE_H, 0.0)
             };
-            if !replaced && (y + h < 0.0 || y - lift > size.height) {
+            if !replaced && !is_active && (y + h < 0.0 || y - lift > size.height) {
                 continue;
             }
-            // "function, line 15": the kind in words, not "fn".
-            let kind = if sym.kind == "method" {
+            // The caret's card stays on screen as the code scrolls: at the
+            // margin's top while its function is above the view, at its foot
+            // while below — with the way back to it. It went away with its
+            // function, and the reader looking on down lost what they were
+            // reading. Away is its line out of sight.
+            let away = if !is_active || replaced {
+                None
+            } else if y < 0.0 {
+                Some(true)
+            } else if y + lh > size.height - foot {
+                Some(false)
+            } else {
+                None
+            };
+            // "function, line 15": the kind in words, not "fn" — and a
+            // Python class's `def` a method, as a Rust `impl`'s `fn` is.
+            let kind = if shown_kind(&v.symbols, index) == "method" {
                 tr!("method")
             } else {
                 tr!("function")
@@ -2003,12 +2033,13 @@ fn notes_beside_code<'a>(
                     meta,
                     NoteOf::Function { sym, ordinal },
                     size.width,
+                    away.map(|up| (up, sym.line)),
                 )
             } else {
                 let summary = cached
                     .map(|c| crate::app::shown_summary(c).into_owned())
                     .unwrap_or_default();
-                plain_note(sym.name.clone(), meta, summary, sym.line)
+                plain_note(sym.name.clone(), meta, summary, sym.line, size.width)
             };
             let top = if replaced {
                 0.0
@@ -2017,7 +2048,15 @@ fn notes_beside_code<'a>(
             } else {
                 y - lift
             };
+            if away == Some(false) {
+                below = Some(top.max(0.0));
+            }
             notes.push((top.max(0.0), h, note));
+        }
+        // Kept at the foot, the caret's card is not pushed off it by the
+        // notes over it: those it would cover give way.
+        if let Some(card) = below {
+            notes.retain(|(top, h, _)| *top >= card || top + h + NOTE_GAP <= card);
         }
         notes.sort_by(|a, b| a.0.total_cmp(&b.0));
         // Each note level with its function, or just under the one above
@@ -2074,23 +2113,86 @@ fn code_replaced(app: &App, v: &Viewer) -> bool {
 }
 
 /// A note's head: the name it is about (as code, for a function) and what
-/// kind of thing that is, where.
-fn note_head<'a>(name: String, meta: String, code: bool, raised: bool) -> Element<'a, Message> {
+/// kind of thing that is, where — whole, the name cut short with an
+/// ellipsis to leave it room in `room` (the note's inside width): "function,
+/// line 87" ran under the margin's edge behind a long name. `back`, while
+/// the note stands away from its function (the caret's card, kept on screen
+/// as the code scrolls), makes "line 59" the way back there, its arrow
+/// pointing where the function is.
+fn note_head<'a>(
+    name: String,
+    meta: String,
+    code: bool,
+    raised: bool,
+    room: f32,
+    back: Option<(bool, usize)>,
+) -> Element<'a, Message> {
+    let name_font = if code {
+        crate::fonts::CODE_SEMIBOLD
+    } else {
+        crate::fonts::UI_SEMIBOLD
+    };
+    let meta_w = super::steady::width_of(&meta, ts::SMALL, crate::fonts::UI)
+        + if back.is_some() {
+            BACK_ICON + 4.0 + 2.0 * BACK_PAD_X
+        } else {
+            0.0
+        };
+    let shown = super::steady::cut(
+        &name,
+        (room - meta_w - 8.0).max(0.0),
+        NOTE_NAME_SIZE,
+        name_font,
+    );
+    let meta_text = text(meta)
+        .size(ts::SMALL)
+        .line_height(ts::normal_line(ts::SMALL))
+        .color(theme::dim())
+        .wrapping(Wrapping::None);
+    let meta: Element<'a, Message> = match back {
+        Some((up, line)) => {
+            let said = tr!("Go to line {n}", n = line);
+            super::toolbar::tip_at(
+                button(
+                    row![
+                        glyph::icon(
+                            if up {
+                                Glyph::ChevronUp
+                            } else {
+                                Glyph::ChevronDown
+                            },
+                            theme::dim(),
+                            BACK_ICON,
+                        ),
+                        meta_text,
+                    ]
+                    .spacing(4)
+                    .align_y(iced::Center),
+                )
+                .style(theme::icon_button(false))
+                .padding([0.0, BACK_PAD_X])
+                .on_press(super::heard::said(
+                    &said,
+                    Message::Editor(EditorMsg::OutlineJump(line)),
+                )),
+                said,
+                None,
+                tooltip::Position::Top,
+            )
+        }
+        None => meta_text.into(),
+    };
     // Each in its face's own line height, as the design sets the head: the
     // row as tall as the taller, the two on one baseline.
     row![
-        text(name)
+        text(shown)
             .size(NOTE_NAME_SIZE)
             .line_height(if code {
                 ts::normal_line_code(NOTE_NAME_SIZE)
             } else {
                 ts::normal_line(NOTE_NAME_SIZE)
             })
-            .font(if code {
-                crate::fonts::CODE_SEMIBOLD
-            } else {
-                crate::fonts::UI_SEMIBOLD
-            })
+            .font(name_font)
             .color(if raised {
                 theme::fg()
             } else {
@@ -2098,16 +2200,26 @@ fn note_head<'a>(name: String, meta: String, code: bool, raised: bool) -> Elemen
             })
             .wrapping(Wrapping::None),
         space().width(Fill),
-        text(meta)
-            .size(ts::SMALL)
-            .line_height(ts::normal_line(ts::SMALL))
-            .color(theme::dim())
-            .wrapping(Wrapping::None),
+        meta,
     ]
     .spacing(8)
     .align_y(iced::Center)
     .into()
 }
+
+/// The way back's arrow, and the room either side of it and its words.
+const BACK_ICON: f32 = 11.0;
+const BACK_PAD_X: f32 = 4.0;
+
+/// A note's inside width in a margin `width` wide: the margin's own room
+/// either side (4 and 12), and the note's (14 each side).
+fn note_room(width: f32) -> f32 {
+    (width - 44.0).max(0.0)
+}
+
+/// How many lines of its summary a plain note has under its head, in its
+/// [`NOTE_H`].
+const PLAIN_NOTE_LINES: usize = 3;
 
 /// A note's name, over what is said of it.
 const NOTE_NAME_SIZE: f32 = 12.0;
@@ -2119,10 +2231,23 @@ fn plain_note<'a>(
     meta: String,
     summary: String,
     line: usize,
+    width: f32,
 ) -> Element<'a, Message> {
+    let room = note_room(width);
+    // As many whole lines as the note has under its head, the last ending
+    // in an ellipsis where there is more: clipped at the note's foot, it
+    // stopped mid-sentence, the line under it sliced through.
+    let summary = super::steady::cut_lines(
+        &summary,
+        room,
+        PLAIN_NOTE_LINES,
+        super::explain_view::NOTE_SIZE,
+        super::explain_view::NOTE_LINE_HEIGHT,
+        crate::fonts::UI,
+    );
     button(
         column![
-            note_head(name.clone(), meta, true, false),
+            note_head(name.clone(), meta, true, false, room, None),
             text(summary)
                 .size(super::explain_view::NOTE_SIZE)
                 .line_height(super::explain_view::NOTE_LINE_HEIGHT)
@@ -2338,6 +2463,7 @@ fn active_note<'a>(
     meta: String,
     of: NoteOf<'a>,
     width: f32,
+    back: Option<(bool, usize)>,
 ) -> Element<'a, Message> {
     let code = matches!(of, NoteOf::Function { .. });
     // The file's history on its way (its blame being read): the History
@@ -2611,9 +2737,15 @@ fn active_note<'a>(
     let inset = iced::padding::left(NOTE_ACTION_PAD_X);
     container(
         column![
-            container(column![note_head(name, meta, code, true), said].spacing(6))
-                .padding(inset)
-                .height(Fill),
+            container(
+                column![
+                    note_head(name, meta, code, true, note_room(width), back),
+                    said
+                ]
+                .spacing(6),
+            )
+            .padding(inset)
+            .height(Fill),
             column![facts, actions].spacing(2),
         ]
         .spacing(10),
@@ -2685,6 +2817,364 @@ fn margin_calls(app: &App) -> Element<'_, Message> {
 /// first — each a way into Time Travel at it — and, under them, the ways
 /// into how the function and the line came to be. It was four links, two
 /// of them the header's own Diff and Time Travel again.
+/// The margin's Goals, for a Lean file: what the Lean server says where the
+/// cursor is — the goals left there, each with its hypotheses and what is
+/// to be shown, or the type a term there must have — and the file's
+/// messages on that line (an error, `#eval`'s and `#check`'s output), as
+/// Lean's own infoview shows them, kept up as the cursor moves.
+fn margin_goals(app: &App) -> Element<'_, Message> {
+    use clew_core::lsp::client::LeanGoal;
+    let note = |s: String| -> Element<'_, Message> {
+        container(
+            text(s)
+                .size(ts::SMALL)
+                .color(theme::dim())
+                .wrapping(Wrapping::WordOrGlyph),
+        )
+        .padding([6, 10])
+        .into()
+    };
+    let code = |s: String, color: iced::Color| -> Element<'_, Message> {
+        container(
+            text(s)
+                .size(ts::SMALL)
+                .font(crate::fonts::CODE)
+                .color(color)
+                .wrapping(Wrapping::WordOrGlyph),
+        )
+        .padding([2, 10])
+        .into()
+    };
+    let Some(v) = app.active_viewer() else {
+        return note(String::new());
+    };
+    let line = v.caret.map_or(0, |(l, _)| l);
+    let mut rows = Column::new().spacing(2);
+    let snapshot = match app.proj.link.lsp_snapshots.get("lean") {
+        Some(Ok(snapshot)) => Some(snapshot),
+        _ => None,
+    };
+    // Mathlib's build, where the project wants it and it is not there:
+    // without it Lean builds all of Mathlib itself, for hours, the first
+    // time a file importing it is checked.
+    let link = |label: &'static str, msg: Message| -> Element<'_, Message> {
+        container(
+            button(text(label).size(ts::SMALL).color(theme::accent()))
+                .style(theme::icon_button(false))
+                .padding([3, 6])
+                .on_press(super::heard::said(label, msg)),
+        )
+        .padding([0, 4])
+        .into()
+    };
+    let get = || Message::Proof(crate::ProofMsg::GetMathlibCache);
+    // Mathlib's build cache saves hours: a card of its own, above the
+    // goals, said as what it is, with its way on and a way to put it by.
+    let card = |title: String, body: String, actions: Vec<Element<'static, Message>>| {
+        let mut col = column![
+            text(title)
+                .size(ts::BODY)
+                .font(crate::fonts::UI_MEDIUM)
+                .color(theme::fg())
+                .wrapping(Wrapping::WordOrGlyph),
+            text(body)
+                .size(ts::SMALL)
+                .color(theme::dim())
+                .wrapping(Wrapping::WordOrGlyph),
+        ]
+        .spacing(4);
+        if !actions.is_empty() {
+            col = col.push(iced::widget::Row::with_children(actions).spacing(6).wrap());
+        }
+        container(
+            container(col)
+                .padding([10, 12])
+                .width(Fill)
+                .style(theme::form_card),
+        )
+        .padding([4, 8])
+    };
+    let action = |label: &'static str, msg: Message, primary: bool| -> Element<'static, Message> {
+        button(text(label).size(ts::SMALL).wrapping(Wrapping::None))
+            .style(if primary {
+                theme::primary_button
+            } else {
+                theme::secondary_button
+            })
+            .padding([4, 10])
+            .on_press(super::heard::said(label, msg))
+            .into()
+    };
+    match &app.proj.mathlib {
+        crate::app::proof::MathlibCache::Missing => {
+            rows = rows.push(card(
+                tr!("Mathlib isn't compiled here yet").into(),
+                tr!("Without its build cache, Lean compiles all of Mathlib itself, which takes hours. The cache downloads in minutes.").into(),
+                vec![
+                    action(tr!("Get Mathlib's Build Cache"), get(), true),
+                    action(
+                        tr!("Not now"),
+                        Message::Proof(crate::ProofMsg::DismissMathlibCache),
+                        false,
+                    ),
+                ],
+            ));
+        }
+        crate::app::proof::MathlibCache::Getting(said) => {
+            rows = rows.push(card(
+                tr!("Getting Mathlib's build cache…").into(),
+                if said.is_empty() {
+                    tr!("lake exe cache get is downloading Mathlib's compiled files.").into()
+                } else {
+                    said.clone()
+                },
+                Vec::new(),
+            ));
+        }
+        crate::app::proof::MathlibCache::Failed(why) => {
+            rows = rows.push(card(
+                tr!("Could not get Mathlib's build cache").into(),
+                why.clone(),
+                vec![
+                    action(tr!("Try again"), get(), true),
+                    action(
+                        tr!("Not now"),
+                        Message::Proof(crate::ProofMsg::DismissMathlibCache),
+                        false,
+                    ),
+                ],
+            ));
+        }
+        _ => {}
+    }
+    // The server's state, under the Mathlib card: a project whose Lean
+    // would build all of Mathlib wants the card most while Lean starts.
+    // Each said as it is — a failure, no Lean, a "no" — with the way on.
+    let servers = || {
+        link(
+            tr!("Language servers…"),
+            Message::Editor(EditorMsg::RunAction(crate::keymap::Action::LspServers)),
+        )
+    };
+    match app.proj.link.lsp.get("lean") {
+        Some(crate::LspSlot::Ready(_)) => {}
+        Some(crate::LspSlot::Starting) => {
+            rows = rows.push(note(
+                tr!("The Lean server is starting. The goals at the cursor show here once it is ready.")
+                    .into(),
+            ));
+            return scrollable(rows).height(Fill).into();
+        }
+        Some(crate::LspSlot::AwaitingConsent) => {
+            rows = rows.push(note(
+                tr!("The Lean server is waiting for your answer before it starts.").into(),
+            ));
+            return scrollable(rows).height(Fill).into();
+        }
+        Some(crate::LspSlot::Failed(error)) => {
+            rows = rows.push(note(tr!("The Lean server stopped: {error}", error = error)));
+            rows = rows.push(servers());
+            return scrollable(rows).height(Fill).into();
+        }
+        Some(crate::LspSlot::Unsupported(why) | crate::LspSlot::Declined(why)) => {
+            rows = rows.push(note(crate::i18n::message(why)));
+            rows = rows.push(servers());
+            return scrollable(rows).height(Fill).into();
+        }
+        None => {
+            rows = rows.push(note(
+                tr!("Start the Lean server to see the goals at the cursor here.").into(),
+            ));
+            rows = rows.push(servers());
+            return scrollable(rows).height(Fill).into();
+        }
+    }
+    // Lean says the file's imports changed since it read them: it checks
+    // nothing more of it until the file is restarted — the one way on, a
+    // click away, where Lean's own words named a command to find.
+    let stale = snapshot.is_some_and(|s| {
+        s.diagnostics(&v.abs)
+            .iter()
+            .any(|d| d.message.contains("Imports are out of date"))
+    });
+    // Restarted and not yet checked again: said, and not offered twice.
+    let checked = snapshot.map_or(0, |s| s.diag_version);
+    let restarting = app
+        .proj
+        .lean_restarting
+        .as_ref()
+        .is_some_and(|(abs, at)| *abs == v.abs && *at == checked);
+    if restarting {
+        rows = rows.push(note(
+            tr!("Lean is checking this file's imports again…").into(),
+        ));
+    } else if stale {
+        rows = rows.push(note(
+            tr!("This file's imports changed since Lean read them. Restart the file to check it against them.")
+                .into(),
+        ));
+        rows = rows.push(link(
+            tr!("Restart File"),
+            Message::Proof(crate::ProofMsg::RestartFile),
+        ));
+    }
+    // What failed in the imports — an import that does not build, a
+    // package not there — stops the file being checked: said wherever the
+    // cursor is, as it was only under the import's own line.
+    let header = lean_header_end(v);
+    if line >= header
+        && !restarting
+        && let Some(snapshot) = snapshot
+    {
+        let failed: Vec<&clew_core::lsp::client::Diag> = snapshot
+            .diagnostics(&v.abs)
+            .iter()
+            .filter(|d| {
+                d.severity == 1 && d.line < header && !d.message.contains("Imports are out of date")
+            })
+            .collect();
+        if !failed.is_empty() {
+            rows = rows.push(super::explain_view::section_header(tr!(
+                "Errors in the imports"
+            )));
+            for d in failed {
+                rows = rows.push(code(d.message.trim().to_string(), theme::danger()));
+            }
+        }
+    }
+    let goals = app.proj.lean_goals.as_ref().filter(|g| g.abs == v.abs);
+    // An answer for another line while this one is asked, and Lean has not
+    // checked this far yet: its goals are not this line's, and may not be
+    // for minutes — how far Lean has got is said instead.
+    let behind = snapshot
+        .and_then(|s| s.checking(&v.abs))
+        .filter(|at| *at < line);
+    let answer = goals.and_then(|g| {
+        g.answer
+            .as_ref()
+            .filter(|(at, _)| !(g.asking && *at != line && behind.is_some()))
+    });
+    match answer {
+        // How far Lean has got, where it says: a goal is answered once the
+        // line is checked, and checking the imports of a big project takes
+        // minutes the reader saw only "Asking…" through.
+        None => match snapshot.and_then(|s| s.checking(&v.abs)) {
+            Some(at) if at < line => {
+                rows = rows.push(note(tr!(
+                    "Lean is checking line {line} of {total} in this file. The goals at line {cursor} show once it gets there.",
+                    line = at + 1,
+                    total = v.line_count().max(at + 1),
+                    cursor = line + 1
+                )))
+            }
+            Some(at) => {
+                rows = rows.push(note(tr!(
+                    "Lean is checking line {line} of {total} in this file…",
+                    line = at + 1,
+                    total = v.line_count().max(at + 1)
+                )))
+            }
+            None => rows = rows.push(note(tr!("Asking the Lean server…").into())),
+        },
+        Some((_, Err(e))) => {
+            rows = rows.push(note(tr!(
+                "The Lean server gave no goals here: {error}",
+                error = crate::i18n::message(e)
+            )))
+        }
+        Some((_, Ok(None))) => {
+            rows = rows.push(note(
+                tr!(
+                    "Nothing to show here. Put the cursor inside a proof to see its goals, or on a term to see its expected type."
+                )
+                .into(),
+            ))
+        }
+        Some((at, Ok(Some(LeanGoal::Tactic(left))))) if left.is_empty() => {
+            rows = rows.push(super::explain_view::section_header(&tr!(
+                "Goals at line {line}",
+                line = at + 1
+            )));
+            // Said of a `sorry` too: none left, not "complete".
+            rows = rows.push(note(tr!("No goals left here.").into()));
+        }
+        Some((at, Ok(Some(LeanGoal::Tactic(left))))) => {
+            rows = rows.push(super::explain_view::section_header(&tr!(
+                "Goals at line {line}",
+                line = at + 1
+            )));
+            rows = rows.push(
+                container(Column::with_children(super::proof::goal_rows(left, None)).spacing(2))
+                    .padding([2, 10]),
+            );
+        }
+        Some((at, Ok(Some(LeanGoal::Term(ty))))) => {
+            rows = rows.push(super::explain_view::section_header(&tr!(
+                "Expected type at line {line}",
+                line = at + 1
+            )));
+            rows = rows.push(code(ty.clone(), theme::fg()));
+        }
+    }
+    // What Lean says of the line: an error, a warning, `#eval`'s answer.
+    if let Some(snapshot) = snapshot {
+        let said: Vec<&clew_core::lsp::client::Diag> = snapshot
+            .diagnostics(&v.abs)
+            .iter()
+            .filter(|d| d.line <= line && line <= d.end_line.max(d.line))
+            .collect();
+        if !said.is_empty() {
+            rows = rows.push(super::explain_view::section_header(&tr!(
+                "Messages on line {line}",
+                line = line + 1
+            )));
+            for d in said {
+                let color = match d.severity {
+                    1 => theme::danger(),
+                    2 => theme::warning(),
+                    _ => theme::fg(),
+                };
+                rows = rows.push(code(d.message.trim().to_string(), color));
+            }
+        }
+    }
+    scrollable(rows).height(Fill).into()
+}
+
+/// Where a Lean file's header ends: the line after its `module`,
+/// `prelude` and `import`s, and the comments and blank lines among them.
+/// What fails there stops the whole file being checked.
+fn lean_header_end(v: &crate::editor::viewer::Viewer) -> usize {
+    let mut in_comment = false;
+    for i in 0..v.line_count().min(2000) {
+        let line = v.source_line(i).unwrap_or("").trim();
+        if in_comment {
+            in_comment = !line.contains("-/");
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("/-") {
+            in_comment = !rest.contains("-/");
+            continue;
+        }
+        let header = line.is_empty()
+            || line.starts_with("--")
+            || line == "prelude"
+            || line == "module"
+            || [
+                "import ",
+                "public import ",
+                "meta import ",
+                "private import ",
+            ]
+            .iter()
+            .any(|p| line.starts_with(p));
+        if !header {
+            return i;
+        }
+    }
+    v.line_count()
+}
+
 fn margin_history(app: &App) -> Element<'_, Message> {
     // Its rows counted from 1, as voice picks them ("open the second").
     super::heard::list();
@@ -2835,7 +3325,7 @@ fn margin_history(app: &App) -> Element<'_, Message> {
         why,
         if has_code {
             tr!(
-                "Explain from the commits that touched it why this line is here, with AI (one AI call)"
+                "Explain with AI why this line is here, using the commits that changed it (one AI call)"
             )
         } else {
             tr!("Put the cursor on a line of code to ask why it is there")
@@ -2893,7 +3383,7 @@ pub(crate) fn outline_note_for(query: Option<Result<(), crate::highlight::QueryE
     match query {
         Some(Err(QueryError::Invalid(e))) => {
             tr!(
-                "Outline unavailable: the outline query does not compile ({error}).",
+                "The outline isn't available because its query doesn't compile ({error}).",
                 error = e
             )
         }
@@ -2932,7 +3422,25 @@ pub(crate) fn outline_content(app: &App) -> Element<'_, Message> {
         notes.entry(n.symbol.as_str()).or_insert(n);
     }
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
-    for ((symbol, &ordinal), key) in v.symbols.iter().zip(&ordinals).zip(&keys) {
+    // A Rust file's `impl` blocks head their items, and every row sits as
+    // deep as what holds it: a method under its class or its `impl`.
+    let groups = app.outline_groups(v);
+    for entry in crate::app::outline_entries(&v.symbols, &groups) {
+        let (index, depth) = match entry {
+            crate::app::OutlineEntry::Group { group, depth } => {
+                let g = &groups[group];
+                rows.push(outline_group_row(
+                    app,
+                    g,
+                    depth,
+                    holds_nothing(&v.symbols, g),
+                ));
+                continue;
+            }
+            crate::app::OutlineEntry::Symbol { index, depth } => (index, depth),
+        };
+        let (symbol, ordinal, key) = (&v.symbols[index], ordinals[index], &keys[index]);
+        let indent = outline_indent(depth);
         let is_fn = matches!(symbol.kind.as_str(), "function" | "method");
         let is_current = is_fn && current == Some((symbol.name.as_str(), ordinal));
         // The reader's note/progress on this symbol (anchored by name, so it
@@ -2942,10 +3450,11 @@ pub(crate) fn outline_content(app: &App) -> Element<'_, Message> {
         let understood = note.is_some_and(|n| n.understood);
         let has_text = note.is_some_and(|n| !n.text.is_empty());
 
+        let kind = shown_kind(&v.symbols, index);
         let label = row![
-            text(short_kind(&symbol.kind))
+            text(short_kind(kind))
                 .size(ts::CAPTION)
-                .color(theme::kind_color(&symbol.kind))
+                .color(theme::kind_color(kind))
                 .width(34),
             // Understood symbols dim, so the outline shows at a glance what's left.
             text(&symbol.name)
@@ -2979,11 +3488,22 @@ pub(crate) fn outline_content(app: &App) -> Element<'_, Message> {
             None
         };
 
-        let mut col = Column::new().spacing(1).push(label);
+        // What is said under the name — its summary, the reader's note —
+        // starting a little past where the name does.
+        let mut under: Vec<Element<'_, Message>> = Vec::new();
+        let under_left = indent + OUTLINE_TOGGLE_W + 2.0 + 44.0;
+        let under_right = 6.0 + 2.0 + OUTLINE_PENCIL_W;
         // What a row's second line has, beside its indent and the list's
         // scrollbar: its words cut to it with an ellipsis — cut at 52
         // characters, then at the panel's edge, they ended mid-word.
-        let line_room = (app.sidebar_width - 44.0 - 6.0 - SCROLLBAR_W - 12.0).max(40.0);
+        let line_room = (app.sidebar_width
+            - 2.0 * super::sidebar::SIDE_PAD
+            - 44.0
+            - 6.0
+            - SCROLLBAR_W
+            - 12.0
+            - indent)
+            .max(40.0);
         let fit = |s: &str| super::steady::cut(s, line_room, ts::CAPTION, crate::fonts::UI);
         if let Some(full) = summary {
             // A one-line table-of-contents entry: the first sentence, truncated
@@ -3001,9 +3521,9 @@ pub(crate) fn outline_content(app: &App) -> Element<'_, Message> {
             .width(Fill)
             .padding(Padding {
                 top: 0.0,
-                right: 6.0,
+                right: under_right,
                 bottom: 0.0,
-                left: 44.0,
+                left: under_left,
             });
             let bubble = container(text(clean).size(ts::SMALL).color(theme::fg()))
                 .padding(Padding {
@@ -3014,7 +3534,11 @@ pub(crate) fn outline_content(app: &App) -> Element<'_, Message> {
                 })
                 .max_width(TIP_MAX_W)
                 .style(theme::modal_panel);
-            col = col.push(super::tip::tip(line, bubble, tooltip::Position::Bottom).gap(4.0));
+            under.push(
+                super::tip::tip(line, bubble, tooltip::Position::Bottom)
+                    .gap(4.0)
+                    .into(),
+            );
         }
         if let Some(n) = note.filter(|n| !n.text.is_empty()) {
             // The reader's own note, in accent so it's distinct from the
@@ -3037,9 +3561,9 @@ pub(crate) fn outline_content(app: &App) -> Element<'_, Message> {
             .width(Fill)
             .padding(Padding {
                 top: 0.0,
-                right: 4.0,
+                right: under_right,
                 bottom: 0.0,
-                left: 44.0,
+                left: under_left,
             });
             let bubble = container(text(n.text.as_str()).size(ts::SMALL).color(theme::fg()))
                 .padding(Padding {
@@ -3050,7 +3574,11 @@ pub(crate) fn outline_content(app: &App) -> Element<'_, Message> {
                 })
                 .max_width(TIP_MAX_W)
                 .style(theme::modal_panel);
-            col = col.push(super::tip::tip(line, bubble, tooltip::Position::Bottom).gap(4.0));
+            under.push(
+                super::tip::tip(line, bubble, tooltip::Position::Bottom)
+                    .gap(4.0)
+                    .into(),
+            );
         }
 
         // Leading "understood" toggle and trailing note pencil sit inside
@@ -3094,16 +3622,25 @@ pub(crate) fn outline_content(app: &App) -> Element<'_, Message> {
         ));
         // Each says what it does where the pointer rests, as in All notes:
         // here, where they are first seen, they said nothing.
-        let toggle = super::toolbar::tip_at(
-            toggle,
-            if understood {
-                tr!("Mark not understood")
-            } else {
-                tr!("Mark understood")
-            },
-            None,
-            tooltip::Position::Bottom,
-        );
+        let toggle: Element<'_, Message> = if crate::notes::is_read_through(&symbol.kind) {
+            super::toolbar::tip_at(
+                toggle,
+                if understood {
+                    tr!("Mark not understood")
+                } else {
+                    tr!("Mark understood")
+                },
+                None,
+                tooltip::Position::Bottom,
+            )
+        } else {
+            // A field or a constant: no circle, its room kept so the names
+            // stay in line.
+            space()
+                .width(OUTLINE_TOGGLE_W)
+                .height(OUTLINE_TOGGLE_W)
+                .into()
+        };
         let pencil = super::toolbar::tip_at(
             pencil,
             if has_text {
@@ -3114,20 +3651,27 @@ pub(crate) fn outline_content(app: &App) -> Element<'_, Message> {
             None,
             tooltip::Position::Bottom,
         );
-        // Top-align so the toggle circle and pencil sit on the kind-badge/name
-        // line rather than floating in the middle of the multi-line row.
+        // The circle, the name and the pencil centred on one line, what is
+        // said of the symbol under it: top-aligned beside the whole column,
+        // the circle and pencil sat 3 below the name they belong to.
         let jump = button(
-            row![toggle, col.width(Fill), pencil]
-                .spacing(2)
-                .align_y(iced::alignment::Vertical::Top),
+            column![
+                row![space().width(indent), toggle, label.width(Fill), pencil]
+                    .spacing(2)
+                    .align_y(iced::Center),
+            ]
+            .extend(under)
+            .spacing(1),
         )
         .style(theme::list_row(is_current))
         .width(Fill)
+        // Its circle at the sidebar's line for words, under the section's
+        // name; its pencil's end where the name's count ends.
         .padding(Padding {
             top: 2.0,
             right: 2.0,
             bottom: 2.0,
-            left: 2.0,
+            left: 0.0,
         })
         .on_press(super::heard::row(
             || symbol.name.clone(),
@@ -3136,42 +3680,180 @@ pub(crate) fn outline_content(app: &App) -> Element<'_, Message> {
         rows.push(jump.into());
     }
 
-    // Sub-label under "OUTLINE": the reader's manual "understood" coverage for
-    // this file. Plain text, left-aligned with the section header — no decorative
-    // leading circle (that read as a stray, non-clickable control). Explain-All
-    // progress lives only in the status bar, so it isn't duplicated here.
-    let names = crate::notes::note_keys(&v.symbols);
-    let (done, total) = crate::notes::coverage(&app.proj.notes, &v.rel, &names);
-    // What "understood" counts, said where the pointer rests: the circle
-    // beside each name was never explained.
-    let header_content: Element<'_, Message> = super::toolbar::tip_at(
-        text(tr!("{done}/{total} understood", done = done, total = total))
-            .size(ts::SMALL)
-            .color(theme::fg_muted()),
-        tr!("Tick the circle beside a function once you've read it; this counts them"),
-        None,
-        iced::widget::tooltip::Position::Bottom,
-    );
-    let header = container(header_content).padding(Padding {
-        top: 2.0,
-        right: 10.0,
-        bottom: 4.0,
-        left: 10.0,
-    });
-
     // The wrapping column must be Fill so the scrollable has a bounded height to
     // scroll within — otherwise it grows to its content and never scrolls (which
     // made long outlines like main.rs's 224 symbols un-navigable).
-    column![
-        header,
-        scrollable(Column::with_children(rows).width(Fill))
-            .id(outline_scroll_id())
-            .direction(thin_scroll())
-            .style(theme::overlay_scrollbar)
-            .height(Fill),
-    ]
+    // Its rows' bands stand in from the sidebar's edges as the Files view's
+    // do, under the views' switch: they ran from edge to edge.
+    scrollable(Column::with_children(rows).width(Fill).padding(Padding {
+        top: 0.0,
+        right: super::sidebar::SIDE_PAD,
+        bottom: 0.0,
+        left: super::sidebar::SIDE_PAD,
+    }))
+    .id(outline_scroll_id())
+    .direction(thin_scroll())
+    .style(theme::overlay_scrollbar)
     .height(Fill)
     .into()
+}
+
+/// How much of the open file's outline the reader has marked understood —
+/// "0/7 understood", what is read through and not every field and
+/// constant — beside the section's name: none with no outline.
+pub(crate) fn outline_understood(app: &App) -> Option<Element<'_, Message>> {
+    let v = app.active_viewer()?;
+    if v.symbols.is_empty() {
+        return None;
+    }
+    let names: Vec<String> = crate::notes::note_keys(&v.symbols)
+        .into_iter()
+        .zip(&v.symbols)
+        .filter(|(_, s)| crate::notes::is_read_through(&s.kind))
+        .map(|(key, _)| key)
+        .collect();
+    let (done, total) = crate::notes::coverage(&app.proj.notes, &v.rel, &names);
+    // What "understood" counts, said where the pointer rests: the circle
+    // beside each name was never explained.
+    Some(super::toolbar::tip_at(
+        text(tr!("{done}/{total} understood", done = done, total = total))
+            .size(ts::SMALL)
+            .color(theme::fg_muted())
+            .wrapping(Wrapping::None),
+        tr!("Tick the circle beside a function once you've read it to count it here"),
+        None,
+        iced::widget::tooltip::Position::Bottom,
+    ))
+}
+
+/// How far an outline row at `depth` stands in: a step per level, four at
+/// most, so a deep item keeps room for its name.
+fn outline_indent(depth: usize) -> f32 {
+    depth.min(4) as f32 * OUTLINE_INDENT_STEP
+}
+
+/// One level of an outline's indent.
+const OUTLINE_INDENT_STEP: f32 = 12.0;
+
+/// The room an outline row's understood circle takes, and its note pencil.
+const OUTLINE_TOGGLE_W: f32 = 21.0;
+const OUTLINE_PENCIL_W: f32 = 20.0;
+
+/// The outline's row heading a Rust `impl` block's items — `impl Display
+/// for Point` — as deep as what holds it, and as tall as an item's row: a
+/// jump to the block's line. It has no circle or pencil: a block is not
+/// read and ticked off, its items are.
+/// The kind symbol `index` is shown as: a function whose innermost holder
+/// is a class is that class's method — Python's `def` in a `class` was
+/// listed "fn" and named a "function", while a Rust `impl`'s and a
+/// JavaScript class's were methods.
+pub(crate) fn shown_kind(symbols: &[crate::outline::Symbol], index: usize) -> &str {
+    let Some(sym) = symbols.get(index) else {
+        return "";
+    };
+    if sym.kind != "function" {
+        return &sym.kind;
+    }
+    let holder = symbols
+        .iter()
+        .enumerate()
+        .filter(|(i, s)| {
+            *i != index && s.line <= sym.line && s.end_line >= sym.end_line && s.end_line > s.line
+        })
+        .max_by_key(|(i, s)| (s.line, *i));
+    match holder {
+        Some((_, h)) if matches!(h.kind.as_str(), "class" | "struct" | "interface" | "trait") => {
+            "method"
+        }
+        _ => &sym.kind,
+    }
+}
+
+/// Whether an `impl` block holds none of the outline's items:
+/// `impl Eq for P {}` heads no rows.
+fn holds_nothing(
+    symbols: &[crate::outline::Symbol],
+    group: &clew_core::outline::ImplBlock,
+) -> bool {
+    !symbols
+        .iter()
+        .any(|s| s.line >= group.line && s.line <= group.end_line)
+}
+
+fn outline_group_row<'a>(
+    app: &App,
+    group: &clew_core::outline::ImplBlock,
+    depth: usize,
+    empty: bool,
+) -> Element<'a, Message> {
+    let indent = outline_indent(depth);
+    let room = (app.sidebar_width
+        - 2.0 * super::sidebar::SIDE_PAD
+        - indent
+        - OUTLINE_TOGGLE_W
+        - OUTLINE_PENCIL_W
+        - 34.0
+        - 4.0
+        - 6.0
+        - SCROLLBAR_W
+        - 12.0)
+        .max(40.0);
+    let shown = super::steady::cut(&group.label, room, ts::BODY, crate::fonts::UI);
+    // Cut ("From<HashMap<…") — the whole of it where the pointer rests.
+    let cut = shown != group.label;
+    let label = row![
+        // An empty one stays, quieter: it says what the type implements,
+        // with nothing under it to read.
+        text(short_kind("implementation"))
+            .size(ts::CAPTION)
+            .color(if empty {
+                theme::dim()
+            } else {
+                theme::kind_color("implementation")
+            })
+            .width(34),
+        text(shown)
+            .size(ts::BODY)
+            .color(if empty {
+                theme::dim()
+            } else {
+                theme::fg_muted()
+            })
+            .wrapping(Wrapping::None),
+    ]
+    .spacing(4)
+    .align_y(iced::Center);
+    let face = row![
+        space().width(indent),
+        space().width(OUTLINE_TOGGLE_W).height(OUTLINE_TOGGLE_W),
+        container(label)
+            .width(Fill)
+            .height(OUTLINE_TOGGLE_W)
+            .align_y(iced::Center),
+        space().width(OUTLINE_PENCIL_W),
+    ]
+    .spacing(2)
+    .align_y(iced::alignment::Vertical::Top);
+    let name = format!("impl {}", group.label);
+    let whole = name.clone();
+    let row = button(face)
+        .style(theme::list_row(false))
+        .width(Fill)
+        .padding(Padding {
+            top: 2.0,
+            right: 2.0,
+            bottom: 2.0,
+            left: 0.0,
+        })
+        .on_press(super::heard::row(
+            move || name.clone(),
+            Message::Editor(EditorMsg::OutlineJump(group.line)),
+        ));
+    if cut {
+        super::toolbar::tip_at(row, whole, None, tooltip::Position::Bottom)
+    } else {
+        row.into()
+    }
 }
 
 /// A commit's id as the reader sees it: git's own seven characters, the same
@@ -3184,6 +3866,37 @@ pub(crate) fn short_sha(sha: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A Python class's `def` is shown a method; a module's, and one
+    /// nested in a method, a function.
+    #[test]
+    fn a_def_in_a_class_is_shown_a_method() {
+        let src = "def top():\n    pass\n\n\
+                   class Desk:\n    def lend(self):\n        def helper():\n            pass\n        return helper\n";
+        let symbols = crate::outline::extract(src, "python");
+        let kind = |name: &str| {
+            let i = symbols.iter().position(|s| s.name == name).unwrap();
+            shown_kind(&symbols, i)
+        };
+        assert_eq!(kind("top"), "function");
+        assert_eq!(kind("lend"), "method");
+        assert_eq!(kind("Desk"), "class");
+        if symbols.iter().any(|s| s.name == "helper") {
+            assert_eq!(kind("helper"), "function", "{symbols:?}");
+        }
+    }
+
+    /// `impl Eq for P {}` holds nothing; `impl P { fn new() }` holds its
+    /// method, one line or many.
+    #[test]
+    fn an_impl_with_no_items_is_told_from_one_with_some() {
+        let src = "struct P;\nimpl Eq for P {}\nunsafe impl Send for P {\n}\n\
+                   impl P {\n    fn new() -> Self { P }\n}\nimpl Clone for P { fn clone(&self) -> P { P } }\n";
+        let symbols = crate::outline::extract(src, "rust");
+        let groups = clew_core::outline::rust_impl_blocks(src);
+        let empty: Vec<bool> = groups.iter().map(|g| holds_nothing(&symbols, g)).collect();
+        assert_eq!(empty, [true, true, false, false], "{groups:?}");
+    }
 
     /// One commit has one short name: git's seven characters, wherever it
     /// shows.

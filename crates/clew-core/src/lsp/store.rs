@@ -161,7 +161,7 @@ pub fn remove(name: &str, version: &str) -> Result<bool, String> {
         return Ok(false);
     }
     if !inside_store(&dir) {
-        return Err("refusing to remove a path outside the server store".into());
+        return Err("cannot remove a path outside the server store".into());
     }
     std::fs::remove_dir_all(&dir).map_err(|e| e.to_string())?;
     // Prune the now-empty parent name directory.
@@ -273,16 +273,17 @@ impl Located {
             return Ok(());
         }
         let Some(current) = self.install_digest() else {
-            return Err("this server is not installed by Clew — nothing to install".into());
+            return Err(
+                "this server is not installed by Clew, so there is nothing to install".into(),
+            );
         };
         match Sha256::parse(consented) {
             Some(consented) if consented == current => Ok(()),
             Some(_) => Err(
-                "the install changed after it was approved (was .clew/lsp.toml edited?) — \
-                 refusing it; review the new prompt and approve that instead"
+                "the install changed after it was approved (was .clew/lsp.toml edited?), so Clew did not run it. Review the new prompt and approve that instead"
                     .into(),
             ),
-            None => Err("the install approval is malformed — refusing".into()),
+            None => Err("the install approval is malformed, so Clew did not run the install".into()),
         }
     }
 }
@@ -341,7 +342,7 @@ pub fn locate(server: &EffectiveServer) -> Located {
     // `EffectiveServer` from anywhere.
     if !registry::is_plain_version(&server.version) {
         return Located::Unsupported(format!(
-            "{}: version {:?} is not a plain version — refusing to provision it",
+            "{}: version {:?} is not a plain version, so Clew will not install it",
             server.server_name,
             server.version.chars().take(64).collect::<String>()
         ));
@@ -363,7 +364,7 @@ pub fn locate(server: &EffectiveServer) -> Located {
             format!("{} is not available for this platform", server.server_name)
         } else {
             format!(
-                "{} {} is not available: Clew ships a verified {} only at {}. Remove the version from .clew/lsp.toml, or set a command of your own there.",
+                "{} {} is not available. Clew ships a verified {} only in version {}. Remove the version from .clew/lsp.toml, or set a command of your own there.",
                 server.server_name, server.version, server.server_name, spec.version
             )
         });
@@ -378,7 +379,7 @@ pub fn locate(server: &EffectiveServer) -> Located {
             return match find_on_path_unresolved(binary) {
                 Some(p) => Located::Ready(p),
                 None => Located::Unsupported(format!(
-                    "'{binary}' not found on PATH — {}, or choose where it is",
+                    "'{binary}' was not found on PATH. To fix this, {}, or choose where it is",
                     install_hint(binary)
                 )),
             };
@@ -405,7 +406,7 @@ fn install_hint(binary: &str) -> &'static str {
     match binary {
         "dart" => "install the Dart or Flutter SDK",
         "lake" => "install Lean with elan",
-        "jdtls" => "install Eclipse JDT LS (with Homebrew: “brew install jdtls”)",
+        "jdtls" => "install Eclipse JDT LS, for example with “brew install jdtls”",
         "ruby-lsp" => "install it with “gem install ruby-lsp”",
         "csharp-ls" => "install it with “dotnet tool install --global csharp-ls”",
         "elp" => "install the Erlang Language Platform (elp) from its releases",
@@ -610,8 +611,7 @@ fn toolchain_tool(tool: &str, path: Option<&OsStr>) -> Result<PathBuf, String> {
     path.and_then(|path| find_in_unresolved(path, tool))
         .ok_or_else(|| {
             format!(
-                "'{tool}' is required to install this server but was not found on PATH; \
-                 install it, or choose a server program of your own"
+                "'{tool}' is required to install this server but was not found on PATH. Install it, or choose a server program of your own"
             )
         })
 }
@@ -625,13 +625,13 @@ fn toolchain_install_with(
 ) -> Result<PathBuf, String> {
     if version != install.version {
         return Err(format!(
-            "the install was prepared for version {} but {version} was requested — refusing",
+            "the install was prepared for version {}, but {version} was requested, so Clew did not run it",
             install.version
         ));
     }
     // The path is derived from possibly project-supplied name/version.
     if !inside_store(dest_dir) {
-        return Err("refusing to install outside the server store".into());
+        return Err("cannot install outside the server store".into());
     }
     let parent = dest_dir
         .parent()
@@ -850,7 +850,7 @@ pub(crate) fn install_download(
 ) -> Result<PathBuf, String> {
     // Refused before any network traffic, not just before the write.
     if !inside(store, dest_dir) {
-        return Err("refusing to install outside the store".into());
+        return Err("cannot install outside the store".into());
     }
     let bytes = fetch(download.url, MAX_DOWNLOAD_BYTES, cancel)?;
     install_bytes(&bytes, download, dest_dir, store, archive::BUDGET)
@@ -868,7 +868,7 @@ pub(crate) fn install_download(
 /// policy in one way: no loopback exception — a store URL is always HTTPS.
 fn fetch(url: &str, cap: u64, cancel: &AtomicBool) -> Result<Vec<u8>, String> {
     if !url.starts_with("https://") {
-        return Err("refusing non-HTTPS download URL".into());
+        return Err("only HTTPS download URLs are allowed".into());
     }
     crate::net::get_cancellable(
         url,
@@ -898,13 +898,13 @@ fn install_bytes(
     // The destination is derived from a name/version that can come from the
     // project's lsp.toml — never touch a path outside the store.
     if !inside(store, dest_dir) {
-        return Err("refusing to install outside the store".into());
+        return Err("cannot install outside the store".into());
     }
     // Verify before we ever unpack or execute anything.
     let actual = Sha256::of(bytes);
     if actual != download.sha256 {
         return Err(format!(
-            "checksum mismatch: expected {}, got {actual}",
+            "the download's checksum is {actual}, but {} was expected",
             download.sha256
         ));
     }
@@ -1148,7 +1148,7 @@ mod tests {
             let mut dl = download(&gz, Archive::Gzip, "rust-analyzer");
             dl.sha256 = Sha256::of(b"something else");
             let err = install_bytes(&gz, &dl, &dest, &store(dir), archive::BUDGET).unwrap_err();
-            assert!(err.contains("checksum mismatch"), "{err}");
+            assert!(err.contains("checksum is"), "{err}");
             assert_eq!(std::fs::read(dest.join("rust-analyzer")).unwrap(), b"old");
 
             // A verified archive that lacks the binary fails the same way:
@@ -1282,7 +1282,7 @@ mod tests {
         let never = AtomicBool::new(false);
         let cap = 256 * 1024;
         let err = fetch("http://127.0.0.1:9/artifact", cap, &never).unwrap_err();
-        assert!(err.contains("non-HTTPS"), "{err}");
+        assert!(err.contains("only HTTPS"), "{err}");
         // Cancelled before it started: no connection is even attempted.
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();

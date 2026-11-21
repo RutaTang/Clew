@@ -290,7 +290,7 @@ impl Adapter {
                 .await;
         }
         if loaded.contains("Failed,") {
-            return Err("the program did not compile — see the output".into());
+            return Err("the program did not compile. See the output".into());
         }
         let quoted: Vec<String> = self.args.iter().map(|a| haskell_string(a)).collect();
         // `:set args` takes them as Haskell would read a command line.

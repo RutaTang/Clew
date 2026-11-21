@@ -93,7 +93,7 @@ impl Hub {
         let config = config.clone();
         tokio::spawn(async move { slot.connect(&config).await })
             .await
-            .unwrap_or_else(|e| Err(format!("the connect failed: {e}")))
+            .unwrap_or_else(|e| Err(format!("the connection failed: {e}")))
     }
 
     /// Connect every enabled server of `configs` (at once) and list its

@@ -186,6 +186,92 @@ pub(crate) fn cut(content: &str, room: f32, size: f32, font: Font) -> String {
     cut
 }
 
+/// A text cut to lines, by text, room, lines, size and font: the key of
+/// [`CUT_LINES`].
+type CutKey = (String, u32, usize, u32, Font);
+
+thread_local! {
+    /// Texts cut to a number of lines, by what they were cut for.
+    static CUT_LINES: RefCell<HashMap<CutKey, String>> = RefCell::new(HashMap::new());
+}
+
+/// `content` as it fits in `lines` lines `room` wide at `size` in `font`,
+/// its lines `line_height` apart: whole, or cut after its last whole word
+/// that leaves room for an ellipsis. A note's summary clipped at its box's
+/// foot ended mid-sentence, the line under it sliced through.
+pub(crate) fn cut_lines(
+    content: &str,
+    room: f32,
+    lines: usize,
+    size: f32,
+    line_height: f32,
+    font: Font,
+) -> String {
+    let key = (
+        content.to_string(),
+        room.to_bits(),
+        lines,
+        size.to_bits(),
+        font,
+    );
+    if let Some(cut) = CUT_LINES.with(|m| m.borrow().get(&key).cloned()) {
+        return cut;
+    }
+    let tall = |s: &str| {
+        let paragraph =
+            Plain::<<iced::Renderer as core_text::Renderer>::Paragraph>::new(core_text::Text {
+                content: s.to_string(),
+                bounds: Size::new(room.max(1.0), f32::INFINITY),
+                size: size.into(),
+                line_height: text::LineHeight::Relative(line_height),
+                font,
+                align_x: core_text::Alignment::Left,
+                align_y: iced::alignment::Vertical::Top,
+                shaping: core_text::Shaping::default(),
+                wrapping: core_text::Wrapping::WordOrGlyph,
+            });
+        paragraph.min_bounds().height
+    };
+    // Half a line of slack: a box of `lines` lines, not one more.
+    let most = (lines as f32 + 0.5) * size * line_height;
+    let cut = if lines == 0 {
+        String::new()
+    } else if tall(content) <= most {
+        content.to_string()
+    } else {
+        // Cut only between words.
+        let ends: Vec<usize> = content
+            .char_indices()
+            .filter(|&(_, c)| c.is_whitespace())
+            .map(|(i, _)| i)
+            .collect();
+        let with = |n: usize| format!("{}…", content[..ends[n]].trim_end());
+        let (mut lo, mut hi) = (0usize, ends.len());
+        // The most words that, with the ellipsis, still fit.
+        while lo < hi {
+            let mid = (lo + hi).div_ceil(2);
+            if tall(&with(mid - 1)) <= most {
+                lo = mid;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        if lo == 0 {
+            "…".to_string()
+        } else {
+            with(lo - 1)
+        }
+    };
+    CUT_LINES.with(|m| {
+        let mut m = m.borrow_mut();
+        if m.len() >= MEASURED_CAP {
+            m.clear();
+        }
+        m.insert(key, cut.clone());
+    });
+    cut
+}
+
 /// [`cut`], measured.
 fn cut_measured(content: &str, room: f32, size: f32, font: Font) -> String {
     if width_of(content, size, font) <= room {

@@ -216,7 +216,7 @@ fn interfaces(corpus: &Corpus) -> Option<ProjectMap> {
     let mut map = MapBuilder::new(
         "go.interfaces",
         "Interface satisfaction",
-        "each type and the interfaces whose methods it has — Go never says so in the code; matched by method name and parameter count, embedded interfaces and promoted methods included",
+        "each type and the interfaces whose methods it has (Go code never states this), matched by method name and parameter count, including embedded interfaces and promoted methods",
     );
     let mut all: Vec<Satisfiable> = ifaces
         .iter()
@@ -279,7 +279,7 @@ fn goroutines(corpus: &Corpus) -> Option<ProjectMap> {
     let mut map = MapBuilder::new(
         "go.goroutines",
         "Goroutines and channels",
-        "an arrow from a function to each goroutine it starts (go), and to each channel it sends on or closes; from a channel to each function that receives from it",
+        "an arrow from a function to each goroutine it starts (go) and to each channel it sends on or closes, and from a channel to each function that receives from it",
     );
     let defs = corpus.defs();
     for source in corpus.in_langs(&[Lang::Go]) {
@@ -513,7 +513,7 @@ fn packages(corpus: &Corpus) -> Option<ProjectMap> {
     let mut map = MapBuilder::new(
         "go.packages",
         "Go packages",
-        "each of the project's packages and an arrow to each of the others it imports; the detail gives its layer (0 imports none of them) and any import cycle it is in",
+        "each of the project's packages and an arrow to each of the others it imports. The detail gives its layer (0 imports none of them) and any import cycle it is in",
     );
     for (i, name) in names.iter().enumerate() {
         let label = if name.is_empty() {

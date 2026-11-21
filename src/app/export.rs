@@ -35,7 +35,7 @@ pub(crate) fn render(x: &Export<'_>) -> String {
     let mut out = String::new();
     out.push_str(&format!(
         "# {}\n\n",
-        tr!("{project} — reading notes", project = md(x.project))
+        tr!("Reading notes for {project}", project = md(x.project))
     ));
     out.push_str(&format!("{}\n\n", tr!("Exported from Clew.")));
 
@@ -264,8 +264,7 @@ impl App {
                 // glossary is the project's, not theirs.
                 if !self.has_reading_record() {
                     self.status = tr!(
-                        "Nothing to export yet: notes, bookmarks, the files read and saved \
-                         walkthroughs are what an export holds"
+                        "Nothing to export yet. An export includes your notes, bookmarks, saved walkthroughs and the files you've read"
                     )
                     .into();
                     return Task::none();
@@ -310,7 +309,7 @@ impl App {
         }
         if self.docs_loading() && waited < DOCS_WAITS {
             if waited == 0 {
-                self.status = tr!("Exporting — waiting for the API docs…").into();
+                self.status = tr!("Waiting for the API docs before exporting…").into();
             }
             let stamp = self.stamp();
             // Created where it is polled: a timer needs the runtime's context.
@@ -449,7 +448,7 @@ mod export_tests {
             glossary: &glossary,
         });
         let expected = "\
-# demo — reading notes
+# Reading notes for demo
 
 Exported from Clew.
 

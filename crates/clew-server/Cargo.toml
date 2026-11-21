@@ -11,6 +11,9 @@ rust-version = "1.95"
 # DBGp (Xdebug's debugging protocol, `php-debug`) carries values in base64.
 base64 = { version = "0.23.1", default-features = false, features = ["std"] }
 clew-core = { path = "../clew-core" }
+# The plugin tools an agent writes, builds and tries plugins with; trying
+# and installing are asked of Clew's window (no plugin runtime here).
+clew-plugin = { path = "../clew-plugin", default-features = false }
 clew-protocol = { path = "../clew-protocol" }
 notify-debouncer-full = "0.7.0"
 # Reads DBGp's XML replies (`php-debug`): small, read-only, no dependencies.

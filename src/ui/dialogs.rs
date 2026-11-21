@@ -38,6 +38,7 @@ pub(crate) fn bp_condition_modal<'a>(
 ) -> Element<'a, Message> {
     let (path, line, draft) = edit;
     prompt_modal(Prompt {
+        question: None,
         title: tr!(
             "Break at {location} when…",
             location = format!("{}:{}", rel_of(app, path), line)
@@ -57,6 +58,7 @@ pub(crate) fn bp_condition_modal<'a>(
         cancel: Message::Debug(DebugMsg::BpConditionCancel),
         // A breakpoint already there can be taken away where its condition
         // is: the dialog offered only to set one.
+        needs_value: false,
         remove: app
             .debug
             .breakpoints
@@ -75,6 +77,7 @@ pub(crate) fn bp_condition_modal<'a>(
 pub(crate) fn bookmark_note_modal(edit: &(String, usize, String)) -> Element<'_, Message> {
     let (rel, line, draft) = edit;
     prompt_modal(Prompt {
+        question: None,
         title: tr!("Note for {location}", location = format!("{rel}:{line}")),
         placeholder: tr!("a short note to your future self…"),
         value: draft,
@@ -83,6 +86,7 @@ pub(crate) fn bookmark_note_modal(edit: &(String, usize, String)) -> Element<'_,
         submit: Message::Reading(ReadingMsg::BookmarkNoteSave),
         submit_label: tr!("Save"),
         cancel: Message::Reading(ReadingMsg::BookmarkNoteCancel),
+        needs_value: false,
         remove: None,
     })
 }
@@ -91,6 +95,7 @@ pub(crate) fn bookmark_note_modal(edit: &(String, usize, String)) -> Element<'_,
 pub(crate) fn reading_note_modal(edit: &(String, String, String)) -> Element<'_, Message> {
     let (rel, symbol, draft) = edit;
     prompt_modal(Prompt {
+        question: None,
         title: tr!("Note on {symbol} in {file}", symbol = symbol, file = rel),
         placeholder: tr!("what you worked out about this symbol…"),
         value: draft,
@@ -99,6 +104,7 @@ pub(crate) fn reading_note_modal(edit: &(String, String, String)) -> Element<'_,
         submit: Message::Reading(ReadingMsg::NoteEditSave),
         submit_label: tr!("Save"),
         cancel: Message::Reading(ReadingMsg::NoteEditCancel),
+        needs_value: false,
         remove: None,
     })
 }
@@ -330,7 +336,7 @@ pub(crate) fn finder_modal(app: &App) -> Element<'_, Message> {
         // Past the end: where Enter goes, the last line, said as such.
         let last = app.active_viewer().map(|v| v.lines.len().max(1));
         let said = match last {
-            Some(last) if n > last => tr!("Go to line {n}, the last line", n = last),
+            Some(last) if n > last => tr!("Go to line {n} (the last line)", n = last),
             _ => tr!("Go to line {n}", n = n),
         };
         rows.push(
@@ -683,7 +689,7 @@ fn bar_rows<'a>(app: &'a App, rows: &mut Vec<Element<'a, Message>>) {
 fn stale_finder_row<'a>(selected: bool) -> Element<'a, Message> {
     button(
         container(
-            text(tr!("— no longer in the project —"))
+            text(tr!("(no longer in the project)"))
                 .size(ts::SMALL)
                 .color(theme::dim()),
         )

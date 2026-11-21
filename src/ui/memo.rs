@@ -80,6 +80,11 @@ pub struct ViewMemo {
     /// The project glossary, keyed on the docs generation and the explain
     /// cache sequence it was built from (`App::glossary`).
     pub(crate) glossary: Memo<(u64, u64), crate::app::glossary::Glossary>,
+    /// The open Rust file's `impl` blocks, which head its outline's items
+    /// (`App::outline_groups`), keyed by the file and the very text they
+    /// were read from — held, so a new text is never taken for it.
+    pub(crate) outline_groups:
+        Memo<(std::path::PathBuf, Arc<String>), Vec<clew_core::outline::ImplBlock>>,
 }
 
 /// One "CONTAINS" row: what it shows, and the node it opens.

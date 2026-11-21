@@ -155,11 +155,10 @@ impl App {
             overlay_open: false,
             arm_on_enter: window_unplaced(),
             acp_agents: clew_core::acp::config::load().0,
-            // Load the persisted appearance settings and point the palette at
-            // them before the first frame, so the window opens in the right theme.
+            // The appearance and the language the first frame is drawn in:
+            // the saved ones for the first window, those of the windows open
+            // for a later one.
             theme_pref: {
-                // And the language, so the first frame speaks it: the saved
-                // one for the first window, the one spoken for a later one.
                 crate::i18n::init();
                 theme::init()
             },
@@ -168,6 +167,7 @@ impl App {
                 ..UpdateState::default()
             },
             usage: Default::default(),
+            plugins: crate::app::plugins::Plugins::new(),
             graph_mode: true,
             graph_3d: true,
             graph_spin: true,
@@ -182,6 +182,8 @@ impl App {
             blame_why_seq: 0,
             insight_seq: 0,
             proof_seq: 0,
+            lean_goals_seq: 0,
+            lean_goals_offered: false,
             palette: Vec::new(),
             palette_recent: Vec::new(),
             palette_home: Vec::new(),
@@ -204,8 +206,11 @@ impl App {
             pending_g: false,
             pending_z: false,
             modifiers: keyboard::Modifiers::default(),
-            status: tr!("Open a folder to start reading").to_string(),
-            status_seen: tr!("Open a folder to start reading").to_string(),
+            // Nothing said until there is something to say: with no folder
+            // open, the welcome page offers one, and the Files view says
+            // there is none — the status bar said it a third time.
+            status: String::new(),
+            status_seen: String::new(),
             status_since: None,
             status_lang: crate::i18n::current(),
             waiting_said: None,
@@ -235,13 +240,14 @@ impl App {
             window_focused: true,
             asking: Default::default(),
             controls_hovered: false,
+            status_hovered: false,
             // The design's sidebar, as it is laid out: its six views take
             // 234 between its 10s.
             sidebar_width: 254.0,
             right_width: 272.0,
             bottom_height: 340.0,
             bottom_sized: false,
-            font_size: DEFAULT_FONT_SIZE,
+            font_size: saved_code_size(),
             #[cfg(test)]
             stale_dropped: 0,
             walk_ui: WalkUi::default(),
@@ -340,6 +346,18 @@ impl App {
             subs.push(
                 iced::time::every(crate::app::speech::SPEAK_TICK)
                     .map(|_| Message::Voice(crate::VoiceMsg::SpeakTick)),
+            );
+        }
+        // What an agent outside Clew asks of the window through
+        // `clew-server mcp`: trying a plugin it built, installing one.
+        if let Some(data) = clew_core::lsp::store::data_root() {
+            subs.push(crate::app::plugins::requests_subscription(data));
+        }
+        // While a plugin's command runs: how far it has come, as it says.
+        if self.plugins.running.is_some() {
+            subs.push(
+                iced::time::every(std::time::Duration::from_millis(250))
+                    .map(|_| Message::Plugin(crate::app::plugins::PluginMsg::ProgressTick)),
             );
         }
         // No per-frame clock for the graph maps: the canvas requests its own
@@ -600,13 +618,38 @@ impl App {
     ) {
         let said = say();
         self.status = said.clone();
+        // Said where the pointer rests, it holds still from the first: as
+        // the failure it takes the place of did, or with nothing beside it,
+        // as nothing is.
+        let held = self
+            .failure_notice
+            .as_ref()
+            .and_then(|f| f.held)
+            .or(self.status_hovered.then_some(false));
         self.failure_notice = Some(crate::app::state::FailureNotice {
             said,
             retry,
             of,
             again: Some(crate::app::state::SayAgain(std::sync::Arc::new(say))),
             about: None,
+            subject: None,
+            spot: None,
+            held,
         });
+    }
+
+    /// Say what the failure standing now is of, as its words name it, and
+    /// where in Settings → Plugins it is about (`FailureNotice::subject`,
+    /// `FailureNotice::spot`).
+    pub(crate) fn failure_in(
+        &mut self,
+        subject: Option<String>,
+        spot: Option<crate::app::plugins::SettingsSpot>,
+    ) {
+        if let Some(notice) = self.failure_notice.as_mut() {
+            notice.subject = subject;
+            notice.spot = spot;
+        }
     }
 
     /// Say which Language model field the failure standing now is about
@@ -629,6 +672,17 @@ impl App {
             })
     }
 
+    /// Whether the status line says something beside the failure it stands
+    /// (`failure_notice`) — its own words are not said again — or, with
+    /// none standing, says anything.
+    pub(crate) fn said_beside_failure(&self) -> bool {
+        !self.status.is_empty()
+            && self
+                .failure_notice
+                .as_ref()
+                .is_none_or(|f| f.said != self.status)
+    }
+
     /// Take a standing failure of `of` away: what it was of was done again
     /// successfully, or dismissed where it was asked for.
     pub(crate) fn forget_failure_of(&mut self, of: crate::app::state::FailureOf) {
@@ -646,12 +700,15 @@ impl App {
     }
 
     /// Take a notice off the status line once it has been up for
-    /// `STATUS_LIFETIME`: the line goes back to the project's counts.
+    /// `STATUS_LIFETIME`: the line goes back to the project's counts. Not
+    /// while the pointer is on the line: what is read there, or reached
+    /// for, stays; and one said meanwhile beside a failure held still may
+    /// have had no room to be said in (`FailureNotice::held`).
     pub(crate) fn expire_status(&mut self) {
         let due = self
             .status_since
             .is_some_and(|since| since.elapsed() >= STATUS_LIFETIME);
-        if due && self.status_may_expire() {
+        if due && self.status_may_expire() && !self.status_hovered {
             self.status.clear();
             self.note_status();
         }
@@ -791,6 +848,19 @@ impl App {
             }
             WindowMsg::ControlsHover(over) => {
                 self.controls_hovered = over;
+                Task::none()
+            }
+            WindowMsg::StatusHover(over) => {
+                self.status_hovered = over;
+                let beside = self.said_beside_failure();
+                if let Some(notice) = self.failure_notice.as_mut() {
+                    notice.held = over.then_some(beside);
+                }
+                // A notice that waited out the pointer is given its time
+                // again, to be read now it can be (`expire_status`).
+                if !over && self.status_since.is_some() {
+                    self.status_since = Some(std::time::Instant::now());
+                }
                 Task::none()
             }
             WindowMsg::DismissFailure => {
@@ -1071,7 +1141,7 @@ impl App {
                 self.rebinding = None;
                 if let Err(other) = self.keymap.reset(action) {
                     self.keymap_notice = Some(tr!(
-                        "Its default shortcut is now used by “{action}” — change that one first",
+                        "Its default shortcut is now used by “{action}”. Change that shortcut first.",
                         action = crate::i18n::lookup(other.label())
                     ));
                     return Task::none();
@@ -1118,7 +1188,7 @@ impl App {
             }
             WindowMsg::NoFileDialog => {
                 self.status =
-                    tr!("No file dialog could open here — install xdg-desktop-portal or zenity")
+                    tr!("No file dialog could open here. Install xdg-desktop-portal or zenity.")
                         .into();
                 Task::none()
             }
@@ -1180,7 +1250,35 @@ fn view_pref(key: &str, default: bool) -> bool {
         .unwrap_or(default)
 }
 
+/// The code's text size as the reader last set it — by the zoom keys or
+/// Settings → Appearance — within what the view draws. It was the default
+/// at every launch, whatever had been chosen.
+fn saved_code_size() -> f32 {
+    if cfg!(test) {
+        return DEFAULT_FONT_SIZE;
+    }
+    clew_core::globalconfig::get(CODE_SIZE_KEY)
+        .and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64)))
+        .map(|size| (size as f32).clamp(theme::MIN_TEXT_SIZE, MAX_FONT_SIZE))
+        .unwrap_or(DEFAULT_FONT_SIZE)
+}
+
 impl App {
+    /// Keep the code's text size for the next launch. Not kept, it still
+    /// holds for this session, and the reader is told.
+    pub(crate) fn keep_code_size(&mut self) {
+        if cfg!(test) {
+            return;
+        }
+        let saved = clew_core::globalconfig::set_keys(vec![(
+            CODE_SIZE_KEY.to_string(),
+            toml::Value::Float(f64::from(self.font_size)),
+        )]);
+        if let Err(e) = saved {
+            self.status = tr!("Could not save settings: {error}", error = e);
+        }
+    }
+
     /// Keep a View-menu choice for the next launch. Not kept, it still holds
     /// for this session, and the reader is told.
     pub(crate) fn keep_view_pref(&mut self, key: &str, on: bool) {

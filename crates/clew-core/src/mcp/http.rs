@@ -128,7 +128,7 @@ impl HttpLink {
             "http" if crate::net::is_loopback_http(url) => {}
             "http" => {
                 return Err(McpError::Config(format!(
-                    "{url}: plain http to another machine would send everything in the clear — use https"
+                    "{url}: plain http to another machine would send everything unencrypted. Use https"
                 )));
             }
             other => {
@@ -658,7 +658,7 @@ fn read_response(
         return Err(Failed {
             status: Some(status),
             error: McpError::Config(format!(
-                "the server redirected to {} — configure that URL instead",
+                "the server redirected to {}. Configure that URL instead",
                 header("location")
             )),
         });

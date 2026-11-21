@@ -703,14 +703,14 @@ impl Agent {
                 name,
                 ..
             }) if args.is_empty() => {
-                format!("{name} — run the agent's command in a terminal, then ask again")
+                format!("{name}. Run the agent's command in a terminal, then ask again")
             }
             Some(AuthMethod {
                 terminal: Some(args),
                 name,
                 ..
             }) => format!(
-                "{name} — run the agent's command with {} in a terminal, then ask again",
+                "{name}. Run the agent's command with {} in a terminal, then ask again",
                 args.join(" ")
             ),
             _ => "sign in with the agent's own command in a terminal, then ask again".into(),
@@ -1221,7 +1221,7 @@ fn project_rel(root: &Path, path: &str) -> Result<String, RpcError> {
     }
     let rel = path.strip_prefix(root).map_err(|_| {
         RpcError::invalid_params(format!(
-            "{} is outside the project — Clew serves only the project's files",
+            "{} is outside the project. Clew serves only the project's files",
             path.display()
         ))
     })?;

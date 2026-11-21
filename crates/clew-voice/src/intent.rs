@@ -117,73 +117,252 @@ struct Title {
 
 /// How well what was said fits a title, better the greater: its words said
 /// exactly, its optional words said, its optional words left unsaid (fewer
-/// is better), its own "do it" words said, and its length (shorter is
-/// better).
-type Score = (usize, usize, Reverse<usize>, usize, Reverse<usize>);
+/// is better), its own "do it" words said, its length (shorter is better),
+/// and whether its words were said in its order ("JSON to YAML" is not
+/// "YAML to JSON").
+type Score = (usize, usize, Reverse<usize>, usize, Reverse<usize>, bool);
 
 /// The index in `titles` of the command `utterance` names, if it plainly
 /// names exactly one.
 pub fn command(utterance: &str, titles: &[&str]) -> Option<usize> {
-    let (said, polarity) = utterance_words(utterance);
-    if said.is_empty() {
-        return None;
+    match command_ties(utterance, titles)[..] {
+        [one] => Some(one),
+        _ => None,
     }
-    // Every word said, the ones that only say "do it" too: which of a
-    // title's own such words were said tells "add to ask" from "ask".
-    let all_said = words(utterance);
-    let mut best: Option<(Score, usize)> = None;
-    let mut tied = false;
-    for (index, text) in titles.iter().enumerate() {
-        let title = read_title(text);
-        if title.required.is_empty() {
-            continue;
-        }
-        let agrees = match (title.polarity, polarity) {
-            (Polarity::Show, Polarity::Hide) | (Polarity::Hide, Polarity::Show) => false,
-            // "Close the call graph" does not open it.
-            (Polarity::Neither, Polarity::Hide) => false,
-            // A title that is only its category and what it does ("Find:
-            // Close"): what it does is said, or "find" would close it.
-            (Polarity::Show | Polarity::Hide, said) if title.by_category => said == title.polarity,
-            _ => true,
-        };
-        if !agrees {
-            continue;
-        }
-        let Some((exact, optional)) = fit(&said, &title) else {
+}
+
+/// The indices in `titles` of the commands `utterance` names best, all as
+/// well as each other: one when it plainly names one, none when it names
+/// none.
+pub fn command_ties(utterance: &str, titles: &[&str]) -> Vec<usize> {
+    best_of(titles.iter().map(|title| score(utterance, title)))
+}
+
+/// The indices of the greatest of `ranks`, all as great as each other;
+/// none when there is none.
+fn best_of<R: Ord>(ranks: impl Iterator<Item = Option<R>>) -> Vec<usize> {
+    let mut best: Option<R> = None;
+    let mut tied: Vec<usize> = Vec::new();
+    for (index, rank) in ranks.enumerate() {
+        let Some(rank) = rank else {
             continue;
         };
-        // Equally well said, the title that says no more than was said wins:
-        // "view docs" is "View Docs", not "Sidebar: Docs"; "ask" is "Ask",
-        // not "Add to Ask".
-        let own = words(text);
-        // Its own verbs, not the small words between them: "go to ask" is
-        // Ask, "add to ask" Add to Ask.
-        let verbs_said = own
-            .iter()
-            .filter(|w| {
-                VERBS.contains(&w.as_str())
-                    && !LINKING.contains(&w.as_str())
-                    && all_said.contains(w)
-            })
-            .count();
-        let score = (
-            exact,
-            optional,
-            Reverse(title.optional.len() - optional),
-            verbs_said,
-            Reverse(own.len()),
-        );
-        match best {
-            Some((top, _)) if score < top => {}
-            Some((top, _)) if score == top => tied = true,
+        match &best {
+            Some(top) if rank < *top => {}
+            Some(top) if rank == *top => tied.push(index),
             _ => {
-                best = Some((score, index));
-                tied = false;
+                best = Some(rank);
+                tied = vec![index];
             }
         }
     }
-    if tied { None } else { best.map(|(_, i)| i) }
+    tied
+}
+
+/// How well `utterance` names the command titled `text`; `None` when it
+/// does not.
+fn score(utterance: &str, text: &str) -> Option<Score> {
+    let (said, polarity) = utterance_words(utterance);
+    let title = read_title(text);
+    let (exact, optional) = fits_read(&said, polarity, &title)?;
+    // Equally well said, the title that says no more than was said wins:
+    // "view docs" is "View Docs", not "Sidebar: Docs"; "ask" is "Ask",
+    // not "Add to Ask".
+    let own = words(text);
+    // Its own verbs, not the small words between them, said (every word
+    // said counts here, the ones that only say "do it" too): "go to ask"
+    // is Ask, "add to ask" Add to Ask.
+    let all_said = words(utterance);
+    let verbs_said = own
+        .iter()
+        .filter(|w| {
+            VERBS.contains(&w.as_str()) && !LINKING.contains(&w.as_str()) && all_said.contains(w)
+        })
+        .count();
+    Some((
+        exact,
+        optional,
+        Reverse(title.optional.len() - optional),
+        verbs_said,
+        Reverse(own.len()),
+        in_order_of(&all_said, &own),
+    ))
+}
+
+/// Whether the words of `said` that are `own`'s — as spelled, or close to
+/// it — were said in `own`'s order.
+fn in_order_of(said: &[String], own: &[String]) -> bool {
+    let is = |w: &str, o: &str| w == o || near(w, o);
+    let mut from = 0;
+    for w in said.iter().filter(|w| own.iter().any(|o| is(w, o))) {
+        match own[from..].iter().position(|o| is(w, o)) {
+            Some(i) => from += i + 1,
+            None => return false,
+        }
+    }
+    true
+}
+
+/// How well what was said names one of the commands named alike: how well
+/// its name was said; then how many of the words in its brackets that say
+/// what it is were said, each as spelled ("todos" is not `todo`'s);
+/// whether all of them were; how many of those that only say "do it" or
+/// which way to turn something ("view", "close") — counted only when all
+/// the rest were said, as a word like "a" or "close" said without the rest
+/// is the speaker's, not the id's; and whether its words were said in
+/// their order (`acme-wc`, not `wc-acme`).
+type AlikeRank = (Score, usize, bool, usize, bool);
+
+/// The indices in `commands` — commands named alike: each the name and,
+/// for some, words of their own in brackets after it (a plugin's id) —
+/// of those `utterance` names best, all as well as each other; none when
+/// it names none.
+///
+/// What was said is read as the name alone, and as the words in a
+/// command's brackets with the name: the better reading counts. So "call
+/// graph" is Clew's own "Call Graph", and "call graph call graph" the
+/// plugin `call-graph`'s; "word count count words" is no more the plugin
+/// `word-count`'s "Word count: Count words" than another's; "… todo" is
+/// `todo`'s, "… todo view" `todo-view`'s, and "… todo close" `todo-close`'s,
+/// though "close" said with a command's name alone would close it.
+pub fn alike_ties(utterance: &str, commands: &[(&str, Option<&str>)]) -> Vec<usize> {
+    best_of(
+        commands
+            .iter()
+            .map(|(name, aside)| alike_rank(utterance, name, *aside)),
+    )
+}
+
+/// How well `utterance` names the command `name` with `aside` in brackets
+/// after it ([`alike_ties`]).
+fn alike_rank(utterance: &str, name: &str, aside: Option<&str>) -> Option<AlikeRank> {
+    let aside = aside.map(words).unwrap_or_default();
+    let none = aside.is_empty();
+    let bare = score(utterance, name).map(|s| (s, 0, none, 0, none));
+    if none {
+        return bare;
+    }
+    let said = words(utterance);
+    let own = words(name);
+    // The name's own words that only say "do it" or which way to turn
+    // something, said: the name's, never the id's ("show" said of "Lint:
+    // Show warnings" is not the plugin `acme-show`'s).
+    let mut names = vec![false; said.len()];
+    for w in own.iter().filter(|w| only_does(w)) {
+        if let Some(i) = (0..said.len()).find(|&i| !names[i] && said[i] == *w) {
+            names[i] = true;
+        }
+    }
+    let telling = aside.iter().filter(|w| !only_does(w)).count();
+    // Read with every word of the id placed where it can be, and with the
+    // id's words the name has too left to the name: "hide ask tools" is
+    // the plugin `ask-tools`'s "Ask: Hide", its "ask" the name's.
+    let read = |leave_the_names: bool| -> Option<AlikeRank> {
+        let placing = |w: &str| !(leave_the_names && !only_does(w) && own.iter().any(|o| o == w));
+        let (at, used) = place_id(&said, &names, &aside, |w| placing(w) && !only_does(w));
+        let told = at.iter().flatten().count();
+        // Its words that only say "do it" or which way to turn something
+        // count only with all the rest: all of it placed again, at once.
+        let every = (told == telling)
+            .then(|| place_id(&said, &names, &aside, placing))
+            .filter(|(every, _)| every.iter().all(Option::is_some));
+        let (at, used, all, did) = match every {
+            Some((every, used)) => (every, used, true, aside.len() - telling),
+            None => (at, used, false, 0),
+        };
+        let placed: Vec<usize> = at.iter().flatten().copied().collect();
+        let in_order = all && placed.windows(2).all(|pair| pair[0] < pair[1]);
+        let rest: Vec<&str> = said
+            .iter()
+            .zip(used.iter().zip(&names))
+            .filter(|(_, (used, name))| !**used || **name)
+            .map(|(w, _)| w.as_str())
+            .collect();
+        score(&rest.join(" "), name).map(|s| (s, told, all, did, in_order))
+    };
+    bare.max(read(false)).max(read(true))
+}
+
+/// Where each word of `aside` that `placing` takes was said, as spelled,
+/// among the words `names` leaves free (where its first word was, of two
+/// run together). Placed from its last word back, each before the next
+/// where it can be, so an id's words said after the name's, the name's
+/// own among them, are found there: `acme-count` in "word count count
+/// words acme count", not the name's first "count". With the words said
+/// placed.
+fn place_id(
+    said: &[String],
+    names: &[bool],
+    aside: &[String],
+    placing: impl Fn(&str) -> bool,
+) -> (Vec<Option<usize>>, Vec<bool>) {
+    let mut used = names.to_vec();
+    let mut at = vec![None; aside.len()];
+    let mut before = said.len();
+    for (k, w) in aside.iter().enumerate().rev() {
+        if !placing(w) {
+            continue;
+        }
+        let place = place_spelled(said, &used, w, before)
+            .or_else(|| place_spelled(said, &used, w, said.len()));
+        if let Some((i, n)) = place {
+            used[i..i + n].iter_mut().for_each(|u| *u = true);
+            before = before.min(i);
+            at[k] = Some(i);
+        }
+    }
+    (at, used)
+}
+
+/// The last place before `before` where `word` was said as spelled among
+/// the words not yet placed — as one word, or as two run together ("acme
+/// 2" for `acme2`): its first word and how many. Never a word only close
+/// to it: "notes" is not `notes2`.
+fn place_spelled(
+    said: &[String],
+    used: &[bool],
+    word: &str,
+    before: usize,
+) -> Option<(usize, usize)> {
+    let before = before.min(said.len());
+    if let Some(i) = (0..before).rev().find(|&i| !used[i] && said[i] == word) {
+        return Some((i, 1));
+    }
+    (0..before.saturating_sub(1))
+        .rev()
+        .find(|&i| !used[i] && !used[i + 1] && format!("{}{}", said[i], said[i + 1]) == word)
+        .map(|i| (i, 2))
+}
+
+/// A text as the voice reads it: its words, lowercase, one space apart —
+/// so names read alike are keyed alike ("Call-Graph", "call graph…").
+pub fn plain_words(text: &str) -> String {
+    words(text).join(" ")
+}
+
+/// Whether `word` only says "do it", or which way to turn something.
+fn only_does(word: &str) -> bool {
+    VERBS.contains(&word) || SHOW.contains(&word) || HIDE.contains(&word)
+}
+
+/// [`fit`], when the way the words turn things agrees with the title's.
+fn fits_read(said: &[String], polarity: Polarity, title: &Title) -> Option<(usize, usize)> {
+    if said.is_empty() || title.required.is_empty() {
+        return None;
+    }
+    let agrees = match (title.polarity, polarity) {
+        (Polarity::Show, Polarity::Hide) | (Polarity::Hide, Polarity::Show) => false,
+        // "Close the call graph" does not open it.
+        (Polarity::Neither, Polarity::Hide) => false,
+        // A title that is only its category and what it does ("Find:
+        // Close"): what it does is said, or "find" would close it.
+        (Polarity::Show | Polarity::Hide, said) if title.by_category => said == title.polarity,
+        _ => true,
+    };
+    if !agrees {
+        return None;
+    }
+    fit(said, title)
 }
 
 /// Lowercase words, apostrophes dropped (`let's` → `lets`).
@@ -248,9 +427,10 @@ fn read_title(title: &str) -> Title {
         .into_iter()
         .filter(|w| !VERBS.contains(&w.as_str()))
         .collect();
-    let aside = words(aside)
+    let aside: Vec<String> = words(aside)
         .into_iter()
-        .filter(|w| !VERBS.contains(&w.as_str()));
+        .filter(|w| !VERBS.contains(&w.as_str()))
+        .collect();
     // Nothing but a verb after the category ("Ask: Hide", "Find: Close"):
     // the category is what is named, and must be said.
     let by_category = required.is_empty();
@@ -329,10 +509,14 @@ fn near(a: &str, b: &str) -> bool {
 /// Whether `x` is `y` inflected: a plural (`files`, `hierarchies`), or a
 /// verb's `-ing` or `-ed` (`debugging`, `zoomed`).
 fn inflected(x: &str, y: &str) -> bool {
+    // A letter doubled before the ending ("running"): the word without
+    // one of them, cut by its letter, not its bytes ("ññing").
     let doubled = |stem: &str| {
         let mut chars = stem.chars().rev();
-        matches!((chars.next(), chars.next()), (Some(a), Some(b)) if a == b)
-            && stem[..stem.len() - 1] == *y
+        match (chars.next(), chars.next()) {
+            (Some(a), Some(b)) if a == b => stem.strip_suffix(a) == Some(y),
+            _ => false,
+        }
     };
     x.strip_suffix("es") == Some(y)
         || x.strip_suffix('s') == Some(y)
@@ -362,6 +546,179 @@ fn edits_at_most_one(a: &[char], b: &[char]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Commands named alike are told apart by the words in their brackets,
+    /// read with the name or not, whichever reads better — never by a
+    /// word the name has too, or that only says "do it", alone.
+    #[test]
+    fn commands_named_alike_are_told_apart_by_the_words_in_their_brackets() {
+        const NAME: &str = "Word count: Count words";
+        let ties = |said: &str, asides: &[Option<&str>]| {
+            let commands: Vec<(&str, Option<&str>)> = asides.iter().map(|a| (NAME, *a)).collect();
+            alike_ties(said, &commands)
+        };
+        let both = [Some("word-count"), Some("acme-wc")];
+        // The name said: its words are the name's, not an id's.
+        assert_eq!(ties("word count count words", &both), [0, 1]);
+        assert_eq!(ties("count words word count", &both), [0, 1]);
+        assert_eq!(ties("count words", &both), [0, 1]);
+        // The name and an id, or the id's own word.
+        assert_eq!(ties("word count count words word count", &both), [0]);
+        assert_eq!(ties("word count count words acme wc", &both), [1]);
+        assert_eq!(ties("count words acme", &both), [1]);
+        assert!(ties("make coffee", &both).is_empty());
+        assert!(ties("word count count words too", &both).is_empty());
+        // Clew's own beside them: the name said is its.
+        let with_own = [None, Some("word-count"), Some("acme-wc")];
+        assert_eq!(ties("word count count words", &with_own), [0]);
+        assert_eq!(ties("count words word count", &with_own), [0]);
+        assert_eq!(ties("word count count words word count", &with_own), [1]);
+        // A word both ids have names neither; one id inside another, the
+        // one said whole.
+        let ids = [Some("acme-wc"), Some("beta-wc")];
+        assert_eq!(ties("word count count words wc", &ids), [0, 1]);
+        let ids = [Some("acme-wc"), Some("wc")];
+        assert_eq!(ties("word count count words wc", &ids), [1]);
+        assert_eq!(ties("count words wc", &ids), [1]);
+        assert_eq!(ties("word count count words acme", &ids), [0]);
+        // Words that only say "do it", or which way to turn something:
+        // they tell ids apart said with the rest of one, never alone.
+        let todo = [
+            Some("todo"),
+            Some("todo-view"),
+            Some("todo-open"),
+            Some("todo-close"),
+        ];
+        assert_eq!(ties("word count count words todo", &todo), [0]);
+        assert_eq!(ties("word count count words todo view", &todo), [1]);
+        assert_eq!(ties("open word count count words todo", &todo), [2]);
+        assert_eq!(ties("word count count words todo close", &todo), [3]);
+        assert_eq!(ties("word count count words", &todo), [0, 1, 2, 3]);
+        let tools = [Some("a-tools"), Some("b-tools")];
+        let ties =
+            |said: &str| alike_ties(said, &[("Run checks", tools[0]), ("Run checks", tools[1])]);
+        assert_eq!(ties("run checks"), [0, 1]);
+        assert_eq!(ties("run a check"), [0, 1], "a is the speaker's");
+        assert_eq!(ties("run checks tools"), [0, 1]);
+        assert_eq!(ties("run checks a tools"), [0]);
+        assert_eq!(ties("run checks b tools"), [1]);
+        // An id only of the name's words: the name said is Clew's own.
+        let graphs = [("Call Graph", None), ("Call graph", Some("call-graph"))];
+        assert_eq!(alike_ties("call graph", &graphs), [0]);
+        assert_eq!(alike_ties("open the call graph", &graphs), [0]);
+        assert_eq!(alike_ties("call graph call graph", &graphs), [1]);
+        assert!(alike_ties("explain the call graph", &graphs).is_empty());
+        // A word that turns things, said without the rest of an id: the
+        // speaker's, and nothing here is closed or turned off.
+        let todo_close =
+            |said: &str| alike_ties(said, &[(NAME, Some("todo")), (NAME, Some("todo-close"))]);
+        assert!(todo_close("close word count count words").is_empty());
+        assert_eq!(todo_close("word count count words todo close"), [1]);
+        let off = [("Call Graph", None), ("Call graph", Some("x-off"))];
+        assert!(alike_ties("turn off the call graph", &off).is_empty());
+        // The name's own such word is the name's, not an id's.
+        let lint = |said: &str| {
+            alike_ties(
+                said,
+                &[
+                    ("Lint: Show warnings", Some("acme")),
+                    ("Lint: Show warnings", Some("acme-show")),
+                ],
+            )
+        };
+        assert_eq!(lint("lint show warnings acme"), [0]);
+        assert_eq!(lint("lint show warnings acme show"), [1]);
+        let minimap = [
+            ("View: Show Minimap", None),
+            ("View: Show Minimap", Some("show")),
+        ];
+        assert_eq!(alike_ties("view show minimap", &minimap), [0]);
+        assert_eq!(alike_ties("view show minimap show", &minimap), [1]);
+        // An id's words as spelled: one close to another id's is not it.
+        let spelled = |said: &str, ids: [&str; 2]| {
+            alike_ties(said, &[(NAME, Some(ids[0])), (NAME, Some(ids[1]))])
+        };
+        assert_eq!(
+            spelled("word count count words todos", ["todo", "todos"]),
+            [1]
+        );
+        assert_eq!(
+            spelled("word count count words todo", ["todo", "todos"]),
+            [0]
+        );
+        assert_eq!(
+            spelled("word count count words acme 2", ["acme1", "acme2"]),
+            [1]
+        );
+        assert_eq!(
+            spelled("word count count words view", ["view", "views"]),
+            [0]
+        );
+        assert_eq!(
+            spelled("word count count words views", ["view", "views"]),
+            [1]
+        );
+        // Two words run together as spelled, though one is close to it.
+        assert_eq!(
+            spelled("word count count words notes 2", ["notes1", "notes2"]),
+            [1]
+        );
+        assert!(spelled("word count count words notes", ["notes1", "notes2"]).is_empty());
+        // The same words in another order: the id said in its order.
+        assert_eq!(
+            spelled("word count count words acme wc", ["acme-wc", "wc-acme"]),
+            [0]
+        );
+        assert_eq!(
+            spelled("word count count words wc acme", ["acme-wc", "wc-acme"]),
+            [1]
+        );
+        assert_eq!(
+            spelled("word count count words todo todo", ["todo", "todo-todo"]),
+            [1]
+        );
+        // An id's word the name has too: the id said together, in its
+        // order, after the name — wherever the name's own is.
+        assert_eq!(
+            spelled(
+                "word count count words acme count",
+                ["acme-count", "count-acme"]
+            ),
+            [0]
+        );
+        assert_eq!(
+            spelled(
+                "word count count words count acme",
+                ["acme-count", "count-acme"]
+            ),
+            [1]
+        );
+        // Said before the name, its word is placed before the id's next,
+        // not on the name's last.
+        assert_eq!(
+            spelled(
+                "count acme word count count words",
+                ["acme-count", "count-acme"]
+            ),
+            [1]
+        );
+        // Said once, that word is the name's, and the rest of the id the
+        // id's: "hide ask tools" is `ask-tools`'s "Ask: Hide".
+        let ask = [("Ask: Hide", None), ("Ask: Hide", Some("ask-tools"))];
+        assert_eq!(alike_ties("hide ask tools", &ask), [1]);
+        assert_eq!(alike_ties("hide ask", &ask), [0]);
+    }
+
+    /// Endings are cut by letters, not bytes: a doubled letter of two
+    /// bytes before "-ing" or "-ed" reads as one, as "running" is "run".
+    #[test]
+    fn words_of_letters_of_more_than_one_byte_are_read_whole() {
+        assert!(near("running", "run"));
+        assert!(near("ññing", "ñ"));
+        assert!(near("ééed", "é"));
+        assert_eq!(command_ties("ééed ññing", &["éé", "ññ ééed"]), [1]);
+        assert_eq!(plain_words("Call-Graph…"), "call graph");
+    }
 
     /// A window's worth of titles, as the palette lists them.
     const TITLES: &[&str] = &[
@@ -568,5 +925,20 @@ mod tests {
             Some(1)
         );
         assert_eq!(command("file", &["Go to File…", "Sidebar: Files"]), Some(0));
+    }
+
+    /// Two titles of the same words, equally well said: the one whose words
+    /// were said in its order.
+    #[test]
+    fn words_said_in_a_titles_order_name_it() {
+        let titles = ["JSON to YAML", "YAML to JSON"];
+        assert_eq!(command_ties("json to yaml", &titles), [0]);
+        assert_eq!(command_ties("yaml to json", &titles), [1]);
+        let titles = ["Toggle Bookmark", "Bookmark: Toggle"];
+        assert_eq!(command_ties("toggle bookmark", &titles), [0]);
+        assert_eq!(command_ties("toggle the bookmark", &titles), [0]);
+        assert_eq!(command_ties("bookmark toggle", &titles), [1]);
+        // Close to its words, as a speech model spells them, as well.
+        assert_eq!(command_ties("toggle bookmarks", &titles), [0]);
     }
 }

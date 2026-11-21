@@ -94,6 +94,13 @@ pub struct DapClient {
     /// other: the session is asked to end once, and no handle goes before
     /// it has ended.
     disconnect: Arc<std::sync::Mutex<Option<Disconnecting>>>,
+    /// The exceptions the adapter stops at unless told otherwise, as its
+    /// `initialize` answer lists them (`exceptionBreakpointFilters` marked
+    /// `default`): debugpy's uncaught exceptions. Sent at configuration
+    /// ([`Self::set_default_exception_breakpoints`]): debugpy stops at none
+    /// it is not told of, and a program died of an exception with the
+    /// debugger never pausing where it was raised.
+    exception_filters: Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 impl DapClient {
@@ -243,7 +250,7 @@ impl DapClient {
     pub async fn connect_tcp_addr(addr: SocketAddr) -> Result<(DapClient, DapEvents), String> {
         if !addr.ip().is_loopback() {
             return Err(tr!(
-                "refusing to open a debug session on {addr}: only a loopback adapter is used",
+                "Clew won't open a debug session on {addr} because it only uses debug adapters on loopback",
                 addr = addr
             ));
         }
@@ -297,6 +304,7 @@ impl DapClient {
             addr,
             timeout: REQUEST_TIMEOUT,
             disconnect: Default::default(),
+            exception_filters: Default::default(),
         };
         (client, events)
     }
@@ -347,8 +355,30 @@ impl DapClient {
     }
 
     pub async fn initialize(&self) -> Result<Value, String> {
-        self.request("initialize", initialize_args(crate::i18n::current()))
+        let capabilities = self
+            .request("initialize", initialize_args(crate::i18n::current()))
+            .await?;
+        if let Ok(mut filters) = self.exception_filters.lock() {
+            *filters = super::proto::default_exception_filters(&capabilities);
+        }
+        Ok(capabilities)
+    }
+
+    /// Have the adapter stop at the exceptions it stops at by default
+    /// ([`Self::exception_filters`]), as an editor asks at configuration.
+    /// Nothing is sent to an adapter with none.
+    pub async fn set_default_exception_breakpoints(&self) -> Result<(), String> {
+        let filters = self
+            .exception_filters
+            .lock()
+            .map(|f| f.clone())
+            .unwrap_or_default();
+        if filters.is_empty() {
+            return Ok(());
+        }
+        self.request("setExceptionBreakpoints", json!({ "filters": filters }))
             .await
+            .map(|_| ())
     }
 
     /// Launch the program with adapter-specific arguments. Sent at once; the
@@ -732,8 +762,8 @@ impl EventSink {
                 text: format!(
                     "{}\n",
                     trn!(
-                        "[Clew] 1 byte of output dropped — the program wrote faster than it could be shown",
-                        "[Clew] {n} bytes of output dropped — the program wrote faster than it could be shown",
+                        "[Clew] 1 byte of output dropped because the program wrote faster than it could be shown",
+                        "[Clew] {n} bytes of output dropped because the program wrote faster than it could be shown",
                         n
                     )
                 ),
@@ -909,7 +939,7 @@ impl framing::Protocol for DapWire {
             format!(
                 "{}\n",
                 tr!(
-                    "[Clew] the debug adapter's output broke framing ({error}) — ending the session",
+                    "[Clew] ending the session because the debug adapter's output broke framing ({error})",
                     error = error
                 )
             )
@@ -2263,7 +2293,10 @@ mod tests {
         let err = DapClient::connect_tcp_addr(SocketAddr::from(([10, 0, 0, 5], 4000)))
             .await
             .unwrap_err();
-        assert!(err.contains("only a loopback"), "{err}");
+        assert!(
+            err.contains("only uses debug adapters on loopback"),
+            "{err}"
+        );
     }
 
     /// A helper an adapter script starts in its own process group — a

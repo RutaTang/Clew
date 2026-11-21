@@ -1,0 +1,22 @@
+# What a Clew plugin is written against: the bindings to Clew's plugin API
+# (crates/clew-plugin/wit/plugin.wit), the `Plugin` trait and `export!`, and
+# builders for what a plugin shows. See docs/plugins.md and
+# crates/clew-plugin/GUIDE.md.
+#
+# Clew writes this crate next to every plugin it builds and the plugin
+# depends on it by path: it is never fetched. It has no dependencies, no
+# build script and no proc macro, so a plugin that adds none of its own
+# builds with nothing running but the compiler.
+[package]
+name = "clew-plugin-sdk"
+version = "0.1.0"
+# 2021 and 1.82, not the workspace's 2024 and 1.95: a plugin is built with
+# whatever Rust the user has, and 1.82 is the first with `wasm32-wasip2`
+# as a supported target.
+edition = "2021"
+rust-version = "1.82"
+publish = false
+license = "MIT OR Apache-2.0"
+
+[lib]
+path = "src/lib.rs"

@@ -1155,7 +1155,7 @@ pub fn typescript_installs(root: &Path, host: &ToolHost) -> Vec<ToolchainCandida
     let mut out: Vec<ToolchainCandidate> = Vec::new();
     out.extend(install(
         root.join("node_modules/typescript"),
-        &|v| format!("The project's TypeScript {v} — runs the project's own code"),
+        &|v| format!("The project's TypeScript {v} (runs the project's own code)"),
         true,
     ));
     let mut globals = vec![
@@ -1453,7 +1453,7 @@ exclude = ["crates/skip"]
         let found = typescript_installs(&root, &host);
         assert_eq!(
             found[0].name,
-            "The project's TypeScript 5.4.5 — runs the project's own code"
+            "The project's TypeScript 5.4.5 (runs the project's own code)"
         );
         assert!(found[0].project);
         assert_eq!(

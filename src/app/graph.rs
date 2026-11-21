@@ -139,19 +139,19 @@ impl GaveUp {
     fn before(self, lang: &str, status: &str) -> String {
         match self {
             GaveUp::NotStarted => tr!(
-                "The {language} server did not start within {time} — {status}",
+                "The {language} server did not start within {time}. {status}",
                 language = crate::app::languages::language_name(lang),
                 time = in_words(REFINE_WAIT_LIMIT),
                 status = status
             ),
             GaveUp::NotLoaded => tr!(
-                "The {language} server did not load the project within {time} — {status}",
+                "The {language} server did not load the project within {time}. {status}",
                 language = crate::app::languages::language_name(lang),
                 time = in_words(REFINE_LOAD_LIMIT),
                 status = status
             ),
             GaveUp::Silent => tr!(
-                "The {language} server reported nothing for {time} while loading the project — {status}",
+                "The {language} server reported nothing for {time} while loading the project. {status}",
                 language = crate::app::languages::language_name(lang),
                 time = in_words(REFINE_WAIT_LIMIT),
                 status = status
@@ -248,7 +248,7 @@ fn function_languages(
 /// Free `value` on the blocking pool, not on the thread that serves every
 /// window: what an import job leaves behind (a graph, a resolver, a batch) is
 /// a map per file, a key per entry, a set of every path.
-fn free_off_thread(value: impl Send + 'static) -> Task<Message> {
+pub(crate) fn free_off_thread(value: impl Send + 'static) -> Task<Message> {
     #[cfg(test)]
     HANDED_OFF.with(|n| n.set(n.get() + 1));
     Task::future(async move {
@@ -614,6 +614,11 @@ impl App {
     }
 
     pub(crate) fn on_open_overlay(&mut self, which: Overlay) -> Task<Message> {
+        // A plugin graph being built for Project Graphs is not built on
+        // under another overlay.
+        if which != Overlay::ProjectMaps {
+            self.stop_plugin_map_builds(None);
+        }
         // A search typed over another map is not this one's.
         if self.proj.overlay != Some(which) {
             self.graph_search.clear();
@@ -639,7 +644,8 @@ impl App {
         }
         if which == Overlay::ProjectMaps {
             // Read when stale; the map shown until then is the last one read.
-            task = Task::batch([task, self.ensure_maps()]);
+            // A plugin's graph chosen is built again if the project moved.
+            task = Task::batch([task, self.ensure_maps(), self.ensure_plugin_map()]);
         }
         if which == Overlay::ProjectCalls {
             // The call graph is brought up to date on demand
@@ -931,7 +937,7 @@ impl App {
                     let retry = self.fetch_remote_ts_configs_after(TS_CONFIGS_RETRY_BACKOFF);
                     self.proj.remote_ts_configs_retry = Some(self.proj.remote_ts_configs_gen);
                     self.status = tr!(
-                        "Could not read tsconfig/jsconfig from the remote host ({error}) — trying once more",
+                        "Could not read tsconfig/jsconfig from the remote host ({error}). Trying again…",
                         error = e
                     );
                     return retry;
@@ -939,19 +945,19 @@ impl App {
                 let last_read = self.proj.remote_ts_configs.is_some();
                 self.status = match (retried, last_read) {
                     (true, true) => tr!(
-                        "Could not read tsconfig/jsconfig from the remote host, even on a second try ({error}) — their `paths` aliases resolve as last read until a config changes",
+                        "Could not read tsconfig/jsconfig from the remote host, even on a second try ({error}). Their `paths` aliases use the last values read until a config changes.",
                         error = e
                     ),
                     (true, false) => tr!(
-                        "Could not read tsconfig/jsconfig from the remote host, even on a second try ({error}) — their `paths` aliases stay unresolved until a config changes",
+                        "Could not read tsconfig/jsconfig from the remote host, even on a second try ({error}). Their `paths` aliases stay unresolved until a config changes.",
                         error = e
                     ),
                     (false, true) => tr!(
-                        "Could not read tsconfig/jsconfig from the remote host ({error}) — their `paths` aliases resolve as last read until a config changes",
+                        "Could not read tsconfig/jsconfig from the remote host ({error}). Their `paths` aliases use the last values read until a config changes.",
                         error = e
                     ),
                     (false, false) => tr!(
-                        "Could not read tsconfig/jsconfig from the remote host ({error}) — their `paths` aliases stay unresolved until a config changes",
+                        "Could not read tsconfig/jsconfig from the remote host ({error}). Their `paths` aliases stay unresolved until a config changes.",
                         error = e
                     ),
                 };
@@ -980,7 +986,7 @@ impl App {
             return;
         }
         if let Some(note) = &note {
-            self.status = format!("{} — {note}", self.status);
+            self.status = crate::i18n::sentences(&self.status, note);
         }
         self.proj.ts_cap_note = note;
     }
@@ -1101,7 +1107,7 @@ impl App {
                 let mut failed = applied.map(Arc::unwrap_or_clone);
                 self.status = if retried {
                     tr!(
-                        "Could not update the import graph, even on a second try ({error}) — those changes are skipped until their files change again",
+                        "Could not update the import graph, even on a second try ({error}). Those changes are skipped until their files change again.",
                         error = e
                     )
                 } else if let Some(batch) =
@@ -1109,12 +1115,12 @@ impl App {
                 {
                     work.retry = Some(batch);
                     tr!(
-                        "Could not update the import graph ({error}) — trying once more",
+                        "Could not update the import graph ({error}). Trying again…",
                         error = e
                     )
                 } else {
                     tr!(
-                        "Could not update the import graph ({error}) — newer changes are applied instead",
+                        "Could not update the import graph ({error}). Newer changes are applied instead.",
                         error = e
                     )
                 };
@@ -1153,13 +1159,13 @@ impl App {
             let others = done.applied.unresolvable.len() - 1;
             self.status = match others {
                 0 => tr!(
-                    "Could not resolve the imports of {file} ({panic}) — left unresolved",
+                    "Could not resolve the imports of {file} ({panic})",
                     file = self.rel_of(first),
                     panic = panic
                 ),
                 n => trn!(
-                    "Could not resolve the imports of {file} ({panic}) and 1 other file — left unresolved",
-                    "Could not resolve the imports of {file} ({panic}) and {n} other files — left unresolved",
+                    "Could not resolve the imports of {file} ({panic}) and 1 other file",
+                    "Could not resolve the imports of {file} ({panic}) and {n} other files",
                     n,
                     file = self.rel_of(first),
                     panic = panic
@@ -1488,20 +1494,27 @@ impl App {
         match maps {
             Ok(maps) => {
                 let retired =
-                    free_off_thread(std::mem::replace(&mut self.proj.maps, Arc::new(maps)));
+                    free_off_thread(std::mem::replace(&mut self.proj.core_maps, Arc::new(maps)));
                 self.proj.maps_rev = Some(rev);
                 self.proj.maps_error = None;
+                // With the plugins' graphs after them; the one chosen, if a
+                // plugin's, built now that the project's are read.
+                let composed = self.compose_maps();
+                let plugin = self.ensure_plugin_map();
                 let relayout = match self.proj.overlay == Some(Overlay::ProjectMaps) {
                     true => self.refresh_graph_layout(),
                     false => Task::none(),
                 };
-                Task::batch([retired, relayout])
+                Task::batch([retired, composed, plugin, relayout])
             }
             Err(e) => {
                 // Not read: nothing is current, and the overlay says why.
+                // The plugins' graphs are still offered.
                 self.proj.maps_rev = None;
                 self.proj.maps_error = Some(e);
-                Task::none()
+                let composed = self.compose_maps();
+                let plugin = self.ensure_plugin_map();
+                Task::batch([composed, plugin])
             }
         }
     }
@@ -1590,7 +1603,7 @@ impl App {
         calls.unrefined_out.clear();
         calls.built = false;
         self.status = tr!(
-            "{reason}: the call graph is name-based again — {next}",
+            "{reason}, so the call graph is name-based again ({next})",
             reason = crate::i18n::lookup(why),
             next = crate::i18n::lookup(then)
         );
@@ -2134,7 +2147,7 @@ impl App {
         if !calls.precise {
             return None;
         }
-        // Each part after a "; " says one thing whole.
+        // Each sentence after the first says one thing whole.
         let mut label = match self.refined_languages().as_slice() {
             [] => tr!("● LSP-precise").to_string(),
             covered => tr!(
@@ -2144,25 +2157,29 @@ impl App {
         };
         let left = self.languages_left_out();
         if !left.is_empty() {
-            label.push_str("; ");
-            label.push_str(&tr!(
-                "{languages} left out",
-                languages = crate::app::languages::language_names(&left)
-            ));
+            label = crate::i18n::sentences(
+                &label,
+                &tr!(
+                    "{languages} left out",
+                    languages = crate::app::languages::language_names(&left)
+                ),
+            );
         }
         match calls.unrefined.len() {
             0 => {}
             n => {
-                label.push_str("; ");
-                label.push_str(&trn!("1 function unrefined", "{n} functions unrefined", n));
+                label = crate::i18n::sentences(
+                    &label,
+                    &trn!("1 function not refined", "{n} functions not refined", n),
+                );
             }
         }
         let waiting = self.refine_waiting_for();
         if !waiting.is_empty() {
             let names =
                 crate::app::languages::language_names(&waiting.into_iter().collect::<Vec<_>>());
-            label.push_str("; ");
-            label.push_str(&tr!("waiting for {languages}", languages = names));
+            label =
+                crate::i18n::sentences(&label, &tr!("Waiting for {languages}", languages = names));
         }
         Some(label)
     }
@@ -2181,7 +2198,7 @@ impl App {
         let left = self.languages_left_out();
         if !left.is_empty() {
             summary.push_str(&tr!(
-                "Functions in {languages} are left out: no server was ready to refine them.",
+                "Functions in {languages} are left out because no server was ready to refine them.",
                 languages = crate::app::languages::language_names(&left)
             ));
         }
@@ -2197,14 +2214,14 @@ impl App {
                 }
                 summary.push_str(&if out_too {
                     trn!(
-                        "1 function could not be refined: calls into and out of it may be missing.",
-                        "{n} functions could not be refined: calls into and out of them may be missing.",
+                        "1 function could not be refined, so calls into and out of it may be missing.",
+                        "{n} functions could not be refined, so calls into and out of them may be missing.",
                         n
                     )
                 } else {
                     trn!(
-                        "1 function could not be refined: calls into it may be missing.",
-                        "{n} functions could not be refined: calls into them may be missing.",
+                        "1 function could not be refined, so calls into it may be missing.",
+                        "{n} functions could not be refined, so calls into them may be missing.",
                         n
                     )
                 });
@@ -2310,9 +2327,9 @@ impl App {
             // one is started. "Open a file" was said with one open.
             let open = self.proj.panes.iter().flatten().next().is_some();
             self.status = if open {
-                tr!("No language server is running — start one in Settings → Language servers, then retry")
+                tr!("No language server is running. Start one in Settings → Language servers, then retry.")
             } else {
-                tr!("No language server ready — open a file to start one, then retry")
+                tr!("No language server is ready. Open a file to start one, then retry.")
             }
             .into();
             return Task::none();
@@ -2397,8 +2414,8 @@ impl App {
                         defs.len()
                     ),
                     false => trn!(
-                        "Refining 1 function with LSP… ({languages} left out: no server ready)",
-                        "Refining {n} functions with LSP… ({languages} left out: no server ready)",
+                        "Refining 1 function with LSP… ({languages} skipped because no server is ready)",
+                        "Refining {n} functions with LSP… ({languages} skipped because no server is ready)",
                         defs.len(),
                         languages = crate::app::languages::language_names(&left)
                     ),
@@ -2578,17 +2595,19 @@ impl App {
             let count = unanswering.len();
             let names =
                 crate::app::languages::language_names(&unanswering.into_iter().collect::<Vec<_>>());
-            refined.push_str(" — ");
-            refined.push_str(&trn!(
-                "the {names} server stopped answering ({limit} timeouts in a row) and was skipped",
-                "the {names} servers stopped answering ({limit} timeouts in a row) and were skipped",
-                count,
-                names = names,
-                limit = REFINE_BREAKER_TIMEOUTS
-            ));
+            refined = crate::i18n::sentences(
+                &refined,
+                &trn!(
+                    "The {names} server stopped answering ({limit} timeouts in a row) and was skipped",
+                    "The {names} servers stopped answering ({limit} timeouts in a row) and were skipped",
+                    count,
+                    names = names,
+                    limit = REFINE_BREAKER_TIMEOUTS
+                ),
+            );
         }
         if let Some(note) = self.unrefined_note() {
-            refined.push_str(&format!(" — {note}"));
+            refined = crate::i18n::sentences(&refined, &note);
         }
         self.status.clone_from(&refined);
         let map = self.relayout_calls_map();
@@ -2603,7 +2622,7 @@ impl App {
         let fold = self.fold_refine_pending();
         // Those held for a starting server are said to be, still.
         if let Some(what) = self.refine_wait_note() {
-            self.status = tr!("{done} — waiting {what}", done = refined, what = what);
+            self.status = tr!("{done}. Waiting {what}", done = refined, what = what);
         }
         Task::batch([retired, map, fold])
     }
@@ -2616,8 +2635,8 @@ impl App {
         let unrefined = &self.proj.project_calls.unrefined;
         let ((file, name, _), why) = unrefined.iter().min_by(|a, b| a.0.cmp(b.0))?;
         Some(trn!(
-            "1 function unrefined ({name} in {file}: {reason})",
-            "{n} functions unrefined ({name} in {file}: {reason}, and {more} more)",
+            "1 function not refined ({name} in {file}: {reason})",
+            "{n} functions not refined ({name} in {file}: {reason}, and {more} more)",
             unrefined.len(),
             name = name,
             file = self.rel_of(file),
@@ -2736,6 +2755,8 @@ impl App {
                 self.proj.overlay = None;
                 self.proj.graph_pick = None;
                 self.graph_search.clear();
+                // A plugin graph being built for it is not built on unseen.
+                self.stop_plugin_map_builds(None);
                 Task::none()
             }
             GraphMsg::Picked(pick) => {
@@ -2768,6 +2789,7 @@ impl App {
             GraphMsg::OverlayOpenImports(path) => {
                 self.proj.overlay = None;
                 self.proj.graph_pick = None;
+                self.stop_plugin_map_builds(None);
                 // The sidebar stays as the reader had it: opening a module
                 // from a map swapped their Files for the Imports view.
                 self.open_file(path, None, true)
@@ -2775,13 +2797,24 @@ impl App {
             GraphMsg::OverlayOpenAt { abs, line } => {
                 self.proj.overlay = None;
                 self.proj.graph_pick = None;
+                self.stop_plugin_map_builds(None);
                 self.open_file(abs, Some(line), true)
             }
             GraphMsg::ProjectCallsBuilt { graph, .. } => self.on_project_calls_built(graph),
             GraphMsg::MapsBuilt { rev, maps, .. } => self.on_maps_built(rev, maps),
             GraphMsg::SelectMap(id) => {
+                // A node picked on another graph is not on this one: its
+                // name and Open stood over the graph picked next.
+                let shown = self
+                    .selected_map_index()
+                    .and_then(|at| self.proj.maps.get(at))
+                    .is_some_and(|m| m.id == id);
+                if !shown {
+                    self.proj.graph_pick = None;
+                }
                 self.proj.maps_selected = Some(id);
-                self.refresh_graph_layout()
+                let built = self.ensure_plugin_map();
+                Task::batch([built, self.refresh_graph_layout()])
             }
             GraphMsg::ChurnLoaded { result, .. } => self.on_churn_loaded(result),
             GraphMsg::ToggleHeat => {

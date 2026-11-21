@@ -3553,9 +3553,10 @@ fn the_trail_row_does_not_move_the_code_when_the_trail_begins() {
 
 /// L16: the margin's tabs fit over the margin in French at 1100 —
 /// "Explications · Appels · Historique" ran past its edge, the last tab's
-/// background cut there — and in English as they were.
+/// background cut there. Each tab is its glyph, named in its tooltip: the
+/// one shown said its name beside its glyph too, and grew when picked.
 #[test]
-fn the_margin_tabs_fit_over_the_margin_in_french() {
+fn the_margin_tabs_are_glyphs_that_fit_over_the_margin() {
     let mut app = reader_app();
     app.show_right_panel = true;
     // At 1100 with the sidebar open, the margin is as narrow as it goes.
@@ -3563,30 +3564,80 @@ fn the_margin_tabs_fit_over_the_margin_in_french() {
     app.show_left_sidebar = true;
     let room = super::panes::margin_w(&app) - 12.0 - 16.0;
     assert!(room <= 240.0 - 28.0 + 0.5, "the narrowest margin: {room}");
+    // A Lean file's four tabs, the most there are, fit, with the margin's
+    // toggle after them.
+    let five = 5.0 * super::sheet::MARGIN_TAB_W + 4.0 * super::sheet::MARGIN_TAB_GAP;
+    assert!(five <= room, "four tabs and the toggle: {five} of {room}");
     for lang in [crate::i18n::Lang::Fr, crate::i18n::Lang::En] {
         crate::i18n::with_lang(lang, || {
-            let mut sim = iced_test::Simulator::with_size(
-                Default::default(),
-                Size::new(room + 200.0, 60.0),
-                super::sheet::margin_tabs(&app, room),
-            );
-            for name in [
-                crate::tr!("Explanations"),
-                crate::tr!("Calls"),
-                crate::tr!("History"),
+            for shown in [
+                crate::MarginTab::Notes,
+                crate::MarginTab::Calls,
+                crate::MarginTab::History,
             ] {
-                let at = text_at(&mut sim, |t| t == name || t.ends_with('…'), 0)
-                    .unwrap_or_else(|| panic!("{name} shown"));
-                assert!(at.x >= 0.0, "{name}: {at:?}");
+                app.margin_tab = shown;
+                let mut sim = iced_test::Simulator::with_size(
+                    Default::default(),
+                    Size::new(room, 60.0),
+                    super::sheet::margin_tabs(&app),
+                );
+                for name in [
+                    crate::tr!("Explanations"),
+                    crate::tr!("Calls"),
+                    crate::tr!("History"),
+                ] {
+                    assert!(
+                        !shows(&mut sim, name),
+                        "{lang:?}, {shown:?} shown: {name} as a word"
+                    );
+                }
             }
-            let last = text_at(&mut sim, |t| t == crate::tr!("History"), 0)
-                .expect("the last tab named whole");
-            assert!(
-                last.x + last.width + 4.0 <= room,
-                "{lang:?}: past the margin's edge: {last:?} of {room}"
-            );
         });
     }
+}
+
+/// The margin hides and comes back by a button at its header's right end,
+/// in the same place either way: it was hidden and shown only from the
+/// View menu and the palette. Hidden, the file's tools still stand where
+/// the View menu opens from.
+#[test]
+fn the_margin_hides_and_comes_back_by_one_button() {
+    let mut app = reader_app();
+    app.show_right_panel = true;
+    let toggles = |app: &App| {
+        let at = super::sheet::margin_toggle_rect(app);
+        let mut sim = sim_of(app);
+        sim.point_at(Point::new(at.center_x(), at.center_y()));
+        let _ = sim.simulate(iced_test::simulator::click());
+        sent_by(sim)
+            .iter()
+            .any(|m| matches!(m, Message::Window(WindowMsg::ToggleRightPanel)))
+    };
+    assert!(
+        super::panes::right_panel(&app).is_some(),
+        "the margin shows"
+    );
+    assert!(toggles(&app), "no way to hide the margin from its header");
+    let _ = app.update(Message::Window(WindowMsg::ToggleRightPanel));
+    assert!(
+        super::panes::right_panel(&app).is_none(),
+        "the margin hidden"
+    );
+    assert!(
+        toggles(&app),
+        "no way to bring the margin back where it was"
+    );
+    // The View menu's button where its menu opens from, the toggle beside it.
+    let view = super::sheet::view_button_rect(&app).expect("the View button");
+    let mut sim = sim_of(&app);
+    sim.point_at(Point::new(view.center_x(), view.center_y()));
+    let _ = sim.simulate(iced_test::simulator::click());
+    assert!(
+        sent_by(sim)
+            .iter()
+            .any(|m| matches!(m, Message::Window(WindowMsg::ToggleViewMenu))),
+        "the View button is not where its menu opens from"
+    );
 }
 
 /// L19: an empty file says so in its pane — it opened blank, with no line
@@ -3611,15 +3662,15 @@ fn an_empty_file_says_so_and_offers_nothing_to_explain() {
         n
     };
     assert_eq!(count(&app, "This file is empty"), 0);
-    // The file's card, with its Explain beside the header's.
+    // The file's card, with its Explain (the header's is its glyph).
     assert_eq!(count(&app, "file"), 1, "a file's card");
-    assert_eq!(count(&app, "Explain"), 2);
+    assert_eq!(count(&app, "Explain"), 1);
     if let Some(v) = app.proj.panes[0].as_mut() {
         v.source = std::sync::Arc::new(String::new());
     }
     assert_eq!(count(&app, "This file is empty"), 1);
     assert_eq!(count(&app, "file"), 0, "no card");
-    assert_eq!(count(&app, "Explain"), 1, "the header's alone");
+    assert_eq!(count(&app, "Explain"), 0, "the card's gone");
 }
 
 /// L9: a file found no longer there is left out of the reading trail: it
@@ -3647,6 +3698,50 @@ fn the_trail_leaves_out_a_file_gone() {
     // The sidebar's Reading trail leaves it out too.
     let mut tab = sim_elem(super::sidebar::trail_tab(&app));
     assert!(!shows(&mut tab, "gone_away.rs"), "left out of the tab");
+}
+
+/// A fork in the reading trail is folded from its own mark, named for what
+/// it does to which stop, and once folded says how many stops it hides: a
+/// folded fork said only that something was under it.
+#[test]
+fn a_folded_fork_says_how_many_stops_it_hides() {
+    let mut app = reader_app();
+    let abs = app.active_viewer().unwrap().abs.clone();
+    let loc = |line| crate::history::Loc {
+        path: abs.clone(),
+        line: Some(line),
+    };
+    for (line, name) in [(1, "line_0"), (20, "Fork"), (30, "First"), (40, "Next")] {
+        app.proj.history.push(loc(line), Some(name.into()));
+    }
+    app.proj.history.back();
+    app.proj.history.back();
+    app.proj.history.push(loc(50), Some("Other".into()));
+    let folds = |app: &App| -> Vec<(String, Message)> {
+        crate::ui::heard::gather_of(|| super::sidebar::trail_tab(app))
+            .into_iter()
+            .filter(|t| t.title.contains("its branches"))
+            .map(|t| (t.title, t.message))
+            .collect()
+    };
+    let open = folds(&app);
+    assert_eq!(
+        open.iter().map(|(t, _)| t.as_str()).collect::<Vec<_>>(),
+        ["Hide its branches: Fork"]
+    );
+    assert!(!shows(&mut sim_elem(super::sidebar::trail_tab(&app)), "+3"));
+    let _ = app.update(open[0].1.clone());
+    assert_eq!(
+        folds(&app)
+            .iter()
+            .map(|(t, _)| t.as_str())
+            .collect::<Vec<_>>(),
+        ["Show its branches: Fork"]
+    );
+    let mut tab = sim_elem(super::sidebar::trail_tab(&app));
+    // First, Next and Other: under it, on either branch.
+    assert!(shows(&mut tab, "+3"));
+    assert!(!shows(&mut tab, "Other"));
 }
 
 /// A stop named for what is on its line — a type gone to — keeps its name
@@ -4162,6 +4257,32 @@ fn back_end_words_beside_the_status_line_are_said_in_the_readers_language() {
     });
 }
 
+/// A peek that is all prepared Markdown — the language server's answer,
+/// or the local peek of a documented name — is drawn: asked only of its
+/// plain text, the summary and the diagnostic, every hover with a server
+/// went unshown, the pointer resting on a call bringing up nothing.
+#[test]
+fn a_peek_of_prepared_markdown_is_drawn() {
+    let mut app = reader_app();
+    let (prepared, _) =
+        app.prepare_segments("```python\ndef fine_for(due, returned)\n```\n\nThe fine owed.");
+    assert!(!prepared.is_empty());
+    app.proj.hover = Some(crate::HoverState {
+        prepared,
+        ..hover_at(10.0, 10.0)
+    });
+    assert!(
+        matches!(
+            super::active_overlay(&app),
+            Some(super::ActiveOverlay::Hover(_))
+        ),
+        "the peek is the overlay drawn"
+    );
+    // Nothing at all to say: nothing drawn, rather than an empty box.
+    app.proj.hover = Some(hover_at(10.0, 10.0));
+    assert!(super::active_overlay(&app).is_none());
+}
+
 /// E2-6: Escape dismisses exactly the overlay that is drawn on top.
 #[test]
 fn escape_names_the_topmost_overlay() {
@@ -4170,6 +4291,7 @@ fn escape_names_the_topmost_overlay() {
 
     app.proj.hover = Some(crate::HoverState {
         text: Some("fn line_1()".into()),
+        prepared: Vec::new(),
         ..hover_at(10.0, 10.0)
     });
     assert!(matches!(
@@ -4187,6 +4309,7 @@ fn escape_names_the_topmost_overlay() {
         served: true,
         by_pointer: true,
         line_top: None,
+        in_test: false,
     });
     assert!(matches!(
         super::escape_message(&app),
@@ -4232,6 +4355,7 @@ fn hover_at(x: f32, y: f32) -> crate::HoverState {
         x,
         y,
         text: None,
+        prepared: Vec::new(),
         summary: None,
         diagnostic: None,
     }
@@ -4252,6 +4376,7 @@ fn escape_closes_overlays_one_at_a_time() {
         served: true,
         by_pointer: true,
         line_top: None,
+        in_test: false,
     });
     open_tools_menu(&mut app);
     let escape = || {
@@ -4511,6 +4636,7 @@ fn the_context_menu_has_each_languages_own_rows() {
         served: true,
         by_pointer: true,
         line_top: None,
+        in_test: false,
     });
     let mut sim = sim_of(&app);
     assert!(shows(&mut sim, "Memory Layout"));
@@ -4628,7 +4754,7 @@ fn the_weak_spots_page_lists_each_spot_with_why() {
     let mut sim = sim_of(&app);
     for words in [
         "Weak Spots",
-        "2 spots, from 12 files measured",
+        "2 spots in 12 files checked",
         "load",
         "src/load.rs:4",
         "87 lines",
@@ -4712,7 +4838,260 @@ fn the_proof_panel_marks_what_each_tactic_did() {
         "{sent:?}"
     );
     app.proj.proof.as_mut().unwrap().at = 2;
-    assert!(shows(&mut sim_of(&app), "No goals left: proved."));
+    assert!(shows(
+        &mut sim_of(&app),
+        "No goals left. The proof is complete."
+    ));
+}
+
+/// The Your notes view's count stands on its section's line, at its other
+/// end — it stood under the name, 4 to the left of it — and a row's circle
+/// is centred on the name it belongs to: top-aligned beside the row's
+/// column, it sat 3 below it.
+#[test]
+fn the_notes_count_and_circles_sit_on_their_lines() {
+    let mut app = reader_app();
+    app.proj.panes[0].as_mut().unwrap().symbols = vec![clew_protocol::Symbol {
+        name: "OutOfStock".into(),
+        kind: "class".into(),
+        line: 1,
+        end_line: 4,
+    }];
+    let view = || sim_elem(super::sidebar::notes_tab(&app));
+    let label = text_at(&mut view(), |t| t == "In this file", 0).expect("the section");
+    let count = text_at(&mut view(), |t| t == "0/1 understood", 0).expect("its count");
+    assert!(
+        (label.center_y() - count.center_y()).abs() < 1.0,
+        "{label:?} / {count:?}"
+    );
+    assert!(count.x > label.x + label.width, "{label:?} / {count:?}");
+    // The circle: left of the name, where a press marks it understood.
+    let name = text_at(&mut view(), |t| t == "OutOfStock", 0).expect("the row");
+    let toggles = |at: Point| {
+        let mut sim = view();
+        sim.point_at(at);
+        let _ = sim.simulate(iced_test::simulator::click());
+        sent_by(sim)
+            .iter()
+            .any(|m| matches!(m, Message::Reading(ReadingMsg::NoteToggleUnderstood { .. })))
+    };
+    let x = (4..80)
+        .map(|dx| name.x - dx as f32)
+        .find(|&x| toggles(Point::new(x, name.center_y())))
+        .expect("no circle left of the name");
+    let hit: Vec<f32> = (-16..=16)
+        .map(|dy| name.center_y() + dy as f32)
+        .filter(|&y| toggles(Point::new(x, y)))
+        .collect();
+    let (top, bottom) = (hit[0], hit[hit.len() - 1]);
+    assert!(
+        ((top + bottom) / 2.0 - name.center_y()).abs() <= 1.5,
+        "circle {top}..{bottom}, name at {}",
+        name.center_y()
+    );
+    // The section's name starts where the view's words do.
+    assert!(
+        (label.x - super::sidebar::SIDE_TEXT_X).abs() < 1.5,
+        "{label:?}"
+    );
+}
+
+/// A tree view heads its root once — "give_back loans.py:45" over its
+/// callers, not again as their first row — pressed to go there, and its
+/// rows are as tall as the Files view's, at the sidebar's line for boxes.
+#[test]
+fn a_tree_view_heads_its_root_once_with_rows_like_the_files() {
+    let mut app = reader_app();
+    let mut tree = crate::callgraph::CallTree::new(
+        7,
+        crate::callgraph::Direction::Incoming,
+        "python",
+        vec![call_item("give_back")],
+    );
+    tree.set_children(0, vec![call_item("main"), call_item("teardown")]);
+    app.proj.call_graph = Some(tree);
+    let view = || sim_elem(super::calls_tab(&app));
+    assert!(text_at(&mut view(), |t| t == "give_back", 0).is_some());
+    assert!(
+        text_at(&mut view(), |t| t == "give_back", 1).is_none(),
+        "the root said twice"
+    );
+    assert!(shows(&mut view(), "x.rs:1"), "where the root is");
+    let sent = click(view(), "give_back");
+    assert!(
+        sent.iter().any(|m| matches!(
+            m,
+            Message::Editor(EditorMsg::OpenAbs { abs, line: Some(1), .. })
+                if abs.as_path() == std::path::Path::new("/p/x.rs")
+        )),
+        "{sent:?}"
+    );
+    let a = text_at(&mut view(), |t| t == "main", 0).expect("a caller");
+    let b = text_at(&mut view(), |t| t == "teardown", 0).expect("another");
+    let pitch = super::sidebar::TREE_ROW_H + super::sidebar::TREE_ROW_GAP;
+    assert!(
+        (b.center_y() - a.center_y() - pitch).abs() < 0.5,
+        "rows {} apart",
+        b.center_y() - a.center_y()
+    );
+    // A press on the band, right of the words, goes to the caller.
+    let sent = click_right_of(view, "main", |m| {
+        matches!(m, Message::Editor(EditorMsg::OpenAbs { .. }))
+    });
+    assert!(!sent.is_empty(), "the band is not pressed past its words");
+
+    // The import tree heads its file once too.
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    app.proj.import_tree = Some(crate::imports::ImportTree::new(
+        &crate::imports::ImportGraph::default(),
+        &root,
+        root.join("src/lib.rs"),
+        crate::imports::Dir::Imports,
+    ));
+    let mut tab = sim_elem(super::imports_tab(&app));
+    assert!(text_at(&mut tab, |t| t == "lib.rs", 0).is_some());
+    assert!(
+        text_at(&mut tab, |t| t == "lib.rs", 1).is_none(),
+        "the file said twice"
+    );
+}
+
+/// A view chosen from ⋯ is named over it, with no × beside its name: "back
+/// to the files" read as closing something, and is the views' switch's
+/// to do, as it is for every other view.
+#[test]
+fn a_view_from_more_views_has_no_close_beside_its_name() {
+    let mut app = reader_app();
+    app.sidebar = crate::SidebarTab::Imports;
+    let view = || sim_elem(super::sidebar::sidebar(&app));
+    let title = text_at(&mut view(), |t| t == "Imports", 0).expect("the view's name");
+    // Pressed anywhere along the name's line, nothing goes back to the files.
+    let back = (0..(app.sidebar_width / 3.0) as usize)
+        .map(|i| i as f32 * 3.0 + 1.0)
+        .find(|&x| {
+            let mut sim = view();
+            sim.point_at(Point::new(x, title.center_y()));
+            let _ = sim.simulate(iced_test::simulator::click());
+            sent_by(sim).iter().any(|m| {
+                matches!(
+                    m,
+                    Message::Window(WindowMsg::SidebarTabPicked(crate::SidebarTab::Files))
+                )
+            })
+        });
+    assert_eq!(back, None, "a × beside the view's name");
+}
+
+/// The sidebar's views start their fields at its line for boxes, under
+/// the views' switch, as the Files view's filter does — Search, Find by
+/// meaning and the reading guide's stood 8 in, 2 wider than the switch —
+/// and the Reading trail's name at its line for words.
+#[test]
+fn the_sidebar_views_start_on_its_lines() {
+    let app = reader_app();
+    let first_field_x = |elem: Element<'_, Message>| {
+        let mut sim = sim_elem(elem);
+        sim.find(|c: iced_test::selector::Candidate<'_>| match c {
+            iced_test::selector::Candidate::TextInput { bounds, .. } => Some(bounds.x),
+            _ => None,
+        })
+        .expect("a field")
+    };
+    for (view, x) in [
+        ("search", first_field_x(super::sidebar::search_tab(&app))),
+        ("meaning", first_field_x(super::semantic_tab(&app))),
+    ] {
+        assert!(
+            (x - super::sidebar::SIDE_PAD).abs() < 0.5,
+            "{view}'s field at {x}"
+        );
+    }
+}
+
+/// A run's tab holds its ×: pressed just past the ×, it is still the tab —
+/// the × stood outside it, as though it were the next control along — and
+/// the × follows the name with no empty slot between them, where an ended
+/// run's mark of how it was doing had been. Resting on the ×, only its own
+/// tooltip shows, not the tab's over it.
+#[test]
+fn a_run_tab_holds_its_close_button() {
+    use crate::app::state::RunTab;
+    let mut app = reader_app();
+    app.show_bottom = true;
+    app.debug.session = Some(crate::DebugSession {
+        client: None,
+        status: crate::DebugStatus::Terminated,
+        exit_code: Some(0),
+        thread_id: None,
+        frames: Vec::new(),
+        scopes: Vec::new(),
+        watches: Vec::new(),
+        output: Vec::new(),
+        current: None,
+        program: PathBuf::from("/p/main.py"),
+        args: Vec::new(),
+        cwd: PathBuf::from("/p"),
+        addr: None,
+    });
+    app.debug.tab = 1;
+    app.run_shown = Some(RunTab::Real(1));
+    let name = text_at(&mut sim_of(&app), |t| t == "Debug main.py", 0).expect("the tab");
+    // What a press sends, point by point along the tab's line past its
+    // name: S shows the tab, C closes it, - is nothing.
+    let along: String = (0..40)
+        .map(|i| {
+            let at = Point::new(name.x + name.width + 0.5 + i as f32, name.center_y());
+            let mut sim = sim_of(&app);
+            sim.point_at(at);
+            let _ = sim.simulate(iced_test::simulator::click());
+            let sent = sent_by(sim);
+            if sent
+                .iter()
+                .any(|m| matches!(m, Message::Debug(DebugMsg::CloseTab(RunTab::Real(1)))))
+            {
+                'C'
+            } else if sent
+                .iter()
+                .any(|m| matches!(m, Message::Debug(DebugMsg::ShowTab(RunTab::Real(1)))))
+            {
+                'S'
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let first = along.find('C').unwrap_or_else(|| panic!("no ×: {along}"));
+    let last = along.rfind('C').expect("found");
+    assert!(first <= 8, "a gap before the ×: {along}");
+    assert!(
+        along[last + 1..].starts_with('S'),
+        "the × outside the tab: {along}"
+    );
+    // Rested on: the ×'s name alone.
+    let on_close = Point::new(
+        name.x + name.width + 0.5 + (first + last) as f32 / 2.0,
+        name.center_y(),
+    );
+    super::tip::warm_now();
+    let mut sim = sim_of(&app);
+    sim.point_at(on_close);
+    let _ = sim.simulate([Event::Mouse(iced::mouse::Event::CursorMoved {
+        position: on_close,
+    })]);
+    assert!(text_at(&mut sim, |t| t == "Close Debug main.py", 0).is_some());
+    assert!(
+        text_at(&mut sim, |t| t == "Debug main.py (ended)", 0).is_none(),
+        "the tab's tooltip over the ×'s"
+    );
+    // On its name, the tab's.
+    let on_name = name.center();
+    super::tip::warm_now();
+    let mut sim = sim_of(&app);
+    sim.point_at(on_name);
+    let _ = sim.simulate([Event::Mouse(iced::mouse::Event::CursorMoved {
+        position: on_name,
+    })]);
+    assert!(text_at(&mut sim, |t| t == "Debug main.py (ended)", 0).is_some());
 }
 
 /// The bottom panel has a tab for each run, named by what it runs — the
@@ -4809,6 +5188,7 @@ fn a_hover_peek_stays_off_the_panel_under_the_code() {
     let doc = "class Decimal(value='0', context=None)\n".repeat(6);
     app.proj.hover = Some(crate::HoverState {
         text: Some(doc),
+        prepared: Vec::new(),
         ..hover_at(300.0, panel_top - 30.0)
     });
     let mut sim = sim_of(&app);
@@ -4904,6 +5284,7 @@ fn the_code_menu_shows_the_breakpoints_key() {
         served: true,
         by_pointer: true,
         line_top: None,
+        in_test: false,
     });
     let mut sim = sim_of(&app);
     let row = text_at(&mut sim, |t| t == "Toggle Breakpoint", 0).expect("the row");
@@ -5047,6 +5428,7 @@ fn a_breakpoints_condition_dialog_edits_and_removes_it() {
             served: true,
             by_pointer: true,
             line_top: None,
+            in_test: false,
         });
     };
     menu(&mut app);
@@ -6001,11 +6383,7 @@ fn a_changed_key_clew_recorded_is_forgotten_only_by_a_click_on_the_prompt() {
         stage(&app),
         Some(crate::ConnectStage::Connecting { .. })
     ));
-    assert!(
-        app.status.contains("old key — connecting"),
-        "{}",
-        app.status
-    );
+    assert!(app.status.contains("old key. Connecting"), "{}", app.status);
 }
 
 /// The forget-key reconnect drops the project as every switch does, and what
@@ -6035,11 +6413,7 @@ fn forgetting_a_key_keeps_the_discard_notice() {
     let _ = app.update(Message::Connect(ConnectMsg::ForgetHostKey {
         host: "[example.com]:2222".into(),
     }));
-    assert!(
-        app.status.contains("old key — connecting"),
-        "{}",
-        app.status
-    );
+    assert!(app.status.contains("old key. Connecting"), "{}", app.status);
     assert!(
         app.status
             .contains("Changes not yet saved on the remote host were discarded: notes.json"),
@@ -6147,6 +6521,28 @@ fn the_download_question_offers_the_program_already_here() {
     );
 }
 
+/// An install of the very build installed — its copy made again, say — is
+/// asked as installing it again, not as an update of itself; another build
+/// of it is an update.
+#[test]
+fn the_same_build_again_is_not_offered_as_an_update() {
+    let mut pending = crate::app::tests::pending_plugin_install("word-count", 0, None);
+    let mut previous = crate::app::tests::installed_plugin(true);
+    previous.record.fingerprint = pending.inspected.fingerprint();
+    pending.previous = Some(previous.clone());
+    {
+        let mut sim = sim_elem(super::plugins::plugin_install_modal(&pending, 1, 0, true));
+        assert!(shows(&mut sim, "Install “Word count” again?"));
+        assert!(shows(&mut sim, "Install again") && shows(&mut sim, "Don't install"));
+        assert!(!shows(&mut sim, "Update"));
+    }
+    previous.record.fingerprint = "an older build".into();
+    pending.previous = Some(previous);
+    let mut sim = sim_elem(super::plugins::plugin_install_modal(&pending, 1, 0, true));
+    assert!(shows(&mut sim, "Update “Word count”?"));
+    assert!(shows(&mut sim, "Don't update") && !shows(&mut sim, "again"));
+}
+
 /// F#8: consent questions are asked one at a time, and the modal says when
 /// more wait behind the one on screen.
 #[test]
@@ -6202,7 +6598,7 @@ fn open_sheet(
 #[test]
 fn a_held_open_says_why_it_waits() {
     let root = std::path::Path::new("/nonexistent/clew-held");
-    let why = "Ready in a moment, once the sheet is in front";
+    let why = "Ready in a moment, once this window is in front";
     let says_why = |ready: bool| {
         let at = {
             let mut sim = sim_elem(open_sheet(root, ready));
@@ -6258,8 +6654,8 @@ fn the_setup_sheet_says_what_each_choice_takes() {
     let mut sim = sim_elem(sheet(&app, &root));
     for said in [
         "Open iced",
-        "/nonexistent/iced/.clew",
-        "Its bookmarks, notes and project settings can be committed with the project; your own reading state stays out of git.",
+        ".clew",
+        "Its bookmarks, notes and project settings can be committed with the project. Your own reading state stays out of git.",
         "Language servers",
         "rust-analyzer: download, builds the project (runs its code)",
         "Explain the project",
@@ -6268,11 +6664,14 @@ fn the_setup_sheet_says_what_each_choice_takes() {
     ] {
         assert!(shows(&mut sim, said), "{said:?}");
     }
+    // The data folder by its name, in the folder the sheet is named for:
+    // its whole path, which wrapped mid-name, only where the pointer asks.
+    assert!(!shows(&mut sim, "/nonexistent/iced/.clew"));
     // And what those calls are likely to cost, with their count, in one
     // sentence of one weight.
     let estimate = app.explain_estimate(3617).expect("an estimate");
     let said = estimate.said(3617);
-    assert!(said.starts_with("About 3,600 AI calls: "), "{said:?}");
+    assert!(said.starts_with("About 3,600 AI calls using "), "{said:?}");
     assert!(shows(&mut sim, &said), "{said:?}");
     assert!(matches!(
         click(sim_elem(sheet(&app, &root)), "Language servers").as_slice(),
@@ -6381,10 +6780,7 @@ fn the_setup_sheets_apply_answers_no_question() {
     });
     assert_eq!(
         apply(&app),
-        [(
-            Some("Nothing to apply: the language servers are already set up."),
-            false
-        )]
+        [(Some("The language servers are already set up."), false)]
     );
 }
 
@@ -7189,6 +7585,7 @@ fn a_question_moved_or_out_of_view_waits_again() {
         x: 10.0,
         y: 10.0,
         text: Some("fn origin()".into()),
+        prepared: Vec::new(),
         summary: None,
         diagnostic: None,
     });
@@ -9033,17 +9430,17 @@ fn the_call_tree_names_its_tree_and_shows_what_the_cap_hid() {
         "the cap's note is not under its node"
     );
     drop(sim);
-    // (The header names the root too: the row is the second "root".)
+    // The root heads the tree; its first caller's arrow opens that caller.
     let sent = click_left_of(
         || sim_elem(super::calls_tab(&app)),
-        "root",
-        1,
+        "caller_0",
+        0,
         |m| matches!(m, Message::Calls(CallsMsg::ExpandNode { .. })),
     );
     assert!(
         matches!(
             sent.as_slice(),
-            [Message::Calls(CallsMsg::ExpandNode { token: 7, id: 0 })]
+            [Message::Calls(CallsMsg::ExpandNode { token: 7, id: 1 })]
         ),
         "{sent:?}"
     );
@@ -9327,7 +9724,7 @@ async fn the_view_reads_lsp_state_from_one_snapshot_and_reports_poisoning() {
     assert!(
         text_at(
             &mut sim_of(&app),
-            |t| t.contains("internal error — restart this language server"),
+            |t| t.contains("internal error (restart this language server)"),
             0
         )
         .is_some(),
@@ -9339,6 +9736,180 @@ async fn the_view_reads_lsp_state_from_one_snapshot_and_reports_poisoning() {
     app.proj.link.lsp.clear();
     let _ = app.update(Message::Noop);
     assert!(app.proj.link.lsp_snapshots.is_empty());
+}
+
+/// The Goals margin says how far Lean has checked the file while a goal
+/// waits — what the reader waited through on "Asking…" while a big
+/// project's imports were checked — and the status bar names the file;
+/// when Lean says the file's imports are out of date, Restart File is a
+/// click away.
+#[tokio::test]
+async fn the_goals_margin_says_how_far_lean_has_checked_and_offers_restart() {
+    let mut app = reader_app();
+    app.show_right_panel = true;
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let abs = root.join("Basic.lean");
+    {
+        let v = app.proj.panes[0].as_mut().unwrap();
+        v.abs = abs.clone();
+        v.rel = "Basic.lean".into();
+        v.lang_key = Some("lean");
+    }
+    app.margin_tab = crate::MarginTab::Goals;
+    let uri = crate::lsp::client::path_to_uri(&abs);
+    let progress = format!(
+        r#"{{"jsonrpc":"2.0","method":"$/lean/fileProgress","params":{{"textDocument":{{"uri":"{uri}","version":1}},"processing":[{{"range":{{"start":{{"line":2,"character":0}},"end":{{"line":9,"character":0}}}},"kind":1}}]}}}}"#
+    );
+    let client = stub_lsp_client_saying(&root, vec![progress]).await;
+    for _ in 0..200 {
+        if client.snapshot().is_ok_and(|s| s.checking(&abs).is_some()) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    app.proj
+        .link
+        .lsp
+        .insert("lean".into(), crate::LspSlot::Ready(client));
+    let _ = app.update(Message::Noop);
+    let total = app.active_viewer().unwrap().line_count().max(3);
+    assert!(shows(
+        &mut sim_of(&app),
+        &format!("Lean is checking line 3 of {total} in this file…")
+    ));
+    assert_eq!(
+        app.lsp_status("lean").as_deref(),
+        Some("checking Basic.lean")
+    );
+    assert!(app.lsp_busy("lean"), "at work while it checks");
+    assert!(
+        !shows(&mut sim_of(&app), "Restart File"),
+        "nothing to restart"
+    );
+
+    // Lean finds the imports changed: the way on is offered.
+    let stale = format!(
+        r#"{{"jsonrpc":"2.0","method":"textDocument/publishDiagnostics","params":{{"uri":"{uri}","diagnostics":[{{"range":{{"start":{{"line":0,"character":0}},"end":{{"line":0,"character":1}}}},"severity":1,"message":"Imports are out of date and must be rebuilt; use the \"Restart File\" command in your editor."}}]}}}}"#
+    );
+    let client = stub_lsp_client_saying(&root, vec![stale]).await;
+    for _ in 0..200 {
+        if client.snapshot().is_ok_and(|s| s.diag_version > 0) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    app.proj
+        .link
+        .lsp
+        .insert("lean".into(), crate::LspSlot::Ready(client));
+    let _ = app.update(Message::Noop);
+    assert!(shows(
+        &mut sim_of(&app),
+        "imports changed since Lean read them"
+    ));
+    let sent = click(sim_of(&app), "Restart File");
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Proof(crate::ProofMsg::RestartFile))),
+        "{sent:?}"
+    );
+}
+
+/// The Goals margin offers a Mathlib project its build cache, says how
+/// the fetch goes, and offers it again when it failed.
+#[test]
+fn the_goals_margin_offers_mathlibs_build_cache() {
+    use crate::app::proof::MathlibCache;
+    let mut app = reader_app();
+    app.show_right_panel = true;
+    {
+        let v = app.proj.panes[0].as_mut().unwrap();
+        v.rel = "Basic.lean".into();
+        v.lang_key = Some("lean");
+    }
+    app.margin_tab = crate::MarginTab::Goals;
+    app.proj
+        .link
+        .lsp
+        .insert("lean".into(), crate::LspSlot::Starting);
+    app.proj.mathlib = MathlibCache::Ready;
+    assert!(!shows(&mut sim_of(&app), "Get Mathlib's Build Cache"));
+    app.proj.mathlib = MathlibCache::Missing;
+    assert!(shows(&mut sim_of(&app), "Mathlib isn't compiled here yet"));
+    // It can be put by, and then is not offered here.
+    let sent = click(sim_of(&app), "Not now");
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Proof(crate::ProofMsg::DismissMathlibCache))),
+        "{sent:?}"
+    );
+    let sent = click(sim_of(&app), "Get Mathlib's Build Cache");
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Proof(crate::ProofMsg::GetMathlibCache))),
+        "{sent:?}"
+    );
+    app.proj.mathlib = MathlibCache::Getting("Downloaded: 1200 file(s)".into());
+    let mut sim = sim_of(&app);
+    assert!(shows(&mut sim, "Getting Mathlib's build cache…"));
+    assert!(shows(&mut sim, "Downloaded: 1200 file(s)"));
+    drop(sim);
+    app.proj.mathlib = MathlibCache::Failed("no network".into());
+    let mut sim = sim_of(&app);
+    assert!(shows(&mut sim, "Could not get Mathlib's build cache"));
+    assert!(shows(&mut sim, "no network"));
+    drop(sim);
+    let sent = click(sim_of(&app), "Try again");
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Proof(crate::ProofMsg::GetMathlibCache))),
+        "{sent:?}"
+    );
+}
+
+/// A Lean file's goals are a click away wherever they are not on screen:
+/// the margin on another tab or closed, the status bar offers them, and
+/// opens the Goals tab; with no room for the margin (a split), the goal at
+/// the cursor in a popup. With the Goals tab shown, nothing is offered.
+#[test]
+fn the_status_bar_offers_the_goals_when_they_are_not_on_screen() {
+    let mut app = reader_app();
+    {
+        let v = app.proj.panes[0].as_mut().unwrap();
+        v.rel = "Basic.lean".into();
+        v.lang_key = Some("lean");
+    }
+    app.window_width = 1400.0;
+    app.show_right_panel = true;
+    app.margin_tab = crate::MarginTab::Goals;
+    assert!(super::panes::right_panel_shown(&app));
+    assert!(
+        !shows(&mut sim_elem(super::statusbar::statusbar(&app)), "Goals"),
+        "the goals are on screen"
+    );
+    app.margin_tab = crate::MarginTab::Calls;
+    let sent = click(sim_elem(super::statusbar::statusbar(&app)), "Goals");
+    assert!(
+        sent.iter().any(|m| matches!(
+            m,
+            Message::Window(WindowMsg::MarginTabPicked(crate::MarginTab::Goals))
+        )),
+        "{sent:?}"
+    );
+    app.proj.split = true;
+    let sent = click(sim_elem(super::statusbar::statusbar(&app)), "Goals");
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Hover(HoverMsg::InsightAtCursor))),
+        "{sent:?}"
+    );
+    // Not in another language's file.
+    app.proj.split = false;
+    app.proj.panes[0].as_mut().unwrap().lang_key = Some("rust");
+    assert!(!shows(
+        &mut sim_elem(super::statusbar::statusbar(&app)),
+        "Goals"
+    ));
 }
 
 fn explain_file(root: &std::path::Path, rel: &str) -> crate::explain::Node {
@@ -11057,7 +11628,7 @@ fn a_run_tour_says_why_it_has_fewer_steps_than_stops() {
         scope: "@trace main.py".into(),
         steps: vec![step(1), step(4)],
     };
-    let said = "2 steps from 4 stops: a function stepped through is one step, and stops outside the project are left out.";
+    let said = "2 steps from 4 stops. A function stepped through counts as one step, and stops outside the project are left out.";
     assert_eq!(super::folded_stops(&run).as_deref(), Some(said));
     let mut app = reader_app();
     app.sidebar = crate::SidebarTab::Walk;
@@ -11077,7 +11648,7 @@ fn a_run_tour_says_why_it_has_fewer_steps_than_stops() {
     assert_eq!(
         super::folded_stops(&run).as_deref(),
         Some(
-            "3 steps from 4 stops: a function stepped through is one step, and stops outside the project are left out."
+            "3 steps from 4 stops. A function stepped through counts as one step, and stops outside the project are left out."
         )
     );
     run.steps.iter_mut().for_each(|s| s.stop = None);
@@ -11222,7 +11793,7 @@ fn the_last_runs_trace_is_offered_as_a_walkthrough_and_listed_on_the_call_graph(
     assert_eq!(super::scope_label("@trace app"), "Debug run (app)");
     assert_eq!(super::scope_label("@trace"), "Debug run");
     let mut sim = sim_elem(super::trace_control(&app));
-    assert!(shows(&mut sim, "Trace: no stops yet"));
+    assert!(shows(&mut sim, "No stops traced yet"));
     drop(sim);
     // A run that ended without stopping has no stops, not "yet".
     app.debug.session = Some(crate::DebugSession {
@@ -11241,8 +11812,8 @@ fn the_last_runs_trace_is_offered_as_a_walkthrough_and_listed_on_the_call_graph(
         addr: None,
     });
     let mut sim = sim_elem(super::trace_control(&app));
-    assert!(shows(&mut sim, "Trace: no stops"));
-    assert!(!shows(&mut sim, "Trace: no stops yet"));
+    assert!(shows(&mut sim, "No stops traced"));
+    assert!(!shows(&mut sim, "No stops traced yet"));
     drop(sim);
     app.debug.session = None;
     let frame = |name: &str, line: usize| crate::TraceFrame {
@@ -11266,7 +11837,7 @@ fn the_last_runs_trace_is_offered_as_a_walkthrough_and_listed_on_the_call_graph(
     ];
     app.debug.trace_rev += 1;
     let mut sim = sim_elem(super::trace_control(&app));
-    assert!(shows(&mut sim, "Trace: 3 stops"));
+    assert!(shows(&mut sim, "3 stops traced"));
     let _ = sim.click("Walk this run");
     let sent: Vec<Message> = sent_by(sim).into_iter().collect();
     assert!(
@@ -11410,6 +11981,7 @@ fn the_flow_tab_lists_occurrences_under_their_roles() {
         served: true,
         by_pointer: true,
         line_top: None,
+        in_test: false,
     });
     assert!(shows(&mut sim_of(&app), "Trace Value"));
     app.proj.context_menu = None;
@@ -11896,7 +12468,7 @@ fn a_remote_projects_path_aliases_resolve_once_its_configs_arrive() {
         result: Err("the server is gone".into()),
     }));
     assert!(
-        app.status.contains("resolve as last read"),
+        app.status.contains("use the last values read"),
         "{}",
         app.status
     );
@@ -12061,7 +12633,12 @@ fn time_travel_shows_the_commit_being_read() {
         !shows(&mut sim, "Loading revision…"),
         "the live file stays on screen until the revision loads"
     );
-    let exit = click(sim_of(&app), "Time Travel");
+    // Its glyph in the header, pressed again, leaves.
+    let at = super::file_tool_rect(&app, 3).expect("the header's Time Travel");
+    let mut sim = sim_of(&app);
+    sim.point_at(at.center());
+    let _ = sim.simulate(iced_test::simulator::click());
+    let exit = sent_by(sim);
     assert!(
         exit.iter()
             .any(|m| matches!(m, Message::TimeTravel(crate::TimeTravelMsg::Exit))),
@@ -12095,7 +12672,7 @@ fn a_disconnected_remote_window_says_so() {
     assert!(
         shows(
             &mut sim,
-            "Disconnected from the remote host — cannot open src/other.rs"
+            "Can't open src/other.rs because you're disconnected from the remote host"
         ),
         "status: {}",
         app.status
@@ -12228,7 +12805,7 @@ fn the_glossary_page_lists_terms_by_kind() {
     let _ = app.update(Message::Glossary(GlossaryMsg::Open));
     assert!(on_page(&app, "No terms found"));
     assert!(!on_page(&app, "Rebuild"));
-    let sent = click(sim_of(&app), "Look again");
+    let sent = click(sim_of(&app), "Scan again");
     assert!(
         sent.iter()
             .any(|m| matches!(m, Message::Docs(DocsMsg::Refresh))),
@@ -12278,7 +12855,7 @@ fn a_long_glossary_section_does_not_hide_the_next() {
         Size::new(1000.0, 40_000.0),
         super::glossary_home(&app),
     );
-    assert!(shows(&mut sim, "5 more — narrow the filter to see them"));
+    assert!(shows(&mut sim, "5 more. Narrow the filter to see them."));
     assert!(
         shows(&mut sim, "Modules"),
         "the modules after a capped section"
@@ -12369,7 +12946,7 @@ fn the_languages_section_offers_each_languages_build_choices() {
     let mut sim = sim_tall(super::connect::languages_section(&app));
     for shown in [
         "What rust-analyzer checks the project with. \
-         Also set in .clew/lsp.toml: cargo.features. Settings here take precedence.",
+         .clew/lsp.toml also sets cargo.features. The settings here take precedence.",
         "Features",
         "Target",
         "cli:",
@@ -12729,6 +13306,220 @@ fn settings_draws_every_shortcut_as_key_caps() {
     );
 }
 
+/// Some sixty shortcuts, and no way to find one but to read them all: a
+/// filter finds one by its name or by its keys; a group with none left
+/// goes, title and all; a filter nothing matches says so; and Escape in a
+/// filled filter empties it, closing nothing.
+#[test]
+fn the_shortcuts_page_finds_a_shortcut_by_name_or_keys() {
+    use crate::SettingsMsg;
+    use iced_test::selector::Candidate;
+    let mut app = reader_app();
+    let _ = app.update(Message::Settings(SettingsMsg::OpenAt(
+        crate::SettingsPage::Shortcuts,
+    )));
+    // What is typed in its field is what the page is narrowed to.
+    let mut sim = sim_elem(super::connect::shortcuts_body(&app));
+    let field = sim
+        .find(|c: Candidate<'_>| match c {
+            Candidate::TextInput { visible_bounds, .. } => visible_bounds,
+            _ => None,
+        })
+        .expect("a filter field");
+    sim.point_at(field.center());
+    let _ = sim.simulate(iced_test::simulator::click());
+    let _ = sim.typewrite("z");
+    let sent = sent_by(sim);
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Settings(SettingsMsg::ShortcutsFilter(q)) if q == "z")),
+        "{sent:?}"
+    );
+    let narrowed = |app: &mut App, filter: &str| {
+        let _ = app.update(Message::Settings(SettingsMsg::ShortcutsFilter(
+            filter.into(),
+        )));
+    };
+    let page_shows =
+        |app: &App, said: &str| shows(&mut sim_elem(super::connect::shortcuts_body(app)), said);
+    // By name: the commands that zoom, and no reading motion at all.
+    narrowed(&mut app, "zoom");
+    for shown in ["Commands", "Zoom in", "Zoom out"] {
+        assert!(page_shows(&app, shown), "{shown}");
+    }
+    for gone in ["Go to file", "Reading motions", "Toggle fold"] {
+        assert!(!page_shows(&app, gone), "{gone}");
+    }
+    // By its keys: gd is Go to definition's.
+    narrowed(&mut app, "gd");
+    assert!(page_shows(&app, "Go to definition"));
+    assert!(!page_shows(&app, "Toggle fold"));
+    // Nothing: said so, and no group's title over nothing.
+    narrowed(&mut app, "nothing-like-this");
+    assert!(page_shows(
+        &app,
+        "No shortcut matches \u{201c}nothing-like-this\u{201d}"
+    ));
+    assert!(!page_shows(&app, "Commands") && !page_shows(&app, "Reading motions"));
+    // Escape in the filled filter empties it, and that press closes nothing.
+    let _ = app.update(Message::Settings(SettingsMsg::ShortcutsFilterEscaped));
+    assert!(app.settings.shortcuts_filter.is_empty());
+    assert!(app.escape_taken && app.settings.open);
+    app.escape_taken = false;
+    // In an empty one, Escape goes on to do what it does.
+    let _ = app.update(Message::Settings(SettingsMsg::ShortcutsFilterEscaped));
+    assert!(!app.escape_taken);
+    // Another page, or Settings closed: the next visit starts whole.
+    narrowed(&mut app, "zoom");
+    let _ = app.update(Message::Settings(SettingsMsg::Page(
+        crate::SettingsPage::Appearance,
+    )));
+    assert!(app.settings.shortcuts_filter.is_empty());
+    narrowed(&mut app, "zoom");
+    let _ = app.update(Message::Settings(SettingsMsg::Close));
+    assert!(app.settings.shortcuts_filter.is_empty());
+}
+
+/// The code's text size is set in Settings → Appearance too, where a
+/// reader looks for it — it was in the zoom keys and the command bar
+/// alone: a step smaller or larger, none past either end, and back to as
+/// shipped once it is not.
+#[test]
+fn appearance_sets_the_codes_text_size() {
+    use crate::app::state::{DEFAULT_FONT_SIZE, MAX_FONT_SIZE};
+    let mut app = reader_app();
+    let _ = app.update(Message::Settings(crate::SettingsMsg::OpenAt(
+        crate::SettingsPage::Appearance,
+    )));
+    let size_shown = |app: &App, size: f32| {
+        let size = format!("{size:.0}");
+        sim_of(app).find(size.as_str()).is_ok()
+    };
+    assert!(shows(&mut sim_of(&app), "Code text size"));
+    assert!(size_shown(&app, DEFAULT_FONT_SIZE));
+    // As shipped: no way back to where it is already.
+    assert!(sent_by_pressing(&app, "Actual size").is_empty());
+    let sent = sent_by_pressing(&app, "Zoom in");
+    assert!(
+        matches!(sent.as_slice(), [Message::Editor(EditorMsg::FontSizeDelta(d))] if *d == 1.0),
+        "{sent:?}"
+    );
+    for m in sent {
+        let _ = app.update(m);
+    }
+    assert_eq!(app.font_size, DEFAULT_FONT_SIZE + 1.0);
+    assert!(size_shown(&app, DEFAULT_FONT_SIZE + 1.0));
+    let sent = sent_by_pressing(&app, "Actual size");
+    assert!(
+        matches!(sent.as_slice(), [Message::Editor(EditorMsg::FontSizeReset)]),
+        "{sent:?}"
+    );
+    // At the largest, no larger.
+    app.font_size = MAX_FONT_SIZE;
+    assert!(sent_by_pressing(&app, "Zoom in").is_empty());
+    assert!(!sent_by_pressing(&app, "Zoom out").is_empty());
+    app.font_size = crate::theme::MIN_TEXT_SIZE;
+    assert!(sent_by_pressing(&app, "Zoom out").is_empty());
+}
+
+/// The model was a field to type a name into, with no way to learn the
+/// names but the provider's own pages: under it, the models the key can
+/// call, asked of the provider on a click (nothing spent), then a list to
+/// pick from. What it says without a key, while it asks, of an empty list,
+/// and after the key changes.
+#[test]
+fn the_model_field_offers_the_models_the_key_can_call() {
+    use crate::SettingsMsg;
+    use crate::app::state::ModelList;
+    let mut app = reader_app();
+    let _ = app.update(Message::Settings(SettingsMsg::OpenAt(
+        crate::SettingsPage::LanguageModel,
+    )));
+    app.settings.provider = crate::llm::Provider::DeepSeek;
+    app.settings.key.clear();
+    app.settings.key_from_env = false;
+    app.settings.base_url = crate::llm::Provider::DeepSeek.default_base_url().into();
+    app.settings.model = "my-own-model".into();
+    let page_shows = |app: &App, said: &str| shows(&mut sim_of(app), said);
+    assert!(page_shows(&app, "Show available models"));
+    // No key: said so, nothing asked.
+    let _ = app.update(Message::Settings(SettingsMsg::ListModels));
+    if std::env::var("DEEPSEEK_API_KEY").is_err() {
+        assert_eq!(
+            app.settings.models,
+            ModelList::Failed("Enter the API key first.".into())
+        );
+        assert!(page_shows(&app, "Enter the API key first."));
+    }
+    // A key: asked, and said while it is.
+    let _ = app.update(Message::Settings(SettingsMsg::KeyChanged("sk-test".into())));
+    let _ = app.update(Message::Settings(SettingsMsg::ListModels));
+    let ModelList::Listing(number) = app.settings.models else {
+        panic!("{:?}", app.settings.models);
+    };
+    assert!(page_shows(&app, "Listing models\u{2026}"));
+    // An answer to an older asking is dropped.
+    let _ = app.update(Message::Settings(SettingsMsg::ModelsListed {
+        number: number - 1,
+        result: Ok(vec!["stale".into()]),
+    }));
+    assert_eq!(app.settings.models, ModelList::Listing(number));
+    let _ = app.update(Message::Settings(SettingsMsg::ModelsListed {
+        number,
+        result: Ok(vec!["deepseek-v4-flash".into(), "deepseek-v4-pro".into()]),
+    }));
+    assert!(matches!(&app.settings.models, ModelList::Listed(m) if m.len() == 2));
+    // A name of the reader's own, not in the list: the list asks for a pick
+    // and the field keeps the name.
+    assert!(page_shows(&app, "Pick a model"));
+    assert_eq!(app.settings.model, "my-own-model");
+    // One in it: the list shows it picked.
+    app.settings.model = "deepseek-v4-pro".into();
+    assert!(!page_shows(&app, "Pick a model"));
+    // Another key: the list was that key's.
+    let _ = app.update(Message::Settings(SettingsMsg::KeyChanged(
+        "sk-other".into(),
+    )));
+    assert_eq!(app.settings.models, ModelList::Unasked);
+    // An empty list is said as one.
+    let _ = app.update(Message::Settings(SettingsMsg::ListModels));
+    let ModelList::Listing(number) = app.settings.models else {
+        panic!("{:?}", app.settings.models);
+    };
+    let _ = app.update(Message::Settings(SettingsMsg::ModelsListed {
+        number,
+        result: Ok(Vec::new()),
+    }));
+    assert!(page_shows(&app, "The provider listed no models."));
+    // A failure, in the provider's words.
+    let _ = app.update(Message::Settings(SettingsMsg::ListModels));
+    let ModelList::Listing(number) = app.settings.models else {
+        panic!("{:?}", app.settings.models);
+    };
+    let _ = app.update(Message::Settings(SettingsMsg::ModelsListed {
+        number,
+        result: Err("DeepSeek API error 401: bad key".into()),
+    }));
+    assert!(page_shows(
+        &app,
+        "Couldn't list the models: DeepSeek API error 401: bad key"
+    ));
+    // Closed, the list is forgotten.
+    let _ = app.update(Message::Settings(SettingsMsg::Discard));
+    let _ = app.update(Message::Settings(SettingsMsg::Close));
+    assert_eq!(app.settings.models, ModelList::Unasked);
+}
+
+/// What a press of the text size control named `said` sends, as `app`
+/// stands: nothing for one that is off.
+fn sent_by_pressing(app: &App, said: &str) -> Vec<Message> {
+    crate::ui::heard::gather_of(|| super::connect::code_size(app))
+        .into_iter()
+        .filter(|t| t.title == said)
+        .map(|t| t.message)
+        .collect()
+}
+
 /// The status bar's target picker is there for a file whose dimming the
 /// platform decides — Rust's, Go's, Haskell's — and not for one whose does
 /// not (C#'s, Erlang's: their files' own symbols decide).
@@ -12769,6 +13560,7 @@ fn the_context_menu_offers_the_languages_own_action() {
         served: true,
         by_pointer: true,
         line_top: None,
+        in_test: false,
     };
     app.proj.context_menu = Some(menu(Some(crate::InsightKind::ExpandMacro)));
     assert!(shows(&mut sim_of(&app), "Expand Macro"));
@@ -12924,6 +13716,104 @@ fn a_margin_note_sits_level_with_its_function() {
     assert!(
         (scrolled - (y - lh)).abs() < 1.0,
         "{scrolled} moved a line from {y}"
+    );
+}
+
+/// The note on what the caret is in stays on screen as the code scrolls
+/// away from it — at the margin's top while its function is above the view
+/// — and says where it is, a press away: it went with its function, and
+/// the reader looking on down lost what they were reading.
+#[test]
+fn the_carets_card_stays_when_its_function_scrolls_away() {
+    let mut app = reader_app();
+    app.show_right_panel = true;
+    let abs = app.proj.panes[0].as_ref().unwrap().abs.clone();
+    app.proj.explain.view = Some(crate::explain::Node::Function {
+        file: abs,
+        name: "origin".into(),
+        ordinal: 0,
+    });
+    app.proj.panes[0].as_mut().unwrap().symbols = vec![crate::outline::Symbol {
+        name: "origin".into(),
+        kind: "function".into(),
+        line: 3,
+        end_line: 5,
+    }];
+    let goes_back = |app: &App| {
+        click(sim_of(app), "function, line 3")
+            .iter()
+            .any(|m| matches!(m, Message::Editor(EditorMsg::OutlineJump(3))))
+    };
+    // Beside its function, it is where it is: no way back to offer.
+    assert!(text_at(&mut sim_of(&app), |t| t == "origin", 0).is_some());
+    assert!(!goes_back(&app), "a way back beside its own function");
+    // Scrolled far past it: kept at the top, its line the way back.
+    app.proj.panes[0].as_mut().unwrap().scroll_y = 5000.0;
+    let mut sim = sim_of(&app);
+    let name = text_at(&mut sim, |t| t == "origin", 0).expect("the card, kept on screen");
+    assert!(
+        name.y < app.window_height / 2.0,
+        "kept at the top: {name:?}"
+    );
+    assert!(goes_back(&app), "no way back to its function");
+}
+
+/// A note beside a function the caret is not in says as much of its
+/// summary as its lines hold, ending in an ellipsis — clipped at its foot,
+/// it stopped mid-sentence, the line under it sliced through — and keeps
+/// "function, line 3" whole, its name cut short instead.
+#[test]
+fn a_plain_note_ends_in_an_ellipsis_and_keeps_its_head_whole() {
+    let mut app = reader_app();
+    app.show_right_panel = true;
+    app.proj.explain.view = None;
+    let abs = app.proj.panes[0].as_ref().unwrap().abs.clone();
+    let name = "make_the_point_that_sits_at_the_origin_of_the_plane";
+    let summary = "Makes the point at zero. ".repeat(20);
+    app.proj.explain.cache.insert(
+        crate::explain::Node::Function {
+            file: abs,
+            name: name.into(),
+            ordinal: 0,
+        },
+        crate::explain::Cached {
+            summary: summary.trim().to_string(),
+            prompt_hash: crate::incremental::content_hash(b"t"),
+            detail: None,
+            basis: None,
+        },
+    );
+    app.proj.panes[0].as_mut().unwrap().symbols = vec![crate::outline::Symbol {
+        name: name.into(),
+        kind: "function".into(),
+        line: 3,
+        end_line: 5,
+    }];
+    let mut sim = sim_of(&app);
+    let said = text_at(
+        &mut sim,
+        |t| t.starts_with("Makes the point") && t.ends_with('…'),
+        0,
+    )
+    .expect("the summary, cut with an ellipsis");
+    let line = super::explain_view::NOTE_SIZE * super::explain_view::NOTE_LINE_HEIGHT;
+    assert!(
+        said.height <= 3.0 * line + 1.0,
+        "{} lines",
+        said.height / line
+    );
+    assert!(
+        text_at(&mut sim, |t| t == "function, line 3", 0).is_some(),
+        "the head's kind and line, whole"
+    );
+    assert!(
+        text_at(
+            &mut sim,
+            |t| t.starts_with("make_the_point") && t.ends_with('…'),
+            0
+        )
+        .is_some(),
+        "the long name cut to leave them room"
     );
 }
 
@@ -13201,8 +14091,7 @@ fn the_explanation_in_blocks_has_the_margin_to_be_read_in() {
             basis: None,
         },
     );
-    // Where the card ends: its actions' row, the lowest "Calls" (the
-    // other is the margin's tab).
+    // Where the card ends: its actions' row, the lowest "Calls".
     let card_foot = |app: &App| {
         let mut sim = sim_of(app);
         (0..)
@@ -14145,7 +15034,7 @@ fn smart_turn_is_offered_in_voice_settings() {
     app.voice.store = Some(store.clone());
     let mut sim = sim_elem(super::voice_section(&app));
     assert!(shows(&mut sim, "Smart Turn"));
-    assert!(shows(&mut sim, "a pause to think is waited through"));
+    assert!(shows(&mut sim, "waits through a pause to think"));
     assert!(matches!(
         click(sim, "Download (9 MB)").as_slice(),
         [Message::Voice(VoiceMsg::DownloadTurn)]
@@ -14167,7 +15056,7 @@ fn smart_turn_is_offered_in_voice_settings() {
     let mut sim = sim_elem(super::voice_section(&app));
     assert!(shows(
         &mut sim,
-        "clew-speak, which runs it, is not installed beside Clew"
+        "This model needs clew-speak, which isn't installed alongside Clew"
     ));
     let _ = std::fs::remove_dir_all(store.dir());
 }
@@ -14248,7 +15137,7 @@ fn the_wake_phrase_is_offered_in_voice_settings() {
     let mut sim = sim_elem(super::voice_section(&app));
     assert!(shows(
         &mut sim,
-        "clew-speak, which runs it, is not installed beside Clew"
+        "This model needs clew-speak, which isn't installed alongside Clew"
     ));
     drop(sim);
     // Waiting: the microphone at rest says so.
@@ -14257,10 +15146,10 @@ fn the_wake_phrase_is_offered_in_voice_settings() {
     assert_eq!(super::askfloat::talk_tint(&app, rest), rest);
     crate::app::wake::testing::ready(&mut app, store.clone());
     assert!(app.resume_waiting());
-    assert_eq!(super::askfloat::talk_tip(&app), "Talk — or say “Hey, Clew”");
+    assert_eq!(super::askfloat::talk_tip(&app), "Talk, or say “Hey, Clew”");
     assert_eq!(
         super::askfloat::stop_listening_tip(),
-        "Stop listening — or say “Bye, Clew”"
+        "Stop listening, or say “Bye, Clew”"
     );
     assert_eq!(
         super::askfloat::talk_tint(&app, rest),
@@ -14398,7 +15287,7 @@ fn the_jump_hint_is_said_whole_beside_a_failure() {
         Some(Message::Explain(crate::ExplainMsg::Refresh)),
         crate::app::state::FailureOf::Explain,
     );
-    let hint = "Type the code on a control to press it — Esc to stop";
+    let hint = "Type the code shown on a control to click it. Press Esc to stop.";
     app.jump = Some(String::new());
     app.status = hint.into();
     let mut sim = sim_elem(super::statusbar::statusbar(&app));
@@ -14420,14 +15309,18 @@ fn the_jump_hint_is_said_whole_beside_a_failure() {
 }
 
 /// A failure on the status line keeps its Try again, Settings and × where
-/// they are whatever else is said or stops being said: shortened to make
-/// room for the next message, they moved under the pointer and a click
-/// meant for Settings landed on words.
+/// they are while the pointer is on the line, whatever else is said or
+/// stops being said: shortened to make room for the next message, they
+/// moved under the pointer and a click meant for Settings landed on words.
+/// Away from it, the failure gives room to what is said beside it and takes
+/// it back after — kept empty for what might be said, its reason was cut
+/// beside nothing.
 #[test]
 fn a_failures_controls_stay_put_on_the_status_line() {
     let mut app = reader_app();
+    let failed = "Couldn't explain lib.rs: couldn't reach the AI provider (nothing answered at that address) — check the base URL in Settings";
     app.say_failure(
-        "Couldn't explain lib.rs: couldn't reach the AI provider (nothing answered at that address) — check the base URL in Settings".into(),
+        failed.into(),
         Some(Message::Explain(crate::ExplainMsg::Refresh)),
         crate::app::state::FailureOf::Explain,
     );
@@ -14435,15 +15328,91 @@ fn a_failures_controls_stay_put_on_the_status_line() {
         let mut sim = sim_elem(super::statusbar::statusbar(app));
         text_at(&mut sim, |t| t == words, 0).map(|r| r.x)
     };
-    let before = (at(&app, "Try again"), at(&app, "Settings"));
-    assert!(before.0.is_some() && before.1.is_some(), "{before:?}");
-    for said in ["Copied 2 lines", "Code statistics ready", ""] {
-        app.status = said.into();
+    let hover = |app: &mut App, over: bool| {
+        let _ = app.update(Message::Window(WindowMsg::StatusHover(over)));
+    };
+    // The pointer came with nothing said beside the failure, and with
+    // something.
+    for first in [failed, "Copied 2 lines"] {
+        app.status = first.into();
+        hover(&mut app, true);
+        let before = (at(&app, "Try again"), at(&app, "Settings"));
+        assert!(before.0.is_some() && before.1.is_some(), "{before:?}");
+        for said in ["Copied 2 lines", "Code statistics ready", ""] {
+            app.status = said.into();
+            assert_eq!(
+                (at(&app, "Try again"), at(&app, "Settings")),
+                before,
+                "moved for {said:?} under the pointer, which came to {first:?}"
+            );
+        }
+        // Another failure in its place, the pointer still there: laid out
+        // as the one it replaced was.
+        app.status = first.into();
+        app.say_failure(
+            failed.into(),
+            Some(Message::Explain(crate::ExplainMsg::Refresh)),
+            crate::app::state::FailureOf::Explain,
+        );
+        app.status = "Code statistics ready".into();
         assert_eq!(
             (at(&app, "Try again"), at(&app, "Settings")),
             before,
-            "moved for {said:?}"
+            "the next failure moved under the pointer"
         );
+        hover(&mut app, false);
+    }
+    // Away from it: all the room is the failure's while nothing else is
+    // said, and half of it, about, is given to what is.
+    app.status = String::new();
+    let alone = at(&app, "Try again").expect("Try again");
+    app.status = "Copied 2 lines".into();
+    let beside = at(&app, "Try again").expect("Try again");
+    assert!(beside < alone, "no room given: {beside} {alone}");
+    let mut sim = sim_elem(super::statusbar::statusbar(&app));
+    assert!(text_at(&mut sim, |t| t == "Copied 2 lines", 0).is_some());
+    drop(sim);
+    app.status = String::new();
+    assert_eq!(
+        at(&app, "Try again"),
+        Some(alone),
+        "the room not taken back"
+    );
+    // A failure raised under the pointer holds still from the first.
+    app.forget_failure_of(crate::app::state::FailureOf::Explain);
+    hover(&mut app, true);
+    app.say_failure(
+        failed.into(),
+        Some(Message::Explain(crate::ExplainMsg::Refresh)),
+        crate::app::state::FailureOf::Explain,
+    );
+    let first = at(&app, "Try again");
+    app.status = "Copied 2 lines".into();
+    assert_eq!(at(&app, "Try again"), first, "moved under the pointer");
+    hover(&mut app, false);
+    assert_eq!(app.failure_notice.as_ref().and_then(|f| f.held), None);
+}
+
+/// A failure with nothing said beside it is said whole where the window has
+/// the room, at the widths a window is used at: the room kept for what
+/// might be said next cut it to what failed, beside nothing.
+#[test]
+fn a_failure_alone_is_said_whole() {
+    let mut app = reader_app();
+    let failed = "Couldn't explain lib.rs: couldn't reach the AI provider (nothing answered at that address) — check the base URL in Settings";
+    app.say_failure(
+        failed.into(),
+        Some(Message::Explain(crate::ExplainMsg::Refresh)),
+        crate::app::state::FailureOf::Explain,
+    );
+    for width in [1280.0, 1440.0] {
+        let mut sim = sim_sized(&app, Size::new(width, 800.0));
+        assert!(
+            text_at(&mut sim, |t| t == failed, 0).is_some(),
+            "cut at {width}"
+        );
+        assert!(text_at(&mut sim, |t| t == "Try again", 0).is_some());
+        assert!(text_at(&mut sim, |t| t == "Settings", 0).is_some());
     }
 }
 
@@ -14490,6 +15459,119 @@ fn what_is_under_way_is_said_whole_beside_an_older_failure() {
         "cut in Chinese"
     );
     assert!(text_at(&mut sim, |t| t.starts_with("无法解释 lib.rs"), 0).is_some());
+}
+
+/// What failed is said whole before the offer to set servers up is: the
+/// offer gives way to its mark and count (whole where the pointer rests),
+/// where a plugin's failure beside it was cut to "Oldest TO…". What is said
+/// next keeps its room all the same.
+#[test]
+fn what_failed_is_said_whole_before_the_setup_offer() {
+    let mut app = reader_app();
+    app.proj.setup_missing = vec![
+        crate::app::setup::SetupServer {
+            language: "rust".into(),
+            name: "rust-analyzer".into(),
+            fetch: crate::app::setup::Fetch::Download,
+            builds: false,
+        },
+        crate::app::setup::SetupServer {
+            language: "python".into(),
+            name: "pyright".into(),
+            fetch: crate::app::setup::Fetch::Install("npm".into()),
+            builds: false,
+        },
+    ];
+    let failed = "Oldest TODO did not finish: it crashed: index out of bounds: the len is 4 but the index is 4 (at src/lib.rs:46:36)";
+    app.say_failure(failed.into(), None, crate::app::state::FailureOf::PluginRun);
+    // The right side says something too: the language's server declined.
+    app.proj.link.lsp.insert(
+        "rust".into(),
+        crate::app::model::LspSlot::Declined("server download declined".into()),
+    );
+    for width in [1000.0, 1100.0, 1280.0, 1440.0] {
+        let mut sim = sim_sized(&app, Size::new(width, 800.0));
+        assert!(
+            text_at(&mut sim, |t| t.starts_with("Oldest TODO did not finish"), 0).is_some(),
+            "what failed is cut at {width}"
+        );
+        assert!(text_at(&mut sim, |t| t == "Settings", 0).is_some());
+        // The offer is still there, short or whole.
+        assert!(
+            text_at(
+                &mut sim,
+                |t| t == "2" || t == "Set up 2 language servers",
+                0
+            )
+            .is_some(),
+            "the offer is gone at {width}"
+        );
+        // Nothing is said beside it: why it failed is said before the
+        // offer is — "List TODOs did not finish: the plu…" stood beside
+        // "Set up 2 language servers" said whole.
+        let whole = text_at(&mut sim, |t| t == failed, 0).is_some();
+        let offer_whole = text_at(&mut sim, |t| t == "Set up 2 language servers", 0).is_some();
+        assert!(
+            whole || !offer_whole,
+            "why it failed is cut beside the offer said whole at {width}"
+        );
+    }
+    // With nothing said beside it, it is said whole where there is the room:
+    // kept empty for what might be said, it was "Oldest TODO did not
+    // finish: it crashed: inde…" beside nothing.
+    for width in [1280.0, 1440.0] {
+        let mut sim = sim_sized(&app, Size::new(width, 800.0));
+        assert!(
+            text_at(&mut sim, |t| t == failed, 0).is_some(),
+            "cut beside nothing at {width}"
+        );
+    }
+    // With room for both, the offer is said whole.
+    {
+        let mut sim = sim_sized(&app, Size::new(2400.0, 800.0));
+        assert!(text_at(&mut sim, |t| t == "Set up 2 language servers", 0).is_some());
+        assert!(text_at(&mut sim, |t| t == failed, 0).is_some());
+    }
+
+    // What was just said, too, before the offer: it was cut to "TODO count
+    // is installed: its commands are in the comma…" beside the offer said
+    // whole.
+    app.forget_failure_of(crate::app::state::FailureOf::PluginRun);
+    let said = "TODO count is installed: its commands are in the command palette, its graphs in Project Graphs";
+    app.status = said.into();
+    for width in [1000.0, 1100.0, 1280.0, 1440.0] {
+        let mut sim = sim_sized(&app, Size::new(width, 800.0));
+        let whole = text_at(&mut sim, |t| t == said, 0).is_some();
+        let offer_whole = text_at(&mut sim, |t| t == "Set up 2 language servers", 0).is_some();
+        assert!(
+            whole || !offer_whole,
+            "what was said is cut beside the offer said whole at {width}"
+        );
+        assert!(
+            text_at(&mut sim, |t| t.starts_with("TODO count is installed"), 0).is_some(),
+            "what was said is gone at {width}"
+        );
+    }
+    {
+        let mut sim = sim_sized(&app, Size::new(2400.0, 800.0));
+        assert!(text_at(&mut sim, |t| t == "Set up 2 language servers", 0).is_some());
+        assert!(text_at(&mut sim, |t| t == said, 0).is_some());
+    }
+    // What an install says is said whole at 1280, beside the offer and the
+    // server declined on the right: in more words, it was cut there.
+    let installed = "TODO count is installed, in the command palette and Project Graphs";
+    app.status = installed.into();
+    for width in [1280.0, 1440.0] {
+        let mut sim = sim_sized(&app, Size::new(width, 800.0));
+        assert!(
+            text_at(&mut sim, |t| t == installed, 0).is_some(),
+            "what an install says is cut at {width}"
+        );
+    }
+    // A short word beside it leaves the offer whole.
+    app.status = "Copied".into();
+    let mut sim = sim_sized(&app, Size::new(1280.0, 800.0));
+    assert!(text_at(&mut sim, |t| t == "Set up 2 language servers", 0).is_some());
 }
 
 /// An Ask answer's failure, raised with Ask put away, is said in the
@@ -14544,6 +15626,41 @@ fn a_standing_failure_is_said_in_the_language_now_spoken() {
     });
 }
 
+/// A command running keeps its chip, and its Stop, beside a failure that
+/// stands with a long reason: laid out after the failure, with the room it
+/// left, the chip was gone and nothing said a command ran.
+#[test]
+fn a_running_commands_chip_stands_beside_a_long_failure() {
+    let mut app = reader_app();
+    app.say_failure_again(
+        || {
+            format!(
+                "Walkthrough failed: {}",
+                "the server at the address it was given refused the connection, again and again, "
+                    .repeat(4)
+            )
+        },
+        None,
+        crate::app::state::FailureOf::Walkthrough,
+    );
+    app.plugins.running = Some("Word count: Count words".into());
+    app.plugins.stop = Some(Arc::new(std::sync::atomic::AtomicBool::new(false)));
+    let mut sim = sim_elem(super::statusbar::statusbar(&app));
+    assert!(
+        text_at(
+            &mut sim,
+            |t| t.starts_with("Running Word count: Count words"),
+            0
+        )
+        .is_some(),
+        "the run's chip is laid out"
+    );
+    assert!(
+        text_at(&mut sim, |t| t.starts_with("Walkthrough failed"), 0).is_some(),
+        "and the failure beside it"
+    );
+}
+
 /// What voice could not do is said in the reader's language: on the card,
 /// on the pill, and under a model in Settings.
 #[test]
@@ -14560,8 +15677,8 @@ fn voice_failures_are_said_in_the_readers_language() {
     app.voice.store = Some(clew_voice::models::Store::new(dir));
     app.voice.download_errors.insert(
         "base.en",
-        "the download does not match the published ggml-base.en.bin (13 bytes, not 147951465) — \
-         it was discarded"
+        "the download does not match the published ggml-base.en.bin (13 bytes, not 147951465), \
+         so it was discarded"
             .into(),
     );
     with_lang(Lang::Fr, || {
@@ -15084,7 +16201,7 @@ fn the_margin_says_why_it_is_hidden_and_follows_the_pane_left() {
     // A narrow window says why too.
     app.show_view_menu = true;
     app.window_width = 900.0;
-    assert!(shows(&mut sim_of(&app), "hidden: window too narrow"));
+    assert!(shows(&mut sim_of(&app), "hidden (window too narrow)"));
 }
 
 /// On Linux and Windows the window is borderless and Clew draws the design's
@@ -15783,12 +16900,12 @@ fn the_files_name_keeps_its_room_in_the_header() {
         let tools = super::file_tools_rect(&app).unwrap();
         assert!(tools.x > name.x + name.width, "{tools:?} over {name:?}");
     });
-    // With room, they are said whole.
+    // With room, they are their glyphs still: one look whatever the room.
     let mut app = reader_app();
     app.show_left_sidebar = true;
     app.window_width = WINDOW.width;
     let mut sim = sim_of(&app);
-    assert!(shows(&mut sim, "Time Travel"));
+    assert!(!shows(&mut sim, "Time Travel"));
     let name = text_at(&mut sim, |t| t == "lib.rs", 0).unwrap();
     assert!(name.width > 20.0);
 }
@@ -15852,9 +16969,10 @@ fn an_unexplained_note_offers_explain_all() {
     );
 }
 
-/// The Overview not generated yet says what it is written from and offers
-/// the one step that gets there, as a button: it said "Run Explain All
-/// first." in words alone, and the page was a dead end.
+/// The Overview not generated yet says, in a card where it will be, what
+/// it is and offers the one step that gets there: it said "Run Explain All
+/// first." in words alone, and the page was a dead end; then a sentence
+/// and a filled button floated alone under the map.
 #[test]
 fn the_overview_offers_its_next_step() {
     let mut app = reader_app();
@@ -15888,10 +17006,48 @@ fn the_overview_offers_its_next_step() {
             basis: None,
         },
     );
-    // Ready: written by the icon beside the close button, not by a button
-    // floated alone under the map.
+    // Ready: written from the card, where it will be.
     let mut sim = sim_elem(super::overview_home(&app));
-    assert!(!shows(&mut sim, "Generate overview"), "a word, not an icon");
+    assert!(shows(&mut sim, "Written overview"));
+    drop(sim);
+    let sent = click(sim_elem(super::overview_home(&app)), "Generate overview");
+    assert!(
+        matches!(
+            sent.as_slice(),
+            [Message::Overview(crate::OverviewMsg::Generate)]
+        ),
+        "{sent:?}"
+    );
+    // Writing it keeps the page: the page was swapped for a line of words.
+    app.proj.overview.generating = true;
+    let mut sim = sim_elem(super::overview_home(&app));
+    assert!(shows(&mut sim, "Architecture Overview"));
+    assert!(shows(&mut sim, "Generating architecture overview…"));
+    assert!(!shows(&mut sim, "Generate overview"), "not offered twice");
+    drop(sim);
+    // Failed: said where it will be, with Try again.
+    app.proj.overview.generating = false;
+    app.proj.overview.failed = Some("the model is overloaded".into());
+    let mut sim = sim_elem(super::overview_home(&app));
+    assert!(shows(
+        &mut sim,
+        "Could not generate the overview: the model is overloaded"
+    ));
+    drop(sim);
+    let sent = click(sim_elem(super::overview_home(&app)), "Try again");
+    assert!(
+        matches!(
+            sent.as_slice(),
+            [Message::Overview(crate::OverviewMsg::Generate)]
+        ),
+        "{sent:?}"
+    );
+    // Written: the card gives way to it, and writing it again is the icon
+    // beside the close button.
+    app.proj.overview.failed = None;
+    app.proj.overview.markdown = Some("The shop sells tea.".into());
+    let mut sim = sim_elem(super::overview_home(&app));
+    assert!(!shows(&mut sim, "Written overview"));
     drop(sim);
     let sent = click_right_of(
         || sim_elem(super::overview_home(&app)),
@@ -15903,12 +17059,6 @@ fn the_overview_offers_its_next_step() {
             .any(|m| matches!(m, Message::Overview(crate::OverviewMsg::Generate))),
         "{sent:?}"
     );
-    // Writing it keeps the page and turns the icon: the page was swapped
-    // for a line of words.
-    app.proj.overview.generating = true;
-    let mut sim = sim_elem(super::overview_home(&app));
-    assert!(shows(&mut sim, "Architecture Overview"));
-    assert!(shows(&mut sim, "Generating architecture overview…"));
 }
 
 /// An empty type map says why: an API index never built — and, without
@@ -15920,7 +17070,7 @@ fn an_empty_type_map_says_why() {
     assert_eq!(app.proj.docs.generation, 0);
     {
         let mut sim = sim_elem(super::project_types_body(&app));
-        assert!(shows(&mut sim, "not running"));
+        assert!(shows(&mut sim, "isn't running"));
         assert!(!shows(&mut sim, "No types found"));
     }
     // Built, and empty: then there are none.
@@ -16158,10 +17308,9 @@ fn the_set_up_sheet_says_why_apply_waits() {
     };
     // Every server set up, Explain not ticked: nothing to apply, and why.
     app.setup = Some(setup(true, false, census(Vec::new())));
-    assert!(says(
-        &app,
-        "Nothing to apply: the language servers are already set up."
-    ));
+    assert!(says(&app, "The language servers are already set up."));
+    // Nothing it could do: the sheet only closes — no "Cancel" of nothing.
+    assert!(says(&app, "Close") && !says(&app, "Cancel"));
     // A server to set up, but unticked: tick it.
     let pyright = SetupServer {
         language: "python".into(),
@@ -16170,7 +17319,8 @@ fn the_set_up_sheet_says_why_apply_waits() {
         builds: false,
     };
     app.setup = Some(setup(false, false, census(vec![pyright.clone()])));
-    assert!(says(&app, "Nothing to apply: tick what to set up."));
+    assert!(says(&app, "Tick what you want to set up."));
+    assert!(says(&app, "Cancel"), "a tick undone is a choice cancelled");
     // Something to do: nothing said.
     app.setup = Some(setup(true, false, census(vec![pyright])));
     assert!(!says(&app, "Nothing to apply"));
@@ -16294,7 +17444,7 @@ fn explain_on_an_empty_file_says_it_is_empty() {
     )));
     assert_eq!(
         app.status,
-        "This file is empty: there is nothing in it to explain."
+        "This file is empty, so there's nothing to explain."
     );
     assert!(!app.proj.explain.running, "a pass began");
     // Nor one in no language Clew reads: it was "no longer part of the
@@ -16565,6 +17715,7 @@ fn the_context_menu_waits_for_the_language_server() {
         served,
         by_pointer: true,
         line_top: None,
+        in_test: false,
     };
     app.proj.context_menu = Some(menu(false));
     for waits in ["Go to Definition", "Find References", "Call Hierarchy"] {
@@ -17295,14 +18446,14 @@ fn an_empty_docs_view_offers_to_look_again() {
         assert!(!shows(&mut sim, "Rebuild"));
     }
     assert!(matches!(
-        click(sim_elem(super::docs_stats::docs_tab(&app)), "Look again").as_slice(),
+        click(sim_elem(super::docs_stats::docs_tab(&app)), "Scan again").as_slice(),
         [Message::Docs(DocsMsg::Refresh)]
     ));
     // A build that came back empty says so, not "No documentation" again.
     app.proj.docs.generation = 1;
     let mut sim = sim_elem(super::docs_stats::docs_tab(&app));
     assert!(shows(&mut sim, "Nothing documented"));
-    assert!(shows(&mut sim, "Look again"));
+    assert!(shows(&mut sim, "Scan again"));
 }
 
 /// M10 (round 6): working without clew-server, the Docs view and the
@@ -17314,19 +18465,20 @@ fn docs_without_their_server_say_what_they_need() {
     let mut app = reader_app();
     app.proj.docs.files.clear();
     app.explain_cache_mut().clear();
-    let why = "No clew-server binary was found beside Clew or on PATH; working without it.";
+    let why =
+        "No clew-server binary was found beside Clew or on PATH, so Clew is working without it.";
     app.handshake_failure = Some(why.into());
     {
         let mut sim = sim_elem(super::docs_stats::docs_tab(&app));
         assert!(shows(&mut sim, "API docs need clew-server"));
         assert!(shows(&mut sim, why));
-        assert!(!shows(&mut sim, "Look again"));
+        assert!(!shows(&mut sim, "Scan again"));
     }
     let _ = app.update(Message::Glossary(GlossaryMsg::Open));
     let on_page = |app: &App, shown: &str| sim_of(app).find(shown).is_ok();
     assert!(on_page(&app, "The glossary needs clew-server"));
     assert!(on_page(&app, why));
-    assert!(!on_page(&app, "Look again"));
+    assert!(!on_page(&app, "Scan again"));
 }
 
 /// L21: the View menu's row that is inert — blocks, with no function
@@ -17359,8 +18511,8 @@ fn the_view_menus_inert_row_says_why() {
 
 /// The header's folder tag is cut short with "…" where the tools leave
 /// it too little room — never clipped under them mid-word ("test" for
-/// "tests", in French, whose tools are longer) — and the tools give up
-/// their words before the folder is cut to nothing ("…op").
+/// "tests", in French, whose tools were longer) — and not to a stub
+/// ("…op").
 #[test]
 fn the_headers_folder_is_cut_with_an_ellipsis_not_clipped() {
     use crate::i18n::{Lang, with_lang};
@@ -17369,17 +18521,10 @@ fn the_headers_folder_is_cut_with_an_ellipsis_not_clipped() {
         app.show_left_sidebar = true;
         app.show_right_panel = true;
         app.proj.panes[0].as_mut().unwrap().rel = "tests/integration/test_pricing.py".into();
-        let mut words_given_up = false;
         for width in (760..=1280).rev().step_by(20) {
             app.window_width = width as f32;
             let mut sim = sim_of(&app);
-            // Skim's name goes before Explain's (L15).
-            if text_at(&mut sim, |t| t == "Survol", 0).is_none() {
-                words_given_up = true;
-            }
-            let Some(tools) = text_at(&mut sim, |t| t == "Expliquer", 0) else {
-                continue;
-            };
+            let tools = super::file_tools_rect(&app).expect("the header's tools");
             let full = text_at(&mut sim, |t| t == "tests/integration", 0);
             let elided = text_at(
                 &mut sim,
@@ -17390,10 +18535,7 @@ fn the_headers_folder_is_cut_with_an_ellipsis_not_clipped() {
                 0,
             );
             if let Some(cut) = elided {
-                assert!(
-                    cut.width >= 60.0,
-                    "{width}: the folder cut to {cut:?} while the tools keep their words"
-                );
+                assert!(cut.width >= 60.0, "{width}: the folder cut to {cut:?}");
             }
             let Some(folder) = full.or(elided) else {
                 continue;
@@ -17404,10 +18546,6 @@ fn the_headers_folder_is_cut_with_an_ellipsis_not_clipped() {
                 tools.x
             );
         }
-        assert!(
-            words_given_up,
-            "a narrow window's tools give up their words"
-        );
     });
 }
 
@@ -17541,31 +18679,27 @@ fn recent_folders_and_close_folder_are_in_the_app_menu() {
     assert!(!shows(&mut tall_menu(&app), "Close Folder"));
 }
 
-/// L15: where the header has room for Explain's name and not every
-/// tool's, Explain keeps it — the one that spends an AI call, and what a
-/// reader new to Clew looks for. At 1100 px "test_pricing.py" showed
-/// ✦ ⤫ ⟲ ◷ alone, where "pricing.py" showed their names.
+/// The header's tools are their glyphs at every width, their names in
+/// their tooltips, and the file's name never gives way to them: they said
+/// their names where a name was short and gave them up where it was long
+/// ("test_pricing.py" showed ✦ ⤫ ⟲ ◷ where "pricing.py" showed words).
 #[test]
-fn explain_keeps_its_name_the_longest() {
+fn the_header_tools_are_glyphs_at_every_width() {
     let mut app = reader_app();
     app.show_left_sidebar = true;
     app.show_right_panel = true;
-    let mut kept_alone = false;
-    for width in (760..=1440).rev().step_by(10) {
+    app.proj.panes[0].as_mut().unwrap().rel = "tests/test_pricing.py".into();
+    for width in (760..=1440).rev().step_by(40) {
         app.window_width = width as f32;
-        app.proj.panes[0].as_mut().unwrap().rel = "tests/test_pricing.py".into();
         let mut sim = sim_of(&app);
-        let explain = text_at(&mut sim, |t| t == "Explain", 0).is_some();
-        let skim = text_at(&mut sim, |t| t == "Skim", 0).is_some();
-        assert!(explain || !skim, "{width}: Skim named, Explain not");
-        kept_alone |= explain && !skim;
-        // The file's name is never what gave way for it.
+        for word in ["Skim", "Diff", "Time Travel", "View"] {
+            assert!(!shows(&mut sim, word), "{width}: {word} as a word");
+        }
         assert!(
             text_at(&mut sim, |t| t == "test_pricing.py", 0).is_some(),
-            "{width}: the name cut for the tools' words"
+            "{width}: the name cut for the tools"
         );
     }
-    assert!(kept_alone, "Explain never kept its name alone");
 }
 
 /// A file's card has no way to a function's calls: the margin's Calls tab
@@ -17587,18 +18721,15 @@ fn a_files_card_offers_no_calls() {
     );
     app.proj.explain.view = Some(crate::explain::Node::File(abs));
     let mut sim = sim_of(&app);
-    // The card is up: its History beside the margin's own tab of the name.
+    // The card is up — its History — and has no Calls (the margin's tabs
+    // are glyphs, the shown one Explanations).
     assert!(
-        text_at(&mut sim, |t| t == "History", 1).is_some(),
-        "the card's History, after the tab's"
+        text_at(&mut sim, |t| t == "History", 0).is_some(),
+        "the card's History"
     );
     assert!(
-        text_at(&mut sim, |t| t == "Calls", 0).is_some(),
-        "the margin's own tab"
-    );
-    assert!(
-        text_at(&mut sim, |t| t == "Calls", 1).is_none(),
-        "and no second Calls, on the card"
+        text_at(&mut sim, |t| t == "Calls", 0).is_none(),
+        "no Calls on the card"
     );
 }
 
@@ -17680,6 +18811,69 @@ fn each_init_in_the_outline_has_a_note_of_its_own() {
     };
     assert_eq!(toggled(0).as_deref(), Some("OutOfStock.__init__"));
     assert_eq!(toggled(1).as_deref(), Some("Inventory.__init__"));
+}
+
+/// A Rust file's outline heads each `impl` block's items with what the
+/// block says — `fmt` was nobody's, and two `new`s one name twice — and
+/// every row stands in as deep as what holds it: a method under its
+/// `impl`, a module's items under the module. A block's row jumps to its
+/// line, and the outline's follow counts it.
+#[test]
+fn a_rust_outline_heads_each_impl_blocks_items() {
+    let mut app = reader_app();
+    let src = "struct Point;\n\
+               impl Point {\n    fn new() -> Self { Point }\n}\n\
+               impl std::fmt::Display for Point {\n    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {\n        Ok(())\n    }\n}\n\
+               mod tests {\n    fn check() {}\n}\n";
+    {
+        let v = app.proj.panes[0].as_mut().unwrap();
+        v.lang_key = Some("rust");
+        v.source = std::sync::Arc::new(src.to_string());
+        v.symbols = crate::outline::extract(src, "rust");
+    }
+    let mut sim = sim_elem(super::outline_content(&app));
+    for said in ["Display for Point", "new", "fmt", "check"] {
+        assert!(shows(&mut sim, said), "{said}");
+    }
+    // The struct, then its `impl Point` block's row: its kind says impl.
+    let x = |sim: &mut _, name: &str| text_at(sim, |t| t == name, 0).unwrap().x;
+    let point = x(&mut sim, "Point");
+    let block = text_at(&mut sim, |t| t == "Point", 1)
+        .expect("the impl Point row")
+        .x;
+    let method = x(&mut sim, "new");
+    let module = x(&mut sim, "tests");
+    let inside = x(&mut sim, "check");
+    assert!(
+        (block - point).abs() < 0.5,
+        "a block at the top level: {block} / {point}"
+    );
+    assert!(
+        method > point + 8.0,
+        "a method under its impl: {method} / {point}"
+    );
+    assert!(
+        inside > module + 8.0,
+        "a module's item under it: {inside} / {module}"
+    );
+    drop(sim);
+    // The block's row jumps to its line.
+    let msgs = click_left_of(
+        || sim_elem(super::outline_content(&app)),
+        "Display for Point",
+        0,
+        |m| matches!(m, Message::Editor(EditorMsg::OutlineJump(_))),
+    );
+    assert!(
+        msgs.iter()
+            .any(|m| matches!(m, Message::Editor(EditorMsg::OutlineJump(5)))),
+        "{msgs:?}"
+    );
+    // The follow counts the two block rows above `fmt`: Point, impl Point,
+    // new, impl Display, then fmt.
+    let v = app.active_viewer().unwrap();
+    let y = app.outline_offset(v, "fmt", 0).expect("fmt in the outline");
+    assert!((y - 4.0 * 27.0).abs() < 0.5, "{y}");
 }
 
 /// A setting whose value is words — the interpreter in use — has them on
@@ -17816,28 +19010,44 @@ fn a_root_files_import_row_names_no_folder() {
 }
 
 /// The header's file tools say what they do where the pointer rests:
-/// Explain that it asks the AI, Skim what it folds, Diff what it compares
-/// with — the names the menu gives them.
+/// Explain that it asks the AI; the others, their glyphs alone, their
+/// names over what they do — Skim what it folds, Diff what it compares
+/// with, Time Travel where it goes.
 #[test]
 fn the_file_tools_say_what_they_do() {
-    let app = reader_app();
-    for (label, says) in [
+    let mut app = reader_app();
+    app.window_width = WINDOW.width;
+    for (nth, name, says) in [
         (
-            "Explain",
+            0,
+            None,
             "Explain this file with AI (an AI call for each part not yet explained)",
         ),
-        ("Skim", "Skim: fold every body to its signature"),
-        ("Diff", "Changes since the last commit"),
+        (1, Some("Skim"), "Fold every body to its signature"),
+        (2, Some("Diff"), "Changes since the last commit"),
+        (
+            3,
+            Some("Time Travel"),
+            "Step back through the file's history",
+        ),
     ] {
-        let at = text_at(&mut sim_of(&app), |t| t == label, 0).expect(label);
-        assert!(!shows(&mut sim_of(&app), says), "{label}: said at rest");
+        let at = super::file_tool_rect(&app, nth).expect("the header's tools");
+        let mut sim = sim_of(&app);
+        assert!(!shows(&mut sim, says), "{says}: said at rest");
+        if let Some(name) = name {
+            assert!(!shows(&mut sim, name), "{name}: a word at rest");
+        }
+        drop(sim);
         super::tip::warm_now();
         let mut sim = sim_of(&app);
         sim.point_at(at.center());
         let _ = sim.simulate([Event::Mouse(iced::mouse::Event::CursorMoved {
             position: at.center(),
         })]);
-        assert!(shows(&mut sim, says), "{label}");
+        assert!(shows(&mut sim, says), "{says}");
+        if let Some(name) = name {
+            assert!(shows(&mut sim, name), "{name}: named in its tooltip");
+        }
     }
 }
 
@@ -18323,10 +19533,10 @@ fn the_fake_run_sheet_asks_for_each_parameter() {
     // a value, or say it in words" read the default as the type (L1).
     let fields = &app.proj.fake.sheet.as_ref().unwrap().fields;
     let hint = |i: usize| super::fakerun::field_words(&fields[i]).1;
-    assert_eq!(hint(0), "Cart — a value, or say it in words");
+    assert_eq!(hint(0), "Cart (a value, or describe it in words)");
     assert_eq!(
         hint(1),
-        "list[Discount] — leave empty for ALL, or give a value"
+        "list[Discount] (leave empty for ALL, or give a value)"
     );
     assert_eq!(hint(2), "leave empty for None, or give a value");
     // Neither a type nor a default: what may be given, said alone.
@@ -18337,7 +19547,7 @@ fn the_fake_run_sheet_asks_for_each_parameter() {
     };
     assert_eq!(
         super::fakerun::field_words(&bare).1,
-        "a value, or say it in words"
+        "a value, or describe it in words"
     );
     assert!(shows(&mut sim, "Anything else it depends on"));
     assert!(shows(&mut sim, "Suggest inputs"));
@@ -18345,7 +19555,7 @@ fn the_fake_run_sheet_asks_for_each_parameter() {
     // started with nothing said of it; one with a default, or given, not.
     assert!(shows(
         &mut sim,
-        "Left empty, a typical cart is assumed, and said in the run."
+        "If you leave this empty, Clew assumes a typical cart and shows it in the run."
     ));
     assert!(!shows(&mut sim, "a typical rules is assumed"));
     drop(sim);
@@ -18673,6 +19883,7 @@ fn audited_states() -> Vec<(String, App)> {
         served: true,
         by_pointer: true,
         line_top: None,
+        in_test: false,
     });
     states.push(("the context menu".into(), app));
     let mut app = base_clone(&base);
@@ -19280,12 +20491,13 @@ fn the_file_trees_scrollbar_shows_beside_the_sidebars_divider() {
     let (away, _) = window_with_pointer(&app, size, None, &[]);
     let over = iced::Point::new(app.window_frame + 120.0, 300.0);
     let (hovered, _) = window_with_pointer(&app, size, Some(over), &[]);
-    // Unseen at rest; seen, well over the chrome, under the pointer.
-    assert!(lightest(&away) < 30, "{}", lightest(&away));
+    // Unseen at rest; seen, well over the chrome, under the pointer. Both
+    // said either way: once under load it failed with one of them alone.
+    let (away, hovered) = (lightest(&away), lightest(&hovered));
+    assert!(away < 30, "at rest {away}, under the pointer {hovered}");
     assert!(
-        lightest(&hovered) > lightest(&away) + 15,
-        "{}",
-        lightest(&hovered)
+        hovered > away + 15,
+        "at rest {away}, under the pointer {hovered}"
     );
 }
 
@@ -19422,6 +20634,65 @@ fn history_app() -> (App, String, String) {
         })),
     );
     (app, new, old)
+}
+
+/// The uncommitted changes head the graph as a commit's row does: their
+/// words where the commits' subjects begin, and their files under the
+/// words. The clock stood off the rail and the words off the subjects.
+#[test]
+fn the_uncommitted_row_lines_up_with_the_commits() {
+    let (mut app, ..) = history_app();
+    app.proj.git_status = [("teashop/pricing.py".to_string(), 'M')]
+        .into_iter()
+        .collect();
+    app.proj.git_log.changes_open = true;
+    let mut sim = sim_elem(super::history::history_tab(&app));
+    let words = text_at(&mut sim, |t| t == "Uncommitted changes", 0).expect("the row");
+    let subject = text_at(&mut sim, |t| t == "Start the shop", 0).expect("a commit");
+    assert!(
+        (words.x - subject.x).abs() < 0.5,
+        "words at {}, subjects at {}",
+        words.x,
+        subject.x
+    );
+    let letter = text_at(&mut sim, |t| t == "M", 0).expect("its file");
+    assert!(
+        (letter.x - words.x).abs() < 0.5,
+        "file at {}, words at {}",
+        letter.x,
+        words.x
+    );
+}
+
+/// A commit's dot is drawn on its subject's line: in the row's middle it
+/// stood between the subject and the line under it, level with neither.
+#[test]
+fn a_commits_dot_is_on_its_subjects_line() {
+    use crate::HistoryMsg;
+    let (app, _new, old) = history_app();
+    let view = || sim_elem(super::history::history_tab(&app));
+    let subject = text_at(&mut view(), |t| t == "Start the shop", 0).expect("a commit");
+    let opens = |y: f32| {
+        let mut sim = view();
+        sim.point_at(Point::new(subject.x + 2.0, y));
+        let _ = sim.simulate(iced_test::simulator::click());
+        sent_by(sim)
+            .iter()
+            .any(|m| matches!(m, Message::History(HistoryMsg::Toggle(s)) if *s == old))
+    };
+    // The row's top: the highest point over the subject that still opens it.
+    let top = (0..60)
+        .map(|d| subject.center_y() - d as f32)
+        .take_while(|&y| opens(y))
+        .last()
+        .expect("the row");
+    let dot = super::history::DOT_Y;
+    assert!(
+        (subject.center_y() - top - dot).abs() <= 1.5,
+        "subject {} below the row's top, dot {dot}",
+        subject.center_y() - top
+    );
+    assert!(dot < super::history::ROW_H / 2.0 - 4.0, "the dot mid-row");
 }
 
 /// The History view lists the project's commits, newest first: the name
@@ -19790,7 +21061,7 @@ fn explaining_says_what_it_will_likely_cost() {
     let estimate = app.explain_estimate(45).expect("an estimate");
     let said = estimate.said(45);
     assert!(
-        said.starts_with("About 45 AI calls: ") && said.contains("tokens"),
+        said.starts_with("About 45 AI calls using ") && said.contains("tokens"),
         "{said:?}"
     );
     assert!(!estimate.from_history, "no explanations in the ledger yet");
@@ -20137,7 +21408,7 @@ fn an_untracked_files_diff_is_every_line_added() {
     app.proj.diff_pending = Some((6, abs.clone()));
     let _ = app.on_diff_loaded(6, abs.clone(), rel.clone(), Ok(None));
     assert!(app.proj.diff.is_none(), "not shown as about to be added");
-    assert!(app.status.contains("not tracked"), "{}", app.status);
+    assert!(app.status.contains("isn't tracked"), "{}", app.status);
     app.proj.git_status.insert(rel.clone(), 'U');
     app.proj.diff_pending = Some((7, abs.clone()));
     let _ = app.on_diff_loaded(7, abs.clone(), rel.clone(), Ok(None));
@@ -21006,13 +22277,13 @@ fn every_note_card_has_one_layout_under_its_words() {
         let mut sim = sim_sized(&app, size);
         let head = text_at(&mut sim, |t| t == kind, 0).expect("its head");
         let date = text_at(&mut sim, |t| t.contains("2025"), 0).expect("its date");
-        let explain = text_at(&mut sim, |t| t == "Explain", 1).expect("its Explain");
+        let explain = text_at(&mut sim, |t| t == "Explain", 0).expect("its Explain");
         let ask = text_at(&mut sim, |t| t == "Ask", 0).expect("its Ask");
         // Facts over actions, each pair on one line.
         assert!((explain.y - ask.y).abs() < 1.0, "{explain:?} {ask:?}");
         assert!(explain.y > date.y + 20.0, "{explain:?} under {date:?}");
         if calls {
-            let count = text_at(&mut sim, |t| t == "Calls", 1).expect("its callers");
+            let count = text_at(&mut sim, |t| t == "Calls", 0).expect("its callers");
             assert!((count.y - date.y).abs() < 1.0, "{count:?} {date:?}");
             assert!(count.x > date.x, "the date first");
         }
@@ -21468,7 +22739,7 @@ fn the_debug_header_keeps_walk_this_run_beside_the_ask_card() {
     let walk = text_at(&mut sim, |t| t == "Walk this run", 0).expect("Walk this run");
     assert!(walk.width > 20.0, "drawn whole: {walk:?}");
     assert!(
-        text_at(&mut sim, |t| t == "Trace: 1 stop", 0).is_some(),
+        text_at(&mut sim, |t| t == "1 stop traced", 0).is_some(),
         "the trace"
     );
     assert!(
@@ -21814,7 +23085,7 @@ fn a_narrow_debug_header_keeps_its_trace_and_walk_this_run() {
             Size::new(width, 260.0),
             super::debug_panel(&app),
         );
-        let count = text_at(&mut sim, |t| t == "Trace: 1 stop", 0).expect("the trace's count");
+        let count = text_at(&mut sim, |t| t == "1 stop traced", 0).expect("the trace's count");
         assert!(count.height < 20.0, "{width}: on one line: {count:?}");
         let walk = text_at(&mut sim, |t| t == "Walk this run", 0).expect("Walk this run");
         assert!(

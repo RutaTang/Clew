@@ -802,7 +802,7 @@ impl App {
             if own {
                 tr!("Waiting for “Hey, Clew”").into()
             } else {
-                tr!("Didn't hear “Clew” — waiting for “Hey, Clew”").into()
+                tr!("Didn't hear “Clew”. Waiting for “Hey, Clew”").into()
             }
         } else if let Some(error) = &self.voice.wake.failed {
             tr!(
@@ -903,7 +903,7 @@ impl App {
         } else if !self.voice.installed(self.voice.prefs.model()) {
             let model = self.voice.prefs.model();
             Some(tr!(
-                "Voice needs a speech model on this computer — download {model} ({size} MB) in Settings → Voice",
+                "Voice needs a speech model on this computer. Download {model} ({size} MB) in Settings → Voice",
                 model = crate::i18n::lookup(model.name),
                 size = model.size_mb
             ))
@@ -998,7 +998,7 @@ impl App {
         }
         let name = crate::i18n::lookup(MODEL.name);
         let Some(store) = self.voice.store.clone() else {
-            self.status = tr!("There is no data directory to keep the model in").into();
+            self.status = tr!("There's no data directory to store the model in").into();
             return Task::none();
         };
         let claim = match Claim::take(spot::dir(&store), ClaimedFor::Download) {

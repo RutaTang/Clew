@@ -40,7 +40,7 @@ pub(crate) fn pretty_init_options(options: Option<&serde_json::Value>) -> Option
         text.truncate(cut);
         text.push('\n');
         text.push_str(tr!(
-            "… truncated for display — the approval covers the whole file's options"
+            "… truncated for display. The approval covers all of the file's options."
         ));
     }
     Some(text)
@@ -141,6 +141,7 @@ impl App {
                         // Diagnostics on their way from a server that says
                         // no more of its work: read when they come.
                         snap.progress.is_some()
+                            || snap.checking_files().next().is_some()
                             || snap.awaiting_diagnostics
                             || self.proj.link.seen_diag_version.get(lang).copied()
                                 != Some(snap.diag_version)
@@ -767,6 +768,19 @@ impl App {
             .lsp
             .insert(language.to_string(), LspSlot::Starting);
         let lang = language.to_string();
+        // Lean's server runs in the Lake project of the Lean file being
+        // read — a folder of its own, in many a repository — where it finds
+        // the project's own modules; started in the opened folder, every
+        // import of them failed.
+        let root = if language == "lean" && !self.connection.is_remote() {
+            let lake = self
+                .lean_file()
+                .map_or_else(|| root.clone(), |file| clew_core::lake_root(&root, &file));
+            self.proj.link.lean_root = Some(lake.clone());
+            lake
+        } else {
+            root
+        };
 
         // Preferred: spawn the language server on clew-server and proxy its
         // stdio, so it runs where the code lives (local today, remote later).
@@ -1071,7 +1085,7 @@ impl App {
         if self.proj.project.as_ref().map(|p| &p.root) != Some(&root)
             || self.connection.approval_host().map(str::to_string) != host
         {
-            self.status = tr!("The project changed — nothing was allowed").into();
+            self.status = tr!("The project changed, so nothing was allowed").into();
             return Task::none();
         }
         if let Err(e) = self
@@ -1119,7 +1133,7 @@ impl App {
         if self.proj.project.as_ref().map(|p| &p.root) != Some(&c.root)
             || self.connection.approval_host().map(str::to_string) != c.host
         {
-            self.status = tr!("The project changed — nothing was approved").into();
+            self.status = tr!("The project changed, so nothing was approved").into();
             return Task::none();
         }
         if let Err(e) = self
@@ -1388,7 +1402,8 @@ impl App {
             Some(LspSlot::Starting) => true,
             Some(LspSlot::Ready(_)) => matches!(
                 self.proj.link.lsp_snapshots.get(language),
-                Some(Ok(s)) if s.error.is_none() && s.progress.is_some()
+                Some(Ok(s)) if s.error.is_none()
+                    && (s.progress.is_some() || s.checking_files().next().is_some())
             ),
             _ => false,
         }

@@ -76,6 +76,11 @@ impl App {
             self.ask_sessions_query.clear();
         }
         self.ask_menu_covered = covered;
+        // The margin's Goals follow the cursor in a Lean file.
+        let task = match self.sync_lean_goals() {
+            Some(goals) => Task::batch([task, goals]),
+            None => task,
+        };
         // The margin's History lists the commits of the file being read.
         // Batched only when it asks: a batch is a task even of none, and an
         // update that asks for nothing returns none.
@@ -199,6 +204,7 @@ impl App {
             Some(O::Consent(root)) => Some(Question::Project(root.to_path_buf())),
             Some(O::LspCommand(_, number, _)) => Some(Question::LspCommand(number)),
             Some(O::LspConsent(_, number, _)) => Some(Question::LspConsent(number)),
+            Some(O::PluginInstall(_, number, _)) => Some(Question::Plugin(number)),
             Some(O::Connect) => self.connect_question(),
             // Nothing over the window: the approval card pinned in the Ask
             // panel, while the panel shows. A hover's peek counts as over
@@ -231,8 +237,8 @@ impl App {
 
     /// Every question waiting on the user's answer, shown or not, in the
     /// order they are put: the project's sheet, a language server's command,
-    /// then its download or build, the connect sheet's, then the agent's
-    /// tool call — each queue's first, the one it asks now.
+    /// then its download or build, a plugin's install, the connect sheet's,
+    /// then the agent's tool call — each queue's first, the one it asks now.
     pub(crate) fn questions_waiting(&self) -> Vec<crate::app::model::Question> {
         use crate::app::model::Question;
         let mut waiting = Vec::new();
@@ -249,6 +255,7 @@ impl App {
                 .asked()
                 .map(Question::LspConsent),
         );
+        waiting.extend(self.plugins.install.asked().map(Question::Plugin));
         waiting.extend(self.connect_question());
         waiting.extend(
             self.first_approval()
@@ -530,6 +537,7 @@ impl App {
             Message::Tutorial(message) => self.update_tutorial(message),
             Message::Voice(message) => self.update_voice(message),
             Message::Fake(message) => self.update_fake(message),
+            Message::Plugin(message) => self.update_plugins(message),
             Message::Proof(message) => self.update_proof(message),
             Message::Weak(message) => self.update_weak(message),
             Message::Picker(message) => self.update_picker(message),

@@ -2242,23 +2242,21 @@ impl ExplainFailure {
                 what: Rejection::Key,
                 detail,
             } => tr!(
-                "the provider rejected the API key ({detail}) — check it in Settings",
+                "the provider rejected the API key ({detail}). Check it in Settings",
                 detail = plain_detail(detail)
             ),
             ExplainFailure::Rejected {
                 what: Rejection::Length,
                 detail,
             } => tr!(
-                "the prompt is too long for the model ({detail}) — a model with a larger \
-                 context window can explain it",
+                "the prompt is too long for the model ({detail}), but a model with a larger context window can explain it",
                 detail = plain_detail(detail)
             ),
             ExplainFailure::Rejected {
                 what: Rejection::Model(model),
                 detail,
             } => tr!(
-                "the provider has no model `{model}` at this endpoint ({detail}) — check the \
-                 model and endpoint in Settings",
+                "the provider has no model `{model}` at this endpoint ({detail}). Check the model and endpoint in Settings",
                 model = model,
                 detail = plain_detail(detail)
             ),
@@ -2266,19 +2264,19 @@ impl ExplainFailure {
                 what: Rejection::Endpoint,
                 detail,
             } => tr!(
-                "the endpoint was not found ({detail}) — check the base URL in Settings",
+                "the endpoint was not found ({detail}). Check the base URL in Settings",
                 detail = plain_detail(detail)
             ),
             ExplainFailure::Rejected {
                 what: Rejection::Request,
                 detail,
             } => tr!(
-                "the request was refused ({detail}) — check the model and endpoint in Settings",
+                "the request was refused ({detail}). Check the model and endpoint in Settings",
                 detail = plain_detail(detail)
             ),
             ExplainFailure::Unavailable(detail) | ExplainFailure::Busy(detail) => {
                 tr!(
-                    "the provider was unavailable ({detail}) — try again later",
+                    "the provider was unavailable ({detail}). Try again later",
                     detail = plain_detail(detail)
                 )
             }
@@ -2286,7 +2284,7 @@ impl ExplainFailure {
             // to check, not "try again" beside a Try again.
             ExplainFailure::Unreached(detail) => {
                 tr!(
-                    "couldn't reach the AI provider ({detail}) — check the base URL in Settings",
+                    "couldn't reach the AI provider ({detail}). Check the base URL in Settings",
                     detail = plain_detail(detail)
                 )
             }
@@ -2301,20 +2299,18 @@ impl ExplainFailure {
                 detail = plain_detail(detail)
             ),
             ExplainFailure::Unusable(detail) => tr!(
-                "the provider's answer could not be used ({detail}) — check the model and \
-                 endpoint in Settings",
+                "the provider's answer couldn't be used ({detail}). Check the model and endpoint in Settings",
                 detail = plain_detail(detail)
             ),
             ExplainFailure::Cancelled => {
-                tr!("its requests were cancelled — run it again to finish").to_string()
+                tr!("its requests were cancelled. Run it again to finish").to_string()
             }
             ExplainFailure::Internal(detail) => tr!(
-                "Clew failed internally ({detail}) — try again, and report it if it happens again",
+                "Clew failed internally ({detail}). Try again, and report it if it happens again",
                 detail = plain_detail(detail)
             ),
             ExplainFailure::ProjectUnreadable(detail) => tr!(
-                "the project folder could not be read ({detail}) — nothing was changed; check \
-                 that it is still there",
+                "the project folder couldn't be read ({detail}) and nothing was changed. Check that it's still there",
                 detail = plain_detail(detail)
             ),
         }
@@ -2729,7 +2725,7 @@ where
     if was_rejected(&model.key, job.hash) {
         return Err(ExplainFailure::Rejected {
             what: Rejection::Length,
-            detail: tr!("refused for its length earlier in this session").into(),
+            detail: tr!("rejected as too long earlier in this session").into(),
         });
     }
     let error = match complete(job.prompt.clone()).await {
@@ -3427,6 +3423,16 @@ pub(crate) fn pick_file(window: Option<iced::window::Id>, title: String) -> Task
     picker(window, move |dialog| dialog.set_title(title).pick_file())
 }
 
+/// Native open dialog for a plugin to install: its `.wasm` file.
+pub(crate) fn pick_plugin_file(window: Option<iced::window::Id>) -> Task<Picked> {
+    picker(window, move |dialog| {
+        dialog
+            .set_title(tr!("Install a plugin"))
+            .add_filter(tr!("Clew plugin"), &["wasm"])
+            .pick_file()
+    })
+}
+
 /// Native save dialog for a Markdown export (the ⋯ menu's Export row), in a
 /// sheet on `window`, proposing `file_name` in `folder`.
 pub(crate) fn save_markdown(
@@ -3512,10 +3518,10 @@ pub(crate) async fn load_file(
         if let Some(root) = confine
             && !clew_core::fs_scan::is_inside(&root, &read_path)
         {
-            return Err(
-                tr!("cannot read: missing, a symlink, or not a file inside the project")
-                    .to_string(),
-            );
+            return Err(tr!(
+                "cannot read it (missing, a symlink, or not a file inside the project)"
+            )
+            .to_string());
         }
         read_text_file(&read_path)
     })
@@ -3542,8 +3548,9 @@ pub(crate) fn read_text_file(path: &Path) -> Result<String, String> {
     // so no separate type check is needed here — and it reports no reason, so
     // the message below has to name every case it folds together (this
     // replaces the OS error text a missing file used to produce).
-    let file = clew_core::statefile::open_plain(path)
-        .ok_or_else(|| tr!("cannot read: missing, a symlink, or not a regular file").to_string())?;
+    let file = clew_core::statefile::open_plain(path).ok_or_else(|| {
+        tr!("cannot read it (missing, a symlink, or not a regular file)").to_string()
+    })?;
     let too_large = |n: u64| {
         tr!(
             "file too large ({size} MB, limit {limit} MB)",
@@ -4218,7 +4225,7 @@ mod pass_tests {
                 assert!(failure.stops_the_pass(), "{call:?}");
                 if said == no_endpoint {
                     assert!(
-                        words.ends_with("— check the base URL in Settings"),
+                        words.ends_with(". Check the base URL in Settings"),
                         "{words}"
                     );
                 }
@@ -4606,7 +4613,7 @@ mod pass_tests {
         assert!(
             ExplainFailure::Unreached("Connection refused (os error 111)".into())
                 .describe()
-                .contains("check the base URL in Settings")
+                .contains("Check the base URL in Settings")
         );
         let remote = CallError::Rpc(RpcError {
             code: None,

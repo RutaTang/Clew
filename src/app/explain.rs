@@ -347,7 +347,7 @@ impl App {
         let left_out = match saved {
             Err(e) => {
                 self.status = tr!(
-                    "Explanations kept for this session but not saved: {error}",
+                    "Could not save the explanations ({error}). They'll last only for this session.",
                     error = e
                 );
                 // Nor is what came back adopted: it is not what the store
@@ -364,14 +364,14 @@ impl App {
         if left_out > 0 && !self.proj.explain.cap_reported {
             self.proj.explain.cap_reported = true;
             let note = trn!(
-                "The explanation cache is over its size limit: 1 summary is kept for this session but not saved (a later Explain All pays for it again)",
-                "The explanation cache is over its size limit: {n} summaries are kept for this session but not saved (a later Explain All pays for them again)",
+                "The explanation cache is over its size limit, so 1 summary wasn't saved and will last only for this session. You'll pay for it again in a later Explain All.",
+                "The explanation cache is over its size limit, so {n} summaries weren't saved and will last only for this session. You'll pay for them again in a later Explain All.",
                 left_out
             );
             self.status = if self.status.is_empty() {
                 note
             } else {
-                format!("{}; {note}", self.status)
+                crate::i18n::sentences(&self.status, &note)
             };
         }
         // What the store lacks of the window's copy is in it already
@@ -588,7 +588,7 @@ impl App {
                     .as_ref()
                     .is_some_and(|(of, ..)| of == node)
                     && self.proj.explain.view.as_ref() == Some(node)
-                    && self.margin_tab == crate::MarginTab::Notes
+                    && self.margin_tab_shown() == crate::MarginTab::Notes
                     && crate::ui::right_panel_shown(self)
             });
             if on_card {
@@ -918,7 +918,7 @@ impl App {
                 .flatten()
                 .any(|v| &v.abs == abs && v.source.is_empty())
         {
-            self.status = tr!("This file is empty: there is nothing in it to explain.").into();
+            self.status = tr!("This file is empty, so there's nothing to explain.").into();
             return Task::none();
         }
         // Nor one in no language Clew reads (notes, a licence): the pass
@@ -944,7 +944,7 @@ impl App {
         }
         // One pass at a time: the one running writes it, if it is due.
         if self.proj.explain.running {
-            self.status = tr!("Explain All is running — this is explained as it goes").into();
+            self.status = tr!("Explain All is running and will explain this along the way").into();
             return shown;
         }
         // Its chip says "Explaining pricing.py…" while it runs: the status
@@ -967,7 +967,7 @@ impl App {
         }
         if !self.proj.explain.cache.contains_key(&node) {
             self.status = tr!(
-                "Nothing to re-explain yet — run Explain All from the ⋯ menu to explain the project first."
+                "Nothing to re-explain yet. Run Explain All from the ⋯ menu to explain the project first."
             )
             .into();
             return Task::none();
@@ -975,7 +975,7 @@ impl App {
         // A second pass is refused while one runs (`start_explain_pass`):
         // said in this flow's own words, to ask again afterwards.
         if self.proj.explain.running {
-            self.status = tr!("Explain All is running — re-explain once it finishes").into();
+            self.status = tr!("Explain All is running. Re-explain once it finishes.").into();
             return Task::none();
         }
         let pass = self.start_explain_pass(PassKind::Node(node));
@@ -1269,15 +1269,15 @@ fn refusal_words(why: explain::Refusal) -> &'static str {
 fn refused_note(why: explain::Refusal, file: &str) -> String {
     match why {
         explain::Refusal::NotUtf8 => tr!(
-            "{file} is not UTF-8 text — its summaries are dropped",
+            "{file} isn't UTF-8 text, so its summaries were removed",
             file = file
         ),
         explain::Refusal::NotPlainFile => tr!(
-            "{file} is not a plain file — its summaries are dropped",
+            "{file} isn't a plain file, so its summaries were removed",
             file = file
         ),
         explain::Refusal::OutsideProject => tr!(
-            "{file} resolves outside the project — its summaries are dropped",
+            "{file} points outside the project, so its summaries were removed",
             file = file
         ),
     }
@@ -1321,7 +1321,7 @@ pub(crate) fn explanation_text(cached: Option<&explain::Cached>) -> String {
         Some(c) if is_unchecked(c) => format!(
             "*{}*\n\n{}",
             tr!(
-                "Written by an earlier version of Clew, and not checked against the code since — Explain All explains it again."
+                "Written by an earlier version of Clew and not checked against the code since. Run Explain All to explain it again."
             ),
             c.summary
         ),
@@ -1526,8 +1526,8 @@ fn pass_said(said: &PassSaid) -> String {
         // "Explained 345 functions…" of the whole project.
         let why: Vec<String> = failures.calls.iter().map(|f| f.describe()).collect();
         trn!(
-            "Explained {name}; 1 summary built on it failed: {reasons}",
-            "Explained {name}; {n} summaries built on it failed: {reasons}",
+            "Explained {name}, but 1 summary built on it failed: {reasons}",
+            "Explained {name}, but {n} summaries built on it failed: {reasons}",
             failures.failed,
             name = node_said(target),
             reasons = why.join("; ")
@@ -1537,7 +1537,8 @@ fn pass_said(said: &PassSaid) -> String {
             // Its file could not be read, or can no longer be explained:
             // the note below says so.
             0 if said.not_read => tr!("Nothing re-explained").to_string(),
-            0 => tr!("Nothing to re-explain: it is no longer part of the project").to_string(),
+            0 => tr!("It's no longer part of the project, so there's nothing to re-explain")
+                .to_string(),
             1 if said.target_new => tr!("Explained").to_string(),
             1 => tr!("Re-explained").to_string(),
             paid => trn!(
@@ -1557,45 +1558,51 @@ fn pass_said(said: &PassSaid) -> String {
                 said.n
             )
         };
-        // Each clause after a "; " says one thing whole.
+        // Each sentence after the first says one thing whole.
         if failures.failed > 0 {
             let why: Vec<String> = failures.calls.iter().map(|f| f.describe()).collect();
-            status.push_str("; ");
-            status.push_str(&trn!(
-                "1 failed: {reasons}",
-                "{n} failed: {reasons}",
-                failures.failed,
-                reasons = why.join("; ")
-            ));
+            status = crate::i18n::sentences(
+                &status,
+                &trn!(
+                    "1 failed: {reasons}",
+                    "{n} failed: {reasons}",
+                    failures.failed,
+                    reasons = why.join("; ")
+                ),
+            );
         }
         if said.unquoted > 0 {
-            status.push_str("; ");
-            status.push_str(&trn!(
-                "1 explained without the failed summaries it builds on",
-                "{n} explained without the failed summaries they build on",
-                said.unquoted
-            ));
+            status = crate::i18n::sentences(
+                &status,
+                &trn!(
+                    "1 explained without the failed summaries it builds on",
+                    "{n} explained without the failed summaries they build on",
+                    said.unquoted
+                ),
+            );
         }
         if said.waiting > 0 {
-            status.push_str("; ");
-            status.push_str(&trn!(
-                "1 left for the next refresh",
-                "{n} left for the next refresh",
-                said.waiting
-            ));
+            status = crate::i18n::sentences(
+                &status,
+                &trn!(
+                    "1 left for the next refresh",
+                    "{n} left for the next refresh",
+                    said.waiting
+                ),
+            );
         }
         let mut left = Vec::new();
         if said.outdated > 0 {
             left.push(trn!(
-                "1 out of date, kept",
-                "{n} out of date, kept",
+                "1 kept but out of date",
+                "{n} kept but out of date",
                 said.outdated
             ));
         }
         if said.unverified > 0 {
             left.push(trn!(
-                "1 from an earlier version of Clew, kept but not rechecked",
-                "{n} from an earlier version of Clew, kept but not rechecked",
+                "1 kept from an earlier version of Clew but not rechecked",
+                "{n} kept from an earlier version of Clew but not rechecked",
                 said.unverified
             ));
         }
@@ -1607,11 +1614,13 @@ fn pass_said(said: &PassSaid) -> String {
             ));
         }
         if !left.is_empty() {
-            status.push_str("; ");
-            status.push_str(&tr!(
-                "{list} — Explain All brings them up to date",
-                list = left.join(", ")
-            ));
+            status = crate::i18n::sentences(
+                &status,
+                &tr!(
+                    "{list} (run Explain All to update them)",
+                    list = left.join(", ")
+                ),
+            );
         }
         status
     };
@@ -1619,17 +1628,19 @@ fn pass_said(said: &PassSaid) -> String {
     // holds no summary loses nothing by it.
     let held = &said.held;
     if !held.is_empty() {
-        status.push_str("; ");
-        status.push_str(&trn!(
-            "1 file could not be read ({files}) — its summaries are kept until it can be",
-            "{n} files could not be read ({files}) — their summaries are kept until they can be",
-            held.len(),
-            files = some_of(held)
-        ));
+        status = crate::i18n::sentences(
+            &status,
+            &trn!(
+                "1 file could not be read ({files}), so its summaries stay until it can be read",
+                "{n} files could not be read ({files}), so their summaries stay until they can be read",
+                held.len(),
+                files = some_of(held)
+            ),
+        );
     }
     // Dropped only by a pass that ran to its end.
     if let Some(note) = dropped_note(&said.dropped) {
-        status.push_str(&format!("; {note}"));
+        status = crate::i18n::sentences(&status, &note);
     }
     status
 }
@@ -1643,7 +1654,7 @@ fn dropped_note(dropped: &[(String, explain::Unexplainable)]) -> Option<String> 
     match dropped {
         [] => None,
         [(path, TooLarge(bytes))] => Some(tr!(
-            "{file} is too large to explain ({size}) — its summaries are dropped",
+            "{file} is too large to explain ({size}), so its summaries were removed",
             file = path.clone(),
             size = size(*bytes)
         )),
@@ -1665,8 +1676,8 @@ fn dropped_note(dropped: &[(String, explain::Unexplainable)]) -> Option<String> 
                 })
                 .collect();
             Some(trn!(
-                "1 file can no longer be explained ({files}) — its summaries are dropped",
-                "{n} files can no longer be explained ({files}) — their summaries are dropped",
+                "1 file can no longer be explained ({files}), so its summaries were removed",
+                "{n} files can no longer be explained ({files}), so their summaries were removed",
                 several.len(),
                 files = some_of(&named)
             ))

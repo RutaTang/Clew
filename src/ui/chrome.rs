@@ -168,6 +168,9 @@ pub(crate) fn modal<'a>(
 /// note, reading note): a title, one input, Cancel and a submit.
 pub(crate) struct Prompt<'a> {
     pub(crate) title: String,
+    /// What is asked, under the title: kept in sight while typing, which
+    /// the placeholder is not.
+    pub(crate) question: Option<&'a str>,
     pub(crate) placeholder: &'a str,
     pub(crate) value: &'a str,
     pub(crate) input_id: iced::widget::Id,
@@ -178,6 +181,9 @@ pub(crate) struct Prompt<'a> {
     /// A way to take away what the dialog edits, at its left: a
     /// breakpoint's Remove.
     pub(crate) remove: Option<(&'a str, Message)>,
+    /// Submit needs something typed: an empty field's Enter and its
+    /// submit button do nothing (a plugin's command that asks for text).
+    pub(crate) needs_value: bool,
 }
 
 /// Build a [`Prompt`] dialog. Enter submits, Esc / a backdrop click cancels.
@@ -185,49 +191,59 @@ pub(crate) fn prompt_modal(p: Prompt<'_>) -> Element<'_, Message> {
     // What is said is its words; its Save is "yes", its Cancel "no".
     super::heard::field(p.value, p.on_input);
     let cancel = super::heard::answer(tr!("Cancel"), super::heard::Answer::No, p.cancel.clone());
-    let submit = super::heard::answer(p.submit_label, super::heard::Answer::Yes, p.submit.clone());
-    let p = Prompt {
-        cancel,
-        submit,
-        ..p
+    // Nothing typed where something must be: no submit to press, say or
+    // Enter (a plugin's command asking what to run on ran on nothing).
+    let submit = (!p.needs_value || !p.value.trim().is_empty())
+        .then(|| super::heard::answer(p.submit_label, super::heard::Answer::Yes, p.submit.clone()));
+    let p = Prompt { cancel, ..p };
+    // The field is named for jump and voice by its placeholder, or, with
+    // none, by what is asked above it.
+    let name = if p.placeholder.trim().is_empty() {
+        p.question.unwrap_or_default()
+    } else {
+        p.placeholder
     };
     let panel = container(
-        column![
-            text(p.title).size(ts::EMPHASIS).color(theme::fg()),
-            super::jump::field_named(
+        column![text(p.title).size(ts::EMPHASIS).color(theme::fg()),]
+            .extend(
+                p.question
+                    .map(|q| text(q).size(ts::BODY).color(theme::dim()).into()),
+            )
+            .push(super::jump::field_named(
                 text_input(p.placeholder, p.value)
                     .style(theme::input)
                     .id(p.input_id)
                     .on_input(p.on_input)
-                    .on_submit(p.submit.clone())
+                    .on_submit_maybe(submit.clone())
                     .size(ts::BASE)
                     .padding(8),
-                p.placeholder,
-            ),
-            row![]
-                .extend(p.remove.map(|(label, msg)| {
-                    button(text(label).size(ts::BODY).color(theme::danger()))
-                        .style(theme::toolbar_button)
-                        .padding([4, 12])
-                        .on_press(super::heard::said(label, msg))
-                        .into()
-                }))
-                .push(space().width(Fill))
-                .push(
-                    button(text(tr!("Cancel")).size(ts::BODY))
-                        .style(theme::toolbar_button)
-                        .padding([4, 12])
-                        .on_press(p.cancel.clone()),
-                )
-                .push(
-                    button(text(p.submit_label).size(ts::BODY))
-                        .style(theme::primary_button)
-                        .padding([4, 12])
-                        .on_press(p.submit),
-                )
-                .spacing(8),
-        ]
-        .spacing(10),
+                name,
+            ))
+            .push(
+                row![]
+                    .extend(p.remove.map(|(label, msg)| {
+                        button(text(label).size(ts::BODY).color(theme::danger()))
+                            .style(theme::toolbar_button)
+                            .padding([4, 12])
+                            .on_press(super::heard::said(label, msg))
+                            .into()
+                    }))
+                    .push(space().width(Fill))
+                    .push(
+                        button(text(tr!("Cancel")).size(ts::BODY))
+                            .style(theme::toolbar_button)
+                            .padding([4, 12])
+                            .on_press(p.cancel.clone()),
+                    )
+                    .push(
+                        button(text(p.submit_label).size(ts::BODY))
+                            .style(theme::primary_button)
+                            .padding([4, 12])
+                            .on_press_maybe(submit),
+                    )
+                    .spacing(8),
+            )
+            .spacing(10),
     )
     .width(PROMPT_W)
     .padding(PROMPT_PAD)

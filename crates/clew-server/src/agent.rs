@@ -859,8 +859,7 @@ impl Turn<'_> {
                 Plan::OverCap => self.msgs.push(llm::AgentMsg::ToolResult {
                     call,
                     content: format!(
-                        "Not run: at most {MAX_CALLS_PER_STEP} tool calls run per step. Request \
-                         it again in your next step if you still need it."
+                        "This call was not run because at most {MAX_CALLS_PER_STEP} tool calls run per step. Request it again in your next step if you still need it."
                     ),
                 }),
                 Plan::External => {
@@ -984,8 +983,7 @@ impl Turn<'_> {
         }
         if size > CONTEXT_HARD_BYTES {
             return Err(Halt::Failed(format!(
-                "the conversation is too large to send ({} KB) — ask a narrower question or \
-                 clear the chat",
+                "the conversation is too large to send ({} KB). Ask a narrower question or clear the chat",
                 size / 1024
             )));
         }
@@ -1409,7 +1407,7 @@ fn guard_tool(
         // progress.
         Err(_) => (
             format!(
-                "the `{name}` tool failed on these arguments — try different ones, or another tool"
+                "the `{name}` tool failed with these arguments. Try different ones, or another tool"
             ),
             format!("{name} (failed)"),
             Vec::new(),
@@ -1440,7 +1438,9 @@ fn dispatch_tool(
         // it led to, under the link's name.
         if link_at(ctx, rel) {
             return (
-                format!("cannot ask about {rel}: it is a symlink, not a file of the project"),
+                format!(
+                    "cannot ask about {rel} because it is a symlink, not a file of the project"
+                ),
                 title,
                 Vec::new(),
                 true,
@@ -1664,7 +1664,7 @@ fn exec_tool_basic(
             if notebook {
                 let Some(nb) = clew_core::notebook::parse(&source) else {
                     return (
-                        format!("cannot read {rel}: not a notebook Clew can parse"),
+                        format!("{rel} is not a notebook Clew can parse"),
                         format!("outline {rel}"),
                         Vec::new(),
                     );
@@ -1746,7 +1746,9 @@ fn exec_tool_basic(
             // would open to a refusal.
             if link_at(ctx, rel) {
                 return (
-                    format!("no history for {rel}: it is a symlink, not a file of the project"),
+                    format!(
+                        "no history for {rel} because it is a symlink, not a file of the project"
+                    ),
                     format!("history {rel}"),
                     Vec::new(),
                 );
@@ -1763,7 +1765,7 @@ fn exec_tool_basic(
             if tracked.is_empty() {
                 return (
                     format!(
-                        "no history for {rel}: that is the project itself — ask for a file or folder in it"
+                        "no history for {rel} because that is the project itself. Ask for a file or folder in it"
                     ),
                     format!("history {rel}"),
                     Vec::new(),
@@ -1868,7 +1870,7 @@ fn exec_tool_basic(
                 Ok(v) => v,
                 Err(e) => {
                     return (
-                        format!("embedding the query failed ({e}) — use `search` instead"),
+                        format!("embedding the query failed ({e}). Use `search` instead"),
                         format!("find \"{query}\" (failed)"),
                         Vec::new(),
                     );
@@ -1882,7 +1884,7 @@ fn exec_tool_basic(
                 Ok(hits) => hits,
                 Err(e) => {
                     return (
-                        format!("semantic index unusable ({e}) — use `search` instead"),
+                        format!("the semantic index is unusable ({e}). Use `search` instead"),
                         format!("find \"{query}\" (index mismatch)"),
                         Vec::new(),
                     );
@@ -1930,7 +1932,9 @@ fn exec_tool_basic(
                 }
                 if link_at(ctx, rel) {
                     return (
-                        format!("no changes for {rel}: it is a symlink, not a file of the project"),
+                        format!(
+                            "no changes for {rel} because it is a symlink, not a file of the project"
+                        ),
                         title(""),
                         Vec::new(),
                     );
@@ -2212,7 +2216,7 @@ fn file_at(ctx: &Ctx, rel: &str) -> bool {
 fn resolve(ctx: &Ctx, rel: &str) -> Result<PathBuf, String> {
     clew_core::confine::confine(&ctx.root, rel).map_err(|e| {
         if e.is_escape() {
-            format!("refused: path escapes the project: {rel}")
+            format!("refused {rel} because it lies outside the project")
         } else {
             format!("cannot open {rel}: {e}")
         }
@@ -3544,7 +3548,7 @@ mod tests {
         let refused = turn
             .msgs
             .iter()
-            .filter(|m| matches!(m, llm::AgentMsg::ToolResult { content, .. } if content.starts_with("Not run")))
+            .filter(|m| matches!(m, llm::AgentMsg::ToolResult { content, .. } if content.starts_with("This call was not run")))
             .count();
         assert_eq!(refused, 3, "the rest were answered, not run");
     }
@@ -3869,7 +3873,7 @@ mod tests {
         );
         assert_eq!(
             content,
-            "cannot ask about src/alias.rs: it is a symlink, not a file of the project"
+            "cannot ask about src/alias.rs because it is a symlink, not a file of the project"
         );
         assert!(refs.is_empty());
         // Nor through a spelling that names a folder: macOS resolved
@@ -4212,7 +4216,7 @@ mod tests {
             assert_eq!(
                 content,
                 format!(
-                    "no history for {root}: that is the project itself — ask for a file or folder in it"
+                    "no history for {root} because that is the project itself. Ask for a file or folder in it"
                 )
             );
             assert!(refs.is_empty());

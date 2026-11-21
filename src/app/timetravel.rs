@@ -14,7 +14,7 @@ fn loading_history() -> &'static str {
 }
 /// What it says instead when the start refused a notebook's cell scope.
 fn no_cell_history() -> &'static str {
-    tr!("No cell history for notebooks — showing the whole file")
+    tr!("No cell history for notebooks. Showing the whole file instead.")
 }
 
 /// The 1-based line range, in HEAD's copy of `rel`, of the `ordinal`-th
@@ -64,7 +64,7 @@ async fn head_range(
 /// use of the session (`App::time_travel_start_gives_way`): the toggle's
 /// button still shows the scope the session keeps.
 fn scope_kept() -> &'static str {
-    tr!("Scope unchanged — you moved on before the new scope loaded")
+    tr!("Scope unchanged because you moved on before the new scope loaded")
 }
 
 /// Where a time-travel session shows, for the status line
@@ -84,47 +84,47 @@ enum Shows {
 fn replaced_status(shows: Shows, file: &str, old: Option<&str>) -> String {
     match (shows, old) {
         (Shows::Here, None) => tr!(
-            "History of {file} opened here, replacing the one open before",
+            "History of {file} opened here, replacing the previous one",
             file = file
         ),
         (Shows::Here, Some(old)) => tr!(
-            "History of {file} opened here, replacing that of {old}",
+            "History of {file} opened here, replacing the history of {old}",
             file = file,
             old = old
         ),
         (Shows::BehindPage, None) => tr!(
-            "History of {file} opened behind this page, replacing the one open before",
+            "History of {file} opened behind this page, replacing the previous one",
             file = file
         ),
         (Shows::BehindPage, Some(old)) => tr!(
-            "History of {file} opened behind this page, replacing that of {old}",
+            "History of {file} opened behind this page, replacing the history of {old}",
             file = file,
             old = old
         ),
         (Shows::LeftPane, None) => tr!(
-            "History of {file} opened in the left pane, replacing the one open before",
+            "History of {file} opened in the left pane, replacing the previous one",
             file = file
         ),
         (Shows::LeftPane, Some(old)) => tr!(
-            "History of {file} opened in the left pane, replacing that of {old}",
+            "History of {file} opened in the left pane, replacing the history of {old}",
             file = file,
             old = old
         ),
         (Shows::RightPane, None) => tr!(
-            "History of {file} opened in the right pane, replacing the one open before",
+            "History of {file} opened in the right pane, replacing the previous one",
             file = file
         ),
         (Shows::RightPane, Some(old)) => tr!(
-            "History of {file} opened in the right pane, replacing that of {old}",
+            "History of {file} opened in the right pane, replacing the history of {old}",
             file = file,
             old = old
         ),
         (Shows::OffScreen, None) => tr!(
-            "History of {file} opened off screen, replacing the one open before",
+            "History of {file} opened off screen, replacing the previous one",
             file = file
         ),
         (Shows::OffScreen, Some(old)) => tr!(
-            "History of {file} opened off screen, replacing that of {old}",
+            "History of {file} opened off screen, replacing the history of {old}",
             file = file,
             old = old
         ),
@@ -651,7 +651,7 @@ impl App {
         }
         if let (Some(sha), None) = (&asked, found) {
             self.status = tr!(
-                "Time Travel does not reach {sha} (a merge, another branch's commit, or an old one): at the newest instead",
+                "Time Travel can't reach {sha} (a merge, a commit on another branch, or an old commit). Showing the newest commit instead.",
                 sha = sha.get(..7).unwrap_or(sha)
             );
         }
@@ -1431,7 +1431,8 @@ impl App {
             }
         }
         if commits.is_empty() {
-            self.status = tr!("This code isn't committed yet — no history to explain").into();
+            self.status =
+                tr!("This code isn't committed yet, so there's no history to explain").into();
             return Task::none();
         }
         let last = l1.min(l0 + 40); // cap the snippet
@@ -1624,7 +1625,7 @@ impl App {
                                     .map(|n| n.to_string_lossy().into_owned())
                                     .unwrap_or_default();
                                 self.status = tr!(
-                                    "{file} is no longer open: open it to ask again",
+                                    "{file} is no longer open. Open it to ask again.",
                                     file = file
                                 );
                                 Task::none()

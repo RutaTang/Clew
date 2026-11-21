@@ -313,8 +313,8 @@ pub(crate) fn search_status(
         Some(first) => {
             let n = skipped_total.max(skipped.len());
             trn!(
-                "{matches}; 1 file not searched ({file}: {reason})",
-                "{matches}; {n} files not searched ({file}: {reason})",
+                "{matches}, but 1 file wasn't searched ({file}: {reason})",
+                "{matches}, but {n} files weren't searched ({file}: {reason})",
                 n,
                 matches = matches,
                 file = first.rel,
@@ -459,7 +459,7 @@ impl App {
             // the way references are shown.
             Ok(targets) if targets.len() > 1 => {
                 self.status = tr!(
-                    "{count} definitions — pick one in the Search list",
+                    "{count} definitions. Pick one in the Search list.",
                     count = targets.len()
                 );
                 self.proj.nav_term = self.proj.goto_term.clone();
@@ -501,8 +501,8 @@ impl App {
         match result {
             Ok(refs) if !refs.is_empty() => {
                 self.status = trn!(
-                    "1 reference — showing it in Search",
-                    "{n} references — showing them in Search",
+                    "1 reference, shown in Search",
+                    "{n} references, shown in Search",
                     refs.len()
                 );
                 self.proj.nav_term = self.proj.refs_term.clone();
@@ -735,7 +735,7 @@ impl App {
         if self.connection.is_remote() {
             self.proj.search.running = false;
             self.proj.search.error = Some(
-                tr!("Disconnected from the remote host — search will work again once reconnected")
+                tr!("Disconnected from the remote host. Search will work again once Clew reconnects.")
                     .into(),
             );
             return Task::none();

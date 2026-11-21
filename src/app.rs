@@ -70,10 +70,12 @@ pub(crate) mod glossary;
 mod graph;
 pub(crate) mod history;
 pub(crate) mod proof;
+pub(crate) mod runplan;
 pub(crate) mod runs;
 pub(crate) mod setup;
 pub(crate) mod suggest;
 pub(crate) mod weakspots;
+pub(crate) use content::{OutlineEntry, outline_entries};
 #[cfg(test)]
 pub(crate) use graph::project_map_layout;
 mod hover;
@@ -86,6 +88,8 @@ pub(crate) mod navigation;
 pub(crate) use navigation::count_matches;
 mod overview;
 pub(crate) mod palette;
+pub(crate) mod plugin_host;
+pub(crate) mod plugins;
 mod project;
 mod reading;
 pub(crate) mod recent;
@@ -122,6 +126,7 @@ pub(crate) use walkthrough::DIFF_SCOPE_PENDING;
 #[cfg(test)]
 pub(crate) use explain::UNCHECKED_MARK;
 
+pub(crate) mod prices;
 #[cfg(test)]
 pub(crate) mod tests;
 pub(crate) mod turn;

@@ -63,6 +63,11 @@ pub enum Action {
     /// Run the program without the debugger (`noDebug`).
     Run,
     StartDebug,
+    /// Run the one test the cursor is in, without the debugger: a Rust
+    /// test through Cargo, a Python one by pytest.
+    RunTest,
+    /// Debug the one test the cursor is in.
+    DebugTest,
     CallGraph,
     ImportGraph,
     TypeGraph,
@@ -87,7 +92,7 @@ pub enum Action {
 }
 
 impl Action {
-    pub const ALL: [Action; 38] = [
+    pub const ALL: [Action; 40] = [
         Action::OpenFile,
         Action::OpenSymbol,
         Action::ProjectSearch,
@@ -107,6 +112,8 @@ impl Action {
         Action::ToggleAsk,
         Action::Run,
         Action::StartDebug,
+        Action::RunTest,
+        Action::DebugTest,
         Action::CallGraph,
         Action::ImportGraph,
         Action::TypeGraph,
@@ -147,6 +154,8 @@ impl Action {
             Action::ToggleAsk => "toggle_ask",
             Action::Run => "run",
             Action::StartDebug => "start_debug",
+            Action::RunTest => "run_test",
+            Action::DebugTest => "debug_test",
             Action::CallGraph => "call_graph",
             Action::TypeGraph => "type_graph",
             Action::ProjectMaps => "project_maps",
@@ -199,6 +208,8 @@ impl Action {
             Action::ToggleAsk => tr!("Ask"),
             Action::Run => tr!("Run without debugging"),
             Action::StartDebug => tr!("Start debugging"),
+            Action::RunTest => tr!("Run test"),
+            Action::DebugTest => tr!("Debug test"),
             Action::CallGraph => tr!("Call graph"),
             Action::ImportGraph => tr!("Import graph"),
             Action::TypeGraph => tr!("Type graph"),
@@ -248,6 +259,8 @@ impl Action {
             Action::ToggleAsk => at(MenuSection::Tools, tr_noop!("Ask")),
             Action::Run => at(MenuSection::Tools, tr_noop!("Run Without Debugging")),
             Action::StartDebug => at(MenuSection::Tools, tr_noop!("Start Debugging")),
+            Action::RunTest => at(MenuSection::Tools, tr_noop!("Run Test")),
+            Action::DebugTest => at(MenuSection::Tools, tr_noop!("Debug Test")),
             Action::CallGraph => at(MenuSection::Tools, tr_noop!("Call Graph")),
             Action::ImportGraph => at(MenuSection::Tools, tr_noop!("Import Graph")),
             Action::TypeGraph => at(MenuSection::Tools, tr_noop!("Type Graph")),
@@ -308,6 +321,10 @@ impl Action {
             Action::FakeDebug => Chord::cmd_shift('b'),
             // Run, as Xcode's ⌘R: the program, without the debugger.
             Action::Run => Chord::cmd('r'),
+            // Test, as Xcode's ⌘U; debugged, ⌘⇧K (the letter beside it
+            // left free).
+            Action::RunTest => Chord::cmd('u'),
+            Action::DebugTest => Chord::cmd_shift('k'),
             Action::Shortcuts => Chord::cmd('/'),
             Action::CommandPalette => Chord::cmd_shift('p'),
             Action::Jump => Chord::cmd('j'),
@@ -1084,7 +1101,7 @@ mod tests {
         let mut km = Keymap::defaults();
         let table: toml::Table = toml::from_str(
             "goto_line = \"cmd+q\"\nopen_symbol = \"cmd+p\"\nzoom_in = \"j\"\n\
-             toggle_split = \"cmd+shift+k\"\nnot_an_action = \"cmd+k\"\n",
+             toggle_split = \"cmd+shift+w\"\nnot_an_action = \"cmd+k\"\n",
         )
         .unwrap();
         km.apply_overrides(&table);
@@ -1095,7 +1112,7 @@ mod tests {
         );
         assert_eq!(km.chord(Action::ZoomIn), Action::ZoomIn.default_chord());
         // A clean override still applies.
-        assert_eq!(km.chord(Action::ToggleSplit), Chord::cmd_shift('k'));
+        assert_eq!(km.chord(Action::ToggleSplit), Chord::cmd_shift('w'));
     }
 
     /// Only ⌘-chords outside the text-editing set may become key equivalents.
@@ -1134,7 +1151,7 @@ mod tests {
         let goto = Action::GotoLine.default_chord();
         let elsewhere = Chord {
             shift: true,
-            ..Chord::cmd('k')
+            ..Chord::cmd('w')
         };
         let mut ui = Keymap::defaults();
         assert!(ui.conflict(&elsewhere, Action::LspServers).is_none());

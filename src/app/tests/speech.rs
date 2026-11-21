@@ -641,7 +641,9 @@ impl crate::app::voice::Listening for Quiet {
 #[test]
 fn what_cannot_be_said_says_why() {
     let (mut app, voice, output) = speech_app("speech-fails");
-    *voice.fail.lock().unwrap() = Some(SayError::Sentence("nothing could be made of it".into()));
+    *voice.fail.lock().unwrap() = Some(SayError::Sentence(
+        "no audio could be made from the text".into(),
+    ));
     asked(&mut app, 1, true);
     delta(&mut app, 1, "This is. That is. Third");
     ended(&mut app, 1, StreamOutcome::Done);
@@ -1270,7 +1272,7 @@ fn a_voice_downloaded_says_what_it_reads() {
     };
     assert_eq!(
         downloaded(&mut app, "en"),
-        "Supertonic 3 is ready — answers to what you ask by voice are read aloud"
+        "Supertonic 3 is ready. Answers to questions you ask by voice are read aloud."
     );
     assert_eq!(downloaded(&mut app, "zh"), "Supertonic 3 is ready");
 }

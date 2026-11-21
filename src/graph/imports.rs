@@ -167,6 +167,16 @@ pub struct Resolver {
     /// `package.yaml` files name (a local project's only, as above), then the
     /// conventional ones. See [`Resolver::resolve_haskell`].
     haskell_roots: Vec<PathBuf>,
+    /// Each library a Cargo package of the project's has, by the name code
+    /// calls it (`use name::…`), with its root file: a workspace's crates
+    /// use one another's items through these. What the project's manifests
+    /// say ([`Resolver::with_manifests`]); empty without them.
+    rust_libs: HashMap<String, PathBuf>,
+    /// The Python source roots the project's `pyproject.toml`s name
+    /// (`src`, `lib`, maturin's `python`, pytest's `pythonpath`, …), that
+    /// exist: where an absolute import is looked for after the project's
+    /// root. See [`Resolver::resolve_python`].
+    python_roots: Vec<PathBuf>,
     /// Each Erlang module a project file defines (`m.erl` is `m`), with the
     /// files that do, sorted.
     erlang_modules: HashMap<String, Vec<PathBuf>>,
@@ -736,10 +746,13 @@ impl Resolver {
     /// are ([`clew_core::imports::source_manifests`]): `composer.json`'s
     /// PSR-4 maps, each directory made absolute against its file's, the
     /// longest prefix first (a prefix written without its closing `\` gets
-    /// it, so `App` does not map `Application\…`); and the Haskell source
-    /// roots its package descriptions name. A local project's are read off
-    /// disk ([`Resolver::new`]); a remote one's arrive with the server's
-    /// snapshot.
+    /// it, so `App` does not map `Application\…`); the Haskell source
+    /// roots its package descriptions name; each Cargo package's library by
+    /// its name, and the target roots Cargo's layout would not find; and the
+    /// Python source roots `pyproject.toml`s name. A local project's are
+    /// read off disk ([`Resolver::new`]); a remote one's arrive with the
+    /// server's snapshot. A path a manifest names outside the project is
+    /// not taken.
     pub fn with_manifests(mut self, manifests: &clew_protocol::SourceManifests) -> Self {
         let mut maps: Vec<(String, Vec<PathBuf>)> = Vec::new();
         for (rel, map) in &manifests.psr4 {
@@ -765,6 +778,47 @@ impl Resolver {
             })
             .collect();
         self.haskell_roots = haskell_roots(&self.root, &declared, &self.dirs);
+        let inside = |base: &Path, path: &str| {
+            let full = normalize(&base.join(path));
+            full.starts_with(&self.root).then_some(full)
+        };
+        let mut libs = HashMap::new();
+        let mut roots = std::mem::take(&mut self.rust_crate_roots);
+        for (rel, package) in &manifests.cargo {
+            let Some(base) = self.root.join(rel).parent().map(Path::to_path_buf) else {
+                continue;
+            };
+            let lib = inside(&base, &package.lib_path).filter(|lib| self.has_file(lib));
+            if let Some(lib) = lib {
+                roots.push(lib.clone());
+                // Two packages' libraries of one name: neither is meant for
+                // certain, so the shallowest (read first) stands.
+                libs.entry(package.lib_name.clone()).or_insert(lib);
+            }
+            roots.extend(
+                package
+                    .target_paths
+                    .iter()
+                    .filter_map(|path| inside(&base, path))
+                    .filter(|file| self.has_file(file)),
+            );
+        }
+        roots.sort();
+        roots.dedup();
+        self.rust_crate_roots = roots;
+        self.rust_libs = libs;
+        let mut python_roots: Vec<PathBuf> = Vec::new();
+        for (rel, named) in &manifests.python {
+            let Some(base) = self.root.join(rel).parent().map(Path::to_path_buf) else {
+                continue;
+            };
+            for dir in named.iter().filter_map(|d| inside(&base, d)) {
+                if self.dirs.contains(&dir) && !python_roots.contains(&dir) {
+                    python_roots.push(dir);
+                }
+            }
+        }
+        self.python_roots = python_roots;
         self
     }
 
@@ -896,6 +950,8 @@ impl Resolver {
             java_roots,
             php_psr4: Vec::new(),
             haskell_roots,
+            rust_libs: HashMap::new(),
+            python_roots: Vec::new(),
             erlang_modules,
             erlang_headers,
             erlang_apps,
@@ -1492,7 +1548,19 @@ impl Resolver {
                     None => self.rust_child_module_file(from, &dir, &[name]).is_some(),
                 };
                 if !local {
-                    return (Target::External(name.to_string()), false);
+                    // Another crate of the project's own (a workspace's
+                    // member, or the package's library from its binary or
+                    // tests): its library's modules, as `crate::` reads
+                    // them inside it. Else a crate from elsewhere.
+                    let Some(lib) = self.rust_libs.get(name) else {
+                        return (Target::External(name.to_string()), false);
+                    };
+                    if rest.is_empty() {
+                        return (Target::Internal(lib.clone()), false);
+                    }
+                    return self
+                        .rust_resolve_in(&self.rust_mod_dir(lib), rest, ctx, hops)
+                        .unwrap_or_else(|| (Target::Internal(lib.clone()), true));
                 }
                 for k in (1..=segs.len()).rev() {
                     if let Some(file) = self.rust_child_module_file(from, &dir, &segs[..k]) {
@@ -1774,11 +1842,15 @@ impl Resolver {
                     _ => Target::Unresolved(format!("{dots}{body}")),
                 });
         }
-        // Absolute: try the project root and each ancestor of `from` as a source
-        // root (covers `src/`-layout and package-relative resolution), then
-        // `src/` itself, as Pyright does: a `tests/` file's `from cart import`
-        // of `src/cart.py` (pytest's `pythonpath = src`) read as a package.
+        // Absolute: try the project root, the source roots its
+        // `pyproject.toml` names (setuptools' `where`, maturin's
+        // `python-source`, pytest's `pythonpath`, …), and each ancestor of
+        // `from` as a source root (covers `src/`-layout and package-relative
+        // resolution), then `src/` itself, as Pyright does: a `tests/` file's
+        // `from cart import` of `src/cart.py` (pytest's `pythonpath = src`)
+        // read as a package.
         let mut bases: Vec<PathBuf> = vec![self.root.clone()];
+        bases.extend(self.python_roots.iter().cloned());
         let mut p = from.parent();
         while let Some(d) = p {
             bases.push(d.to_path_buf());
@@ -1799,25 +1871,30 @@ impl Resolver {
         Target::External(segs.first().copied().unwrap_or(body).to_string())
     }
 
+    /// The file module `segs` is under `base`: `a/b.py`, or the package
+    /// `a/b/__init__.py`; else its stub, `a/b.pyi` or `a/b/__init__.pyi` —
+    /// the source when there is one, as it is what runs, and the stub of a
+    /// module that is compiled (a Rust or C extension's `.pyi`) or written
+    /// apart from its code.
     fn python_module_file(&self, base: &Path, segs: &[&str]) -> Option<PathBuf> {
-        if segs.is_empty() {
-            let init = base.join("__init__.py");
-            return self.has_file(&init).then_some(init);
-        }
-        let (last, dirs) = segs.split_last()?;
-        let mut dir = base.to_path_buf();
-        for d in dirs {
-            dir = dir.join(d);
-        }
-        let flat = dir.join(format!("{last}.py"));
-        if self.has_file(&flat) {
-            return Some(flat);
-        }
-        let pkg = dir.join(last).join("__init__.py");
-        if self.has_file(&pkg) {
-            return Some(pkg);
-        }
-        None
+        let found = |ext: &str| -> Option<PathBuf> {
+            if segs.is_empty() {
+                let init = base.join(format!("__init__.{ext}"));
+                return self.has_file(&init).then_some(init);
+            }
+            let (last, dirs) = segs.split_last()?;
+            let mut dir = base.to_path_buf();
+            for d in dirs {
+                dir = dir.join(d);
+            }
+            let flat = dir.join(format!("{last}.{ext}"));
+            if self.has_file(&flat) {
+                return Some(flat);
+            }
+            let pkg = dir.join(last).join(format!("__init__.{ext}"));
+            self.has_file(&pkg).then_some(pkg)
+        };
+        found("py").or_else(|| found("pyi"))
     }
 
     // --- JS / TS ---
@@ -2230,15 +2307,19 @@ fn ts_config_candidates(files: &[PathBuf]) -> Vec<&PathBuf> {
 
 /// Whether `path` is a file a local resolver reads for the WHOLE project —
 /// go.mod, pubspec.yaml, a composer.json (PHP's PSR-4 map), a Haskell
-/// package description (`.cabal`, `package.yaml`), a tsconfig/jsconfig or a
-/// base one extends by the usual naming (`tsconfig.base.json`) — so a change
-/// to it re-resolves every file against a resolver that reads it again.
+/// package description (`.cabal`, `package.yaml`), a Cargo.toml (a crate's
+/// library name and targets), a pyproject.toml (Python's source roots), a
+/// tsconfig/jsconfig or a base one extends by the usual naming
+/// (`tsconfig.base.json`) — so a change to it re-resolves every file against
+/// a resolver that reads it again.
 pub fn is_resolution_metadata(path: &Path) -> bool {
     let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
         return false;
     };
-    matches!(name, "go.mod" | "pubspec.yaml" | "composer.json")
-        || clew_core::imports::is_haskell_manifest(name)
+    matches!(
+        name,
+        "go.mod" | "pubspec.yaml" | "composer.json" | "Cargo.toml" | "pyproject.toml"
+    ) || clew_core::imports::is_haskell_manifest(name)
         || ((name.starts_with("tsconfig") || name.starts_with("jsconfig"))
             && name.ends_with(".json"))
 }
@@ -4570,6 +4651,220 @@ mod tests {
         );
     }
 
+    /// A workspace's crates `use` one another by their libraries' names, as
+    /// their manifests give them: `use acme_core::store::Thing` from the
+    /// server crate is the core crate's `store.rs`, not an external crate —
+    /// and a library at a path of its own (`[lib] path`) or a binary named
+    /// in `[[bin]]` is a crate root, whose `crate::` reads beside it. A name
+    /// no package has stays external.
+    #[test]
+    fn a_workspaces_crates_resolve_one_anothers_uses() {
+        let root = Path::new("/ws");
+        let files: Vec<PathBuf> = [
+            "crates/core/Cargo.toml",
+            "crates/core/src/lib.rs",
+            "crates/core/src/store.rs",
+            "crates/core/src/store/disk.rs",
+            "crates/server/Cargo.toml",
+            "crates/server/src/main.rs",
+            "crates/proto/Cargo.toml",
+            "crates/proto/wire/proto.rs",
+            "crates/proto/wire/frame.rs",
+            "crates/proto/tools/gen.rs",
+            "crates/proto/tools/opts.rs",
+        ]
+        .iter()
+        .map(|f| root.join(f))
+        .collect();
+        let package = |name: &str, lib: &str, targets: &[&str]| clew_protocol::CargoTargets {
+            lib_name: name.into(),
+            lib_path: lib.into(),
+            target_paths: targets.iter().map(|t| t.to_string()).collect(),
+        };
+        let manifests = clew_protocol::SourceManifests {
+            cargo: vec![
+                (
+                    "crates/core/Cargo.toml".into(),
+                    package("acme_core", "src/lib.rs", &[]),
+                ),
+                (
+                    "crates/server/Cargo.toml".into(),
+                    package("acme_server", "src/lib.rs", &[]),
+                ),
+                (
+                    "crates/proto/Cargo.toml".into(),
+                    package(
+                        "proto",
+                        "wire/proto.rs",
+                        &["tools/gen.rs", "../../outside.rs"],
+                    ),
+                ),
+            ],
+            ..Default::default()
+        };
+        let r = Resolver::with_meta(root, &files, None, None).with_manifests(&manifests);
+        let server = root.join("crates/server/src/main.rs");
+        let at = |spec: &str, from: &Path| r.resolve(&ri(spec), from, "rust");
+        assert_eq!(
+            at("acme_core::store::Thing", &server),
+            Target::Internal(root.join("crates/core/src/store.rs"))
+        );
+        assert_eq!(
+            at("acme_core::store::disk::open", &server),
+            Target::Internal(root.join("crates/core/src/store/disk.rs"))
+        );
+        assert_eq!(
+            at("acme_core", &server),
+            Target::Internal(root.join("crates/core/src/lib.rs"))
+        );
+        // An item of the library's root itself.
+        assert_eq!(
+            at("acme_core::Config", &server),
+            Target::Internal(root.join("crates/core/src/lib.rs"))
+        );
+        // `[lib] path`: the library is where its manifest says, its
+        // modules beside it.
+        assert_eq!(
+            at("proto::frame::Frame", &server),
+            Target::Internal(root.join("crates/proto/wire/frame.rs"))
+        );
+        assert_eq!(
+            at(
+                "crate::frame::Frame",
+                &root.join("crates/proto/wire/proto.rs")
+            ),
+            Target::Internal(root.join("crates/proto/wire/frame.rs"))
+        );
+        // `[[bin]] path`: a crate root, its `mod`s beside it.
+        assert_eq!(
+            at("crate::opts", &root.join("crates/proto/tools/gen.rs")),
+            Target::Internal(root.join("crates/proto/tools/opts.rs"))
+        );
+        // A crate the project does not hold, and a server with no library.
+        assert_eq!(
+            at("serde::Serialize", &server),
+            Target::External("serde".into())
+        );
+        assert_eq!(
+            at("acme_server::run", &root.join("crates/core/src/lib.rs")),
+            Target::External("acme_server".into())
+        );
+    }
+
+    /// Off disk: a local project's `Cargo.toml`s and `pyproject.toml` are
+    /// read when its resolver is made, and what they say is used.
+    #[test]
+    fn a_local_projects_cargo_and_pyproject_manifests_are_read() {
+        let dir = clew_core::testutil::TempDir::new("cargo-pyproject");
+        let write = |rel: &str, text: &str| {
+            let path = dir.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        write("Cargo.toml", "[workspace]\nmembers = [\"crates/*\"]\n");
+        write(
+            "crates/my-core/Cargo.toml",
+            "[package]\nname = \"my-core\"\nversion = \"0.1.0\"\n",
+        );
+        write("crates/my-core/src/lib.rs", "pub mod store;\n");
+        write("crates/my-core/src/store.rs", "");
+        write("crates/app/src/main.rs", "use my_core::store;\n");
+        write(
+            "pyproject.toml",
+            "[tool.maturin]\npython-source = \"python\"\n",
+        );
+        write("python/acme/__init__.py", "");
+        write("python/acme/_native.pyi", "");
+        write("python/acme/cli.py", "from acme import _native\n");
+        let files: Vec<PathBuf> = [
+            "Cargo.toml",
+            "crates/my-core/Cargo.toml",
+            "crates/my-core/src/lib.rs",
+            "crates/my-core/src/store.rs",
+            "crates/app/src/main.rs",
+            "pyproject.toml",
+            "python/acme/__init__.py",
+            "python/acme/_native.pyi",
+            "python/acme/cli.py",
+        ]
+        .iter()
+        .map(|f| dir.join(f))
+        .collect();
+        let r = Resolver::new(&dir, &files);
+        assert_eq!(
+            r.resolve(
+                &ri("my_core::store"),
+                &dir.join("crates/app/src/main.rs"),
+                "rust"
+            ),
+            Target::Internal(dir.join("crates/my-core/src/store.rs"))
+        );
+        // maturin's `python-source`: `acme` is the project's, and its
+        // compiled module is read by its stub.
+        assert_eq!(
+            r.resolve(
+                &ri("acme:_native"),
+                &dir.join("tests/test_cli.py"),
+                "python"
+            ),
+            Target::Internal(dir.join("python/acme/_native.pyi"))
+        );
+    }
+
+    /// A Python module is its source where it has one, its stub (`.pyi`)
+    /// where it has only that; and a source root a `pyproject.toml` names
+    /// (`lib/` here) is looked in after the project's root, so a test's
+    /// `import billing` is the project's own module, not a package's.
+    #[test]
+    fn python_resolves_declared_roots_and_stubs() {
+        let root = Path::new("/py");
+        let files: Vec<PathBuf> = [
+            "pyproject.toml",
+            "lib/billing/__init__.py",
+            "lib/billing/rates.py",
+            "lib/billing/rates.pyi",
+            "lib/billing/_speedups.pyi",
+            "lib/typed/__init__.pyi",
+            "tests/test_billing.py",
+        ]
+        .iter()
+        .map(|f| root.join(f))
+        .collect();
+        let manifests = clew_protocol::SourceManifests {
+            python: vec![(
+                "pyproject.toml".into(),
+                vec!["lib".into(), "missing".into(), "../elsewhere".into()],
+            )],
+            ..Default::default()
+        };
+        let r = Resolver::with_meta(root, &files, None, None).with_manifests(&manifests);
+        assert_eq!(
+            r.python_roots,
+            [root.join("lib")],
+            "only roots that exist, inside"
+        );
+        let test = root.join("tests/test_billing.py");
+        let at = |spec: &str| r.resolve(&ri(spec), &test, "python");
+        assert_eq!(
+            at("billing"),
+            Target::Internal(root.join("lib/billing/__init__.py"))
+        );
+        // The source, not its stub, where both are.
+        assert_eq!(
+            at("billing.rates"),
+            Target::Internal(root.join("lib/billing/rates.py"))
+        );
+        assert_eq!(
+            at("billing:_speedups"),
+            Target::Internal(root.join("lib/billing/_speedups.pyi"))
+        );
+        assert_eq!(
+            at("typed"),
+            Target::Internal(root.join("lib/typed/__init__.pyi"))
+        );
+        assert_eq!(at("requests"), Target::External("requests".into()));
+    }
+
     #[test]
     fn resolves_rust_mod_and_use_paths() {
         let root = Path::new("/proj");
@@ -4983,7 +5278,14 @@ mod tests {
     /// it when they change.
     #[test]
     fn php_and_haskell_manifests_are_resolution_metadata() {
-        for name in ["composer.json", "acme.cabal", "package.yaml", "go.mod"] {
+        for name in [
+            "composer.json",
+            "acme.cabal",
+            "package.yaml",
+            "go.mod",
+            "Cargo.toml",
+            "pyproject.toml",
+        ] {
             assert!(is_resolution_metadata(Path::new(name)), "{name}");
         }
         assert!(!is_resolution_metadata(Path::new(".cabal")));

@@ -238,7 +238,7 @@ impl AiClient {
             Ok(Err(_)) => return Err(RpcError::local(tr!("server gone"))),
             Err(_) => {
                 return Err(RpcError::local(tr!(
-                    "the server took no requests for {seconds}s",
+                    "the server accepted no requests for {seconds}s",
                     seconds = limit.as_secs()
                 )));
             }
@@ -559,7 +559,7 @@ impl GitSource {
         };
         if !result.answers(&asked) {
             return Err(tr!(
-                "the git reply answers another operation ({operation})",
+                "the git reply is for another operation ({operation})",
                 operation = result.name()
             ));
         }

@@ -471,6 +471,7 @@ impl App {
     pub(crate) fn on_files_indexed(&mut self, files: Vec<IndexedFile>) -> Task<Message> {
         let mut index_dirty = false;
         let mut applied: Vec<PathBuf> = Vec::new();
+        let mut defined: HashMap<PathBuf, Option<Arc<Vec<index::SymbolEntry>>>> = HashMap::new();
         for f in files {
             if self.proj.registry.version(&f.path) != Some(f.hash) {
                 continue;
@@ -486,14 +487,19 @@ impl App {
                     items,
                 },
             );
-            if f.symbols.is_empty() {
-                index_dirty |= self.proj.symbol_index_by_file.remove(&f.path).is_some();
+            // What it defined before, for the trail's stops in it to move
+            // with their symbols (`History::reanchor`).
+            let was = if f.symbols.is_empty() {
+                let was = self.proj.symbol_index_by_file.remove(&f.path);
+                index_dirty |= was.is_some();
+                was
             } else {
+                index_dirty = true;
                 self.proj
                     .symbol_index_by_file
-                    .insert(f.path.clone(), Arc::new(f.symbols));
-                index_dirty = true;
-            }
+                    .insert(f.path.clone(), Arc::new(f.symbols))
+            };
+            defined.entry(f.path.clone()).or_insert(was);
             // The call sites of the same parse, for the next call-graph build.
             match f.calls.filter(|c| !c.is_empty()) {
                 Some(calls) => {
@@ -528,19 +534,19 @@ impl App {
         // Keep the reading trail anchored across edits: re-point each changed
         // file's history entries to their symbol's new line.
         let mut trail_moved = false;
+        let stops = |syms: Option<&Arc<Vec<index::SymbolEntry>>>| -> Vec<(String, usize)> {
+            syms.map(|syms| {
+                syms.iter()
+                    .filter(|s| crate::app::navigation::names_trail_stops(&s.kind))
+                    .map(|s| (s.name.clone(), s.line))
+                    .collect()
+            })
+            .unwrap_or_default()
+        };
         for path in &applied {
-            let symbols: Vec<(String, usize)> = self
-                .proj
-                .symbol_index_by_file
-                .get(path)
-                .map(|syms| {
-                    syms.iter()
-                        .filter(|s| crate::app::navigation::names_trail_stops(&s.kind))
-                        .map(|s| (s.name.clone(), s.line))
-                        .collect()
-                })
-                .unwrap_or_default();
-            trail_moved |= self.proj.history.reanchor(path, &symbols);
+            let before = stops(defined.get(path).and_then(Option::as_ref));
+            let after = stops(self.proj.symbol_index_by_file.get(path));
+            trail_moved |= self.proj.history.reanchor(path, &before, &after);
         }
         let saved = if trail_moved {
             self.save_history()
@@ -697,7 +703,7 @@ impl App {
         }
         // What the index left out is said either way: said once, here.
         if let Some(note) = cap_note {
-            self.status = format!("{} — {note}", self.status);
+            self.status = crate::i18n::sentences(&self.status, &note);
         }
         // The local call graph is linked from the index: one built before it
         // landed (the Calls map opened while indexing) read none of it, and

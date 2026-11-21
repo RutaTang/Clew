@@ -189,12 +189,13 @@ fn valid_header_name(name: &str) -> bool {
 pub fn check_headers(headers: &[(String, String)]) -> Result<(), String> {
     for (name, value) in headers {
         if !valid_header_name(name) {
-            return Err("a header's name holds characters a header name cannot \
-                        (letters, digits and !#$%&'*+-.^_`|~) — write each as `Name: value`"
+            return Err("a header name contains characters that are not allowed (use letters, digits and !#$%&'*+-.^_`|~). Write each header as `Name: value`"
                 .into());
         }
         if !clew_rules::headers::header_value_ok(value.as_bytes()) {
-            return Err(format!("header `{name}`'s value holds a line break"));
+            return Err(format!(
+                "the value of header `{name}` contains a line break"
+            ));
         }
     }
     Ok(())
@@ -235,7 +236,7 @@ pub fn from_table(servers: &toml::Table) -> (Vec<ServerConfig>, Vec<String>) {
 fn server_from_toml(name: &str, entry: &toml::Value) -> Result<ServerConfig, String> {
     if !valid_name(name) {
         return Err(format!(
-            "a server name is letters, digits, `-` and `_`, at most {MAX_NAME_LEN} of them"
+            "a server name can use only letters, digits, `-` and `_`, up to {MAX_NAME_LEN} characters"
         ));
     }
     let entry = entry.as_table().ok_or("not a table")?;
@@ -247,7 +248,7 @@ fn server_from_toml(name: &str, entry: &toml::Value) -> Result<ServerConfig, Str
                 .map(|v| {
                     v.as_str()
                         .map(str::to_owned)
-                        .ok_or(format!("`{key}` holds something that is not a string"))
+                        .ok_or(format!("`{key}` contains something that is not a string"))
                 })
                 .collect(),
             Some(_) => Err(format!("`{key}` is not a list of strings")),
@@ -554,7 +555,7 @@ fn server_from_json(name: &str, entry: &Value) -> Result<ServerConfig, String> {
         .and_then(Value::as_str)
         .unwrap_or_default();
     if kind == "sse" {
-        return Err("the deprecated SSE transport is not supported — use the server's Streamable HTTP URL or its command".into());
+        return Err("the deprecated SSE transport is not supported. Use the server's Streamable HTTP URL or its command".into());
     }
     let transport = if let Some(command) = entry.get("command").and_then(Value::as_str) {
         Transport::Stdio(Launch {

@@ -32,8 +32,6 @@ const TRAIL_STOP_H: f32 = 22.0;
 /// Height of the controls of the header's first row: the title's line and
 /// the tools, each a button.
 const HEADER_CONTROL_H: f32 = 28.0;
-/// Height of a margin tab.
-const MARGIN_TAB_H: f32 = 26.0;
 /// How many stops of the reading trail the header shows, the current last.
 const TRAIL_STOPS: usize = 4;
 
@@ -123,10 +121,29 @@ pub(crate) fn sheet_room(app: &App) -> f32 {
 fn header_right(app: &App) -> f32 {
     let tabs = if super::panes::right_panel_shown(app) {
         super::panes::margin_w(app)
+    } else if super::panes::right_panel_fits(app) {
+        // The margin hidden: its toggle, kept where it was.
+        MARGIN_TOGGLE_W + MARGIN_TABS_PAD_RIGHT
     } else {
         0.0
     };
     sheet_content_right(app.window_width) - tabs
+}
+
+/// The margin's toggle's width, and the room right of it and the tabs.
+const MARGIN_TOGGLE_W: f32 = 2.0 * FILE_TOOL_PAD_X + FILE_TOOL_GLYPH;
+const MARGIN_TABS_PAD_RIGHT: f32 = 16.0;
+
+/// Where the margin's toggle is drawn, in window coordinates: at the
+/// header's right end, the margin shown or hidden.
+#[cfg(test)]
+pub(crate) fn margin_toggle_rect(app: &App) -> iced::Rectangle {
+    iced::Rectangle {
+        x: sheet_content_right(app.window_width) - MARGIN_TABS_PAD_RIGHT - MARGIN_TOGGLE_W,
+        y: body_top(app) + 1.0 + HEADER_ROW_PAD.top,
+        width: MARGIN_TOGGLE_W,
+        height: HEADER_CONTROL_H,
+    }
 }
 
 /// Left edge of the sheet's content, in window coordinates.
@@ -166,70 +183,18 @@ fn file_tool_w(label: &str, short: bool) -> f32 {
         + text_width(label, ts::BODY, FILE_TOOL_FONT)
 }
 
-/// The least room the file's name keeps beside the header's tools: its
-/// width, up to this.
-const TITLE_MIN_W: f32 = 160.0;
-
 /// The least room the file's folder is shown in, cut short from its start:
 /// its width, up to this. With less, it gives way whole — before the
 /// header's tools give up their words, which at 1100 px went to glyphs
 /// alone for a folder's sake; and rather than as a stub ("…op").
 const FOLDER_MIN_W: f32 = 96.0;
 
-/// What the header's tools say beside their glyphs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ToolWords {
-    /// Each its name.
-    All,
-    /// Explain its name, the others their glyphs alone: the one that
-    /// spends an AI call, and what a reader new to Clew looks for.
-    Explain,
-    /// Their glyphs alone, their names in their tooltips.
-    None,
-}
-
-impl ToolWords {
-    /// Whether the tool named `explain` (or another) is said short.
-    fn short(self, explain: bool) -> bool {
-        match self {
-            ToolWords::All => false,
-            ToolWords::Explain => !explain,
-            ToolWords::None => true,
-        }
-    }
-}
-
-/// Width of the header's tools, Explain through View, saying `words`.
-fn file_tools_w(words: ToolWords) -> f32 {
-    let tools = [tr!("Explain"), tr!("Skim"), tr!("Diff"), tr!("Time Travel")]
-        .iter()
-        .enumerate()
-        .map(|(i, l)| file_tool_w(l, words.short(i == 0)))
-        .sum::<f32>();
-    tools + TOOLS_RULE_W + view_button_w(words.short(false)) + 5.0 * TOOLS_SPACING
-}
-
-/// What the header's tools say: their names, where the file's name keeps
-/// its room beside them; else Explain's alone; else their glyphs alone,
-/// their names in their tooltips. In a narrow window, or a language of
-/// longer words, the labelled tools took the whole row and the name was
-/// cut to nothing — and with a name a few letters longer at 1100 px,
-/// every word went where Explain's alone had room ("test_pricing.py"
-/// showed ✦ ⤫ ⟲ ◷ where "pricing.py" showed their names).
-fn file_tool_words(app: &App) -> ToolWords {
-    let Some(v) = app.active_viewer() else {
-        return ToolWords::All;
-    };
-    let (name, _) = title_parts(v);
-    // The name: its folder gives way before the tools' words do
-    // (`folder_shown`), the tools being what a reader new to Clew reads.
-    let title = text_width(&name, ts::EMPHASIS, TITLE_FONT).min(TITLE_MIN_W);
-    let room = header_right(app) - HEADER_PAD_RIGHT - (sheet_content_left(app) + HEADER_PAD_X);
-    let fits = |words| room - TITLE_GAP / 2.0 - file_tools_w(words) >= title;
-    [ToolWords::All, ToolWords::Explain]
-        .into_iter()
-        .find(|&words| fits(words))
-        .unwrap_or(ToolWords::None)
+/// Width of the header's tools, Explain through View: their glyphs, their
+/// names in their tooltips. The row's actions as glyphs, the margin's views
+/// as glyphs with the shown one named: as nine words in a line, they read
+/// as one group, and they changed form with the length of a file's name.
+fn file_tools_w() -> f32 {
+    4.0 * file_tool_w("", true) + TOOLS_RULE_W + view_button_w() + 5.0 * TOOLS_SPACING
 }
 
 /// The open file's `folder` as the header has room to show it beside
@@ -239,7 +204,6 @@ fn folder_shown(app: &App, name: &str, folder: &str) -> String {
     if folder.is_empty() {
         return String::new();
     }
-    let words = file_tool_words(app);
     let markdown = app.active_viewer().is_some_and(|v| v.md.is_some());
     let toggle = if markdown {
         file_tool_w(tr!("Rendered"), false).max(file_tool_w(tr!("Source"), false)) + TITLE_SPACING
@@ -250,7 +214,7 @@ fn folder_shown(app: &App, name: &str, folder: &str) -> String {
         - HEADER_PAD_RIGHT
         - (sheet_content_left(app) + HEADER_PAD_X)
         - TITLE_GAP
-        - file_tools_w(words)
+        - file_tools_w()
         - text_width(name, ts::EMPHASIS, TITLE_FONT)
         - TITLE_SPACING
         - toggle;
@@ -284,15 +248,9 @@ const TOOLS_RULE_W: f32 = 9.0;
 const HEADER_PAD_X: f32 = 20.0;
 const HEADER_PAD_RIGHT: f32 = 16.0;
 
-/// Width of the View menu's button: its eye, its name unless `short`, and
-/// its chevron.
-fn view_button_w(short: bool) -> f32 {
-    let named = if short {
-        0.0
-    } else {
-        6.0 + text_width(tr!("View"), ts::BODY, FILE_TOOL_FONT)
-    };
-    VIEW_PAD.x() + 14.0 + named + 6.0 + VIEW_CHEVRON
+/// Width of the View menu's button: its eye and its chevron.
+fn view_button_w() -> f32 {
+    VIEW_PAD.x() + 14.0 + 6.0 + VIEW_CHEVRON
 }
 
 /// The View menu's button: the design's 9 before what it holds, 8 after,
@@ -315,7 +273,7 @@ pub(crate) fn file_tools_rect(app: &App) -> Option<iced::Rectangle> {
         return None;
     }
     let row_left = sheet_content_left(app) + HEADER_PAD_X;
-    let width = file_tools_w(file_tool_words(app));
+    let width = file_tools_w();
     let x = (header_right(app) - HEADER_PAD_RIGHT - width).max(row_left);
     Some(iced::Rectangle {
         x,
@@ -325,11 +283,25 @@ pub(crate) fn file_tools_rect(app: &App) -> Option<iced::Rectangle> {
     })
 }
 
+/// Where the header's `nth` tool is drawn — Explain, Skim, Diff, Time
+/// Travel — in window coordinates: a glyph's place, for what finds it
+/// with no words to find it by.
+#[cfg(test)]
+pub(crate) fn file_tool_rect(app: &App, nth: usize) -> Option<iced::Rectangle> {
+    let tools = file_tools_rect(app)?;
+    let w = file_tool_w("", true);
+    Some(iced::Rectangle {
+        x: tools.x + nth as f32 * (w + TOOLS_SPACING),
+        width: w,
+        ..tools
+    })
+}
+
 /// Where the View menu's button is drawn, in window coordinates: the last
 /// of the file tools.
 pub(crate) fn view_button_rect(app: &App) -> Option<iced::Rectangle> {
     let tools = file_tools_rect(app)?;
-    let w = view_button_w(file_tool_words(app).short(false));
+    let w = view_button_w();
     Some(iced::Rectangle {
         x: tools.x + tools.width - w,
         width: w,
@@ -444,76 +416,126 @@ fn file_tool<'a>(
     .padding([0.0, FILE_TOOL_PAD_X])
     .on_press(super::heard::said(label, msg));
     // Its tooltip says what it does (`about`) where its name alone does
-    // not, with its shortcut; said short, the tooltip is where its name is.
-    let tip = about.unwrap_or(label);
-    match shortcut {
-        Some(sc) => tip_at(face, tip, Some(sc), tooltip::Position::Bottom),
-        None if short || about.is_some() => tip_at(face, tip, None, tooltip::Position::Bottom),
-        None => face.into(),
+    // not, with its shortcut; said short, the tooltip is where its name
+    // is, over what it does.
+    match (short, about, shortcut) {
+        (true, about, shortcut) => {
+            tip_at_why(face, label, shortcut, about, tooltip::Position::Bottom)
+        }
+        (false, Some(about), shortcut) => tip_at(face, about, shortcut, tooltip::Position::Bottom),
+        (false, None, Some(sc)) => tip_at(face, label, Some(sc), tooltip::Position::Bottom),
+        (false, None, None) => face.into(),
     }
 }
 
-/// The margin's tabs — Notes, Calls, History — in the header, over the
-/// margin they switch.
-pub(crate) fn margin_tabs(app: &App, room: f32) -> Element<'_, Message> {
-    let labels = [
-        (tr!("Explanations"), crate::MarginTab::Notes),
-        (tr!("Calls"), crate::MarginTab::Calls),
-        (tr!("History"), crate::MarginTab::History),
-    ];
-    // As much room round each name as the margin has: in French at 1100,
-    // "Explications · Appels · Historique" ran past the margin's edge, the
-    // last tab's background cut there. Tighter first; then, where even
-    // that is too wide, each name cut short, whole in its tip.
-    let widths: Vec<f32> = labels
-        .iter()
-        .map(|(l, _)| super::steady::width_of(l, ts::BODY, FILE_TOOL_FONT))
-        .collect();
-    let words: f32 = widths.iter().sum();
-    let gaps = 2.0 * (labels.len() - 1) as f32;
-    let pad = ((room - words - gaps) / (2.0 * labels.len() as f32)).clamp(4.0, 10.0);
-    let over = words + gaps + 2.0 * pad * labels.len() as f32 - room;
-    let tab = |label: &'static str, width: f32, this: crate::MarginTab| {
-        let chosen = app.margin_tab == this;
-        // Each name gives up its share of what is over, by its width.
-        let keep = if over > 0.0 {
-            (width - over * width / words).max(0.0)
+/// The margin's tabs — a Lean file's Goals, Explanations, Calls, History —
+/// in the header, over the margin they switch: each its glyph, named in its
+/// tooltip, the one shown filled, as a segmented control's chosen segment
+/// is. Picking one shows its view below; the tab says no more than that it
+/// is the one shown, as the header's tools beside it say only their glyphs.
+/// Each is a header tool's size and the same gap apart, so the tools and
+/// the tabs read as one row: their glyphs on one line, at one pitch (the
+/// tabs stood 26 high to the tools' 28, a pixel above them, and closer).
+pub(crate) fn margin_tabs(app: &App) -> Element<'_, Message> {
+    use crate::MarginTab;
+    // A Lean file's goals last, in a slot of their own: first, they moved
+    // every other tab one place along whenever a Lean file was open.
+    let goals = app.reading_lean().then_some((
+        Glyph::Turnstile,
+        tr!("Goals"),
+        tr!("What is left to prove where the cursor is"),
+        MarginTab::Goals,
+    ));
+    let tabs: Vec<(Glyph, &'static str, &'static str, MarginTab)> = [
+        (
+            Glyph::Explanations,
+            tr!("Explanations"),
+            tr!("Explanations of this code, shown beside it"),
+            MarginTab::Notes,
+        ),
+        (
+            Glyph::Network,
+            tr!("Calls"),
+            tr!("Who calls the function at the cursor, and what it calls"),
+            MarginTab::Calls,
+        ),
+        (
+            Glyph::Branch,
+            tr!("History"),
+            tr!("The commits that changed this file"),
+            MarginTab::History,
+        ),
+    ]
+    .into_iter()
+    .chain(goals)
+    .collect();
+    let shown = app.margin_tab_shown();
+    let tab = |(glyph, label, why, this): (Glyph, &'static str, &'static str, MarginTab)| -> Element<'_, Message> {
+        let chosen = shown == this;
+        let tint = if chosen {
+            theme::fg()
         } else {
-            width
+            theme::fg_muted()
         };
-        let shown = super::steady::cut(label, keep, ts::BODY, FILE_TOOL_FONT);
-        let face = button(ts::set_in(
-            text(shown.clone())
-                .font(FILE_TOOL_FONT)
-                .color(if chosen {
-                    theme::fg()
-                } else {
-                    theme::fg_muted()
-                })
-                .wrapping(Wrapping::None),
-            MARGIN_TAB_H,
-            ts::INTER,
-            ts::BODY,
-        ))
+        let face = button(
+            container(glyph::icon(glyph, tint, FILE_TOOL_GLYPH))
+                .height(Length::Fixed(HEADER_CONTROL_H))
+                .align_y(iced::Center),
+        )
         .style(theme::segment(chosen))
-        .padding([0.0, pad])
+        .padding([0.0, FILE_TOOL_PAD_X])
         .on_press(super::heard::said(
             label,
             Message::Window(WindowMsg::MarginTabPicked(this)),
         ));
-        if shown == label {
-            face.into()
-        } else {
-            tip_at(face, label, None, tooltip::Position::Bottom)
-        }
+        // Its name and what it shows, as the tools beside it say theirs.
+        super::toolbar::tip_at_why(face, label, None, Some(why), tooltip::Position::Bottom)
     };
-    let tabs: Vec<Element<'_, Message>> = labels
-        .iter()
-        .zip(&widths)
-        .map(|((label, this), w)| tab(label, *w, *this))
-        .collect();
-    iced::widget::Row::with_children(tabs).spacing(2).into()
+    iced::widget::Row::with_children(tabs.into_iter().map(tab))
+        .spacing(TOOLS_SPACING)
+        .push(space().width(Fill))
+        .push(margin_toggle(app))
+        .align_y(iced::Center)
+        .into()
 }
+
+/// The margin's own way to be hidden, at its header's right end — and, at
+/// the same place while it is hidden, the way to bring it back: it was
+/// hidden and shown only from the View menu and the palette.
+pub(crate) fn margin_toggle(app: &App) -> Element<'_, Message> {
+    let shown = app.show_right_panel;
+    let said = if shown {
+        tr!("Hide the margin")
+    } else {
+        tr!("Show the margin")
+    };
+    let face = button(
+        container(glyph::icon(
+            Glyph::PanelRight,
+            if shown {
+                theme::fg_muted()
+            } else {
+                theme::fg()
+            },
+            FILE_TOOL_GLYPH,
+        ))
+        .height(Length::Fixed(HEADER_CONTROL_H))
+        .align_y(iced::Center),
+    )
+    .style(theme::icon_button(false))
+    .padding([0.0, FILE_TOOL_PAD_X])
+    .on_press(super::heard::said(
+        said,
+        Message::Window(WindowMsg::ToggleRightPanel),
+    ));
+    super::toolbar::tip_at(face, said, None, tooltip::Position::Bottom)
+}
+
+/// A margin tab's width, and the gap between tabs: a header tool's.
+#[cfg(test)]
+pub(crate) const MARGIN_TAB_W: f32 = 2.0 * FILE_TOOL_PAD_X + FILE_TOOL_GLYPH;
+#[cfg(test)]
+pub(crate) const MARGIN_TAB_GAP: f32 = TOOLS_SPACING;
 
 /// The sheet's header: the open file's name and folder, the tools that act
 /// on it — Explain, Skim, Diff, Time Travel, and the View menu of reading
@@ -581,25 +603,14 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
             }),
     )
     .padding([0.0, (TOOLS_RULE_W - 1.0) / 2.0]);
-    // Said short where the file's name would otherwise lose its room:
-    // Explain the last to give its name up.
-    let words = file_tool_words(app);
-    let short = words.short(false);
-    let mut view_face = row![glyph::icon(Glyph::Eye, theme::fg_muted(), 14.0)]
-        .spacing(6)
-        .align_y(iced::Center);
-    if !short {
-        view_face = view_face.push(ts::set_in(
-            text(tr!("View"))
-                .font(FILE_TOOL_FONT)
-                .color(theme::fg_muted())
-                .wrapping(Wrapping::None),
-            HEADER_CONTROL_H,
-            ts::INTER,
-            ts::BODY,
-        ));
-    }
-    let view_face = view_face.push(glyph::icon(Glyph::ChevronDown, theme::dim(), VIEW_CHEVRON));
+    // Glyphs, their names in their tooltips.
+    let short = true;
+    let view_face = row![
+        glyph::icon(Glyph::Eye, theme::fg_muted(), 14.0),
+        glyph::icon(Glyph::ChevronDown, theme::dim(), VIEW_CHEVRON),
+    ]
+    .spacing(6)
+    .align_y(iced::Center);
     let view_menu = button(
         container(view_face)
             .height(Length::Fixed(HEADER_CONTROL_H))
@@ -611,11 +622,13 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
         tr!("View"),
         Message::Window(WindowMsg::ToggleViewMenu),
     ));
-    let view_menu: Element<'_, Message> = if short {
-        tip_at(view_menu, tr!("View"), None, tooltip::Position::Bottom)
-    } else {
-        view_menu.into()
-    };
+    let view_menu = tip_at_why(
+        view_menu,
+        tr!("View"),
+        None,
+        Some(tr!("Reading aids")),
+        tooltip::Position::Bottom,
+    );
     let unchanged = !diffing
         && v.git
             .as_ref()
@@ -634,12 +647,12 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
             Message::Explain(ExplainMsg::Explain(crate::explain::Node::File(
                 v.abs.clone(),
             ))),
-            words.short(true),
+            short,
         ),
         file_tool(
             Glyph::Skim,
             tr!("Skim"),
-            Some(tr!("Skim: fold every body to its signature")),
+            Some(tr!("Fold every body to its signature")),
             v.skimmed(&app.skim_lines(&v.abs)),
             None,
             Message::Editor(EditorMsg::SkimFile),
@@ -665,7 +678,7 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
         file_tool(
             Glyph::TimeTravel,
             tr!("Time Travel"),
-            None,
+            Some(tr!("Step back through the file's history")),
             time_travel,
             caps(Action::TimeTravel),
             if time_travel {
@@ -700,13 +713,24 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
     // Over the margin, beside the divider, its tabs.
     let tabs: Element<'_, Message> = if right_panel(app).is_some() {
         // At the row's top, as the design has them: 14 down.
-        container(margin_tabs(app, super::panes::margin_w(app) - 12.0 - 16.0))
+        container(margin_tabs(app))
             .width(Length::Fixed(super::panes::margin_w(app)))
             .height(Length::Fixed(SHEET_HEADER_ROW_H))
             .align_y(iced::Top)
             .padding(Padding {
-                right: 16.0,
+                right: MARGIN_TABS_PAD_RIGHT,
                 left: 12.0,
+                ..HEADER_ROW_PAD
+            })
+            .into()
+    } else if super::panes::right_panel_fits(app) {
+        // Hidden, the margin's toggle stays where it was, to bring it back.
+        container(margin_toggle(app))
+            .height(Length::Fixed(SHEET_HEADER_ROW_H))
+            .align_y(iced::Top)
+            .padding(Padding {
+                right: MARGIN_TABS_PAD_RIGHT,
+                left: 0.0,
                 ..HEADER_ROW_PAD
             })
             .into()
@@ -852,6 +876,36 @@ fn trail_row(app: &App) -> Element<'_, Message> {
                     id,
                     loc: loc.clone(),
                 }),
+            )),
+        );
+    }
+    // The plugin's page the reader came here from, put away by the row
+    // they opened: the next row is a click away, not another run.
+    if let Some(page) = &app.proj.last_plugin_page {
+        let title = super::steady::cut(&page.view.title, 220.0, ts::BODY, crate::fonts::UI);
+        let label = tr!("Back to {page}", page = title);
+        line = line.push(space().width(Fill)).push(
+            button(
+                row![
+                    glyph::icon(Glyph::ChevronLeft, theme::accent(), 11.0),
+                    ts::set_in(
+                        text(label.clone())
+                            .font(crate::fonts::in_control(crate::fonts::UI))
+                            .color(theme::accent())
+                            .wrapping(Wrapping::None),
+                        TRAIL_STOP_H,
+                        ts::INTER,
+                        ts::BODY,
+                    ),
+                ]
+                .spacing(4)
+                .align_y(iced::Center),
+            )
+            .style(theme::icon_button(false))
+            .padding([0, 5])
+            .on_press(super::heard::said(
+                &label,
+                Message::Plugin(crate::app::plugins::PluginMsg::BackToPage),
             )),
         );
     }

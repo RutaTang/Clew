@@ -187,8 +187,8 @@ impl App {
             self.status = match first_reason {
                 None => tr!("Rendered math & diagrams").into(),
                 Some(reason) if rendered == 0 => trn!(
-                    "Could not render math & diagrams: 1 failed ({reason})",
-                    "Could not render math & diagrams: all {n} failed ({reason})",
+                    "Could not render the math or diagram ({reason})",
+                    "Could not render any of the {n} math and diagram blocks ({reason})",
                     failed,
                     reason = reason
                 ),
@@ -233,7 +233,7 @@ impl App {
             // is itself forbidden. It rejects exactly what `linkify_citations`
             // never emits: empty, absolute, and any `.`/`..` component.
             if !clew_core::statefile::safe_rel(rel) {
-                self.status = tr!("Refused a link outside the project: {url}", url = url);
+                self.status = tr!("Blocked a link outside the project: {url}", url = url);
                 return Task::none();
             }
             let abs = root.join(rel);
@@ -248,7 +248,7 @@ impl App {
             // in between stays open — the same residual `.clew` documents.
             if self.local_project_state() && !clew_core::fs_scan::is_inside(&root, &abs) {
                 self.status = tr!(
-                    "Couldn't open {file}: a symlink, or not a file inside the project",
+                    "Couldn't open {file} because it's a symlink or isn't inside the project",
                     file = rel
                 );
                 return Task::none();
@@ -401,10 +401,25 @@ impl App {
         operation::scroll_to(ui::outline_scroll_id(), AbsoluteOffset { x: 0.0, y })
     }
 
+    /// The `impl` blocks heading the items of `v`'s outline: a Rust file's,
+    /// read once per text of it.
+    pub(crate) fn outline_groups(&self, v: &Viewer) -> Arc<Vec<clew_core::outline::ImplBlock>> {
+        if v.lang_key != Some("rust") {
+            return Arc::default();
+        }
+        self.proj
+            .view_memo
+            .outline_groups
+            .get_or((v.abs.clone(), Arc::clone(&v.source)), || {
+                clew_core::outline::rust_impl_blocks(&v.source)
+            })
+    }
+
     /// Where function `name` (its `ordinal`th of the name) starts in `v`'s
     /// outline, estimated from its rows' lines as `ui::outline_content` lays
     /// them out: a label line, a summary line when inline summaries are on
-    /// and the symbol has a real one, and a line for the reader's note.
+    /// and the symbol has a real one, and a line for the reader's note; an
+    /// `impl` block's heading a label line.
     pub(crate) fn outline_offset(&self, v: &Viewer, name: &str, ordinal: u32) -> Option<f32> {
         let mut y = 0.0f32;
         let mut found = false;
@@ -419,7 +434,13 @@ impl App {
         // quadratic, on every caret move.
         let ordinals = outline::fn_ordinals(&v.symbols);
         let keys = crate::notes::note_keys(&v.symbols);
-        for ((s, &symbol_ordinal), key) in v.symbols.iter().zip(&ordinals).zip(&keys) {
+        let groups = self.outline_groups(v);
+        for entry in outline_entries(&v.symbols, &groups) {
+            let OutlineEntry::Symbol { index, .. } = entry else {
+                y += OUTLINE_LINE_H;
+                continue;
+            };
+            let (s, symbol_ordinal, key) = (&v.symbols[index], ordinals[index], &keys[index]);
             if matches!(s.kind.as_str(), "function" | "method")
                 && s.name == name
                 && symbol_ordinal == ordinal
@@ -429,7 +450,7 @@ impl App {
             }
             // Mirror ui::outline_content's row layout: a label line, plus a summary
             // line when inline summaries are on and this symbol has a real one.
-            let mut h = 27.0;
+            let mut h = OUTLINE_LINE_H;
             let has_summary = self.show_inline_summaries
                 && matches!(s.kind.as_str(), "function" | "method")
                 && self
@@ -452,6 +473,59 @@ impl App {
         }
         found.then_some(y)
     }
+}
+
+/// An outline row's label line, as tall as its toggle and pencil make it.
+const OUTLINE_LINE_H: f32 = 27.0;
+
+/// One row of a file's outline: a symbol, or the `impl` block heading the
+/// items in it — each with how deep it sits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OutlineEntry {
+    /// `groups[group]`.
+    Group { group: usize, depth: usize },
+    /// `symbols[index]`.
+    Symbol { index: usize, depth: usize },
+}
+
+/// A file's outline rows in order: its `symbols` (in line order), and each
+/// of the `groups` before the first item in it; each row as deep as the
+/// symbols and blocks that hold it — a method under its class or its
+/// `impl`, a module's items under the module, a nested function under its
+/// function. A notebook's cells and headings hold nothing.
+pub(crate) fn outline_entries(
+    symbols: &[Symbol],
+    groups: &[clew_core::outline::ImplBlock],
+) -> Vec<OutlineEntry> {
+    let mut out = Vec::with_capacity(symbols.len() + groups.len());
+    // The last lines of what holds the row being placed, innermost last.
+    let mut open: Vec<usize> = Vec::new();
+    let mut place = |line: usize, end: usize, holds: bool| -> usize {
+        while open.last().is_some_and(|&last| last < line) {
+            open.pop();
+        }
+        let depth = open.len();
+        if holds && end > line {
+            open.push(end);
+        }
+        depth
+    };
+    let mut next = 0;
+    for (index, s) in symbols.iter().enumerate() {
+        while let Some(g) = groups.get(next).filter(|g| g.line <= s.line) {
+            let depth = place(g.line, g.end_line, true);
+            out.push(OutlineEntry::Group { group: next, depth });
+            next += 1;
+        }
+        let holds = !matches!(s.kind.as_str(), "cell" | "section");
+        let depth = place(s.line, s.end_line, holds);
+        out.push(OutlineEntry::Symbol { index, depth });
+    }
+    for (group, g) in groups.iter().enumerate().skip(next) {
+        let depth = place(g.line, g.end_line, true);
+        out.push(OutlineEntry::Group { group, depth });
+    }
+    out
 }
 
 impl App {
@@ -504,7 +578,7 @@ pub(crate) fn reveal_in_file_manager(path: &std::path::Path) -> Result<(), Strin
     let mut open = {
         let program = clew_core::linerpc::resolve_program("explorer").ok_or_else(|| {
             tr!(
-                "Couldn't show it: {program} was not found",
+                "Couldn't show it because {program} wasn't found",
                 program = "explorer"
             )
         })?;
@@ -528,7 +602,7 @@ pub(crate) fn reveal_in_file_manager(path: &std::path::Path) -> Result<(), Strin
         };
         let program = clew_core::linerpc::resolve_program("xdg-open").ok_or_else(|| {
             tr!(
-                "Couldn't show it: {program} was not found",
+                "Couldn't show it because {program} wasn't found",
                 program = "xdg-open"
             )
         })?;
@@ -551,7 +625,7 @@ pub(crate) fn open_in_browser(url: &str) -> Result<(), String> {
         && !url.contains(['\n', '\r', '\0'])
         && url.len() < 8192;
     if !plain {
-        return Err(tr!("Refused to open link: {url}", url = url));
+        return Err(tr!("Clew won't open this link: {url}", url = url));
     }
     // By absolute path where the system ships one, and else found on the
     // absolute directories of PATH: a bare name is resolved through PATH,
@@ -567,7 +641,7 @@ pub(crate) fn open_in_browser(url: &str) -> Result<(), String> {
         };
         clew_core::linerpc::resolve_program(name).ok_or_else(|| {
             tr!(
-                "Couldn't open the link: {program} was not found",
+                "Couldn't open the link because {program} wasn't found",
                 program = name
             )
         })?
@@ -706,6 +780,66 @@ mod path_tests {
                 .display()
                 .to_string(),
             r"C:\proj\src\app\main.rs"
+        );
+    }
+}
+
+#[cfg(test)]
+mod outline_rows_tests {
+    use super::*;
+
+    fn symbol(name: &str, kind: &str, line: usize, end_line: usize) -> Symbol {
+        Symbol {
+            name: name.into(),
+            kind: kind.into(),
+            line,
+            end_line,
+        }
+    }
+
+    /// Each row as deep as what holds it — a class's methods, a function's
+    /// nested function, an impl block's items — and back out after it; an
+    /// impl block before its first item, an empty one in its place, one
+    /// after the last symbol at the end; a notebook's cells and headings
+    /// hold nothing.
+    #[test]
+    fn outline_rows_sit_as_deep_as_what_holds_them() {
+        use OutlineEntry::{Group, Symbol as S};
+        let symbols = [
+            symbol("Cart", "class", 1, 8),
+            symbol("add", "method", 2, 5),
+            symbol("check", "function", 3, 4),
+            symbol("total", "method", 6, 8),
+            symbol("free", "function", 10, 11),
+            symbol("new", "method", 14, 14),
+        ];
+        let block = |line, end_line| clew_core::outline::ImplBlock {
+            line,
+            end_line,
+            label: "impl Cart".into(),
+        };
+        let groups = [block(12, 12), block(13, 15), block(20, 20)];
+        assert_eq!(
+            outline_entries(&symbols, &groups),
+            [
+                S { index: 0, depth: 0 },
+                S { index: 1, depth: 1 },
+                S { index: 2, depth: 2 },
+                S { index: 3, depth: 1 },
+                S { index: 4, depth: 0 },
+                Group { group: 0, depth: 0 },
+                Group { group: 1, depth: 0 },
+                S { index: 5, depth: 1 },
+                Group { group: 2, depth: 0 },
+            ]
+        );
+        let cells = [
+            symbol("Setup", "section", 1, 9),
+            symbol("cell 1", "cell", 2, 4),
+        ];
+        assert_eq!(
+            outline_entries(&cells, &[]),
+            [S { index: 0, depth: 0 }, S { index: 1, depth: 0 }]
         );
     }
 }

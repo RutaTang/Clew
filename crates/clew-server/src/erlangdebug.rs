@@ -226,7 +226,7 @@ impl Adapter {
         let (sources, includes) = sources_of(&program, &cwd);
         let compiled = self.compile(&sources, &includes, &scratch).await?;
         if !compiled.contains_key(&module) {
-            return Err(format!("{module} did not compile — see the output"));
+            return Err(format!("{module} did not compile. See the output"));
         }
         self.modules = compiled;
         let bridge_dir = scratch.join("bridge");
@@ -308,7 +308,7 @@ impl Adapter {
                 Err(_) => return Err(format!("the node did not connect within {} s", CONNECT_TIMEOUT.as_secs())),
             },
             _ = exited.wait_for(Option::is_some) => {
-                return Err("the Erlang node exited before its debugger connected — see its output".into());
+                return Err("the Erlang node exited before its debugger connected. See its output".into());
             }
         };
         let bridge = Bridge::start(

@@ -6,9 +6,11 @@
 //! an `Event::Usage`, on this machine straight to the ledger. The ledger is
 //! one JSON line a call in the data directory (`usage.jsonl`), the reader's
 //! own: it is never sent anywhere. Money is worked out as it is shown, from
-//! the price table ([`price_of`]) — Clew's own for the models it knows, the
-//! reader's where they set one — so a price corrected later corrects the
-//! history too.
+//! the price table ([`price_of`]) — Clew's price list for the models it
+//! knows (`prices`, refreshed from Clew's repository), the reader's where
+//! they set one — so a price corrected later corrects the history too. A
+//! price change a provider announced applies from its day: the calls made
+//! before it keep the price they were made at.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -58,9 +60,11 @@ impl Entry {
         }
     }
 
-    /// Its cost in US dollars, at the price its model has now.
+    /// Its cost in US dollars: at the reader's own price for its model,
+    /// else at Clew's as it was when the call was made.
     pub(crate) fn cost(&self) -> Option<f64> {
-        price_of(&self.model).map(|p| p.cost(self.input, self.cached, self.written, self.output))
+        price_at(&self.model, self.at)
+            .map(|p| p.cost(self.input, self.cached, self.written, self.output))
     }
 }
 
@@ -188,65 +192,15 @@ impl Price {
     }
 }
 
-/// Clew's own prices, by the model id's start (a dated id is its model's):
-/// the longer start first where one is another's.
-const PRICES: &[(&str, Price)] = &[
-    // Anthropic: its API reference.
-    ("claude-fable-5-2", p(8.0, 0.20, 40.0)),
-    ("claude-mythos-5-2", p(8.0, 0.20, 40.0)),
-    ("claude-fable-5", p(10.0, 1.0, 50.0)),
-    ("claude-mythos-5", p(10.0, 1.0, 50.0)),
-    ("claude-opus-5-5", p(4.0, 0.20, 20.0)),
-    ("claude-opus-5", p(5.0, 0.50, 25.0)),
-    ("claude-opus-4-8", p(5.0, 0.50, 25.0)),
-    ("claude-opus-4-7", p(5.0, 0.50, 25.0)),
-    ("claude-opus-4-6", p(5.0, 0.50, 25.0)),
-    ("claude-opus-4-5", p(5.0, 0.50, 25.0)),
-    ("claude-opus-4", p(15.0, 1.50, 75.0)),
-    ("claude-sonnet-5-5", p(2.0, 0.10, 10.0)),
-    ("claude-sonnet-5", p(2.0, 0.20, 10.0)),
-    ("claude-sonnet-4", p(3.0, 0.30, 15.0)),
-    ("claude-haiku-5-5", p(0.10, 0.01, 0.50)),
-    ("claude-haiku-4-5", p(1.0, 0.10, 5.0)),
-    ("claude-3-5-haiku", p(0.80, 0.08, 4.0)),
-    // OpenAI.
-    ("gpt-4o-mini", p(0.15, 0.075, 0.60)),
-    ("gpt-4o", p(2.50, 1.25, 10.0)),
-    ("gpt-4.1-nano", p(0.10, 0.025, 0.40)),
-    ("gpt-4.1-mini", p(0.40, 0.10, 1.60)),
-    ("gpt-4.1", p(2.0, 0.50, 8.0)),
-    ("gpt-5-nano", p(0.05, 0.005, 0.40)),
-    ("gpt-5-mini", p(0.25, 0.025, 2.0)),
-    ("gpt-5", p(1.25, 0.125, 10.0)),
-    // DeepSeek, at its daytime (peak) rates.
-    ("deepseek-v4-pro", p(1.32, 0.044, 3.96)),
-    ("deepseek-v4-flash", p(0.30, 0.006, 1.20)),
-    ("deepseek-flash", p(0.30, 0.006, 1.20)),
-    ("deepseek-chat", p(0.28, 0.028, 0.42)),
-    ("deepseek-reasoner", p(0.28, 0.028, 0.42)),
-];
-
-const fn p(input: f64, cached: f64, output: f64) -> Price {
-    Price {
-        input,
-        cached,
-        output,
-    }
+/// Clew's own price for `model` now, if it knows one.
+pub(crate) fn builtin_price(model: &str) -> Option<Price> {
+    builtin_price_at(model, now_secs())
 }
 
-/// Clew's own price for `model`, if it knows one.
-pub(crate) fn builtin_price(model: &str) -> Option<Price> {
-    let model = model.trim().to_ascii_lowercase();
-    // OpenRouter's ids name their maker first, write a version with dots,
-    // and may carry a variant: `anthropic/claude-opus-4.5:beta`. Dotted, it
-    // was priced as `claude-opus-4`, three times over, and `claude-haiku-4.5`
-    // not at all.
-    let model = model.rsplit('/').next().unwrap_or(&model);
-    let model = model.split(':').next().unwrap_or(model).replace('.', "-");
-    PRICES
-        .iter()
-        .find(|(start, _)| model.starts_with(&start.replace('.', "-")))
-        .map(|(_, price)| *price)
+/// Clew's own price for `model` at the moment `at` (seconds since the Unix
+/// epoch), if its price list names the model (see `prices`).
+pub(crate) fn builtin_price_at(model: &str, at: u64) -> Option<Price> {
+    crate::app::prices::list().price_at(model, at)
 }
 
 /// The reader's own prices, `config.toml`'s `[prices]`, as last read: read
@@ -274,9 +228,15 @@ pub(crate) fn own_price(model: &str) -> Option<Price> {
     })
 }
 
-/// The price `model`'s calls are read at: the reader's, else Clew's.
+/// `model`'s price now: the reader's, else Clew's.
 pub(crate) fn price_of(model: &str) -> Option<Price> {
-    own_price(model).or_else(|| builtin_price(model))
+    price_at(model, now_secs())
+}
+
+/// `model`'s price at the moment `at`: the reader's own, which holds for
+/// every call, else Clew's as it was then.
+pub(crate) fn price_at(model: &str, at: u64) -> Option<Price> {
+    own_price(model).or_else(|| builtin_price_at(model, at))
 }
 
 /// Keep `price` as the reader's for `model` (`None`: back to Clew's).
@@ -437,12 +397,13 @@ fn summarize_in(entries: &[Entry], now: u64, local: impl Fn(u64) -> u64) -> Summ
         ..Summary::default()
     };
     let mut by: HashMap<&str, Totals> = HashMap::new();
-    // Each model's price looked up once.
-    let mut prices: HashMap<&str, Option<Price>> = HashMap::new();
+    // Each model's price looked up once a day (UTC), the day a price
+    // change starts.
+    let mut prices: HashMap<(&str, u64), Option<Price>> = HashMap::new();
     for e in entries {
         let price = *prices
-            .entry(e.model.as_str())
-            .or_insert_with(|| price_of(&e.model));
+            .entry((e.model.as_str(), e.at / 86_400))
+            .or_insert_with(|| price_at(&e.model, e.at));
         let d = day(e.at);
         if d == today {
             s.today.add(e, price);
@@ -545,24 +506,24 @@ pub(crate) struct Estimate {
 }
 
 impl Estimate {
-    /// `calls` of them, in one sentence of one weight: "About 44 AI calls:
-    /// 75k tokens, $0.03." The count stood bold over a dim line of the
+    /// `calls` of them, in one sentence of one weight: "About 44 AI calls
+    /// using 75k tokens ($0.03)." The count stood bold over a dim line of the
     /// tokens and money — the figure that matters most said least.
     pub(crate) fn said(&self, calls: usize) -> String {
         let count = crate::app::setup::about(calls);
         let tokens = tokens(self.tokens);
         match self.cost {
             Some(cost) => trn!(
-                "About {count} AI call: {tokens} tokens, {cost}.",
-                "About {count} AI calls: {tokens} tokens, {cost}.",
+                "About {count} AI call using {tokens} tokens ({cost}).",
+                "About {count} AI calls using {tokens} tokens ({cost}).",
                 calls,
                 count = count,
                 tokens = tokens,
                 cost = money(cost)
             ),
             None => trn!(
-                "About {count} AI call: {tokens} tokens.",
-                "About {count} AI calls: {tokens} tokens.",
+                "About {count} AI call using {tokens} tokens.",
+                "About {count} AI calls using {tokens} tokens.",
                 calls,
                 count = count,
                 tokens = tokens
@@ -844,10 +805,13 @@ impl App {
                 Task::none()
             }
             UsageMsg::Written(Some(e)) => {
-                self.status = tr!("Could not keep what the AI call used: {error}", error = e);
+                self.status = tr!("Could not record the AI call's usage: {error}", error = e);
                 Task::none()
             }
             UsageMsg::Written(None) => Task::none(),
+            // A newer list prices from now on; the view reads it as it draws.
+            // A fetch that failed changes nothing: the list in use stays.
+            UsageMsg::PricesFetched(_) => Task::none(),
             UsageMsg::RefreshBalance => self.read_balance(),
             UsageMsg::BalanceRead(Ok(Some(amounts))) => {
                 self.usage.balance = Balance::Read(amounts, now_secs());
@@ -967,12 +931,18 @@ impl App {
         }
     }
 
-    /// [`Self::usage_opened`], if Settings is on the Usage page.
+    /// What a Settings page asks for as it opens: the ledger for Usage
+    /// ([`Self::usage_opened`]), the toolchain check for Plugins.
     pub(crate) fn on_usage_page(&mut self) -> Task<Message> {
-        if self.settings.page == crate::SettingsPage::Usage {
-            self.usage_opened()
-        } else {
-            Task::none()
+        match self.settings.page {
+            crate::SettingsPage::Usage => self.usage_opened(),
+            // Whether plugins can be built here, looked at as their page
+            // opens: Rust may have been set up meanwhile. And the list,
+            // read again: one that could not be read may be fixed now.
+            crate::SettingsPage::Plugins => {
+                Task::batch([self.reload_plugins(), self.check_toolchain()])
+            }
+            _ => Task::none(),
         }
     }
 
@@ -1104,6 +1074,34 @@ mod tests {
         );
         assert_eq!(builtin_price("openai/gpt-4.1-mini").unwrap().input, 0.4);
         assert_eq!(builtin_price("gpt-4.1").unwrap().input, 2.0);
+        // A newer release is its own price, not its family's: `gpt-5.5`
+        // was read as `gpt-5`, at a quarter of its input rate.
+        let gpt55 = builtin_price("gpt-5.5").unwrap();
+        assert_eq!((gpt55.input, gpt55.cached, gpt55.output), (5.0, 0.5, 30.0));
+        assert_eq!(builtin_price("openai/gpt-5.4").unwrap().output, 15.0);
+        assert_eq!(builtin_price("gpt-5.2").unwrap().output, 14.0);
+        assert_eq!(builtin_price("gpt-5.5-pro").unwrap().input, 30.0);
+        assert_eq!(builtin_price("gpt-5").unwrap().input, 1.25);
+        assert_eq!(builtin_price("gpt-5-2025-08-07").unwrap().input, 1.25);
+        assert_eq!(
+            builtin_price("claude-sonnet-4-20250514").unwrap().input,
+            3.0
+        );
+        assert_eq!(
+            builtin_price("claude-opus-4-1-20250805").unwrap().input,
+            15.0
+        );
+        assert_eq!(builtin_price("claude-3-5-haiku-latest").unwrap().input, 0.8);
+        // One the table does not know is unpriced, not an older one's.
+        assert!(builtin_price("gpt-5.9").is_none());
+        assert!(builtin_price("gpt-4o-audio-preview").is_none());
+        assert!(builtin_price("claude-opus-4-9").is_none());
+        // Gemini, by its own id or the API's `models/` one.
+        assert_eq!(
+            builtin_price("models/gemini-2.5-flash").unwrap().output,
+            2.5
+        );
+        assert_eq!(builtin_price("gemini-2.5-flash-lite").unwrap().input, 0.1);
         // Cached tokens bill at the cache's rate; never more than the prompt.
         let price = Price {
             input: 1.0,
@@ -1112,6 +1110,48 @@ mod tests {
         };
         assert!((price.cost(1_000_000, 500_000, 0, 100_000) - 1.05).abs() < 1e-9);
         assert!((price.cost(10, 99, 0, 0) - 10.0 * 0.1 / 1e6).abs() < 1e-12);
+    }
+
+    /// A price a provider has announced changes on its day, and a call is
+    /// priced as of when it was made.
+    #[test]
+    fn a_price_changes_on_its_day() {
+        use crate::app::prices::utc_day;
+        let before = utc_day(2026, 12, 1) - 1;
+        let after = utc_day(2026, 12, 1);
+        assert_eq!(after, 1_796_083_200, "2026-12-01 00:00 UTC");
+        assert_eq!(
+            builtin_price_at("gemini-4-carbon", before).unwrap().input,
+            2.0
+        );
+        assert_eq!(
+            builtin_price_at("gemini-4-carbon", after).unwrap().input,
+            4.0
+        );
+        // Gemini 2.5 Pro, retired, bills as Gemini 3.8 Flash, whose own
+        // price rises a month later.
+        let pro = |at| builtin_price_at("gemini-2.5-pro", at).unwrap().output;
+        assert_eq!(pro(before), 10.0);
+        assert_eq!(pro(after), 3.75);
+        assert_eq!(pro(utc_day(2027, 1, 1)), 7.5);
+        assert_eq!(
+            builtin_price_at("gemini-3.8-flash", utc_day(2027, 1, 1))
+                .unwrap()
+                .input,
+            1.5
+        );
+        // A call before the change keeps the price it was made at.
+        let call = |at| Entry {
+            at,
+            purpose: EXPLAIN.to_string(),
+            model: "gemini-4-carbon".to_string(),
+            input: 1_000_000,
+            cached: 0,
+            written: 0,
+            output: 0,
+        };
+        assert_eq!(call(before).cost(), Some(2.0));
+        assert_eq!(call(after).cost(), Some(4.0));
     }
 
     /// Today, this month and the chart count what fell in them; the month's
@@ -1178,12 +1218,12 @@ mod tests {
         assert_eq!(estimate(&lately, EXPLAIN, 1, "mystery").cost, None);
         assert_eq!(
             estimate(&lately, EXPLAIN, 1, "mystery").said(1),
-            "About 1 AI call: 1.1k tokens."
+            "About 1 AI call using 1.1k tokens."
         );
         assert_eq!(
             drawn.said(10),
             format!(
-                "About 10 AI calls: 11k tokens, {}.",
+                "About 10 AI calls using 11k tokens ({}).",
                 money(drawn.cost.unwrap())
             )
         );

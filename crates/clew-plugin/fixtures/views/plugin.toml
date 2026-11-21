@@ -1,0 +1,63 @@
+[plugin]
+id = "views"
+name = "Views"
+version = "0.1.0"
+description = "Clew's test plugin: every kind of answer, and every way to fail."
+permissions = ["read"]
+
+[[command]]
+id = "all-blocks"
+title = "Every block"
+
+[[command]]
+id = "open"
+title = "Open a place"
+
+[[command]]
+id = "say"
+title = "Say something"
+
+[[command]]
+id = "refuse"
+title = "Refuse"
+
+[[command]]
+id = "read"
+title = "Read the file"
+where = "code"
+
+[[command]]
+id = "escape"
+title = "Read outside"
+
+[[command]]
+id = "store"
+title = "Count runs"
+
+[[command]]
+id = "spin"
+title = "Never end"
+
+[[command]]
+id = "sleep"
+title = "Sleep for an hour"
+
+[[command]]
+id = "nap"
+title = "Nap"
+
+[[command]]
+id = "hog"
+title = "Use all memory"
+
+[[command]]
+id = "panic"
+title = "Panic"
+
+[[command]]
+id = "chatter"
+title = "Print a lot"
+
+[[graph]]
+id = "pair"
+title = "A pair"

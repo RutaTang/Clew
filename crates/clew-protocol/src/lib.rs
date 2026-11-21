@@ -143,7 +143,16 @@ pub use payload::*;
 /// v26: every model call the server makes for the client says what it used
 /// ([`Event::Usage`]), and [`Request::Chat`] / [`Request::ChatStream`] say
 /// what they are for (`purpose`): the client's ledger of what its key spent.
-pub const PROTOCOL_VERSION: u32 = 27;
+///
+/// v28: [`PythonSource::Managed`] — the Python a project's language server
+/// is given may be its own environment kept by its tool (Poetry, Pipenv,
+/// pyenv), found by where that tool keeps it.
+///
+/// v29: [`SourceManifests`] carries each Cargo package's targets
+/// ([`CargoTargets`]) and each `pyproject.toml`'s Python source roots: a
+/// workspace's crates resolve one another's `use`s, and Python imports
+/// resolve under the roots a project declares.
+pub const PROTOCOL_VERSION: u32 = 29;
 
 /// A hash of this crate's source as a token stream — comments and whitespace
 /// removed — computed at build time (see `build.rs`). Carried in `Hello` /
@@ -229,12 +238,39 @@ pub struct SourceManifests {
     /// Each Haskell package description (`*.cabal`, `package.yaml`; by rel)
     /// with the source directories it names, relative to its own.
     pub haskell: Vec<(Rel, Vec<String>)>,
+    /// Each Cargo package's manifest (`Cargo.toml`, by rel) with what it
+    /// says of its targets: a workspace's crates `use` one another by their
+    /// libraries' names.
+    pub cargo: Vec<(Rel, CargoTargets)>,
+    /// Each `pyproject.toml` (by rel) with the Python source roots it names,
+    /// relative to its own directory: where `import name` is looked for
+    /// besides the project's root.
+    pub python: Vec<(Rel, Vec<String>)>,
 }
 
 impl SourceManifests {
     pub fn is_empty(&self) -> bool {
-        self.psr4.is_empty() && self.haskell.is_empty()
+        self.psr4.is_empty()
+            && self.haskell.is_empty()
+            && self.cargo.is_empty()
+            && self.python.is_empty()
     }
+}
+
+/// What a Cargo package's manifest says of its targets, paths relative to
+/// the manifest's directory.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CargoTargets {
+    /// The name code calls its library by (`use name::…`): `[lib] name`,
+    /// else the package's name with `-` read as `_`.
+    pub lib_name: String,
+    /// Its library's root file: `[lib] path`, else `src/lib.rs` (which a
+    /// package with no library does not have).
+    pub lib_path: String,
+    /// The root files its `[[bin]]`, `[[example]]`, `[[test]]` and
+    /// `[[bench]]` entries name: crate roots where Cargo's own layout
+    /// would not look.
+    pub target_paths: Vec<String>,
 }
 
 /// Correlates a request with its reply. Minted by the client from ONE counter
@@ -1766,8 +1802,12 @@ pub enum PythonSource {
     /// it is a copy or link of, its packages read rather than its start-up
     /// code run, as it came with the project.
     ProjectVenv,
-    /// The virtualenv activated where clew was started (`VIRTUAL_ENV`).
+    /// The virtualenv activated where clew was started (`VIRTUAL_ENV`), or
+    /// the conda environment (`CONDA_PREFIX`).
     Activated,
+    /// This project's own environment, kept by its tool outside the project:
+    /// its Poetry or Pipenv environment, or the pyenv Python it pins.
+    Managed(PythonEnvKind),
 }
 
 /// The server-side state of a language server, as an explicit enum — the

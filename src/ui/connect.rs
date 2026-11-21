@@ -76,6 +76,7 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
         Message::Settings(SettingsMsg::ModelChanged(v))
     })
     .id(super::settings_model_id());
+    let model = column![model, model_list(app)].spacing(6);
     let base = input(base_hint, &app.settings.base_url, |v| {
         Message::Settings(SettingsMsg::BaseUrlChanged(v))
     })
@@ -85,7 +86,7 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
         crate::app::state::ConnectionTest::Untried => None,
         crate::app::state::ConnectionTest::Testing(_) => Some(tr!("Testing…").to_string()),
         crate::app::state::ConnectionTest::Answered(model) => {
-            Some(tr!("Connected: {model} answered.", model = model))
+            Some(tr!("Connected. {model} answered.", model = model))
         }
         crate::app::state::ConnectionTest::Failed(why) => Some(why.said()),
     };
@@ -210,13 +211,17 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
                 form::item(tr!("Mode"), None, mode),
                 form::item(tr!("Light theme"), None, light_pick),
                 form::item(tr!("Dark theme"), None, dark_pick),
+                form::item(tr!("Code text size"), None, code_size(app)),
             ],
         )]),
         SettingsPage::Updates => {
             let mut rows = vec![
                 form::toggle(
                     tr!("Check for updates automatically"),
-                    None,
+                    Some(
+                        tr!("Each time Clew starts, it asks GitHub for a newer release and its latest model prices. Nothing about your projects is sent.")
+                            .to_string(),
+                    ),
                     app.update.auto_check,
                     |v| Message::Updater(UpdaterMsg::SetAuto(v)),
                 ),
@@ -234,7 +239,7 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
             // Opened by an AI action asked without a key: why, above the
             // field it needs — it opened on the form with no word of it.
             (app.settings.key_asked && app.settings.key.trim().is_empty())
-                .then(|| tr!("That needs an AI model: add an API key below, then try it again.").to_string()),
+                .then(|| tr!("That needs an AI model. Add an API key below, then try again.").to_string()),
             None,
             [
                 form::field(tr!("Provider"), None, provider),
@@ -287,6 +292,7 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
         }
         SettingsPage::Voice => voice_section(app),
         SettingsPage::Integrations => integrations_section(app),
+        SettingsPage::Plugins => super::plugins::plugins_settings(app),
         SettingsPage::Languages if app.proj.project.is_none() => form::page(vec![
             form::note(tr!("Open a project to set up its languages.")).into(),
             installed_servers(app),
@@ -429,6 +435,7 @@ fn settings_glyph(page: SettingsPage) -> Glyph {
         SettingsPage::Embeddings => Glyph::FindMeaning,
         SettingsPage::Voice => Glyph::Mic,
         SettingsPage::Integrations => Glyph::Plug,
+        SettingsPage::Plugins => Glyph::Cube,
         SettingsPage::Languages => Glyph::Braces,
         SettingsPage::Shortcuts => Glyph::Shortcuts,
         SettingsPage::Usage => Glyph::Stats,
@@ -539,7 +546,7 @@ fn chip<'a>(label: String, on: bool, msg: Message) -> Element<'a, Message> {
 fn project_sets_note(sets: &[String]) -> Option<String> {
     (!sets.is_empty()).then(|| {
         tr!(
-            "Also set in .clew/lsp.toml: {settings}. Settings here take precedence.",
+            ".clew/lsp.toml also sets {settings}. The settings here take precedence.",
             settings = sets.join(", ")
         )
     })
@@ -575,6 +582,100 @@ pub(crate) fn model_field_hints(provider: crate::llm::Provider) -> (&'static str
     }
 }
 
+/// Under the Model field, the models the key can call, to pick from: asked
+/// of the provider on a click — a read of the account, which spends
+/// nothing — then a list whose pick fills the field. A name typed by hand
+/// still goes, for a model the list leaves out.
+fn model_list(app: &App) -> Element<'_, Message> {
+    use crate::app::state::ModelList;
+    let ask = |label: &str, on: bool| {
+        super::toolbar::tip_at(
+            form::action(
+                label,
+                on.then_some(Message::Settings(SettingsMsg::ListModels)),
+            ),
+            tr!("Asks the provider which models your key can use. Costs nothing."),
+            None,
+            iced::widget::tooltip::Position::Top,
+        )
+    };
+    match &app.settings.models {
+        ModelList::Unasked => ask(tr!("Show available models"), true),
+        ModelList::Listing(_) => ask(tr!("Listing models…"), false),
+        ModelList::Listed(models) => {
+            let current = app.settings.model.trim().to_string();
+            let selected = models.iter().find(|m| **m == current).cloned();
+            form::pick_with(
+                tr!("Model"),
+                models.clone(),
+                selected,
+                |m: String| Message::Settings(SettingsMsg::ModelChanged(m)),
+                Some(tr!("Pick a model").to_string()),
+            )
+            .width(Length::Fill)
+            .into()
+        }
+        ModelList::Failed(why) => column![
+            ask(tr!("Show available models"), true),
+            text(why.clone()).size(ts::SMALL).color(theme::danger()),
+        ]
+        .spacing(4)
+        .into(),
+    }
+}
+
+/// The code's text size, a size smaller or larger, and back to as shipped:
+/// the zoom keys' work, here where a reader looks for it — it was in the
+/// keys and the command bar alone. Each step names its keys.
+pub(crate) fn code_size(app: &App) -> Element<'_, Message> {
+    use crate::app::state::{DEFAULT_FONT_SIZE, MAX_FONT_SIZE};
+    use crate::keymap::Action;
+    let size = app.font_size;
+    let step = |glyph: Glyph, action: Action, msg: Option<Message>| {
+        let label = action.label();
+        super::toolbar::tip_at(
+            button(glyph::icon(glyph, theme::fg_muted(), 13.0))
+                .style(theme::secondary_button)
+                .padding([5, 7])
+                .on_press_maybe(msg.map(|m| super::heard::said(label, m))),
+            label,
+            Some(app.keymap.chord(action).caps()),
+            iced::widget::tooltip::Position::Top,
+        )
+    };
+    let smaller = step(
+        Glyph::Minus,
+        Action::ZoomOut,
+        (size > crate::theme::MIN_TEXT_SIZE)
+            .then_some(Message::Editor(EditorMsg::FontSizeDelta(-1.0))),
+    );
+    let larger = step(
+        Glyph::Plus,
+        Action::ZoomIn,
+        (size < MAX_FONT_SIZE).then_some(Message::Editor(EditorMsg::FontSizeDelta(1.0))),
+    );
+    // The size in figures of one width, so a step moves nothing beside it.
+    let now = container(
+        text(format!("{size:.0}"))
+            .size(ts::BASE)
+            .font(crate::fonts::CODE)
+            .color(theme::fg()),
+    )
+    .width(Length::Fixed(28.0))
+    .align_x(iced::Center);
+    let mut row = row![].spacing(4).align_y(iced::Center);
+    // Back to as shipped, before the steps where it comes and goes: the
+    // steps stay put at the row's end.
+    if size != DEFAULT_FONT_SIZE {
+        row = row.push(step(
+            Glyph::Refresh,
+            Action::ZoomReset,
+            Some(Message::Editor(EditorMsg::FontSizeReset)),
+        ));
+    }
+    row.push(smaller).push(now).push(larger).into()
+}
+
 /// `s` begun with a capital, as a line of its own begins.
 fn sentence_start(s: &str) -> String {
     let mut chars = s.chars();
@@ -593,9 +694,12 @@ pub(crate) fn languages_section(app: &App) -> Element<'_, Message> {
     let mut servers = Vec::new();
     for language in &rows {
         let server = match choices.servers.as_ref().and_then(|s| s.get(language)) {
-            // The server program the reader chose: "Your program:" read as
-            // the reader's own code.
-            Some(choice) => tr!("{program} (your choice)", program = program_line(choice)),
+            // The server program set for the project: "(your choice)" said
+            // the reader picked what the setup sheet found on this computer.
+            Some(choice) => tr!(
+                "{program} (set for this project)",
+                program = program_line(choice)
+            ),
             None => app
                 .effective_server(language)
                 .map(|s| match s.command {
@@ -854,7 +958,7 @@ fn server_log(app: &App) -> Element<'_, Message> {
         let (why, color) = match (slot, unreadable) {
             (_, Some(poisoned)) => (poisoned.to_string(), theme::warning()),
             (Some(LspSlot::Ready(c)), None) if !c.alive() => (
-                tr!("The server has stopped; restart it to see new output.").to_string(),
+                tr!("The server has stopped. Restart it to see new output.").to_string(),
                 theme::dim(),
             ),
             (Some(LspSlot::Ready(_)), None) => (tr!("No output.").to_string(), theme::dim()),
@@ -903,6 +1007,16 @@ fn python_block<'a>(
             PythonSource::LspToml => tr!("Set in the project's .clew/lsp.toml"),
             PythonSource::ProjectVenv => tr!("Found in the project"),
             PythonSource::Activated => tr!("Active in the shell Clew was started from"),
+            PythonSource::Managed(PythonEnvKind::Poetry) => {
+                tr!("This project's Poetry environment")
+            }
+            PythonSource::Managed(PythonEnvKind::Pipenv) => {
+                tr!("This project's Pipenv environment")
+            }
+            PythonSource::Managed(PythonEnvKind::Pyenv) => {
+                tr!("The pyenv Python this project pins")
+            }
+            PythonSource::Managed(_) => tr!("Found for this project"),
             // Nobody named one: the server looks for its own. "None" read
             // as though Python went without an interpreter.
             PythonSource::Server => tr!("Chosen by the language server"),
@@ -915,7 +1029,7 @@ fn python_block<'a>(
         if let Some(bad) = &effect.unusable_choice {
             rows.push(form::plain(
                 text(tr!(
-                    "The interpreter you chose ({path}) can't be used: it no longer exists, or it is a program inside the repository. The interpreter above is used until you pick another.",
+                    "The interpreter you chose ({path}) can't be used because it no longer exists or is a program inside the repository. Clew uses the interpreter above until you pick another.",
                     path = bad
                 ))
                 .size(ts::SMALL)
@@ -1557,7 +1671,7 @@ fn servers_block(app: &App) -> Vec<Element<'_, Message>> {
         tr!("Add a server program"),
         Some(
             tr!(
-                "Your own server program for a language: a different build, or a server Clew doesn't support."
+                "Your own server program for a language, such as a different build or a server Clew doesn't support."
             )
             .into(),
         ),
@@ -1739,7 +1853,7 @@ fn integrations_section(app: &App) -> Element<'_, Message> {
     let mut add_rows = Vec::new();
     if !needs.is_empty() {
         add_rows.push(form::field_text(
-            tr!("It reads"),
+            tr!("Settings it uses"),
             None,
             Column::with_children(needs).spacing(6),
         ));
@@ -2634,9 +2748,35 @@ pub(crate) fn shortcuts_body(app: &App) -> Element<'_, Message> {
             .into(),
         None => form::note(tr!("Click a shortcut, then press new keys.")).into(),
     };
+    // Some sixty rows: the ones whose name or keys hold what is typed in
+    // the filter ("fold", "F5"), as every other long list is narrowed.
+    let filter = app.settings.shortcuts_filter.trim().to_lowercase();
+    let wanted = |label: &str, keys: &str| {
+        filter.is_empty()
+            || label.to_lowercase().contains(&filter)
+            || keys.to_lowercase().contains(&filter)
+    };
+    let field = super::sidebar::filter_box(
+        tr!("Find a shortcut"),
+        &app.settings.shortcuts_filter,
+        None,
+        |q| Message::Settings(SettingsMsg::ShortcutsFilter(q)),
+        None,
+        Message::Settings(SettingsMsg::ShortcutsFilterEscaped),
+        None,
+    );
     // Rebindable command rows.
     let mut cmds = Vec::new();
     for action in Action::ALL {
+        let keys = std::iter::once(app.keymap.chord(action))
+            .chain(app.keymap.alias(action))
+            .map(|c| c.caps())
+            .collect::<Vec<_>>()
+            .join(" ");
+        // The one being rebound stays, whatever is typed.
+        if app.rebinding != Some(action) && !wanted(action.label(), &keys) {
+            continue;
+        }
         let binding: Element<'_, Message> = if app.rebinding == Some(action) {
             row![
                 container(
@@ -2726,37 +2866,51 @@ pub(crate) fn shortcuts_body(app: &App) -> Element<'_, Message> {
         (tr!("Toggle fold"), "za"),
         (tr!("Open all folds"), "zR"),
         (tr!("Close all folds"), "zM"),
-        (tr!("Time Travel: older / newer commit"), "⌘←   ⌘→"),
+        (tr!("Older / newer commit in Time Travel"), "⌘←   ⌘→"),
         (tr!("Next / previous control or field"), "Tab   ⇧Tab"),
-        (tr!("Press the control the ring is on"), press_keys),
+        (tr!("Activate the focused control"), press_keys),
         (tr!("Code / sidebar / file tree / Ask"), "F6   ⇧F6"),
         (
-            tr!("File tree: walk it, open a folder / close it"),
+            tr!("Move up / down in the file tree, open / close a folder"),
             "↑ ↓ → ←   j k l h",
         ),
         (tr!("Close the top panel / clear selection"), "Esc"),
-        (tr!("The menu of the code or file there"), "⇧F10"),
-        (tr!("Debugger: breakpoint on this line"), "F9"),
-        (tr!("Debugger: start / continue, stop"), "F5   ⇧F5"),
-        (tr!("Debugger: step over"), "F10"),
-        (tr!("Debugger: step into / out"), "F11   ⇧F11"),
+        (tr!("Open the context menu"), "⇧F10"),
+        (tr!("Toggle a breakpoint on this line"), "F9"),
+        (tr!("Start or continue debugging / stop"), "F5   ⇧F5"),
+        (tr!("Step over the current line"), "F10"),
+        (tr!("Step into a call / out of the function"), "F11   ⇧F11"),
     ];
-    let vim = motions
+    let vim: Vec<_> = motions
         .into_iter()
+        .filter(|(label, keys)| wanted(label, &crate::keymap::local_keys(keys)))
         .map(|(label, keys)| slim(label.to_string(), motion_caps(keys)))
         .collect();
 
-    form::page(vec![
-        notice,
-        form::group(tr!("Commands"), None, None, cmds),
-        form::group(
+    let mut parts = vec![column![field, notice].spacing(10).into()];
+    if cmds.is_empty() && vim.is_empty() {
+        parts.push(
+            form::note(tr!(
+                "No shortcut matches “{filter}”",
+                filter = app.settings.shortcuts_filter.trim()
+            ))
+            .into(),
+        );
+    }
+    // A group none of whose rows is wanted goes, title and all.
+    if !cmds.is_empty() {
+        parts.push(form::group(tr!("Commands"), None, None, cmds));
+    }
+    if !vim.is_empty() {
+        parts.push(form::group(
             tr!("Reading motions"),
             Some(tr!("Vim-style keys. These can't be changed.").into()),
             None,
             vim,
-        ),
-        form::note(tr!("Saved to {path}", path = crate::llm::config_hint())).into(),
-    ])
+        ));
+    }
+    parts.push(form::note(tr!("Saved to {path}", path = crate::llm::config_hint())).into());
+    form::page(parts)
 }
 
 /// A reading motion's keys as caps, as every other shortcut's are: each
@@ -2844,7 +2998,7 @@ fn embed_model_rows(app: &App) -> Vec<Element<'_, Message>> {
     let mut rows = vec![form::item(
         MODEL.name,
         Some(
-            tr!("By Google DeepMind, run by Clew: nothing leaves this computer, and no key is needed.")
+            tr!("Made by Google DeepMind and run by Clew. Nothing leaves this computer, and no key is needed.")
                 .to_string(),
         ),
         state,
@@ -2961,7 +3115,7 @@ fn registry_group(draft: &crate::app::integrations::IntegrationsDraft) -> Elemen
                 ));
             }
             rows.push(form::plain(form::note(tr!(
-                "The registry lists what publishers say about their servers; it does not check them. Read the command before you add one."
+                "The registry lists what publishers say about their servers but doesn't check them. Read the command before you add one."
             ))));
         }
     }

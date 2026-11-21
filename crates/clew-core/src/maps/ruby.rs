@@ -74,7 +74,7 @@ fn meta(corpus: &Corpus) -> Option<ProjectMap> {
     let mut map = MapBuilder::new(
         "ruby.meta",
         "Metaprogramming",
-        "the methods a class has that no def names, and where they come from: modules mixed in, concerns' included blocks and class_methods, define_method, attr_*, delegate, alias, class_eval; calls made by name (send) and the classes that answer any call (method_missing)",
+        "the methods a class has without a def, and where they come from (modules mixed in, concerns' included blocks and class_methods, define_method, attr_*, delegate, alias, class_eval), plus calls made by name (send) and the classes that answer any call (method_missing)",
     );
     let defs = corpus.defs();
     let sources: Vec<(&Source, tree_sitter::Tree)> = corpus

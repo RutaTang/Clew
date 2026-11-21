@@ -587,7 +587,7 @@ async fn prompt(
         .or_else(llm::Config::load)
         .ok_or_else(|| {
             RpcError::internal(format!(
-                "Clew has no model to answer with — add an API key in Clew's settings ({})",
+                "Clew has no model to answer with. Add an API key in Clew's settings ({})",
                 llm::config_hint()
             ))
         })?;

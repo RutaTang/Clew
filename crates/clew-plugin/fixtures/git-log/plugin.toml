@@ -1,0 +1,10 @@
+[plugin]
+id = "git-log"
+name = "Git log"
+version = "0.1.0"
+description = "Clew's test plugin that reads the project's history."
+permissions = ["git"]
+
+[[command]]
+id = "latest"
+title = "Latest commit"

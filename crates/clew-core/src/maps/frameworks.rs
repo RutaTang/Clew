@@ -70,7 +70,7 @@ fn injection(corpus: &Corpus) -> Option<ProjectMap> {
     let mut map = MapBuilder::new(
         "di",
         "Dependency injection",
-        "each component the container makes; an arrow to each dependency it is given (labelled with how), from an interface to its implementation, and from a configuration to the beans it provides",
+        "each component the container creates, with an arrow to each dependency it is given (labelled with how), from an interface to its implementation, and from a configuration to the beans it provides",
     );
     // .NET: what each service type resolves to.
     let mut registered: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -406,7 +406,7 @@ fn orm(corpus: &Corpus) -> Option<ProjectMap> {
         map: MapBuilder::new(
             "orm",
             "Entity relations",
-            "each model or entity the ORM maps; an arrow to each it relates to, labelled with the field and how (one-to-many, belongs to, …)",
+            "each model or entity the ORM maps, with an arrow to each one it relates to, labelled with the field and how (one-to-many, belongs to, …)",
         ),
     };
     // EF Core: the entities are what a DbContext has `DbSet<>`s of.
@@ -739,7 +739,7 @@ fn wordpress(corpus: &Corpus) -> Option<ProjectMap> {
     let mut map = MapBuilder::new(
         "wp.hooks",
         "WordPress hooks",
-        "each action and filter; an arrow from each file that fires it (do_action, apply_filters) to it, and from it to each callback hooked on (add_action, add_filter)",
+        "each action and filter, with an arrow to it from each file that fires it (do_action, apply_filters) and from it to each callback hooked on it (add_action, add_filter)",
     );
     for source in corpus.in_langs(&[Lang::Php]) {
         let Some(tree) = source.tree() else {

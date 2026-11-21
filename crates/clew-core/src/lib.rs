@@ -79,6 +79,7 @@ impl Drop for EnvLock {
 pub mod acp;
 pub mod apidoc;
 pub mod buildfacts;
+pub mod cargorun;
 pub mod cmacro;
 pub mod confine;
 pub mod dapwire;
@@ -96,6 +97,10 @@ pub mod imports;
 pub mod inactive;
 pub mod incremental;
 pub(crate) mod lean;
+pub use lean::{
+    RunEnd as LeanRunEnd, has_main as lean_has_main, lake_root, mathlib_build_missing,
+    run_main as lean_run_main,
+};
 pub mod leanproof;
 pub mod linerpc;
 pub mod llm;
@@ -107,6 +112,7 @@ pub mod notebook;
 pub mod outline;
 pub mod procgroup;
 pub mod projectcalls;
+pub mod runnables;
 pub mod rustscope;
 pub mod search;
 pub mod server_dist;

@@ -104,7 +104,7 @@ pub fn lsp_command_allowed(
     })?;
     staged.exec_path.ok_or_else(|| {
         format!(
-            "refused: this project's lsp.toml command for {language} is not approved — open a {language} file in Clew and approve it there",
+            "refused to run this project's lsp.toml command for {language} because it is not approved. Open a {language} file in Clew and approve it there",
             language = shown(language)
         )
     })
@@ -148,7 +148,7 @@ pub(crate) fn build_refusal(
     runs: &str,
 ) -> String {
     format!(
-        "{} has not been allowed to build this project (it runs {runs}) — open a {} file in Clew to allow it",
+        "{} has not been allowed to build this project (it runs {runs}). Open a {} file in Clew to allow it",
         server.server_name,
         shown(&server.language)
     )
@@ -227,8 +227,7 @@ pub fn approved_init_options(
             return (
                 None,
                 Some(format!(
-                    "this project's lsp.toml init_options for {language} cannot be \
-                     fingerprinted ({e}) — they were not sent to the server",
+                    "this project's lsp.toml init_options for {language} cannot be fingerprinted ({e}), so they were not sent to the server",
                     language = shown(language)
                 )),
             );
@@ -241,8 +240,7 @@ pub fn approved_init_options(
     (
         None,
         Some(format!(
-            "this project's lsp.toml init_options for {language} are not approved — \
-             they were NOT sent to the language server"
+            "this project's lsp.toml init_options for {language} are not approved, so they were not sent to the language server"
         )),
     )
 }
@@ -336,8 +334,7 @@ pub(crate) fn resolve_spawn_exe(
                 return Err((
                     ErrorCode::Refused,
                     format!(
-                        "the {language} server is not installed on this host — \
-                         it must be installed (with the user's consent) first",
+                        "the {language} server is not installed on this host. It must be installed first, with the user's consent",
                         language = shown(language)
                     ),
                 ));
@@ -565,7 +562,7 @@ pub(crate) fn install_lsp(
         // sending LspInstall for it is confused — refuse.
         return LspResolution::Unsupported {
             message: format!(
-                "the {language} server is set by the project (.clew/lsp.toml), nothing to install",
+                "the {language} server is set by the project (.clew/lsp.toml), so there is nothing to install",
                 language = shown(language)
             ),
         };
@@ -613,7 +610,7 @@ pub(crate) fn install_lsp(
         }
         // Refused by the consent check above: nothing installs these.
         Located::RepoCommand(_) => {
-            Err("set by the project (.clew/lsp.toml), nothing to install".into())
+            Err("set by the project (.clew/lsp.toml), so there is nothing to install".into())
         }
         Located::Unsupported(message) => Err(message),
     };
@@ -667,7 +664,7 @@ mod tests {
         match refused {
             LspResolution::Unsupported { message } => assert_eq!(
                 message,
-                "the Rust server is set by the project (.clew/lsp.toml), nothing to install"
+                "the Rust server is set by the project (.clew/lsp.toml), so there is nothing to install"
             ),
             other => panic!("expected Unsupported, got {other:?}"),
         }
@@ -886,7 +883,7 @@ mod tests {
             resolve_spawn_exe(&approvals, &root, "rust", &choose("rust")).unwrap_err();
         assert_eq!(code, ErrorCode::Refused);
         assert!(message.contains("not been allowed to build"), "{message}");
-        assert!(message.contains("open a Rust file in Clew"), "{message}");
+        assert!(message.contains("Open a Rust file in Clew"), "{message}");
         approvals.lock().unwrap().insert(
             clew_core::trust::build_key("rust-analyzer"),
             clew_core::trust::build_fingerprint("rust-analyzer"),
@@ -942,7 +939,7 @@ mod tests {
             resolve_spawn_exe(&approvals, &root, "rust", &Default::default()).unwrap_err();
         assert_eq!(code, ErrorCode::Refused);
         assert!(message.contains("not been allowed to build"), "{message}");
-        assert!(message.contains("open a Rust file in Clew"), "{message}");
+        assert!(message.contains("Open a Rust file in Clew"), "{message}");
         // The leave as the client pushes it…
         let (key, leave) = (
             clew_core::trust::build_key("rust-analyzer"),

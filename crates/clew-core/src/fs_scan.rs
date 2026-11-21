@@ -206,6 +206,17 @@ pub const NOISE_DIRS: &[&str] = &[
     ".venv",
     "venv",
     "__pycache__",
+    // Python's tools: tox's and nox's environments (whole site-packages
+    // each), and the type checker's, test runner's and linter's caches.
+    ".tox",
+    ".nox",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    // Lean's Lake: its builds and its packages — Mathlib's thousands of
+    // files — under `.lake`, and `lake-packages` before Lake 4.3.
+    ".lake",
+    "lake-packages",
 ];
 
 /// Whether a directory with this name is one of [`NOISE_DIRS`].
@@ -818,9 +829,37 @@ mod tests {
         .unwrap();
         std::fs::write(dir.join("target/debug/build.json"), "{}").unwrap();
         std::fs::write(dir.join(".dart_tool/pkg.json"), "{}").unwrap();
+        // Lean's Lake packages (Mathlib's thousands of files) and Python's
+        // tool environments and caches.
+        for (folder, file) in [
+            (".lake/packages/mathlib/Mathlib", "Logic.lean"),
+            ("lake-packages/std/Std", "Data.lean"),
+            (".tox/py312/lib/site-packages/six", "__init__.py"),
+            (".nox/tests/lib", "x.py"),
+            (".mypy_cache/3.12", "x.json"),
+            (".pytest_cache/v", "x"),
+            (".ruff_cache/0.5", "x"),
+        ] {
+            std::fs::create_dir_all(dir.join(folder)).unwrap();
+            std::fs::write(dir.join(folder).join(file), "x\n").unwrap();
+        }
 
         let result = scan(dir);
         let rels: Vec<&str> = result.files.iter().map(|f| f.rel.as_str()).collect();
+        for noise in [
+            ".lake",
+            "lake-packages",
+            ".tox",
+            ".nox",
+            ".mypy_cache",
+            ".pytest_cache",
+            ".ruff_cache",
+        ] {
+            assert!(
+                !rels.iter().any(|r| r.starts_with(noise)),
+                "{noise} leaked: {rels:?}"
+            );
+        }
         assert!(
             rels.contains(&"src/index.ts"),
             "own source missing: {rels:?}"

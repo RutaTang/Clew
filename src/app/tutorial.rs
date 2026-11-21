@@ -214,7 +214,7 @@ pub(crate) fn steps(app: &App) -> Vec<TutStep> {
         TutStep::new(
             C::FindYourWay,
             tr!("Every file"),
-            tr!("The project's folders and files. teashop/pricing.py works out what an order costs; it's open now."),
+            tr!("The project's folders and files. teashop/pricing.py works out what an order costs, and it's open now."),
             Anchor::Sidebar,
         )
         .demo(tab(SidebarTab::Files))
@@ -229,7 +229,7 @@ pub(crate) fn steps(app: &App) -> Vec<TutStep> {
         TutStep::new(
             C::FindYourWay,
             tr!("Find by meaning"),
-            tr!("Describe what code does, such as \"where is tax added?\", and Clew finds it, even where no name says so."),
+            tr!("Describe what code does, such as \"where is tax added?\", and Clew finds it, even if no name in the code mentions it."),
             Anchor::Sidebar,
         )
         .demo(tab(SidebarTab::Semantic)),
@@ -237,7 +237,7 @@ pub(crate) fn steps(app: &App) -> Vec<TutStep> {
         TutStep::new(
             C::Read,
             tr!("Explanations beside the code"),
-            tr!("Each function's explanation sits level with its code. Clew wrote Tea Shop's with your model as the tour began."),
+            tr!("Each function's explanation sits level with its code. Clew wrote the ones for Tea Shop with your model when the tour started."),
             Anchor::RightTop,
         )
         .at(PRICING, "def total(", "total"),
@@ -251,7 +251,7 @@ pub(crate) fn steps(app: &App) -> Vec<TutStep> {
         TutStep::new(
             C::Read,
             tr!("Reading aids"),
-            tr!("Turn on what helps you read: a summary over each function, the types a name has, a map of the file."),
+            tr!("Turn on what helps you read, such as a summary above each function, the type of each name, or a map of the file."),
             Anchor::ViewMenu,
         )
         .at(PRICING, "def total(", "total"),
@@ -288,7 +288,7 @@ pub(crate) fn steps(app: &App) -> Vec<TutStep> {
         TutStep::new(
             C::Follow,
             tr!("Types and their kinds"),
-            tr!("The Type Graph shows Discount and the two kinds of it the shop has: MemberDiscount and BulkDiscount."),
+            tr!("The Type Graph shows Discount and the two discounts built on it, MemberDiscount and BulkDiscount."),
             Anchor::Strip(StripTool::TypeMap),
         ),
         TutStep::new(
@@ -301,7 +301,7 @@ pub(crate) fn steps(app: &App) -> Vec<TutStep> {
         TutStep::new(
             C::Ask,
             tr!("Ask Clew"),
-            tr!("Ask about the project, such as \"why is tax worked out after discounts?\", and Clew answers from its code and shows where. You can also tell it what to do; it asks before running anything."),
+            tr!("Ask about the project, such as \"why is tax worked out after discounts?\", and Clew answers from its code and shows where. You can also tell it what to do. It asks before running anything."),
             Anchor::AskCorner,
         )
         .demo(Message::Ask(AskMsg::Open)),
@@ -357,7 +357,7 @@ pub(crate) fn steps(app: &App) -> Vec<TutStep> {
         TutStep::new(
             C::Run,
             tr!("Run and debug"),
-            tr!("Run main.py to its end, or Debug it to stop at a breakpoint in checkout() and see its variables and its stack. Fake Run and Fake Debug, each under its twin, have the AI work a function out on inputs you give, without running anything."),
+            tr!("Run main.py to the end, or Debug it to stop at a breakpoint in checkout() and see its variables and stack. Fake Run and Fake Debug, below Run and Debug, let the AI work out what a function does with the inputs you give, without running anything."),
             Anchor::RunTools,
         )
         .demo(Message::Window(WindowMsg::ShowDebugPanel)),

@@ -63,6 +63,27 @@ pub fn promises_hover_eval(capabilities: &Value) -> bool {
         .unwrap_or(false)
 }
 
+/// The exception filters an adapter's `initialize` capabilities mark as on
+/// by default (`exceptionBreakpointFilters[].default`, DAP spec): what an
+/// editor turns on unless the reader chose otherwise. Each filter id as the
+/// adapter gave it, bounded: a filter list is a handful of short ids.
+pub fn default_exception_filters(capabilities: &Value) -> Vec<String> {
+    capabilities
+        .get("exceptionBreakpointFilters")
+        .and_then(Value::as_array)
+        .map(|filters| {
+            filters
+                .iter()
+                .filter(|f| f.get("default").and_then(Value::as_bool) == Some(true))
+                .filter_map(|f| f.get("filter").and_then(Value::as_str))
+                .filter(|id| !id.is_empty() && id.len() <= 64)
+                .take(16)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// A frame in the debuggee's call stack.
 #[derive(Debug, Clone)]
 pub struct StackFrame {
@@ -75,14 +96,30 @@ pub struct StackFrame {
     pub column: usize,
 }
 
+/// A frame's name without the hash Rust's legacy symbol names end in
+/// (`app::main::h0123456789abcdef`), which lldb leaves on: what the code
+/// calls it, `app::main`.
+fn without_rust_hash(name: &str) -> &str {
+    match name.rsplit_once("::h") {
+        Some((head, hash)) if hash.len() == 16 && hash.bytes().all(|b| b.is_ascii_hexdigit()) => {
+            head
+        }
+        _ => name,
+    }
+}
+
+/// Whether a frame is Rust's panic machinery starting to unwind — where the
+/// debugger stops a Rust program that panics (`rust_panic`, the symbol it
+/// is told to stop at).
+pub fn is_rust_panic(name: &str) -> bool {
+    name == "rust_panic" || name.ends_with("::rust_panic")
+}
+
 impl StackFrame {
     pub fn from_value(v: &Value) -> Option<StackFrame> {
         Some(StackFrame {
             id: v.get("id")?.as_i64()?,
-            name: v
-                .get("name")
-                .and_then(Value::as_str)
-                .unwrap_or("?")
+            name: without_rust_hash(v.get("name").and_then(Value::as_str).unwrap_or("?"))
                 .to_string(),
             path: v
                 .get("source")
@@ -362,6 +399,51 @@ impl DapEvent {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// lldb's Rust frame names lose their symbol hash, and keep everything
+    /// else; the panic's frame is known by its name.
+    #[test]
+    fn rust_frame_names_are_read_as_the_code_names_them() {
+        assert_eq!(
+            without_rust_hash("app::main::hd698b321c1151f52"),
+            "app::main"
+        );
+        assert_eq!(
+            without_rust_hash("<T as app::Shape>::area::h0123456789abcdef"),
+            "<T as app::Shape>::area"
+        );
+        assert_eq!(without_rust_hash("app::hash"), "app::hash");
+        assert_eq!(without_rust_hash("app::h0123"), "app::h0123");
+        assert_eq!(without_rust_hash("ns::helper"), "ns::helper");
+        assert!(is_rust_panic("__rustc::rust_panic"));
+        assert!(is_rust_panic("rust_panic"));
+        assert!(!is_rust_panic("app::not_rust_panic_here"));
+    }
+
+    /// debugpy's filters as its `initialize` lists them: only the one on
+    /// by default (uncaught exceptions) is asked for; lldb-dap's C++ and
+    /// Objective-C filters, none of them default, ask for nothing.
+    #[test]
+    fn the_exceptions_an_adapter_stops_at_by_default_are_read_from_its_capabilities() {
+        let debugpy = json!({ "exceptionBreakpointFilters": [
+            { "filter": "raised", "label": "Raised Exceptions", "default": false },
+            { "filter": "uncaught", "label": "Uncaught Exceptions", "default": true },
+            { "filter": "userUnhandled", "label": "User Uncaught Exceptions" },
+        ]});
+        assert_eq!(default_exception_filters(&debugpy), vec!["uncaught"]);
+        let lldb = json!({ "exceptionBreakpointFilters": [
+            { "filter": "cpp_catch", "label": "C++ Catch", "default": false },
+            { "filter": "cpp_throw", "label": "C++ Throw", "default": false },
+        ]});
+        assert!(default_exception_filters(&lldb).is_empty());
+        assert!(default_exception_filters(&json!({})).is_empty());
+        let odd = json!({ "exceptionBreakpointFilters": [
+            { "filter": "", "default": true },
+            { "filter": "x".repeat(65), "default": true },
+            { "default": true },
+        ]});
+        assert!(default_exception_filters(&odd).is_empty());
+    }
 
     #[test]
     fn parses_stack_frame_with_source() {

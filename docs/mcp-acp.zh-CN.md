@@ -28,6 +28,8 @@ claude mcp add clew -- /Applications/Clew.app/Contents/MacOS/clew-server mcp
 
 （Linux 和 Windows 上，`clew-server` 就是解压目录里 `clew` 旁边的那个。）
 
+同一个服务器也提供 Clew 的插件工具，所以这样连接的智能体可以为你制作[插件](plugins.zh-CN.md)：它在那里编写并构建插件，然后请 Clew 试运行或安装。试运行需要 Clew 已打开这个项目。安装会在 Clew 的窗口里询问你，并写明是哪个智能体请求的，智能体会一直等到你回答。代码工具只读，并会如实告诉智能体的客户端；会写入、构建或请求安装的插件工具则声明它们不只是读取，所以客户端会先问你。
+
 **把 Clew 作为 ACP 智能体。** `clew-server acp` 把 Ask Clew 的智能体提供给支持 ACP 智能体的编辑器，用 Clew 设置里配置的模型回答。编辑器交给它的 MCP 服务器会加入它的工具，每次调用都先问你。例如在 Zed 的 `settings.json` 中：
 
 ```json

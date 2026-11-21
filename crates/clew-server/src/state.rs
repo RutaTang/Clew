@@ -103,7 +103,7 @@ fn merge_or_why(
 /// file released those writes over it.
 fn run_read(path: &Path, rel: &str) -> Result<Option<String>, String> {
     clew_core::statefile::read_capped_checked(path, read_limit(rel))
-        .map_err(|e| format!("cannot read .clew/{rel}: {e} — it was left untouched"))
+        .map_err(|e| format!("cannot read .clew/{rel}: {e}. It was left untouched"))
 }
 
 /// The reading preferences have the same short-file cap on both hosts.
@@ -138,7 +138,7 @@ pub(crate) fn check_replaceable(
 ) -> Result<(), String> {
     let refuse = |why: String| {
         Err(format!(
-            "refused to overwrite .clew/{rel}: {why} — it was left untouched"
+            "left .clew/{rel} untouched instead of overwriting it: {why}"
         ))
     };
     let existing = match clew_core::statefile::read_capped_checked(path, read_limit(rel)) {
@@ -157,7 +157,7 @@ pub(crate) fn check_replaceable(
     let writing = incoming.and_then(|t| format.schema_version(t)).unwrap_or(1);
     if current > writing {
         return refuse(format!(
-            "it was written by a newer Clew (schema {current}; this client writes {writing})"
+            "it was written by a newer Clew (schema {current}, but this client writes {writing})"
         ));
     }
     Ok(())
@@ -307,7 +307,7 @@ fn run_job(job: StateJob) -> Event {
 pub(crate) fn wrong_project(root: &Path, want: &str, rel: &str) -> Option<Event> {
     (root.to_string_lossy() != want).then(|| {
         refused(format!(
-            "refused: state {rel} is for project {want}, this server has {}",
+            "refused the state file {rel}, which belongs to project {want} while this server has {} open",
             root.display()
         ))
     })

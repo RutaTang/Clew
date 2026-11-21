@@ -166,8 +166,11 @@ pub(crate) fn sidebar(app: &App) -> Element<'_, Message> {
     let tabs = container(tabs_row.push(more))
         .padding(2)
         .style(theme::trough);
-    // A view not on the strip, opened by what shows it, is named over it,
-    // with the way back to the files.
+    // A view not on the strip, opened by what shows it, is named over it:
+    // the ⋯ it was chosen from, raised, does not say which it is. Left as
+    // the views on the strip are, by choosing another there — a × beside
+    // its name, "back to the files", read as closing something, and was a
+    // way out the other views do not have.
     let titled: Element<'_, Message> = if elsewhere {
         container(
             row![
@@ -176,28 +179,15 @@ pub(crate) fn sidebar(app: &App) -> Element<'_, Message> {
                     .size(ts::BASE)
                     .font(crate::fonts::UI_SEMIBOLD)
                     .color(theme::fg()),
-                space().width(Fill),
-                tip_at(
-                    button(glyph::icon(Glyph::Close, theme::fg_muted(), 13.0))
-                        .style(theme::icon_button(false))
-                        .padding(5)
-                        .on_press(super::heard::said(
-                            tr!("Close"),
-                            Message::Window(WindowMsg::SidebarTabPicked(SidebarTab::Files,))
-                        )),
-                    tr!("Back to the files"),
-                    None,
-                    tooltip::Position::Bottom,
-                ),
             ]
             .spacing(8)
             .align_y(iced::Center),
         )
         .padding(Padding {
             top: 0.0,
-            right: 8.0,
+            right: SIDE_PAD,
             bottom: SIDEBAR_GAP,
-            left: 14.0,
+            left: SIDE_TEXT_X,
         })
         .into()
     } else {
@@ -314,9 +304,9 @@ pub(crate) fn walk_tab(app: &App) -> Element<'_, Message> {
     }
     let review = container(actions).padding(Padding {
         top: 0.0,
-        right: 8.0,
+        right: SIDE_PAD,
         bottom: 6.0,
-        left: 8.0,
+        left: SIDE_PAD,
     });
 
     // The library list is always shown under the input; selecting a tour expands
@@ -404,8 +394,8 @@ pub(crate) fn folded_stops(wt: &crate::walkthrough::Walkthrough) -> Option<Strin
     let steps = wt.steps.len();
     (stops > steps).then(|| {
         trn!(
-            "1 step from {stops} stops: a function stepped through is one step, and stops outside the project are left out.",
-            "{n} steps from {stops} stops: a function stepped through is one step, and stops outside the project are left out.",
+            "1 step from {stops} stops. A function stepped through counts as one step, and stops outside the project are left out.",
+            "{n} steps from {stops} stops. A function stepped through counts as one step, and stops outside the project are left out.",
             steps,
             stops = stops
         )
@@ -556,8 +546,16 @@ pub(crate) fn walk_header(app: &App) -> Element<'_, Message> {
             iced::widget::tooltip::Position::Bottom,
         ));
     }
+    // At the sidebar's line for boxes, just under the views' switch, as
+    // the Files view's filter is: 8 in all round set it 2 wider than the
+    // switch above it and 8 lower than the filter.
     container(column![toggle, field].spacing(8))
-        .padding(8)
+        .padding(Padding {
+            top: 0.0,
+            right: SIDE_PAD,
+            bottom: 8.0,
+            left: SIDE_PAD,
+        })
         .into()
 }
 
@@ -829,7 +827,7 @@ pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
                     regenerate.into(),
                     if !again {
                         tr!(
-                            "This walkthrough records a debug run — debug the program again to record a new one"
+                            "This walkthrough records a debug run. Debug the program again to record a new one"
                         )
                     } else if wt.scope.starts_with("@trace ") {
                         // It takes the last run of the program, which may
@@ -1101,12 +1099,10 @@ pub(crate) fn files_tab(app: &App) -> Element<'_, Message> {
                 None,
             )
         } else {
-            empty_state(
-                Glyph::Folder,
-                tr!("No folder open"),
-                tr!("Open a folder to start reading."),
-                None,
-            )
+            // The welcome page beside it offers the folder to open: "Open a
+            // folder to start reading" under this said it again, and the
+            // status bar a third time.
+            empty_state(Glyph::Folder, tr!("No folder open"), "", None)
         };
     };
 
@@ -1889,7 +1885,12 @@ pub(crate) fn search_tab(app: &App) -> Element<'_, Message> {
         ],
     }
     .spacing(6)
-    .padding(8);
+    .padding(Padding {
+        top: 0.0,
+        right: SIDE_PAD,
+        bottom: 8.0,
+        left: SIDE_PAD,
+    });
     if let Some((status, color)) = status_line {
         col = col.push(text(status).size(ts::SMALL).color(color));
     }
@@ -2043,23 +2044,28 @@ pub(crate) fn loc_label(loc: &crate::history::Loc, label: Option<&str>) -> Strin
 /// row over the code said "cents()" — anything else by its name, a file by
 /// its file name and line.
 pub(crate) fn stop_label(app: &App, loc: &crate::history::Loc, label: Option<&str>) -> String {
-    match label {
-        Some(name)
-            if app
-                .proj
-                .symbol_index_by_file
-                .get(&loc.path)
-                .is_some_and(|symbols| {
-                    symbols
-                        .iter()
-                        .any(|s| s.name == name && matches!(s.kind.as_str(), "function" | "method"))
-                }) =>
-        {
-            format!("{name}()")
-        }
+    // The functions of that name in the stop's file, by the line each
+    // starts on.
+    let starts: Option<Vec<usize>> = label.and_then(|name| {
+        let symbols = app.proj.symbol_index_by_file.get(&loc.path)?;
+        let starts: Vec<usize> = symbols
+            .iter()
+            .filter(|s| s.name == name && matches!(s.kind.as_str(), "function" | "method"))
+            .map(|s| s.line)
+            .collect();
+        (!starts.is_empty()).then_some(starts)
+    });
+    match (label, starts) {
+        // Inside the function, not at its head: its line too, as a stop
+        // noted by line says it — two stops in give_back() read as the same
+        // place twice.
+        (Some(name), Some(starts)) => match loc.line {
+            Some(line) if !starts.contains(&line) => format!("{name}():{line}"),
+            _ => format!("{name}()"),
+        },
         // A stop recorded by its line: the function it was in, and the
         // line — "pricing.py:20" did not say it was inside discounts().
-        None => match loc
+        (None, _) => match loc
             .line
             .and_then(|line| Some((app.function_around(&loc.path, line)?, line)))
         {
@@ -2113,115 +2119,176 @@ pub(crate) fn trail_tab(app: &App) -> Element<'_, Message> {
             )),
     ]
     .align_y(iced::Center)
+    // Its name at the line for words, its Clear's word ending where the
+    // rows' bands do less their padding.
     .padding(Padding {
-        top: 4.0,
-        right: 8.0,
-        bottom: 2.0,
-        left: 8.0,
+        top: 0.0,
+        right: SIDE_PAD,
+        bottom: 4.0,
+        left: SIDE_TEXT_X,
     });
 
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
     for v in &visits {
         // Indented under each fork above it — a hop that just followed the
         // one before stays in line — and capped: past ~8 branches a deep one
-        // would push the node off the panel's right edge.
-        let indent = (v.indent.min(8) as f32) * 14.0;
-        // What is left for its name and file after the row's indent, chevron,
-        // mark and icon: cut with an ellipsis, where they were cut bare.
+        // would push the node off the panel's right edge. The steps are the
+        // forks' lines: where each branch begins, and which branch a row is
+        // on. Without them a fork's branches sat one under another at one
+        // indent and read as a single path.
+        let shown = v.indent.min(TRAIL_MAX_STEPS);
+        let lead_w = (shown + 1) as f32 * TRAIL_STEP;
+        // What is left for its name and file after the row's lines, mark
+        // and icon: cut with an ellipsis, where they were cut bare.
+        // A folded fork's count of what it hides, at the row's end: its
+        // fold said only that something was under it, not how much.
+        let hides = (v.collapsed && v.hidden > 0).then(|| format!("+{}", v.hidden));
+        let hides_w = hides.as_deref().map_or(0.0, |n| {
+            super::steady::width_of(n, ts::CAPTION, crate::fonts::UI) + 6.0
+        });
         let room = (app.sidebar_width
-            - indent
-            - CHEVRON_W
-            - 10.0
+            - 2.0 * SIDE_PAD
+            - lead_w
             - 12.0
-            - 3.0 * 6.0
-            - 14.0
+            - 2.0 * 6.0
+            - (SIDE_TEXT_X - SIDE_PAD)
+            - 8.0
+            - hides_w
             - crate::ui::SCROLLBAR_W)
             .max(0.0);
 
-        // A collapse chevron for nodes with children (forks stand out in accent);
-        // leaves get a fixed-width spacer so names still line up.
-        // Only where the trail branches (or was folded there): in a straight
-        // run every row had one, and folding one hid every later stop.
-        let toggle: Element<'_, Message> = if v.has_children && (v.forks || v.collapsed) {
-            chevron(
-                !v.collapsed,
+        // Its mark: where the trail forks, the fork's fold — its line
+        // running on down to its branches while they are shown — and
+        // elsewhere a dot. Either is the accent for where the reader is,
+        // and the tree's grey elsewhere. The dots are drawn shapes rather
+        // than a tiny "●" glyph (text stays at or above the type scale's
+        // floor). The fold was a column of its own left of the marks, with
+        // a ⋔ beside it: the marks of a forked trail stood 18 further in
+        // than a straight one's.
+        let mark_color = if v.is_current {
+            theme::accent()
+        } else {
+            theme::dim()
+        };
+        let mark: Element<'_, Message> = if v.has_children && (v.forks || v.collapsed) {
+            let does = if v.collapsed {
+                tr!("Show its branches")
+            } else {
+                tr!("Hide its branches")
+            };
+            let fold = button(
+                container(glyph::icon(
+                    if v.collapsed {
+                        Glyph::ChevronRight
+                    } else {
+                        Glyph::ChevronDown
+                    },
+                    mark_color,
+                    10.0,
+                ))
+                .center(Fill),
+            )
+            .style(theme::list_row(false))
+            .width(Length::Fixed(TRAIL_STEP))
+            .height(Length::Fixed(TRAIL_STEP))
+            .padding(0)
+            .on_press(super::heard::said_to_with(
+                does,
+                || stop_label(app, &v.loc, v.label.as_deref()),
                 Message::Reading(ReadingMsg::TrailToggleCollapse {
                     id: v.id,
                     loc: v.loc.clone(),
                 }),
-            )
-        } else {
-            space().width(CHEVRON_W).into()
-        };
-        // Status marker: current dot (accent), fork ⋔ (accent), other visited
-        // nodes a grey dot so the trail reads as a string of nodes. The dots
-        // are drawn shapes rather than a tiny "●" glyph (text stays at or
-        // above the type scale's floor); the fork glyph stays readable.
-        let marker: Element<'_, Message> = if v.forks && !v.is_current {
-            text("⋔")
-                .size(ts::SMALL)
-                .color(theme::accent())
-                .width(10)
-                .into()
-        } else {
-            let color = if v.is_current {
-                theme::accent()
+            ));
+            let fold = super::toolbar::tip_at(fold, does, None, tooltip::Position::Bottom);
+            let below: Element<'_, Message> = if v.collapsed {
+                space().height(Fill).into()
             } else {
-                theme::dim()
+                iced::widget::canvas(TrailStub)
+                    .width(Length::Fixed(TRAIL_STEP))
+                    .height(Fill)
+                    .into()
             };
-            container(trail_dot(color))
-                .width(10)
-                .align_x(iced::Center)
+            column![space().height(Fill), fold, below]
+                .width(Length::Fixed(TRAIL_STEP))
+                .height(Fill)
+                .into()
+        } else {
+            container(trail_dot(mark_color))
+                .center_x(Length::Fixed(TRAIL_STEP))
+                .center_y(Fill)
                 .into()
         };
-        // The row is the whole width, as the file tree's are — its depth
-        // indents what is in it, not the row — and the place being read is
-        // the row lit as the open file is, its name in the medium weight.
+        // The lines and the mark, side by side with no gap: a fork's line
+        // runs under its mark, and a branch's ├ reaches its first mark.
+        let lead = Row::new()
+            .extend((shown > 0).then(|| {
+                iced::widget::canvas(TrailGuides(v.guides[..shown].to_vec()))
+                    .width(Length::Fixed(shown as f32 * TRAIL_STEP))
+                    .height(Fill)
+                    .into()
+            }))
+            .push(mark)
+            .width(Length::Fixed(lead_w))
+            .height(Fill);
+        // The row's band is as wide as the file tree's — its depth indents
+        // what is in it, not the band — and the place being read is the
+        // row lit as the open file is, its name in the medium weight.
         let name_font = if v.is_current {
             crate::fonts::UI_MEDIUM
         } else {
             crate::fonts::UI
         };
         let jump = button(
-            row![
-                space().width(indent),
-                toggle,
-                marker,
-                container(glyph::icon(Glyph::File, theme::dim(), 12.0)).width(12),
-                container(column![
-                    text(super::steady::elide_end(
-                        &stop_label(app, &v.loc, v.label.as_deref()),
-                        ts::BODY,
-                        name_font,
-                        room,
-                    ))
-                    .size(ts::BODY)
-                    .font(name_font)
-                    .color(theme::fg())
-                    .wrapping(Wrapping::None),
-                    text(super::steady::elide_start(
-                        &trail_caption(app, v),
-                        ts::CAPTION,
-                        crate::fonts::UI,
-                        room,
-                    ))
-                    .size(ts::CAPTION)
-                    .color(theme::dim())
-                    .wrapping(Wrapping::None),
-                ])
-                .width(Fill)
-                .clip(true),
-            ]
-            .spacing(6)
-            .align_y(iced::Center),
+            Row::new()
+                .push(lead)
+                .push(container(glyph::icon(Glyph::File, theme::dim(), 12.0)).width(12))
+                .push(
+                    container(column![
+                        text(super::steady::elide_end(
+                            &stop_label(app, &v.loc, v.label.as_deref()),
+                            ts::BODY,
+                            name_font,
+                            room,
+                        ))
+                        .size(ts::BODY)
+                        .font(name_font)
+                        .color(theme::fg())
+                        .wrapping(Wrapping::None),
+                        text(super::steady::elide_start(
+                            &trail_caption(app, v),
+                            ts::CAPTION,
+                            crate::fonts::UI,
+                            room,
+                        ))
+                        .size(ts::CAPTION)
+                        .color(theme::dim())
+                        .wrapping(Wrapping::None),
+                    ])
+                    .padding([3, 0])
+                    .width(Fill)
+                    .clip(true),
+                )
+                .extend(hides.map(|n| {
+                    text(n)
+                        .size(ts::CAPTION)
+                        .color(theme::dim())
+                        .wrapping(Wrapping::None)
+                        .into()
+                }))
+                .spacing(6)
+                .align_y(iced::Center),
         )
         .style(theme::list_row(v.is_current))
         .width(Fill)
+        // Its first mark at the line for words, under the trail's name;
+        // no room above or below, so the forks' lines run on unbroken from
+        // row to row (the words keep theirs).
         .padding(Padding {
-            top: 3.0,
+            top: 0.0,
             right: 8.0,
-            bottom: 3.0,
-            left: 6.0,
+            bottom: 0.0,
+            left: SIDE_TEXT_X - SIDE_PAD,
         })
         .on_press(super::heard::row(
             || stop_label(app, &v.loc, v.label.as_deref()),
@@ -2235,13 +2302,106 @@ pub(crate) fn trail_tab(app: &App) -> Element<'_, Message> {
     }
     column![
         header,
-        scrollable(Column::with_children(rows).spacing(1))
-            .id(super::trail_scroll_id())
-            .direction(thin_scroll())
-            .style(theme::overlay_scrollbar)
-            .height(Fill),
+        scrollable(Column::with_children(rows).padding(Padding {
+            top: 0.0,
+            right: SIDE_PAD,
+            bottom: 8.0,
+            left: SIDE_PAD,
+        }))
+        .id(super::trail_scroll_id())
+        .direction(thin_scroll())
+        .style(theme::overlay_scrollbar)
+        .height(Fill),
     ]
     .into()
+}
+
+/// A step of the trail's indent: one fork's column, its line down the
+/// middle; a row's mark is one step wide too, so a fork's line runs on
+/// under its fold.
+const TRAIL_STEP: f32 = 14.0;
+/// The most steps the trail indents: past ~8 branches a deep one would push
+/// the row off the panel's right edge.
+const TRAIL_MAX_STEPS: usize = 8;
+
+/// The colour of the forks' lines: quieter than the marks they join.
+fn trail_line_color() -> iced::Color {
+    iced::Color {
+        a: 0.45,
+        ..theme::dim()
+    }
+}
+
+/// The forks' lines across a trail row ([`crate::history::Guide`]), one
+/// [`TRAIL_STEP`] for each fork above it.
+struct TrailGuides(Vec<crate::history::Guide>);
+
+impl iced::widget::canvas::Program<Message> for TrailGuides {
+    type State = ();
+
+    fn draw(
+        &self,
+        _state: &(),
+        renderer: &iced::Renderer,
+        _theme: &iced::Theme,
+        bounds: iced::Rectangle,
+        _cursor: iced::advanced::mouse::Cursor,
+    ) -> Vec<iced::widget::canvas::Geometry> {
+        use crate::history::Guide;
+        use iced::widget::canvas::{Frame, Path, Stroke};
+        let mut frame = Frame::new(renderer, bounds.size());
+        let pen = Stroke::default()
+            .with_width(1.0)
+            .with_color(trail_line_color());
+        let (h, mid) = (bounds.height, (bounds.height / 2.0).round());
+        let p = iced::Point::new;
+        for (step, guide) in self.0.iter().enumerate() {
+            // On the pixel grid, so a 1 px line is one pixel, not two half.
+            let x = (step as f32 * TRAIL_STEP + TRAIL_STEP / 2.0).floor() + 0.5;
+            match guide {
+                Guide::Clear => {}
+                Guide::Through => frame.stroke(&Path::line(p(x, 0.0), p(x, h)), pen),
+                // A branch begins: across to its mark, the line going on
+                // (├) or, for the fork's last branch, turning (└).
+                Guide::Tee | Guide::Elbow => {
+                    let end = if *guide == Guide::Tee { h } else { mid };
+                    frame.stroke(&Path::line(p(x, 0.0), p(x, end)), pen);
+                    frame.stroke(
+                        &Path::line(p(x, mid + 0.5), p(bounds.width, mid + 0.5)),
+                        pen,
+                    );
+                }
+            }
+        }
+        vec![frame.into_geometry()]
+    }
+}
+
+/// Under a fork's fold, its line on down to its first branch.
+struct TrailStub;
+
+impl iced::widget::canvas::Program<Message> for TrailStub {
+    type State = ();
+
+    fn draw(
+        &self,
+        _state: &(),
+        renderer: &iced::Renderer,
+        _theme: &iced::Theme,
+        bounds: iced::Rectangle,
+        _cursor: iced::advanced::mouse::Cursor,
+    ) -> Vec<iced::widget::canvas::Geometry> {
+        use iced::widget::canvas::{Frame, Path, Stroke};
+        let mut frame = Frame::new(renderer, bounds.size());
+        let x = (TRAIL_STEP / 2.0).floor() + 0.5;
+        frame.stroke(
+            &Path::line(iced::Point::new(x, 2.0), iced::Point::new(x, bounds.height)),
+            Stroke::default()
+                .with_width(1.0)
+                .with_color(trail_line_color()),
+        );
+        vec![frame.into_geometry()]
+    }
 }
 
 /// What a trail row says under its name: the file a place is in — or, for
@@ -2458,47 +2618,73 @@ pub(crate) fn marks_tab(app: &App) -> Element<'_, Message> {
 pub(crate) fn notes_tab(app: &App) -> Element<'_, Message> {
     if app.active_viewer().is_none() {
         return column![
-            row![space().width(Fill), notes_export(app)],
+            section_head(tr!("All notes"), notes_export(app), SIDE_PAD - 2.0),
             notes_list(app)
         ]
         .into();
     }
-    let label = |s: &'static str| {
-        container(
-            text(s)
-                .size(ts::SMALL)
-                .font(crate::fonts::UI_SEMIBOLD)
-                .color(theme::dim()),
-        )
-        .padding(Padding {
-            top: 8.0,
-            right: 14.0,
-            bottom: 2.0,
-            left: 14.0,
-        })
-    };
+    // The count's words end where the rows' pencils do; the Export button's,
+    // inside its own padding, the same.
     column![
-        label(tr!("In this file")),
+        section_head(
+            tr!("In this file"),
+            super::panes::outline_understood(app),
+            SIDE_TEXT_X + 4.0
+        ),
         container(outline_content(app)).height(Length::FillPortion(1)),
         hairline(),
-        row![
-            label(tr!("All notes")),
-            space().width(Fill),
-            notes_export(app)
-        ]
-        .align_y(iced::Bottom),
+        section_head(tr!("All notes"), notes_export(app), SIDE_PAD - 2.0),
         container(notes_list(app)).height(Length::FillPortion(1)),
     ]
     .into()
 }
 
+/// How far a sidebar view's boxes — fields, switches, rows' bands — stand
+/// in from its edges: the views' switch above them, and the Files view's
+/// filter and rows, do.
+pub(crate) const SIDE_PAD: f32 = 10.0;
+/// Where a sidebar view's words and marks begin: its title's icon, its
+/// sections' names, and the first mark of a row in a band.
+pub(crate) const SIDE_TEXT_X: f32 = 14.0;
+
+/// A section's name, at the sidebar's line for words, and what it counts
+/// or offers at its other end, `right` in from the edge. The Your notes
+/// view's count stood on a line of its own under its name, 4 to the left
+/// of it, and the rows' circles 6 further left again.
+fn section_head<'a>(
+    name: &'a str,
+    end: Option<Element<'a, Message>>,
+    right: f32,
+) -> Element<'a, Message> {
+    container(
+        row![
+            text(name)
+                .size(ts::SMALL)
+                .font(crate::fonts::UI_SEMIBOLD)
+                .color(theme::dim())
+                .wrapping(Wrapping::None),
+            space().width(Fill),
+        ]
+        .extend(end)
+        .spacing(8)
+        .align_y(iced::Center),
+    )
+    .padding(Padding {
+        top: 8.0,
+        right,
+        bottom: 4.0,
+        left: SIDE_TEXT_X,
+    })
+    .into()
+}
+
 /// The notes exported, as one Markdown file — here, where they are: none
 /// yet, nothing to export.
-fn notes_export(app: &App) -> Element<'_, Message> {
+fn notes_export(app: &App) -> Option<Element<'_, Message>> {
     if app.proj.notes.is_empty() {
-        return space().into();
+        return None;
     }
-    container(
+    Some(
         button(
             text(tr!("Export…"))
                 .size(ts::SMALL)
@@ -2509,13 +2695,9 @@ fn notes_export(app: &App) -> Element<'_, Message> {
         .on_press(super::heard::said(
             tr!("Export notes"),
             Message::Export(ExportMsg::Start),
-        )),
+        ))
+        .into(),
     )
-    .padding(Padding {
-        right: 8.0,
-        ..Padding::ZERO
-    })
-    .into()
 }
 
 /// Every reading note in the project, file by file — the notes on
@@ -3009,7 +3191,12 @@ pub(crate) fn semantic_tab(app: &App) -> Element<'_, Message> {
                 .height(Fill),
         ]
         .spacing(8)
-        .padding([8, 8]),
+        .padding(Padding {
+            top: 0.0,
+            right: SIDE_PAD,
+            bottom: 8.0,
+            left: SIDE_PAD,
+        }),
     )
     .height(Fill)
     .into()
@@ -3088,8 +3275,40 @@ fn walk_action<'a>(
 /// A sidebar view's filter: the filter mark, the field, and — once there is
 /// something in it — a × that empties it; Escape in it does too
 /// (`escaped`). The Files view's and the API docs': the docs' was a plain
-/// field of another style.
+/// field of another style. At the sidebar's line for boxes, with the room
+/// under it the views keep before their lists.
 pub(crate) fn filter_field<'a>(
+    placeholder: &'a str,
+    value: &'a str,
+    id: Option<iced::widget::Id>,
+    on_input: fn(String) -> Message,
+    on_submit: Option<Message>,
+    escaped: Message,
+    down: Option<Message>,
+) -> Element<'a, Message> {
+    container(filter_box(
+        placeholder,
+        value,
+        id,
+        on_input,
+        on_submit,
+        escaped,
+        down,
+    ))
+    .padding(Padding {
+        top: 0.0,
+        right: SIDE_PAD,
+        bottom: SIDEBAR_GAP,
+        left: SIDE_PAD,
+    })
+    .into()
+}
+
+/// [`filter_field`] alone, with no room round it: for a row that sets it
+/// beside something of its own (History's Refresh). Inside that room as
+/// well, History's filter stood 10 in from the switch under it, and its
+/// Refresh 6 below the field's middle.
+pub(crate) fn filter_box<'a>(
     placeholder: &'a str,
     value: &'a str,
     id: Option<iced::widget::Id>,
@@ -3131,24 +3350,16 @@ pub(crate) fn filter_field<'a>(
             tooltip::Position::Bottom,
         ));
     }
-    container(
-        super::escape_clears::EscapeClears::new(
-            container(field)
-                .height(Length::Fixed(FILTER_H))
-                // The design's 10 inside its 1 px border, which here
-                // takes no room of its own.
-                .padding([1, 11])
-                .style(theme::field(!value.is_empty())),
-            escaped,
-        )
-        .ringed(9.0)
-        .on_down(down),
+    super::escape_clears::EscapeClears::new(
+        container(field)
+            .height(Length::Fixed(FILTER_H))
+            // The design's 10 inside its 1 px border, which here
+            // takes no room of its own.
+            .padding([1, 11])
+            .style(theme::field(!value.is_empty())),
+        escaped,
     )
-    .padding(Padding {
-        top: 0.0,
-        right: 10.0,
-        bottom: SIDEBAR_GAP,
-        left: 10.0,
-    })
+    .ringed(9.0)
+    .on_down(down)
     .into()
 }

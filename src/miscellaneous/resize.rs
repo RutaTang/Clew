@@ -32,6 +32,7 @@ pub struct Divider<'a, Message> {
     vertical: bool,
     panel: Panel,
     thickness: f32,
+    inset: f32,
     on_drag: Box<dyn Fn(f32) -> Message + 'a>,
 }
 
@@ -66,6 +67,7 @@ impl<'a, Message> Divider<'a, Message> {
             vertical: true,
             panel: Panel::Within,
             thickness: THICKNESS,
+            inset: 0.0,
             on_drag: Box::new(on_drag),
         }
     }
@@ -76,6 +78,7 @@ impl<'a, Message> Divider<'a, Message> {
             vertical: false,
             panel: Panel::Within,
             thickness: THICKNESS,
+            inset: 0.0,
             on_drag: Box::new(on_drag),
         }
     }
@@ -90,6 +93,14 @@ impl<'a, Message> Divider<'a, Message> {
     /// How thick the strip is, if not [`THICKNESS`].
     pub fn thickness(mut self, thickness: f32) -> Self {
         self.thickness = thickness;
+        self
+    }
+
+    /// How far short of each end its line stops: beside the sheet, its
+    /// corner radius, so the lit edge ends where the sheet's straight edge
+    /// does instead of running on past the rounded corners.
+    pub fn inset(mut self, inset: f32) -> Self {
+        self.inset = inset;
         self
     }
 
@@ -210,10 +221,18 @@ where
             line: theme::hairline(),
             accent: theme::accent(),
         };
-        for (rect, color) in paint(bounds, self.vertical, self.panel, active, colors) {
+        let lit = paint(bounds, self.vertical, self.panel, active, colors);
+        for (rect, color) in lit
+            .into_iter()
+            .map(|(r, c)| (shorten(r, self.vertical, self.inset), c))
+        {
             renderer.fill_quad(
                 renderer::Quad {
                     bounds: rect,
+                    border: iced::Border {
+                        radius: cap(rect).into(),
+                        ..iced::Border::default()
+                    },
                     ..Default::default()
                 },
                 color,
@@ -281,6 +300,31 @@ pub fn paint(
             vec![(line(at, ACTIVE_LINE), colors.accent)]
         }
         Panel::Before | Panel::After => Vec::new(),
+    }
+}
+
+/// The corner radius that rounds a line's ends: half its width, so each
+/// end is a half circle rather than cut square.
+pub fn cap(rect: Rectangle) -> f32 {
+    rect.width.min(rect.height) / 2.0
+}
+
+/// `rect`, a line along the strip, stopped `inset` short of each end.
+pub fn shorten(rect: Rectangle, vertical: bool, inset: f32) -> Rectangle {
+    if vertical {
+        let inset = inset.min(rect.height / 2.0);
+        Rectangle {
+            y: rect.y + inset,
+            height: rect.height - 2.0 * inset,
+            ..rect
+        }
+    } else {
+        let inset = inset.min(rect.width / 2.0);
+        Rectangle {
+            x: rect.x + inset,
+            width: rect.width - 2.0 * inset,
+            ..rect
+        }
     }
 }
 
@@ -367,6 +411,37 @@ mod tests {
                 COLORS.accent
             )]
         );
+    }
+
+    /// An inset line stops that far short of each end, along the strip
+    /// either way, and never turns inside out on a strip too short for it.
+    #[test]
+    fn an_inset_line_stops_short_of_both_ends() {
+        let lit = paint(strip(true), true, Panel::Before, true, COLORS)[0].0;
+        let cut = shorten(lit, true, 10.0);
+        assert_eq!(
+            (cut.x, cut.y, cut.width, cut.height),
+            (100.0, 10.0, ACTIVE_LINE, 480.0)
+        );
+        let across = paint(strip(false), false, Panel::Within, true, COLORS)[0].0;
+        let cut = shorten(across, false, 10.0);
+        assert_eq!((cut.x, cut.width), (10.0, 780.0));
+        let stub = Rectangle {
+            x: 0.0,
+            y: 0.0,
+            width: 2.0,
+            height: 12.0,
+        };
+        assert_eq!(shorten(stub, true, 10.0).height, 0.0);
+    }
+
+    /// A lit line's ends are round — half its width — however it lies.
+    #[test]
+    fn a_lit_line_has_round_ends() {
+        let side = paint(strip(true), true, Panel::Before, true, COLORS)[0].0;
+        assert_eq!(cap(side), ACTIVE_LINE / 2.0);
+        let across = paint(strip(false), false, Panel::After, true, COLORS)[0].0;
+        assert_eq!(cap(across), ACTIVE_LINE / 2.0);
     }
 
     /// Between two parts of one panel it keeps its hairline down the middle.

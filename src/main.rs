@@ -63,10 +63,11 @@ pub(crate) use app::message::{Handoff, Origin, Stamp};
 pub(crate) use app::model::*;
 pub(crate) use app::rpc::*;
 pub use app::state::{
-    App, AvailableUpdate, CheckOutcome, DEFAULT_FONT_SIZE, DebugState, DocsState, DocsView,
-    EditIds, ExplainState, ImportWork, InFlight, LostEdits, OverviewState, PaneOpen, PendingAnchor,
-    PendingAsk, ProjectCallsState, ProjectLink, ProjectSession, RemoteEdit, SettingsDraft,
-    SettingsPage, StatsState, SupersededOpen, UpdatePhase, UpdateState, WalkState, WalkUi,
+    App, AvailableUpdate, CODE_SIZE_KEY, CheckOutcome, DEFAULT_FONT_SIZE, DebugState, DocsState,
+    DocsView, EditIds, ExplainState, ImportWork, InFlight, LostEdits, MAX_FONT_SIZE, OverviewState,
+    PaneOpen, PendingAnchor, PendingAsk, ProjectCallsState, ProjectLink, ProjectSession,
+    RemoteEdit, SettingsDraft, SettingsPage, StatsState, SupersededOpen, UpdatePhase, UpdateState,
+    WalkState, WalkUi,
 };
 pub(crate) use app::tasks::*;
 pub use app::voice::VoiceMsg;

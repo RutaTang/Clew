@@ -240,7 +240,7 @@ fn a_command_heard_runs_as_the_palette_runs_it() {
     assert!(
         app.palette_recent
             .first()
-            .is_some_and(|t| t == "Call Graph")
+            .is_some_and(|t| *t == crate::app::palette::Recent::Titled("Call Graph".into()))
     );
 }
 
@@ -254,6 +254,70 @@ fn a_command_is_heard_by_the_name_it_had() {
     assert_eq!(
         app.voice.heard.as_ref().map(|h| &h.outcome),
         Some(&HeardOutcome::Ran("Code Statistics".into()))
+    );
+}
+
+/// Two plugins' commands named alike, said without either's id: neither
+/// runs, nothing else is made of the words, and the status says which to
+/// say.
+#[test]
+fn commands_named_alike_are_asked_which() {
+    let (mut app, script, _) = voice_app("voice-alike", "Word count, count words.");
+    let (mut acme, mut beta) = (
+        crate::app::tests::installed_plugin(true),
+        crate::app::tests::installed_plugin(true),
+    );
+    acme.id = "acme-wc".into();
+    beta.id = "beta-wc".into();
+    app.plugins.installed = vec![acme, beta];
+    say(&mut app, &script);
+    assert_eq!(
+        app.status,
+        "More than one command has that name. Say which: “Word count: Count words (acme-wc)” or “Word count: Count words (beta-wc)”"
+    );
+    assert!(
+        matches!(
+            app.voice.heard.as_ref().map(|h| &h.outcome),
+            Some(HeardOutcome::Failed(_))
+        ),
+        "{:?}",
+        app.voice.heard
+    );
+}
+
+/// A plugin's command named as the voice key's own "Talk": "talk" said is
+/// still Clew's — never run by voice — and not the plugin's in its place;
+/// said with its id, it is the plugin's.
+#[test]
+fn a_plugin_named_as_the_voice_key_is_not_run_for_it() {
+    let (mut app, script, _) = voice_app("voice-talk-plugin", "");
+    app.voice.transcriber = Arc::new(InTurn(Mutex::new(
+        ["Talk.", "Talk, talker."].map(String::from).into(),
+    )));
+    let mut talk = crate::app::tests::installed_plugin(true);
+    talk.id = "talker".into();
+    talk.manifest.plugin.name = "Talk".into();
+    talk.manifest.commands[0].title = "Talk".into();
+    app.plugins.installed = vec![talk];
+    let titles: Vec<String> = app
+        .palette_commands()
+        .into_iter()
+        .map(|c| c.title)
+        .collect();
+    assert!(titles.iter().any(|t| t == "Talk (talker)"), "{titles:?}");
+    say(&mut app, &script);
+    assert!(
+        !matches!(
+            app.voice.heard.as_ref().map(|h| &h.outcome),
+            Some(HeardOutcome::Ran(_) | HeardOutcome::Confirm(_))
+        ),
+        "{:?}",
+        app.voice.heard
+    );
+    say(&mut app, &script);
+    assert_eq!(
+        app.voice.heard.as_ref().map(|h| &h.outcome),
+        Some(&HeardOutcome::Ran("Talk (talker)".into()))
     );
 }
 
@@ -727,7 +791,7 @@ fn the_microphone_listens_until_it_is_turned_off() {
     assert!(app.voice.is_listening(), "{}", app.status);
     assert_eq!(
         app.status,
-        "Listening… say a command or question — “Bye, Clew” stops listening"
+        "Listening… say a command or a question, or “Bye, Clew” to stop"
     );
     // Nothing said for long: listened past, quietly, afresh.
     if let VoicePhase::Listening { since, .. } = &mut app.voice.phase {
@@ -742,7 +806,7 @@ fn the_microphone_listens_until_it_is_turned_off() {
     );
     assert_eq!(
         app.status,
-        "Listening… say a command or question — “Bye, Clew” stops listening"
+        "Listening… say a command or a question, or “Bye, Clew” to stop"
     );
     assert!(app.voice.heard.is_none(), "nothing said, nothing shown");
     // Esc, with no question waiting and Clew quiet, is not the
@@ -893,7 +957,7 @@ fn silence_is_let_go_and_a_lost_microphone_says_so() {
     assert_eq!(app.voice.heard, None);
     assert_eq!(
         app.status,
-        "Listening… say a command or question — “Bye, Clew” stops listening"
+        "Listening… say a command or a question, or “Bye, Clew” to stop"
     );
     assert!(app.proj.ask_input.is_empty());
     assert!(!app.ask_view.is_open(), "nothing heard opens no card");
@@ -934,7 +998,7 @@ fn without_a_model_voice_asks_for_one() {
     let _ = app.update(Message::Voice(VoiceMsg::Toggle));
     assert!(!app.voice.is_listening());
     assert!(app.settings.open);
-    assert!(app.status.contains("download"), "{}", app.status);
+    assert!(app.status.contains("Download"), "{}", app.status);
     // No microphone at all: said, and nothing listens.
     let (mut app, _, _) = voice_app("voice-no-mic", "zoom in");
     MIC.with(|m| *m.borrow_mut() = None);
@@ -1029,13 +1093,13 @@ fn a_failed_download_says_why_in_the_readers_language() {
     with_lang(Lang::Fr, || {
         assert_eq!(
             download_failure(
-                &format!("{signed}: the transfer took too long — giving up"),
+                &format!("{signed}: the transfer took too long and was stopped"),
                 704_000_000,
                 model
             ),
             format!(
                 "Interrompu à 704 sur {} Mo\u{a0}: us.aws.cdn.hf.co\u{a0}: le transfert a \
-                 pris trop de temps — abandon",
+                 pris trop de temps et a été arrêté",
                 model.size_mb
             )
         );
@@ -1261,6 +1325,17 @@ fn a_command_is_heard_in_the_language_the_palette_shows() {
         Some(0)
     );
     assert_eq!(said_as_shown(Lang::Fr, "Masquer la minimap", &fr), Some(1));
+    // Clew's own as shown, beside a plugin's shown alike but for its id in
+    // brackets: the title said whole is Clew's; with the id, the plugin's.
+    let alike = ["Graphe d’appels (acme)", "Graphe d’appels"];
+    assert_eq!(
+        said_as_shown(Lang::Fr, "Ouvre le graphe d'appels", &alike),
+        Some(1)
+    );
+    assert_eq!(
+        said_as_shown(Lang::Fr, "Graphe d'appels acme", &alike),
+        Some(0)
+    );
     // Said formally, or to a group: the longer word is the one left out
     // ("ouvrez", not "ouvre" and a "z").
     assert_eq!(
@@ -1539,7 +1614,7 @@ fn the_debugger_is_driven_by_voice() {
     );
     assert_eq!(
         app.status,
-        "Start Debugging? Say yes or no — “Start debugging.”"
+        "Start Debugging? Say yes or no (heard “Start debugging.”)"
     );
     say_words(&mut app, &script, "No, never mind.");
     assert!(app.voice.confirm.is_none());
@@ -2309,7 +2384,7 @@ fn the_voice_key_says_which_model_is_missing() {
     assert!(!app.voice.is_listening());
     assert_eq!(
         app.status,
-        "Small is not downloaded yet — download it (190 MB) in Settings → Voice, or choose \
+        "Small isn't downloaded yet. Download it (190 MB) in Settings → Voice, or choose \
          one that is"
     );
     assert!(app.settings.open);
@@ -2515,7 +2590,7 @@ fn what_undoes_waits_for_a_yes() {
     );
     assert!(
         app.status
-            .ends_with("? Say yes or no — “remove src/lib.rs 3”"),
+            .ends_with("? Say yes or no (heard “remove src/lib.rs 3”)"),
         "{}",
         app.status
     );
@@ -2650,7 +2725,7 @@ fn a_yes_said_before_the_allow_can_be_pressed_is_not_asked() {
         assert!(app.proj.ask_queue.is_empty(), "{said}");
         assert!(
             app.status
-                .starts_with("A question is waiting — answer it first with a plain “yes” or “no”"),
+                .starts_with("A question is waiting. Answer it first with a plain “yes” or “no”."),
             "{said}: {}",
             app.status
         );
@@ -2930,7 +3005,7 @@ fn a_button_said_before_it_can_be_pressed_says_why() {
         &mut app,
         &script,
         "Apply",
-        "Nothing to apply: the language servers are already set up.",
+        "The language servers are already set up.",
     );
     // A first open's sheet, read long since, the look still on its way.
     app.asking.delay = std::time::Duration::ZERO;
@@ -3007,7 +3082,7 @@ fn a_no_the_question_has_no_answer_for_asks_for_its_words() {
         say_words(app, script, said);
         assert!(
             app.status
-                .starts_with("Say the answer you mean by the words on its button"),
+                .starts_with("To choose an answer, say the words on its button"),
             "{said}: {}",
             app.status
         );
@@ -3044,7 +3119,7 @@ fn a_no_the_question_has_no_answer_for_asks_for_its_words() {
     }
     assert!(
         app.status
-            .starts_with("Say the answer you mean by the words on its button"),
+            .starts_with("To choose an answer, say the words on its button"),
         "{}",
         app.status
     );
@@ -3720,7 +3795,7 @@ fn a_call_without_the_name_is_no_call() {
         !script.lock().unwrap().stopped,
         "the microphone kept to wait"
     );
-    assert_eq!(app.status, "Didn't hear “Clew” — waiting for “Hey, Clew”");
+    assert_eq!(app.status, "Didn't hear “Clew”. Waiting for “Hey, Clew”");
     drop(app);
     drop(turn);
     // Nothing written down: listening goes on — and what is said next
@@ -3799,7 +3874,7 @@ fn a_call_without_the_name_is_no_call() {
     assert!(app.voice.speech.is_speaking(), "Clew goes on");
     assert_eq!(
         app.status,
-        "Stopped listening — say “Hey, Clew” to start again"
+        "Stopped listening. Say “Hey, Clew” to start again"
     );
     drop(app);
     drop(turn);
@@ -5601,7 +5676,7 @@ fn waiting_needs_its_model_and_is_turned_off() {
     assert!(!wait_step(&mut app));
     assert!(wait_step(&mut app));
     assert!(!app.voice.mic_on && !app.voice.wake.is_waiting());
-    assert!(app.status.contains("download"), "{}", app.status);
+    assert!(app.status.contains("Download"), "{}", app.status);
     std::fs::write(&whisper, b"a model").unwrap();
     assert!(app.resume_waiting());
     let _ = app.update(Message::Voice(VoiceMsg::SetWake(false)));
@@ -5835,7 +5910,7 @@ fn a_microphone_lost_while_listening_waits_for_the_call_again() {
     assert!(!app.voice.is_listening());
     assert_eq!(
         app.status,
-        "Stopped listening — say “Hey, Clew” to start again (the device was unplugged)"
+        "Stopped listening (the device was unplugged). Say “Hey, Clew” to start again"
     );
     assert!(app.voice.wake.is_waiting());
     assert_eq!(script.lock().unwrap().opened, opened + 1, "opened anew");
@@ -6107,7 +6182,7 @@ fn a_real_microphone_wakes_clew() {
             && !listening
             && waits_again
             && heard.is_none()
-            && status == "Didn't hear “Clew” — waiting for “Hey, Clew”";
+            && status == "Didn't hear “Clew”. Waiting for “Hey, Clew”";
         assert!((waiting && !woke) || no_call, "woken: {status}");
         return;
     }

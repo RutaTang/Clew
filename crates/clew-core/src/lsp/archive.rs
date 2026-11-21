@@ -80,7 +80,7 @@ enum Name {
 fn entry_name(name: &str) -> Result<Name, String> {
     let refuse = || {
         Err(format!(
-            "archive entry {name:?} is not a plain relative path — refusing"
+            "archive entry {name:?} is not a plain relative path, so it was not unpacked"
         ))
     };
     if name.starts_with('/') || name.contains(['\0', '\\']) {
@@ -126,7 +126,7 @@ impl<'a> Extractor<'a> {
     fn entry(&mut self) -> Result<(), String> {
         if self.entries_left == 0 {
             return Err(format!(
-                "archive has over {} entries — refusing",
+                "archive has over {} entries, so it was not unpacked",
                 self.entry_cap
             ));
         }
@@ -156,7 +156,9 @@ impl<'a> Extractor<'a> {
         let written = std::io::copy(&mut data.take(self.bytes_left + 1), &mut writer)
             .map_err(|e| format!("unpack of {} failed: {e}", rel.display()))?;
         if written > self.bytes_left {
-            return Err("archive contents exceed the unpack budget — refusing".into());
+            return Err(
+                "archive contents exceed the unpack size limit, so it was not unpacked".into(),
+            );
         }
         self.bytes_left -= written;
         writer
@@ -200,7 +202,7 @@ fn extract_zip(bytes: &[u8], dest: &Path, budget: Budget) -> Result<(), String> 
         zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(|e| format!("bad zip: {e}"))?;
     if archive.len() > budget.entries {
         return Err(format!(
-            "archive has over {} entries — refusing",
+            "archive has over {} entries, so it was not unpacked",
             budget.entries
         ));
     }
@@ -215,10 +217,16 @@ fn extract_zip(bytes: &[u8], dest: &Path, budget: Budget) -> Result<(), String> 
         let rel = match entry_name(&name)? {
             Name::Path(rel) => rel,
             Name::Root if entry.is_dir() => continue,
-            Name::Root => return Err(format!("archive entry {name:?} has no name — refusing")),
+            Name::Root => {
+                return Err(format!(
+                    "archive entry {name:?} has no name, so it was not unpacked"
+                ));
+            }
         };
         if entry.is_symlink() {
-            return Err(format!("archive entry {name:?} is a link — refusing"));
+            return Err(format!(
+                "archive entry {name:?} is a link, so it was not unpacked"
+            ));
         }
         if entry.is_dir() {
             ex.dir(&rel)?;
@@ -239,7 +247,7 @@ fn tar_stream_cap(budget: Budget) -> u64 {
 }
 
 /// What a stream past its cap is refused with.
-const OVER_BUDGET: &str = "archive expands past the unpack budget — refusing";
+const OVER_BUDGET: &str = "archive expands past the unpack size limit, so it was not unpacked";
 
 /// A reader that yields at most `left` bytes and then FAILS if its source has
 /// more, where `Read::take` would quietly end.
@@ -335,7 +343,11 @@ fn extract_tar_entries<R: Read>(reader: R, dest: &Path, budget: Budget) -> Resul
         let rel = match entry_name(&name)? {
             Name::Path(rel) => rel,
             Name::Root if kind == EntryType::Directory => continue,
-            Name::Root => return Err(format!("archive entry {name:?} has no name — refusing")),
+            Name::Root => {
+                return Err(format!(
+                    "archive entry {name:?} has no name, so it was not unpacked"
+                ));
+            }
         };
         match kind {
             EntryType::Directory => ex.dir(&rel)?,
@@ -344,11 +356,13 @@ fn extract_tar_entries<R: Read>(reader: R, dest: &Path, budget: Budget) -> Resul
                 ex.file(&rel, &mut entry, mode)?;
             }
             EntryType::Symlink | EntryType::Link => {
-                return Err(format!("archive entry {name:?} is a link — refusing"));
+                return Err(format!(
+                    "archive entry {name:?} is a link, so it was not unpacked"
+                ));
             }
             other => {
                 return Err(format!(
-                    "archive entry {name:?} is of an unsupported kind ({other:?}) — refusing"
+                    "archive entry {name:?} is of an unsupported kind ({other:?}), so it was not unpacked"
                 ));
             }
         }
@@ -386,7 +400,9 @@ impl Write for ChunkWriter {
     fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
         if data.len() as u64 > self.left {
             self.over_budget = true;
-            return Err(std::io::Error::other("the archive expands past the budget"));
+            return Err(std::io::Error::other(
+                "the archive expands past the unpack size limit",
+            ));
         }
         self.left -= data.len() as u64;
         self.buf.extend_from_slice(data);
@@ -663,23 +679,23 @@ mod tests {
 
         let tar = raw_tar(&[("big", tar::EntryType::Regular, &big, "")]);
         let err = unpack(Archive::TarXz, &xz(&tar), &dir.join("t1"), "", tight).unwrap_err();
-        assert!(err.contains("budget"), "tar.xz: {err}");
+        assert!(err.contains("so it was not unpacked"), "tar.xz: {err}");
 
         let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         gz.write_all(&tar).unwrap();
         let tgz = gz.finish().unwrap();
         let err = unpack(Archive::TarGz, &tgz, &dir.join("t2"), "", tight).unwrap_err();
-        assert!(err.contains("budget"), "tar.gz: {err}");
+        assert!(err.contains("so it was not unpacked"), "tar.gz: {err}");
 
         let zip = zip_of(&[("big", &big)], &[]);
         let err = unpack(Archive::Zip, &zip, &dir.join("t3"), "", tight).unwrap_err();
-        assert!(err.contains("budget"), "zip: {err}");
+        assert!(err.contains("so it was not unpacked"), "zip: {err}");
 
         let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         gz.write_all(&big).unwrap();
         let single = gz.finish().unwrap();
         let err = unpack(Archive::Gzip, &single, &dir.join("t4"), "tool", tight).unwrap_err();
-        assert!(err.contains("budget"), "gzip: {err}");
+        assert!(err.contains("so it was not unpacked"), "gzip: {err}");
 
         // Exactly at the budget still fits.
         let exact = vec![b'b'; 1000];
@@ -730,7 +746,7 @@ mod tests {
         let bomb = xz(&vec![0u8; 4 * 1024 * 1024]);
         let dir = scratch("bomb");
         let err = unpack(Archive::TarXz, &bomb, &dir.join("b"), "", tight).unwrap_err();
-        assert!(err.contains("budget"), "{err}");
+        assert!(err.contains("so it was not unpacked"), "{err}");
 
         // Stream the tar reader consumes without writing a byte or counting
         // an entry — a pax global header's body, which is skipped — must be
@@ -748,7 +764,7 @@ mod tests {
         for (format, bytes) in compressed_tars(&tar) {
             let dir = scratch("stream-bomb");
             let err = unpack(format, &bytes, &dir.join("b"), "", tight).unwrap_err();
-            assert!(err.contains("budget"), "{format:?}: {err}");
+            assert!(err.contains("so it was not unpacked"), "{format:?}: {err}");
             assert!(!dir.join("b/after").exists());
         }
     }
@@ -786,7 +802,7 @@ mod tests {
         for (format, bytes) in compressed_tars(&tar) {
             let dir = scratch("cut");
             let err = unpack(format, &bytes, &dir.join("c"), "", budget).unwrap_err();
-            assert!(err.contains("budget"), "{format:?}: {err}");
+            assert!(err.contains("so it was not unpacked"), "{format:?}: {err}");
             assert!(!dir.join("c/second").exists(), "{format:?}");
         }
     }
@@ -808,7 +824,7 @@ mod tests {
         assert_eq!(short.unwrap().len(), 10);
         assert!(!over);
         let (err, over) = read_all(&[7u8; 101], 100);
-        assert!(err.unwrap_err().to_string().contains("budget"));
+        assert!(err.unwrap_err().to_string().contains("unpack size limit"));
         assert!(over);
 
         let mut reader = CappedReader::new(&[7u8; 5][..], 2);

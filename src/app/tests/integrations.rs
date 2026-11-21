@@ -20,6 +20,7 @@ impl mcp::serve::Host for Shout {
             title: None,
             description: "Upper-cases s".into(),
             input_schema: json!({"type": "object", "properties": {"s": {"type": "string"}}}),
+            read_only: true,
         }]
     }
     fn call(&self, _: &str, args: &Value, _: &AtomicBool) -> Result<mcp::ToolOutput, String> {
@@ -1291,7 +1292,8 @@ fn an_acp_agent_is_asked_only_about_a_local_project_it_knows() {
     app.proj.ask_input = "why?".into();
     let _ = app.update(Message::Ask(AskMsg::Submit));
     assert!(
-        app.status.contains("No ACP agent `nobody`"),
+        app.status
+            .contains("The ACP agent `nobody` is no longer configured"),
         "{}",
         app.status
     );

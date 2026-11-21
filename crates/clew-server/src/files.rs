@@ -28,7 +28,7 @@ pub(crate) const MAX_DIR_ENTRIES: usize = 10_000;
 /// when the file simply is not there.
 pub(crate) fn confine_refusal(rel: &str, e: &ConfineError) -> Event {
     if e.is_escape() {
-        refused(format!("refused: path escapes project: {rel}"))
+        refused(format!("refused {rel} because it is outside the project"))
     } else {
         failed(format!("{rel}: {e}"))
     }

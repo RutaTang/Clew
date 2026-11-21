@@ -66,6 +66,7 @@ pub enum Glyph {
     Edit,
     Close,
     ChevronDown,
+    ChevronUp,
     CheckCircle,
     Circle,
     Search,
@@ -125,6 +126,11 @@ pub enum Glyph {
     Braces,
     /// What leans on a function: one box over the boxes under it.
     Network,
+    /// ⊢, the sign a Lean goal is stated after: a proof's goals.
+    Turnstile,
+    /// A note, and a spark: what the AI wrote of the code (the margin's
+    /// explanations).
+    Explanations,
     /// When something was: a clock face.
     Clock,
     /// A line of work forking off another: a git branch.
@@ -135,6 +141,8 @@ pub enum Glyph {
     Sun,
     Refresh,
     Plus,
+    /// Less of something: the code's text a size smaller.
+    Minus,
 }
 
 /// The window buttons Clew draws on Windows and Linux. Their own family:
@@ -308,6 +316,7 @@ fn body(g: Glyph) -> &'static str {
         Edit => "<path d='M15.5 5 L19 8.5 L8.5 19 L4.5 20 L5.5 16 Z'/><path d='M13.5 7 L17 10.5'/>",
         Close => "<path d='M6 6 L18 18'/><path d='M18 6 L6 18'/>",
         ChevronDown => "<path d='m6 9 6 6 6-6'/>",
+        ChevronUp => "<path d='m18 15-6-6-6 6'/>",
         CheckCircle => "<circle cx='12' cy='12' r='8'/><path d='M8.2 12 L11 14.8 L15.8 9.4'/>",
         Circle => "<circle cx='12' cy='12' r='8'/>",
         // The design's own magnifier.
@@ -426,12 +435,27 @@ fn body(g: Glyph) -> &'static str {
              <path d='M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16'/><path d='M16 16h5v5'/>"
         }
         Plus => "<path d='M5 12h14'/><path d='M12 5v14'/>",
+        Minus => "<path d='M5 12h14'/>",
         Network => {
             "<rect x='16' y='16' width='6' height='6' rx='1'/><rect x='2' y='16' width='6' height='6' rx='1'/>\
              <rect x='9' y='2' width='6' height='6' rx='1'/>\
              <path d='M5 16v-3a1 1 0 0 1 1-1h12a1 1 0 0 1 1 1v3'/><path d='M12 12V8'/>"
         }
         Clock => "<circle cx='12' cy='12' r='10'/><path d='M12 6v6l4 2'/>",
+        // As tall as the glyphs beside it, and a little right of the
+        // middle: its bar carries its weight, so centred by its box it
+        // leaned left.
+        Turnstile => "<path d='M7.5 4 V20'/><path d='M7.5 12 H19.5'/>",
+        // A page, and clear of its corner the spark Fake Run and Ask carry:
+        // the two weighed together sit in the middle, as the glyphs beside
+        // them do.
+        // What was written about the code: a speech bubble with its lines.
+        // No sparkle — that marks what spends an AI call, and showing what
+        // was written spends none.
+        Explanations => {
+            "<path d='M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z'/>\
+             <path d='M7.5 8.5 H16.5'/><path d='M7.5 12 H13'/>"
+        }
         Branch => {
             "<circle cx='6' cy='5' r='2.5'/><circle cx='6' cy='19' r='2.5'/><circle cx='18' cy='7' r='2.5'/>\
              <path d='M6 7.5v9'/><path d='M18 9.5c0 4.5-4 5.5-9.5 7.5'/>"

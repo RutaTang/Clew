@@ -1897,7 +1897,7 @@ pub(crate) fn margin_hidden_why(app: &App) -> Option<&'static str> {
     if app.proj.split {
         Some(tr!("hidden while split"))
     } else if app.window_width < super::panes::RIGHT_PANEL_MIN_WINDOW_W {
-        Some(tr!("hidden: window too narrow"))
+        Some(tr!("hidden (window too narrow)"))
     } else {
         None
     }
@@ -1986,8 +1986,8 @@ pub(crate) fn view_menu(app: &App) -> Element<'_, Message> {
                 tip_at(
                     item,
                     trn!(
-                        "Shown when a file shows 1 line or more (folded lines don't count)",
-                        "Shown when a file shows {n} lines or more (folded lines don't count)",
+                        "Shown for files of 1 line or more (folded lines don't count)",
+                        "Shown for files of {n} lines or more (folded lines don't count)",
                         crate::codeview::MINIMAP_MIN_ROWS
                     ),
                     None,
@@ -2136,7 +2136,9 @@ pub(crate) fn menu_action_able(app: &App, action: Action) -> bool {
         | Action::GotoLine
         | Action::TraceValue
         | Action::ToggleDiff
-        | Action::TimeTravel => file,
+        | Action::TimeTravel
+        | Action::RunTest
+        | Action::DebugTest => file,
         Action::OpenSymbol
         | Action::ProjectSearch
         | Action::Run

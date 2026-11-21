@@ -63,7 +63,16 @@ async fn the_binary_serves_its_code_tools_over_mcp() {
             .find(|t| t.name == name)
             .unwrap_or_else(|| panic!("no {name} tool"))
     };
-    assert!(tools.iter().all(|t| t.read_only));
+    // The code tools only read; the plugin tools say which of them write
+    // (a source file, a build, an install the user is asked about).
+    assert!(
+        tools
+            .iter()
+            .filter(|t| !t.name.starts_with("plugin_"))
+            .all(|t| t.read_only)
+    );
+    assert!(tool("plugin_guide").read_only && tool("plugin_try").read_only);
+    assert!(!tool("plugin_write").read_only && !tool("plugin_install").read_only);
     let found = client
         .call_tool(
             tool("search"),

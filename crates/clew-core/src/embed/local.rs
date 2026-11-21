@@ -289,9 +289,8 @@ impl Engine {
             .spawn(move || {
                 for line in BufReader::new(stdout).lines() {
                     let answer = match line {
-                        Ok(line) => serde_json::from_str::<Answer>(&line).map_err(|e| {
-                            format!("the embedding model said something unreadable: {e}")
-                        }),
+                        Ok(line) => serde_json::from_str::<Answer>(&line)
+                            .map_err(|e| format!("the embedding model sent an invalid reply: {e}")),
                         Err(e) => Err(format!(
                             "the embedding model's reply could not be read: {e}"
                         )),
@@ -629,14 +628,16 @@ pub fn embed(
     }
     let Some(program) = program() else {
         return Err(
-            "clew-speak, which makes embeddings on this computer, is not installed beside Clew"
+            "clew-speak, which makes embeddings on this computer, is not installed with Clew"
                 .into(),
         );
     };
     let Some(dir) = dir().filter(|dir| present(dir)) else {
         // Removed since it was loaded: what is still in memory goes too.
         ENGINES.unload();
-        return Err("EmbeddingGemma is not downloaded: get it in Settings → Embeddings".into());
+        return Err(
+            "EmbeddingGemma is not downloaded. Download it in Settings → Embeddings".into(),
+        );
     };
     watch_idle();
     ENGINES.embed(&program, &dir, texts, purpose, cancelled)

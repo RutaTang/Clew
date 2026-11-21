@@ -9,7 +9,8 @@
 #     (its commit is that action's `<version>` branch; the version is also in
 #     the trailing comment), which `scripts/check-toolchain.sh` compares with
 #     this file in every job,
-#   - `rust-version` in every crate's Cargo.toml (the MSRV cargo enforces).
+#   - `rust-version` in every crate's Cargo.toml (the MSRV cargo enforces),
+#     except the plugin SDK's, which plugin authors build with their own Rust.
 [toolchain]
 channel = "1.95.0"
 components = ["clippy", "rustfmt"]

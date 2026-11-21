@@ -308,7 +308,7 @@ impl MapBuilder {
         }
         if self.dropped > 0 {
             self.map.description = format!(
-                "{} — the first {MAX_NODES} shown of {}",
+                "{} (showing the first {MAX_NODES} of {})",
                 self.map.description,
                 MAX_NODES + self.dropped
             );

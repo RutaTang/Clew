@@ -489,12 +489,12 @@ impl App {
                 // printed, the steps there to go back through.
                 self.status = if trace.dropped > 0 {
                     trn!(
-                        "Fake run done — 1 step named no line of this project and was left out",
-                        "Fake run done — {n} steps named no line of this project and were left out",
+                        "Fake run done. 1 step didn't point to a line in this project and was left out.",
+                        "Fake run done. {n} steps didn't point to a line in this project and were left out.",
                         trace.dropped
                     )
                 } else {
-                    tr!("Fake run done — what it returns is below").into()
+                    tr!("Fake run done. See what it returns below.").into()
                 };
                 let at = trace.steps.len().saturating_sub(1);
                 self.proj.fake.sim = Some(Sim {
@@ -512,12 +512,12 @@ impl App {
                 self.forget_failure_of(crate::app::state::FailureOf::FakeRun);
                 self.status = if trace.dropped > 0 {
                     trn!(
-                        "Fake debug ready — 1 step named no line of this project and was left out",
-                        "Fake debug ready — {n} steps named no line of this project and were left out",
+                        "Fake debug ready. 1 step didn't point to a line in this project and was left out.",
+                        "Fake debug ready. {n} steps didn't point to a line in this project and were left out.",
                         trace.dropped
                     )
                 } else {
-                    tr!("Fake debug ready — step through it below").into()
+                    tr!("Fake debug ready. Step through it below.").into()
                 };
                 self.proj.fake.sim = Some(Sim {
                     target: working.target,

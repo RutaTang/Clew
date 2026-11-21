@@ -134,7 +134,7 @@ pub fn consent_task() -> Task<Message> {
     let no: &'static str = tr!("Don't Check");
     let title = tr!("Check for Clew updates automatically?");
     let description = tr!(
-        "Clew can ask GitHub for a newer release each time it starts. Nothing about your projects is sent. You can change this, and check for updates yourself, in Settings → Updates at any time."
+        "Clew can ask GitHub for a newer release and its latest model prices each time it starts. Nothing about your projects is sent. You can change this, and check for updates yourself, in Settings → Updates at any time."
     );
     Task::perform(
         async move {
@@ -196,7 +196,7 @@ pub fn validate_dmg_url(url: &str) -> Result<(), String> {
     }
     if !url.starts_with("https://") {
         return Err(tr!(
-            "refusing a non-HTTPS update download: {url}",
+            "a non-HTTPS update download was blocked: {url}",
             url = url
         ));
     }
@@ -217,7 +217,7 @@ pub fn validate_dmg_url(url: &str) -> Result<(), String> {
     });
     if !release_asset {
         return Err(tr!(
-            "refusing an update download from outside Clew's GitHub releases: {url}",
+            "an update download from outside Clew's GitHub releases was blocked: {url}",
             url = url
         ));
     }

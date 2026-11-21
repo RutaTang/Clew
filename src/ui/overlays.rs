@@ -9,10 +9,14 @@ const MENU_W: f32 = 210.0;
 
 /// The code's hover peek, kept above `floor` where it fits there (see
 /// [`Anchored::floor`]).
-pub(crate) fn hover_tooltip(h: &crate::HoverState, floor: f32) -> Element<'_, Message> {
+pub(crate) fn hover_tooltip<'a>(
+    app: &'a App,
+    h: &'a crate::HoverState,
+    floor: f32,
+) -> Element<'a, Message> {
     // Nothing to say (no summary, no LSP text, no diagnostic): show nothing
     // rather than an empty box — an empty peek reads as "hover is broken".
-    if h.diagnostic.is_none() && h.summary.is_none() && h.text.is_none() {
+    if !h.says_something() {
         return slot();
     }
     let mut parts: Vec<Element<'_, Message>> = Vec::new();
@@ -25,7 +29,11 @@ pub(crate) fn hover_tooltip(h: &crate::HoverState, floor: f32) -> Element<'_, Me
     if let Some(s) = &h.summary {
         parts.push(text(s.clone()).size(ts::BODY).color(theme::accent()).into());
     }
-    // The LSP / local-peek text below (monospace), trimmed if very long.
+    // The language server's answer, set as markdown: its signature as
+    // code, its docs as text.
+    parts.extend(super::explain_view::render_prepared(app, &h.prepared));
+    // The local peek's or the debugger's text below (monospace), trimmed if
+    // very long.
     if let Some(t) = &h.text {
         let shown: String = if t.chars().count() > 1200 {
             t.chars().take(1200).collect::<String>() + "…"
@@ -97,15 +105,15 @@ pub(crate) fn gutter_words(app: &App, pane: usize, line: usize) -> Option<String
         said.push(match (&bp.condition, bp.verified) {
             // The hollow dot: what it means said where it is.
             (_, Some(false)) => {
-                tr!("The debugger couldn't set this breakpoint: it won't stop here").to_string()
+                tr!("The debugger couldn't set this breakpoint, so it won't stop here").to_string()
             }
             (Some(condition), _) => {
                 tr!(
-                    "Breaks when {condition} — click to remove, right-click to edit",
+                    "Breaks when {condition}. Click to remove, right-click to edit",
                     condition = condition
                 )
             }
-            (None, _) => tr!("Breakpoint — click to remove").to_string(),
+            (None, _) => tr!("Breakpoint. Click to remove").to_string(),
         });
     }
     if let Some(bm) = app
@@ -167,7 +175,7 @@ pub(crate) fn context_menu<'a>(app: &App, menu: &'a crate::ContextMenu) -> Eleme
     // `g` pairs, a shortcut), and whether it can do it now — what only the
     // language server answers waits for it.
     struct Row {
-        label: &'static str,
+        label: std::borrow::Cow<'static, str>,
         msg: Message,
         keys: Option<String>,
         able: bool,
@@ -176,7 +184,7 @@ pub(crate) fn context_menu<'a>(app: &App, menu: &'a crate::ContextMenu) -> Eleme
     }
     let keys = |k: &str| Some(k.to_string());
     let goto = |kind: GotoKind, k: &str| Row {
-        label: kind.label(),
+        label: kind.label().into(),
         msg: Message::Hover(HoverMsg::ContextGoto(kind)),
         keys: keys(k),
         able: menu.served,
@@ -191,7 +199,7 @@ pub(crate) fn context_menu<'a>(app: &App, menu: &'a crate::ContextMenu) -> Eleme
         goto(GotoKind::Implementation, "gi"),
         goto(GotoKind::TypeDefinition, "gy"),
         Row {
-            label: tr!("Call Hierarchy"),
+            label: tr!("Call Hierarchy").into(),
             msg: Message::Calls(CallsMsg::FromMenu),
             keys: keys("gc"),
             able: menu.served,
@@ -210,7 +218,7 @@ pub(crate) fn context_menu<'a>(app: &App, menu: &'a crate::ContextMenu) -> Eleme
     // that none was running.
     if let Some(kind) = menu.insight {
         navigate.push(Row {
-            label: kind.label(),
+            label: kind.label().into(),
             msg: Message::Hover(HoverMsg::Insight),
             keys: keys("ge"),
             able: menu.served || matches!(lang, Some("c" | "cpp")),
@@ -221,7 +229,7 @@ pub(crate) fn context_menu<'a>(app: &App, menu: &'a crate::ContextMenu) -> Eleme
     // which only its language server can answer.
     for &kind in lang.map_or(&[][..], crate::InsightKind::more_for_lang) {
         navigate.push(Row {
-            label: kind.label(),
+            label: kind.label().into(),
             msg: Message::Hover(HoverMsg::InsightOf(kind)),
             keys: None,
             able: menu.served,
@@ -231,7 +239,7 @@ pub(crate) fn context_menu<'a>(app: &App, menu: &'a crate::ContextMenu) -> Eleme
     // A Lean proof, walked one tactic at a time.
     if lang == Some("lean") {
         navigate.push(Row {
-            label: tr!("Step Through Proof"),
+            label: tr!("Step Through Proof").into(),
             msg: Message::Proof(crate::ProofMsg::FromMenu),
             keys: None,
             able: menu.served,
@@ -239,7 +247,7 @@ pub(crate) fn context_menu<'a>(app: &App, menu: &'a crate::ContextMenu) -> Eleme
         });
     }
     let plain = |label: &'static str, msg: Message| Row {
-        label,
+        label: label.into(),
         msg,
         keys: None,
         able: true,
@@ -265,8 +273,27 @@ pub(crate) fn context_menu<'a>(app: &App, menu: &'a crate::ContextMenu) -> Eleme
             },
         );
     }
-    // In groups: going somewhere, understanding what is here, marking the
-    // line, debugging.
+    // The commands of the plugins turned on that ask to be here
+    // (`where = "code"`): run at the line clicked.
+    // Named as the palette names them, two alike told apart.
+    let clews = app.clews_commands();
+    let plugins: Vec<Row> = app
+        .plugin_offers(&clews)
+        .into_iter()
+        .filter(|o| o.command.place == clew_plugin::manifest::Place::Code)
+        .map(|o| Row {
+            label: o.shown.into(),
+            msg: Message::Plugin(crate::app::plugins::PluginMsg::RunFromMenu {
+                id: o.plugin.id.clone(),
+                command: o.command.id.clone(),
+            }),
+            keys: None,
+            able: true,
+            ai: false,
+        })
+        .collect();
+    // In groups: going somewhere, understanding what is here, the
+    // plugins', marking the line, debugging.
     let groups = [
         navigate,
         vec![
@@ -304,6 +331,7 @@ pub(crate) fn context_menu<'a>(app: &App, menu: &'a crate::ContextMenu) -> Eleme
                 )
             },
         ],
+        plugins,
         // A bookmark on this line, and a note to come back to it by.
         {
             let marked = app
@@ -338,6 +366,35 @@ pub(crate) fn context_menu<'a>(app: &App, menu: &'a crate::ContextMenu) -> Eleme
                     Message::Reading(ReadingMsg::BookmarkFromMenu { note: true }),
                 ),
             ]
+        },
+        {
+            // The test the line is in, run or debugged alone, beside where
+            // it stops: Rust's through Cargo, Python's by pytest.
+            let mut debugging = Vec::new();
+            if menu.in_test {
+                let line = Some(menu.line + 1);
+                debugging.push(Row {
+                    keys: Some(app.keymap.chord(crate::keymap::Action::RunTest).caps()),
+                    ..plain(
+                        tr!("Run Test"),
+                        Message::Debug(DebugMsg::RunTest {
+                            line,
+                            no_debug: true,
+                        }),
+                    )
+                });
+                debugging.push(Row {
+                    keys: Some(app.keymap.chord(crate::keymap::Action::DebugTest).caps()),
+                    ..plain(
+                        tr!("Debug Test"),
+                        Message::Debug(DebugMsg::RunTest {
+                            line,
+                            no_debug: false,
+                        }),
+                    )
+                });
+            }
+            debugging
         },
         vec![
             // Its key, as Settings lists it: the menu showed Ctrl+D on
@@ -378,7 +435,7 @@ pub(crate) fn context_menu<'a>(app: &App, menu: &'a crate::ContextMenu) -> Eleme
         .iter()
         .flatten()
         .map(|r| {
-            super::sheet::text_width(r.label, ts::BASE, crate::fonts::UI)
+            super::sheet::text_width(&r.label, ts::BASE, crate::fonts::UI)
                 + key_w(&r.keys)
                 + if r.ai { 12.0 + 6.0 } else { 0.0 }
                 + 2.0 * 12.0
@@ -402,7 +459,8 @@ pub(crate) fn context_menu<'a>(app: &App, menu: &'a crate::ContextMenu) -> Eleme
         _ => tr!("The language server isn't ready").to_string(),
     };
     let row = |r: Row| -> Element<'a, Message> {
-        let words = text(r.label).size(ts::BASE).wrapping(Wrapping::None);
+        let label = r.label;
+        let words = text(label.clone()).size(ts::BASE).wrapping(Wrapping::None);
         let words = if r.able {
             words
         } else {
@@ -434,7 +492,7 @@ pub(crate) fn context_menu<'a>(app: &App, menu: &'a crate::ContextMenu) -> Eleme
         .style(theme::list_row(false))
         .width(Fill)
         .padding([5, 12])
-        .on_press_maybe(r.able.then(|| super::heard::said(r.label, r.msg)));
+        .on_press_maybe(r.able.then(|| super::heard::said(&label, r.msg)));
         if r.able && r.ai {
             super::toolbar::tip_at(
                 b,
@@ -467,7 +525,7 @@ pub(crate) fn context_menu<'a>(app: &App, menu: &'a crate::ContextMenu) -> Eleme
         .into()
     };
     let mut items: Vec<Element<'a, Message>> = Vec::new();
-    for (i, group) in groups.into_iter().enumerate() {
+    for (i, group) in groups.into_iter().filter(|g| !g.is_empty()).enumerate() {
         if i > 0 {
             items.push(rule());
         }

@@ -80,8 +80,7 @@ fn plain_version<'de, D: serde::Deserializer<'de>>(de: D) -> Result<Option<Strin
         return Ok(Some(version));
     }
     Err(serde::de::Error::custom(format!(
-        "version {} is not a plain version: ASCII letters, digits and . - _ + only, \
-         starting with a letter or digit, at most {} characters",
+        "version {} is not a plain version. It can use only ASCII letters, digits and . - _ +, must start with a letter or digit, and can be at most {} characters long",
         shown(&version),
         registry::MAX_VERSION_LEN
     )))
@@ -93,8 +92,7 @@ fn plain_name<'de, D: serde::Deserializer<'de>>(de: D) -> Result<Option<String>,
         return Ok(Some(name));
     }
     Err(serde::de::Error::custom(format!(
-        "server {} is not a plain name: ASCII letters, digits and . - _ + only, \
-         starting with a letter or digit, at most {} characters",
+        "server {} is not a plain name. It can use only ASCII letters, digits and . - _ +, must start with a letter or digit, and can be at most {} characters long",
         shown(&name),
         registry::MAX_NAME_LEN
     )))
@@ -115,7 +113,7 @@ impl ProjectLspConfig {
         // classification below, where a link pointing at nothing would look
         // like "no config" and silently resolve to defaults.
         if !crate::statefile::repo_dirs_are_real(&path) {
-            return Err("lsp.toml: a .clew directory is a symlink — refusing to read it".into());
+            return Err("lsp.toml was not read because a .clew directory is a symlink".into());
         }
         // Read through `statefile`, where the `.clew` rules live, rather than
         // spelling them again here: it opens the leaf ONCE with `O_NOFOLLOW |
@@ -134,11 +132,9 @@ impl ProjectLspConfig {
             return match std::fs::symlink_metadata(&path) {
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
                 Err(e) => Err(format!("lsp.toml: {e}")),
-                Ok(meta) if !meta.is_file() => Err("lsp.toml: not a regular file".into()),
-                Ok(meta) if meta.len() > MAX_CONFIG_BYTES => {
-                    Err("lsp.toml: unreasonably large".into())
-                }
-                Ok(_) => Err("lsp.toml: unreadable".into()),
+                Ok(meta) if !meta.is_file() => Err("lsp.toml is not a regular file".into()),
+                Ok(meta) if meta.len() > MAX_CONFIG_BYTES => Err("lsp.toml is too large".into()),
+                Ok(_) => Err("lsp.toml could not be read".into()),
             };
         };
         toml::from_str(&text).map_err(|e| format!("lsp.toml: {e}"))

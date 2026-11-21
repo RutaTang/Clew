@@ -672,7 +672,7 @@ fn widgets(files: &[File]) -> Option<ProjectMap> {
     let mut map = MapBuilder::new(
         "flutter.widgets",
         "Widget tree",
-        "what each widget's build builds, nested as written: the project's widgets (a State's build is its widget's) and the framework widgets under them, each arrow labelled by the slot it fills; runApp at the root",
+        "what each widget's build builds, nested as in the code, from runApp at the root down through the project's widgets (a State's build counts as its widget's) and the framework widgets under them. Each arrow is labelled with the slot it fills",
     );
     let project = widget_classes(files);
     for file in files {
@@ -917,7 +917,7 @@ fn state(files: &[File]) -> Option<ProjectMap> {
     let mut map = MapBuilder::new(
         "dart.state",
         "State management",
-        "where state lives and who reads it: Riverpod providers and who watches, reads or listens to them; provider-package notifiers, who provides and who reads them; Blocs and Cubits, the events each handles, who adds them and who builds on them",
+        "where state lives and who reads it, for Riverpod providers (who watches, reads or listens to them), provider-package notifiers (who provides and reads them), and Blocs and Cubits (the events each handles, who adds them and who builds on them)",
     );
     // The state classes and Bloc events by name.
     let mut holders: HashMap<String, (String, usize, &'static str, String)> = HashMap::new();

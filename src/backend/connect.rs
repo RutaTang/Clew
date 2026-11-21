@@ -647,7 +647,7 @@ fn edit(change: impl FnOnce(&mut Vec<SavedConnection>)) -> Result<Vec<SavedConne
     let path = store_path().ok_or(tr!("no data directory"))?;
     let _exclusive = clew_core::statefile::lock(&path).map_err(|e| {
         tr!(
-            "cannot lock {path}: {error} — the connection list was not changed",
+            "cannot lock {path}, so the connection list was not changed: {error}",
             path = path.display(),
             error = e
         )
@@ -657,7 +657,7 @@ fn edit(change: impl FnOnce(&mut Vec<SavedConnection>)) -> Result<Vec<SavedConne
     // host in it.
     let mut merged = load_checked().map_err(|e| {
         tr!(
-            "{error} — not overwriting it; fix or remove the file, then try again",
+            "{error}. Clew won't overwrite the file. Fix or remove it, then try again",
             error = e
         )
     })?;
@@ -1156,7 +1156,7 @@ pub fn trust_host_key(key: &ScannedHostKey, host_field: &str) -> Result<PathBuf,
         || parse_key_line(&key.line, recorded_as).is_none()
     {
         return Err(tr!(
-            "the key offered is not a key line for {host}; nothing was recorded",
+            "the offered key is not a key line for {host}, so nothing was recorded",
             host = host_field
         ));
     }
@@ -1234,7 +1234,7 @@ fn edit_known_hosts(change: impl FnOnce(&str) -> Option<String>) -> Result<PathB
     let current = clew_core::statefile::read_capped_checked(&path, MAX_KNOWN_HOSTS_BYTES)
         .map_err(|e| {
             tr!(
-                "{path} could not be read ({error}) — left untouched",
+                "{path} could not be read ({error}), so it was left unchanged",
                 path = path.display(),
                 error = e
             )
@@ -1383,7 +1383,7 @@ mod tests {
             assert!(load_checked().is_err());
             assert!(load().is_empty(), "display still degrades to empty");
             let err = upsert(host("b.example.com")).unwrap_err();
-            assert!(err.contains("not overwriting"), "{err}");
+            assert!(err.contains("Clew won't overwrite the file"), "{err}");
             assert!(remove("root@a.example.com", 22).is_err());
             assert_eq!(
                 std::fs::read_to_string(&path).unwrap(),

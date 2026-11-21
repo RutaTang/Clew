@@ -114,6 +114,38 @@ pub(crate) struct PaletteCommand {
     pub(crate) shown_as: Option<String>,
 }
 
+/// A palette command run lately: by its title — a plugin's by its plugin
+/// and command, as its title says the plugin's id only while another
+/// command is named as it is, and lost its place among the recent ones
+/// each time that changed.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Recent {
+    Titled(String),
+    Plugin { id: String, command: String },
+}
+
+impl Recent {
+    /// How `command` is kept among the recent ones.
+    pub(crate) fn of(command: &PaletteCommand) -> Recent {
+        match &command.action {
+            PaletteAction::Send(Message::Plugin(crate::app::plugins::PluginMsg::Run {
+                id,
+                command,
+            })) => Recent::Plugin {
+                id: id.clone(),
+                command: command.clone(),
+            },
+            _ => Recent::Titled(command.title.clone()),
+        }
+    }
+
+    /// Its command among `commands`, as titled now; none when they do not
+    /// offer it now.
+    pub(crate) fn among<'a>(&self, commands: &'a [PaletteCommand]) -> Option<&'a PaletteCommand> {
+        commands.iter().find(|c| Recent::of(c) == *self)
+    }
+}
+
 impl PaletteCommand {
     /// Whether running it uses the AI model (and so costs money): its row
     /// is marked so, as every control that does is.
@@ -164,7 +196,11 @@ impl PaletteCommand {
                 _ => matches!(
                     message,
                     Message::Editor(EditorMsg::RunAction(
-                        Action::ExplainAll | Action::StartDebug | Action::Run
+                        Action::ExplainAll
+                            | Action::StartDebug
+                            | Action::Run
+                            | Action::RunTest
+                            | Action::DebugTest
                     )) | Message::Debug(_)
                         | Message::Explain(_)
                         | Message::Project(
@@ -306,6 +342,17 @@ impl PaletteCommand {
                 Glyph::Play,
                 tr!("This builds the program and runs it, without the debugger."),
             ),
+            // Python's tests are not built: said of what each does.
+            Message::Editor(EditorMsg::RunAction(Action::RunTest))
+            | Message::Debug(DebugMsg::RunTest { no_debug: true, .. }) => (
+                Glyph::Play,
+                tr!("This runs the test at the cursor (a Rust test is built with Cargo first)."),
+            ),
+            Message::Editor(EditorMsg::RunAction(Action::DebugTest))
+            | Message::Debug(DebugMsg::RunTest { .. }) => (
+                Glyph::Debug,
+                tr!("This runs the test at the cursor under the debugger."),
+            ),
             Message::Debug(DebugMsg::Control(_)) => (
                 Glyph::Debug,
                 tr!("This resumes the program from where it stopped."),
@@ -315,7 +362,7 @@ impl PaletteCommand {
             }
             Message::Debug(DebugMsg::ToggleHoverEval) => (
                 Glyph::Debug,
-                tr!("This runs code in the program for each name the mouse rests on."),
+                tr!("This runs code in the program for each name you hover over."),
             ),
             Message::Debug(_) => (Glyph::Debug, tr!("This changes where the program stops.")),
             Message::Editor(EditorMsg::RunAction(Action::ExplainAll)) | Message::Explain(_) => (
@@ -339,7 +386,7 @@ impl PaletteCommand {
             }
             Message::Voice(_) => (
                 Glyph::Mic,
-                tr!("This changes what the microphone hears, and what is done with it."),
+                tr!("This changes what the microphone hears and what Clew does with it."),
             ),
             Message::Settings(SettingsMsg::ProviderPicked(_) | SettingsMsg::EmbedHere(_)) => {
                 (Glyph::Network, tr!("This changes where your code is sent."))
@@ -383,18 +430,146 @@ fn formerly(title: &str) -> Option<&'static str> {
     }
 }
 
+/// What words said name among `commands` ([`command_named`]).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Named {
+    /// The command at this index.
+    One(usize),
+    /// Commands named alike — two plugins', or a plugin's and one of Clew's
+    /// own — that the words name equally: none is run on a guess, and the
+    /// one saying them is told which to say.
+    Alike(Vec<usize>),
+    /// None.
+    Nothing,
+}
+
 /// The index in `commands` of the command `said` plainly names: by its
 /// title, or, when no title is named, by the name it had ([`formerly`]).
+#[cfg(test)]
 pub(crate) fn command_said(said: &str, commands: &[PaletteCommand]) -> Option<usize> {
+    match command_named(said, commands) {
+        Named::One(i) => Some(i),
+        Named::Alike(_) | Named::Nothing => None,
+    }
+}
+
+/// What `said` names among `commands`: the title it plainly names, or the
+/// name a command had ([`formerly`]); of commands named alike — each
+/// plugin's titled with its id after the name they share ("Word count:
+/// Count words (word-count)") — the one the words name best
+/// ([`told_apart`]), or all those they name as well, so the one saying
+/// them is asked which.
+pub(crate) fn command_named(said: &str, commands: &[PaletteCommand]) -> Named {
     let titles: Vec<&str> = commands.iter().map(|c| c.title.as_str()).collect();
-    clew_voice::intent::command(said, &titles).or_else(|| {
-        let (names, at): (Vec<&str>, Vec<usize>) = commands
-            .iter()
-            .enumerate()
-            .filter_map(|(i, c)| formerly(&c.title).map(|name| (name, i)))
-            .unzip();
-        clew_voice::intent::command(said, &names).map(|k| at[k])
-    })
+    let keys: Vec<String> = commands
+        .iter()
+        .map(|c| crate::app::plugins::alike_key(alike_named(c).0))
+        .collect();
+    let alike =
+        |key: &str| -> Vec<usize> { (0..commands.len()).filter(|&i| keys[i] == key).collect() };
+    let tied = clew_voice::intent::command_ties(said, &titles);
+    match tied.first() {
+        // Named best, alone or with others named alike only: that one, or
+        // the one of them the words tell apart. A title fitted only by
+        // words close to its id names none of them.
+        Some(&first) if tied.iter().all(|&i| keys[i] == keys[first]) => {
+            let group = alike(&keys[first]);
+            if group.len() == 1 {
+                return Named::One(first);
+            }
+            if let Some(named) = told_apart(said, commands, &group) {
+                return named;
+            }
+        }
+        // Commands not named alike, named as well as each other: none of
+        // them; a command by the name it had, as when none is named.
+        Some(_) => {}
+        // No title named as a whole: one of commands named alike, by its
+        // name and the words in its brackets read apart ("… todo close",
+        // which as a whole would close something).
+        None => {
+            let mut groups: Vec<&str> = Vec::new();
+            for key in &keys {
+                if !groups.contains(&key.as_str()) && keys.iter().filter(|k| *k == key).count() > 1
+                {
+                    groups.push(key);
+                }
+            }
+            let mut found = groups
+                .into_iter()
+                .filter_map(|key| told_apart(said, commands, &alike(key)));
+            if let (Some(named), None) = (found.next(), found.next()) {
+                return named;
+            }
+        }
+    }
+    // None named: by the name one had, which only Clew's own had.
+    let (names, at): (Vec<&str>, Vec<usize>) = commands
+        .iter()
+        .enumerate()
+        .filter_map(|(i, c)| formerly(&c.title).map(|name| (name, i)))
+        .unzip();
+    match clew_voice::intent::command(said, &names) {
+        Some(k) => Named::One(at[k]),
+        None => Named::Nothing,
+    }
+}
+
+/// The name `command` shares with the commands named alike, and its
+/// plugin's id when its title carries it after that name ("Word count:
+/// Count words (word-count)"); else its title, and none.
+fn alike_named(command: &PaletteCommand) -> (&str, Option<&str>) {
+    if let PaletteAction::Send(Message::Plugin(crate::app::plugins::PluginMsg::Run { id, .. })) =
+        &command.action
+        && let Some(name) = command
+            .title
+            .strip_suffix(')')
+            .and_then(|t| t.strip_suffix(id.as_str()))
+            .and_then(|t| t.strip_suffix(" ("))
+    {
+        return (name, Some(id));
+    }
+    (&command.title, None)
+}
+
+/// Which of the commands at `group`, named alike, `said` names, as the
+/// voice's own reading tells them apart by the words in their brackets —
+/// a plugin's id — and their name ([`clew_voice::intent::alike_ties`]):
+/// one, those it names as well as each other, or `None` when it names
+/// none of them.
+fn told_apart(said: &str, commands: &[PaletteCommand], group: &[usize]) -> Option<Named> {
+    // Read against one name, so the words name each alike: Clew's own,
+    // when one of them is ("Window: Minimize", not a plugin's "Window
+    // Minimize", whose words are the same).
+    let shared = group
+        .iter()
+        .map(|&i| alike_named(&commands[i]))
+        .find(|(_, id)| id.is_none())
+        .unwrap_or_else(|| alike_named(&commands[group[0]]))
+        .0;
+    let named: Vec<(&str, Option<&str>)> = group
+        .iter()
+        .map(|&i| (shared, alike_named(&commands[i]).1))
+        .collect();
+    match clew_voice::intent::alike_ties(said, &named)[..] {
+        [] => None,
+        [one] => Some(Named::One(group[one])),
+        ref ties => Some(Named::Alike(ties.iter().map(|&k| group[k]).collect())),
+    }
+}
+
+/// "a", "a or b", "a, b or c", as the reader's language writes a list.
+pub(crate) fn or_list(items: &[String]) -> String {
+    match items {
+        [] => String::new(),
+        [one] => one.clone(),
+        [first, middle @ .., last] => {
+            let list = middle.iter().fold(first.clone(), |list, item| {
+                tr!("{list}, {item}", list = list, item = item)
+            });
+            tr!("{list} or {last}", list = list, last = last)
+        }
+    }
 }
 
 /// `row`, and the words the command titled `title` also goes by.
@@ -609,7 +784,9 @@ impl App {
         for title in self
             .palette_recent
             .iter()
-            .filter(|t| listed(t) && !shown.contains(t))
+            .filter_map(|r| r.among(&self.palette))
+            .map(|c| &c.title)
+            .filter(|t| !shown.contains(t))
             .take(SUGGESTED_RECENT)
         {
             out.push(Suggestion::Command {
@@ -664,7 +841,7 @@ impl App {
         let recent: Vec<&PaletteCommand> = self
             .palette_recent
             .iter()
-            .filter_map(|t| self.palette.iter().find(|c| &c.title == t))
+            .filter_map(|r| r.among(&self.palette))
             .collect();
         let recent_english: Vec<String> = recent.iter().map(|c| c.searched_in_english()).collect();
         let recent: Vec<String> = recent.iter().map(|c| c.searched()).collect();
@@ -774,8 +951,9 @@ impl App {
         else {
             return Task::none();
         };
-        self.palette_recent.retain(|r| r != title);
-        self.palette_recent.insert(0, title.to_string());
+        let recent = Recent::of(&command);
+        self.palette_recent.retain(|r| *r != recent);
+        self.palette_recent.insert(0, recent);
         self.palette_recent.truncate(MAX_RECENT);
         match command.action {
             PaletteAction::Send(message) => self.update(message),
@@ -798,6 +976,7 @@ impl App {
                     served,
                     by_pointer: false,
                     line_top: None,
+                    in_test: self.test_at(pane, line + 1).is_some(),
                 });
                 self.update(message)
             }
@@ -815,6 +994,52 @@ impl App {
     /// them with nothing typed. Their titles are in English (each marked for
     /// the catalogs where it is written); the rows show them translated.
     pub(crate) fn palette_commands(&self) -> Vec<PaletteCommand> {
+        let mut out = self.clews_commands();
+        // Each enabled plugin's commands, by the plugin's name and the
+        // command's ("TODO Owners: List TODOs"), as the agent and the voice
+        // find them too — each by a name of its own.
+        let offered: Vec<PaletteCommand> = self
+            .plugin_offers(&out)
+            .into_iter()
+            .map(|o| PaletteCommand {
+                title: o.title,
+                keys: None,
+                action: PaletteAction::Send(Message::Plugin(crate::app::plugins::PluginMsg::Run {
+                    id: o.plugin.id.clone(),
+                    command: o.command.id.clone(),
+                })),
+                shown_as: Some(o.shown),
+            })
+            .collect();
+        // Listed before Close Folder, which stays last.
+        let at = out
+            .iter()
+            .rposition(|c| {
+                matches!(
+                    c.action,
+                    PaletteAction::Send(Message::Project(ProjectMsg::CloseFolder))
+                )
+            })
+            .unwrap_or(out.len());
+        out.splice(at..at, offered);
+        out
+    }
+
+    /// The plugins' commands as the palette names them, beside Clew's own
+    /// (`clews`, [`Self::clews_commands`]): the code's menu names them so.
+    pub(crate) fn plugin_offers(
+        &self,
+        clews: &[PaletteCommand],
+    ) -> Vec<crate::app::plugins::Offered<'_>> {
+        let clews: Vec<(&str, &str)> = clews
+            .iter()
+            .map(|c| (c.title.as_str(), c.shown()))
+            .collect();
+        crate::app::plugins::offered_commands(&self.plugins.installed, &clews)
+    }
+
+    /// The commands of Clew's own the window offers now.
+    pub(crate) fn clews_commands(&self) -> Vec<PaletteCommand> {
         let mut out = Vec::new();
         let project = self.proj.project.is_some();
         let mut add = |title: String, keys: Option<String>, action: PaletteAction| {
@@ -889,6 +1114,26 @@ impl App {
                     None,
                     PaletteAction::AtCaret(Message::Proof(crate::ProofMsg::FromMenu)),
                 );
+                // Lean's own name for it — its message says to use "the
+                // Restart File command" when a file's imports changed — said
+                // whose it is among every other command, as vscode-lean4's.
+                add(
+                    tr_noop!("Lean: Restart File").to_string(),
+                    None,
+                    send(Message::Proof(crate::ProofMsg::RestartFile)),
+                );
+                if matches!(
+                    self.proj.mathlib,
+                    crate::app::proof::MathlibCache::Missing
+                        | crate::app::proof::MathlibCache::Failed(_)
+                        | crate::app::proof::MathlibCache::Dismissed
+                ) {
+                    add(
+                        tr_noop!("Get Mathlib's Build Cache").to_string(),
+                        None,
+                        send(Message::Proof(crate::ProofMsg::GetMathlibCache)),
+                    );
+                }
             }
             let at_caret = |m| PaletteAction::AtCaret(m);
             for (title, keys, message) in [
@@ -1027,11 +1272,19 @@ impl App {
                     send(Message::Editor(message)),
                 );
             }
+            // Goals only where a Lean file is read: elsewhere it picked a
+            // tab the margin does not show, and nothing happened.
+            let goals = self
+                .reading_lean()
+                .then_some((tr_noop!("Margin: Goals"), MarginTab::Goals));
             for (title, tab) in [
                 (tr_noop!("Margin: Explanations"), MarginTab::Notes),
                 (tr_noop!("Margin: Calls"), MarginTab::Calls),
                 (tr_noop!("Margin: History"), MarginTab::History),
-            ] {
+            ]
+            .into_iter()
+            .chain(goals)
+            {
                 add(
                     title.into(),
                     None,
@@ -1054,6 +1307,7 @@ impl App {
                 tr_noop!("Settings: Integrations"),
                 SettingsPage::Integrations,
             ),
+            (tr_noop!("Settings: Plugins"), SettingsPage::Plugins),
             (
                 tr_noop!("Settings: Language Servers"),
                 SettingsPage::Languages,
@@ -1276,6 +1530,18 @@ impl App {
                 keys: None,
                 action: PaletteAction::Send(message),
                 shown_as: Some(tr!("Open Recent: {name}", name = name)),
+            });
+        }
+        // The command running stopped from here too, and by voice: its
+        // chip's × was the only way, and a chip short of room is left out.
+        if let Some((title, _, false)) = self.plugin_run() {
+            out.push(PaletteCommand {
+                title: format!("Stop {title}"),
+                keys: None,
+                action: PaletteAction::Send(Message::Plugin(
+                    crate::app::plugins::PluginMsg::StopRun,
+                )),
+                shown_as: Some(tr!("Stop {command}", command = title.to_string())),
             });
         }
         if self.proj.project.is_some() {
