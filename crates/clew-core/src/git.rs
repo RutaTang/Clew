@@ -949,7 +949,7 @@ fn settings_for(
         }
         Err(e) => {
             return Err(GitError::UnsafeConfig(format!(
-                "its filter drivers cannot be switched off: no scratch directory ({e})"
+                "its filter drivers cannot be switched off because there is no scratch directory ({e})"
             )));
         }
     };
@@ -958,8 +958,7 @@ fn settings_for(
         true => overrides_for(names),
         false if names.len() > MAX_INCLUDED_DRIVERS => {
             return Err(GitError::UnsafeConfig(format!(
-                "its configuration defines {} filter drivers to switch off, more than the {} \
-                 git can be run with in reasonable time",
+                "its configuration defines {} filter drivers to switch off, more than the {} that git can handle in reasonable time",
                 names.len(),
                 MAX_INCLUDED_DRIVERS
             )));

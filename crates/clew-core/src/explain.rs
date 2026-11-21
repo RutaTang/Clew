@@ -773,7 +773,7 @@ pub fn edit(
             let mut merged = Cache::new();
             change(&mut merged);
             let refused = std::io::Error::other(format!(
-                "explain.json {e} — left untouched rather than overwritten"
+                "explain.json {e}. It was left untouched, not overwritten"
             ));
             (merged, Err(refused))
         }

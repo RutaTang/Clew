@@ -1429,7 +1429,7 @@ pub fn resolve_stdio(
             (_, None) => Err(tcp_refusal()),
         },
         Resolution::NeedsInstall(install) => Err(format!(
-            "{} is not installed on the remote host — install it there: {}",
+            "{} is not installed on the remote host. Install it there: {}",
             install.name(),
             install.describe()
         )),

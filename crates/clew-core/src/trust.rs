@@ -438,7 +438,7 @@ fn hash_command(
         .len();
     if len > MAX_COMMAND_BYTES {
         return Err(format!(
-            "{}: larger than {} MB — refusing to fingerprint",
+            "{}: larger than {} MB, so it was not fingerprinted",
             real.display(),
             MAX_COMMAND_BYTES / (1024 * 1024)
         ));
@@ -592,8 +592,7 @@ impl CommandProbe {
             clew_rules::location::Launch::InPlace => {
                 same_file(&self.file, &self.canonical).map_err(|e| {
                     format!(
-                        "{}: {e} — it changed after it was approved; open the file again to \
-                         re-approve",
+                        "{}: {e}. It changed after it was approved. Open the file again to re-approve it",
                         self.canonical.display()
                     )
                 })?;
@@ -861,7 +860,7 @@ fn make_read_exec_only(out: &std::fs::File) -> Result<(), String> {
             & 0o777;
         if mode != 0o500 {
             return Err(format!(
-                "the staged command has mode {mode:o}, not 0500 — refusing to run it"
+                "the staged command has mode {mode:o}, not 0500, so Clew did not run it"
             ));
         }
     }
@@ -954,7 +953,7 @@ fn copy_verified(
     }
     if hex(&h.finalize()) != content {
         return Err(format!(
-            "{}: changed while it was being staged — refusing to run it",
+            "{}: changed while it was being staged, so Clew did not run it",
             source.display()
         ));
     }

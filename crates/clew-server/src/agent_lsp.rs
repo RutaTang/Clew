@@ -80,7 +80,7 @@ struct Started {
 }
 
 /// What a query on a closed pool is told.
-const CLOSED: &str = "the project was closed — its language servers are stopped";
+const CLOSED: &str = "the project was closed, so its language servers were stopped";
 
 struct LangSlot {
     state: Mutex<LangState>,
@@ -413,8 +413,7 @@ impl LspPool {
         };
         let Some(byte_col) = symbol_byte_col(line_text, symbol) else {
             return Err(format!(
-                "`{symbol}` does not appear on line {line1} of {rel} — \
-                 pass the line the symbol is on, as shown by read/search/outline"
+                "`{symbol}` does not appear on line {line1} of {rel}. Pass the line the symbol is on, as shown by read/search/outline"
             ));
         };
 
@@ -713,7 +712,7 @@ async fn start(
     let config = config::ProjectLspConfig::load(root)?;
     let Some(server) = config.resolve_with(language, choices) else {
         return Err(format!(
-            "no language server is configured for {language} — use `search` instead"
+            "no language server is configured for {language}. Use `search` instead"
         ));
     };
     let exe = match server.command.clone() {
@@ -735,7 +734,7 @@ async fn start(
             }
             store::Located::NeedsDownload { .. } | store::Located::NeedsInstall { .. } => {
                 return Err(format!(
-                    "the {language} language server is not installed — the user can open a {language} file in Clew to install it; use `search` for now"
+                    "the {language} language server is not installed. The user can open a {language} file in Clew to install it. Use `search` for now"
                 ));
             }
             // Handled by the `Some(cmd)` arm above; never spawned as-is.

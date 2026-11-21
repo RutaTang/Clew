@@ -1093,13 +1093,13 @@ fn a_failed_download_says_why_in_the_readers_language() {
     with_lang(Lang::Fr, || {
         assert_eq!(
             download_failure(
-                &format!("{signed}: the transfer took too long — giving up"),
+                &format!("{signed}: the transfer took too long and was stopped"),
                 704_000_000,
                 model
             ),
             format!(
                 "Interrompu à 704 sur {} Mo\u{a0}: us.aws.cdn.hf.co\u{a0}: le transfert a \
-                 pris trop de temps — abandon",
+                 pris trop de temps et a été arrêté",
                 model.size_mb
             )
         );

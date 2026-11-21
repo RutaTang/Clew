@@ -521,8 +521,7 @@ impl Server {
                     return Some(Event::error(
                         ErrorCode::Handshake,
                         format!(
-                            "protocol mismatch: client speaks v{protocol}, this clew-server \
-                             speaks v{PROTOCOL_VERSION} — update so both sides match"
+                            "protocol mismatch: the client speaks v{protocol}, but this clew-server speaks v{PROTOCOL_VERSION}. Update so both sides match"
                         ),
                     ));
                 }
@@ -536,9 +535,7 @@ impl Server {
                     return Some(Event::error(
                         ErrorCode::Handshake,
                         format!(
-                            "protocol build mismatch: both sides speak v{PROTOCOL_VERSION} but \
-                             were built from different protocol sources (client {fingerprint}, \
-                             server {}) — rebuild/redeploy so they match",
+                            "protocol build mismatch: both sides speak v{PROTOCOL_VERSION}, but they were built from different protocol sources (client {fingerprint}, server {}). Rebuild or redeploy so they match",
                             clew_protocol::SCHEMA_FINGERPRINT
                         ),
                     ));
@@ -1602,8 +1599,7 @@ impl Server {
                         kill_removed(&self.out, proc, p);
                     }
                     return Some(refused(format!(
-                        "refused: {} bytes of input for process {proc} (limit \
-                         {MAX_PROC_INPUT_BYTES}); the process was stopped",
+                        "refused: {} bytes of input for process {proc} (limit {MAX_PROC_INPUT_BYTES}), so the process was stopped",
                         data.len()
                     )));
                 }
@@ -1620,7 +1616,7 @@ impl Server {
                                 kill_removed(&self.out, proc, p);
                             }
                             Some(failed(format!(
-                                "process {proc} stopped reading stdin (queue overflow); killed"
+                                "process {proc} stopped reading stdin (queue overflow), so it was killed"
                             )))
                         }
                     },

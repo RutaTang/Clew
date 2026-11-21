@@ -619,7 +619,7 @@ fn request_batch(
             .and_then(|v| v.to_str().ok())
             .unwrap_or("elsewhere");
         return Err(BatchError::Final(format!(
-            "embeddings endpoint redirected to {}; not following — set the Base URL in Settings to the real endpoint",
+            "embeddings endpoint redirected to {}, and Clew did not follow the redirect. Set the Base URL in Settings to the real endpoint",
             to.lines()
                 .next()
                 .unwrap_or("")
@@ -678,7 +678,7 @@ fn read_body(body: impl Read, cap: u64) -> Result<String, String> {
         .map_err(|e| format!("read: {}", crate::net::describe_io(&e)))?;
     if s.len() as u64 > cap {
         return Err(format!(
-            "embeddings response exceeded {} MiB; not an answer to this request",
+            "embeddings response exceeded {} MiB, too large to be an answer to this request",
             cap.div_ceil(1024 * 1024)
         ));
     }
@@ -733,7 +733,9 @@ fn parse_embeddings(text: &str, expected: usize) -> Result<Vec<Vec<f32>>, String
             .iter()
             .map(|x| x.as_f64().map(|f| f as f32).filter(|f| f.is_finite()))
             .collect::<Option<Vec<f32>>>()
-            .ok_or_else(|| format!("embedding {idx} holds a non-number or one out of range"))?;
+            .ok_or_else(|| {
+                format!("embedding {idx} contains a value that is not a number or is out of range")
+            })?;
         if vec.is_empty() {
             return Err(format!("embedding {idx} is empty"));
         }
@@ -946,7 +948,7 @@ fn load_in(store: &Path, root: &Path, space: Option<&Space>) -> (Index, Option<S
         Ok(stored) => stored,
         Err(e) => {
             let problem = format!(
-                "the semantic index {} is unreadable ({e}); it will be rebuilt",
+                "the semantic index {} is unreadable ({e}) and will be rebuilt",
                 path.display()
             );
             return (Index::default(), Some(problem));
@@ -983,13 +985,13 @@ fn index_problem(path: &Path) -> Option<String> {
     let meta = std::fs::symlink_metadata(path).ok()?;
     if !meta.is_file() {
         return Some(format!(
-            "the semantic index {} is not a plain file; ignored",
+            "the semantic index {} is not a plain file, so it was ignored",
             path.display()
         ));
     }
     (meta.len() > crate::statefile::MAX_STATE_BYTES).then(|| {
         format!(
-            "the semantic index {} is {} MiB, over the {} MiB read cap; ignored and rebuilt",
+            "the semantic index {} is {} MiB, over the {} MiB read limit, so it will be ignored and rebuilt",
             path.display(),
             meta.len() / (1024 * 1024),
             crate::statefile::MAX_STATE_BYTES / (1024 * 1024)
@@ -1194,8 +1196,7 @@ pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
 pub fn check_query(index: &Index, query: &[f32]) -> Result<(), String> {
     match index.dims() {
         Some(dims) if dims != query.len() => Err(format!(
-            "the semantic index holds {dims}-dimensional vectors but the query embedding has {} — \
-             the embedding endpoint changed its output; rebuild the index",
+            "the semantic index has {dims}-dimensional vectors, but the query embedding has {}. The embedding endpoint changed its output, so rebuild the index",
             query.len()
         )),
         _ => Ok(()),
@@ -2537,7 +2538,7 @@ mod integrity_tests {
         // Sparse: no bytes are written.
         f.set_len(crate::statefile::MAX_STATE_BYTES + 1).unwrap();
         let problem = stored_index_problem(&dir).expect("an over-cap file is a problem");
-        assert!(problem.contains("read cap"), "{problem}");
+        assert!(problem.contains("read limit"), "{problem}");
         assert!(load(&dir, Path::new("/p")).entries.is_empty());
         // Closed first: Windows keeps an open file's name until it is.
         drop(f);
@@ -2601,7 +2602,7 @@ mod integrity_tests {
             (
                 r#"{"data":[{"index":0,"embedding":[1,"x"]}]}"#,
                 1,
-                "non-number",
+                "not a number",
             ),
             (
                 r#"{"data":[{"index":0,"embedding":[1,2]},{"index":1,"embedding":[1]}]}"#,

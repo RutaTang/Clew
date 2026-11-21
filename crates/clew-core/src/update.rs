@@ -124,7 +124,7 @@ pub fn ensure_upgrade(running: Version, candidate: &str) -> Result<Version, Stri
             // Named, so the message is the one `extern_messages` translates.
             let v = Version::from(v);
             Err(format!(
-                "the update contains Clew {v}, which is not newer than the running {running} — refusing to install it"
+                "the update contains Clew {v}, which is not newer than the running {running}, so it was not installed"
             ))
         }
         Upgrade::Newer(v) => Ok(Version::from(v)),
@@ -424,7 +424,7 @@ mod tests {
             |_, _| {},
         )
         .unwrap_err();
-        assert!(err.contains("non-HTTPS"), "{err}");
+        assert!(err.contains("only HTTPS"), "{err}");
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();

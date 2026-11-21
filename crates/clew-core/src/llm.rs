@@ -681,7 +681,7 @@ impl fmt::Display for LlmError {
             } => write!(f, "{who} API error {code}: {message}"),
             LlmError::Redirected { who, location } => write!(
                 f,
-                "{who} endpoint redirected to {location}; not following, because the API key would travel with it — set the Base URL in Settings to the real endpoint"
+                "{who} endpoint redirected to {location}, which Clew didn't follow to keep the API key safe. Set the Base URL in Settings to the real endpoint"
             ),
             LlmError::Stream(m) => write!(f, "stream error: {m}"),
         }
@@ -3249,8 +3249,8 @@ mod tests {
         // fixR10 #1: said to be a refusal only perhaps.
         let text = err.to_string();
         assert!(
-            text.contains("it may have rejected the user name and password")
-                && text.contains("if they are right, try again later"),
+            text.contains("It may have rejected the user name and password")
+                && text.contains("If they are right, try again later"),
             "{text}"
         );
         assert_eq!(count(&heads), 1, "the proxy was asked again");
@@ -3278,7 +3278,7 @@ mod tests {
         let text = err.to_string();
         assert!(
             text.contains("did not answer the CONNECT")
-                && text.contains("it may have rejected the user name and password"),
+                && text.contains("It may have rejected the user name and password"),
             "{text}"
         );
 

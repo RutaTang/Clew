@@ -15677,8 +15677,8 @@ fn voice_failures_are_said_in_the_readers_language() {
     app.voice.store = Some(clew_voice::models::Store::new(dir));
     app.voice.download_errors.insert(
         "base.en",
-        "the download does not match the published ggml-base.en.bin (13 bytes, not 147951465) — \
-         it was discarded"
+        "the download does not match the published ggml-base.en.bin (13 bytes, not 147951465), \
+         so it was discarded"
             .into(),
     );
     with_lang(Lang::Fr, || {

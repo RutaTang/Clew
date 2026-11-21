@@ -11,28 +11,28 @@ use crate::tr_noop;
 /// Every such message, as its crate writes it.
 pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("'{arg1}' not found in archive"),
-    tr_noop!("'{binary}' not found on PATH — {arg1}, or choose where it is"),
+    tr_noop!("'{binary}' was not found on PATH. To fix this, {arg1}, or choose where it is"),
     tr_noop!(
-        "'{tool}' is required to install this server but was not found on PATH; install it, or choose a server program of your own"
+        "'{tool}' is required to install this server but was not found on PATH. Install it, or choose a server program of your own"
     ),
     tr_noop!("1 unreadable entry (first: {error})"),
     tr_noop!("ACP agent `{name}`: {why}"),
     tr_noop!(
-        "Clew cannot read proxy passwords from the keychain: put them in environment variables ({PERCENT_ENCODING}); Clew then uses those instead of all of the system's proxy settings, so set {arg1}"
+        "Clew needs the user name and password in environment variables ({PERCENT_ENCODING}) because it cannot read proxy passwords from the keychain. It then uses those variables instead of all of the system's proxy settings, so set {arg1}"
     ),
     tr_noop!("Clew cannot use {other}:// proxies"),
-    tr_noop!("Clew has no model to answer with — add an API key in Clew's settings ({arg1})"),
+    tr_noop!("Clew has no model to answer with. Add an API key in Clew's settings ({arg1})"),
     tr_noop!(
         "Clew is not open, so the user could not be asked. Ask them to open Clew, then try again."
     ),
-    tr_noop!("Clew lost track of this language server after an internal error; restart it"),
-    tr_noop!("EmbeddingGemma is not downloaded: get it in Settings → Embeddings"),
+    tr_noop!("Clew lost track of this language server after an internal error. Restart it"),
+    tr_noop!("EmbeddingGemma is not downloaded. Download it in Settings → Embeddings"),
     tr_noop!("GHCi cannot pause a running program"),
     tr_noop!("GHCi is gone: {e}"),
     tr_noop!("Invalid pattern: {e}"),
     tr_noop!("MCP server `{name}`: {why}"),
     tr_noop!(
-        "No Clew window has this project open, so the try was not run. Ask the user to open {arg1} in Clew, then try again."
+        "No Clew window has this project open, so the test run did not start. Ask the user to open {arg1} in Clew, then try again."
     ),
     tr_noop!("Node did not answer in time"),
     tr_noop!("Node did not open its inspector within {arg1} s"),
@@ -47,22 +47,24 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("TLS with the proxy {name} failed: {arg1}"),
     tr_noop!("The MCP server failed: {why}"),
     tr_noop!("The other {arg1} functions of the cycle, by signature:\n"),
-    tr_noop!("The project's TypeScript {v} — runs the project's own code"),
+    tr_noop!("The project's TypeScript {v} (runs the project's own code)"),
     tr_noop!("The tool failed: {content}"),
-    tr_noop!("The try did not finish in time."),
+    tr_noop!("The test run did not finish in time."),
     tr_noop!(
         "The user did not answer in Clew, so the install was withdrawn. Ask them whether they want it, then try again."
     ),
     tr_noop!("TypeScript {v} (installed in {place})"),
     tr_noop!("WAV format {tag} at {bits} bits is not supported"),
     tr_noop!("Xdebug closed the connection"),
-    tr_noop!("Xdebug did not connect within {arg1} s — is it Xdebug 3, and enabled for {arg2}?"),
+    tr_noop!(
+        "Xdebug did not connect within {arg1} s. Is it Xdebug 3, and is it enabled for {arg2}?"
+    ),
     tr_noop!("Xdebug did not connect: {e}"),
     tr_noop!(
-        "Xdebug is not loaded in {arg1} — install it (pecl install xdebug, or your system's php-xdebug package) and enable it"
+        "Xdebug is not loaded in {arg1}. Install it (pecl install xdebug, or your system's php-xdebug package) and enable it"
     ),
     tr_noop!("Xdebug refused: {why}"),
-    tr_noop!("Xdebug sent <{arg1}> where <init> was due"),
+    tr_noop!("Xdebug sent <{arg1}> instead of <init>"),
     tr_noop!("Xdebug sent a reply that is not XML: {e}"),
     tr_noop!("Xdebug's control socket broke: {e}"),
     tr_noop!("Xdebug's control socket did not answer: {e}"),
@@ -73,18 +75,18 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("`env` is not a table of strings"),
     tr_noop!("`{arg1}` cannot name a server"),
     tr_noop!("`{arg1}` cannot name an agent"),
-    tr_noop!("`{arg1}` was not found — give its full path, or install it"),
+    tr_noop!("`{arg1}` was not found. Give its full path, or install it"),
     tr_noop!("`{key}.{k}` is not a string"),
-    tr_noop!("`{key}` holds something that is not a string"),
+    tr_noop!("`{key}` contains something that is not a string"),
     tr_noop!("`{key}` is not a list of strings"),
     tr_noop!("`{key}` is not a table of strings"),
     tr_noop!("`{method}` was not answered"),
     tr_noop!("`{name}` is not a tool of this session"),
     tr_noop!(
-        "`{symbol}` does not appear on line {line1} of {rel} — pass the line the symbol is on, as shown by read/search/outline"
+        "`{symbol}` does not appear on line {line1} of {rel}. Pass the line the symbol is on, as shown by read/search/outline"
     ),
     tr_noop!(
-        "a TypeScript program needs Node 22.6 or later, which strips its types; this host has {major}.{minor} — run its compiled JavaScript instead"
+        "a TypeScript program needs Node 22.6 or later, which strips its types, but this host has {major}.{minor}. Run its compiled JavaScript instead"
     ),
     tr_noop!("a `{kind}` token, which MCP does not use"),
     tr_noop!("a body that is not JSON: {e}"),
@@ -92,14 +94,16 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("a filter longer than {MAX_LOG_TEXT} bytes"),
     tr_noop!("a header line exceeds {MAX_HEADER_LINE_BYTES} bytes"),
     tr_noop!(
-        "a header's name holds characters a header name cannot (letters, digits and !#$%&'*+-.^_`|~) — write each as `Name: value`"
+        "a header name contains characters that are not allowed (use letters, digits and !#$%&'*+-.^_`|~). Write each header as `Name: value`"
     ),
     tr_noop!("a message that is not JSON ({e})"),
     tr_noop!("a message without Content-Length"),
-    tr_noop!("a name expected after ."),
-    tr_noop!("a name is letters, digits, `-` and `_`"),
+    tr_noop!("expected a name after ."),
+    tr_noop!("a name can use only letters, digits, `-` and `_`"),
     tr_noop!("a quote is not closed"),
-    tr_noop!("a server name is letters, digits, `-` and `_`, at most {MAX_NAME_LEN} of them"),
+    tr_noop!(
+        "a server name can use only letters, digits, `-` and `_`, up to {MAX_NAME_LEN} characters"
+    ),
     tr_noop!("a state directory on its path is a symlink or not a directory"),
     tr_noop!("a text could not be read: {e}"),
     tr_noop!("a {n}-byte message exceeds the {MAX_FRAME_BYTES}-byte limit"),
@@ -110,17 +114,17 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("an x-mcp-header outside the schema's plain properties"),
     tr_noop!("answered the CONNECT to {authority} with {status_line}: {what}"),
     tr_noop!("answered with address type {other}"),
-    tr_noop!("archive contents exceed the unpack budget — refusing"),
-    tr_noop!("archive entry {name} has no name — refusing"),
-    tr_noop!("archive entry {name} is a link — refusing"),
-    tr_noop!("archive entry {name} is not a plain relative path — refusing"),
-    tr_noop!("archive entry {name} is of an unsupported kind ({other}) — refusing"),
-    tr_noop!("archive has over {arg1} entries — refusing"),
+    tr_noop!("archive contents exceed the unpack size limit, so it was not unpacked"),
+    tr_noop!("archive entry {name} has no name, so it was not unpacked"),
+    tr_noop!("archive entry {name} is a link, so it was not unpacked"),
+    tr_noop!("archive entry {name} is not a plain relative path, so it was not unpacked"),
+    tr_noop!("archive entry {name} is of an unsupported kind ({other}), so it was not unpacked"),
+    tr_noop!("archive has over {arg1} entries, so it was not unpacked"),
     tr_noop!("bad JSON response: {e}"),
     tr_noop!("bad JSON: {e}"),
     tr_noop!("bad zip: {e}"),
     tr_noop!("call graph node {i} links to node {bad}, but the graph has {n} nodes"),
-    tr_noop!("cannot ask about {rel}: it is a symlink, not a file of the project"),
+    tr_noop!("cannot ask about {rel} because it is a symlink, not a file of the project"),
     tr_noop!("cannot be parsed: {e}"),
     tr_noop!("cannot be read: {e}"),
     tr_noop!("cannot fingerprint the {language} server command: {e}"),
@@ -135,7 +139,7 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("cannot open {rel}: {e}"),
     tr_noop!("cannot reach Node's inspector: {e}"),
     tr_noop!("cannot reach the JVM's agent: {e}"),
-    tr_noop!("cannot read .clew/{rel}: {e} — it was left untouched"),
+    tr_noop!("cannot read .clew/{rel}: {e}. It was left untouched"),
     tr_noop!("cannot read node's output: {e}"),
     tr_noop!("cannot read the git version from {arg1}"),
     tr_noop!("cannot read {arg1}: {e}"),
@@ -150,7 +154,7 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!(
         "clew-server download failed checksum verification (expected {expected}, got {actual})"
     ),
-    tr_noop!("clew-speak, which makes embeddings on this computer, is not installed beside Clew"),
+    tr_noop!("clew-speak, which makes embeddings on this computer, is not installed with Clew"),
     tr_noop!("conflicting Content-Length headers"),
     tr_noop!("correct them in its setting ({example}, {PERCENT_ENCODING})"),
     tr_noop!("could not connect to the debug adapter on {addr}: {error}"),
@@ -167,7 +171,7 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("could not look up {host}: {why}"),
     tr_noop!("could not look up {name}: {e}"),
     tr_noop!("could not probe {arg1}: {e}"),
-    tr_noop!("could not reach {authority}: it answered the CONNECT with {status_line}"),
+    tr_noop!("could not reach {authority} (it answered the CONNECT with {status_line})"),
     tr_noop!("could not reach {target} (SOCKS4 answer 91: rejected or failed)"),
     tr_noop!("could not reach {target}: {why}"),
     tr_noop!("could not run {name}: {e}"),
@@ -186,31 +190,31 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("download {arg1} (SHA-256 {arg2}) into Clew's data directory"),
     tr_noop!("embedding index {idx} appears twice"),
     tr_noop!("embedding index {idx} is out of range"),
-    tr_noop!("embedding the query failed ({e}) — use `search` instead"),
-    tr_noop!("embedding {idx} holds a non-number or one out of range"),
+    tr_noop!("embedding the query failed ({e}). Use `search` instead"),
+    tr_noop!("embedding {idx} contains a value that is not a number or is out of range"),
     tr_noop!("embedding {idx} is empty"),
     tr_noop!("embedding {idx} is not a list of numbers"),
     tr_noop!("embedding {pos} has a non-integer index"),
     tr_noop!("embeddings API error {arg1}: {msg}"),
     tr_noop!(
-        "embeddings endpoint redirected to {arg1}; not following — set the Base URL in Settings to the real endpoint"
+        "embeddings endpoint redirected to {arg1}, and Clew did not follow the redirect. Set the Base URL in Settings to the real endpoint"
     ),
-    tr_noop!("embeddings response exceeded {arg1} MiB; not an answer to this request"),
+    tr_noop!("embeddings response exceeded {arg1} MiB, too large to be an answer to this request"),
     tr_noop!("enter a single line to evaluate"),
     tr_noop!("entry {arg1} is not an object"),
     tr_noop!("exited with code {code}"),
     tr_noop!("expected {expected} embeddings, got {arg1}"),
-    tr_noop!("explain.json {e} — left untouched rather than overwritten"),
+    tr_noop!("explain.json {e}. It was left untouched, not overwritten"),
     tr_noop!("failed to launch {arg1}: {e}"),
     tr_noop!(
-        "file watching is unavailable for {arg1} ({e}) — changes made outside Clew will not appear until the project is reopened"
+        "file watching is unavailable for {arg1} ({e}). Changes made outside Clew will not appear until you reopen the project"
     ),
     tr_noop!(
-        "file watching reported a problem ({first}) — changes made outside Clew may not appear until the project is reopened"
+        "file watching reported a problem ({first}). Changes made outside Clew may not appear until you reopen the project"
     ),
     tr_noop!("find \"{query}\" (index mismatch)"),
     tr_noop!("find \"{query}\" (no index)"),
-    tr_noop!("gave no answer to the user name and password ({how}): it may have refused them"),
+    tr_noop!("gave no answer to the user name and password ({how}) and may have refused them"),
     tr_noop!("git blame of {rel}: {e}"),
     tr_noop!("git changes unavailable: {e}"),
     tr_noop!("git could not be started: {e}"),
@@ -228,8 +232,8 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("git's output exceeded {limit} bytes and it was stopped"),
     tr_noop!("grew past {arg1} MB while it was being searched, so only part of it was searched"),
     tr_noop!("has both a `command` and a `url`"),
-    tr_noop!("header `{name}`'s value holds a line break"),
-    tr_noop!("hovering does not run methods — evaluate the expression instead"),
+    tr_noop!("the value of header `{name}` contains a line break"),
+    tr_noop!("hovering does not run methods. Evaluate the expression instead"),
     tr_noop!("image/svg+xml ({arg1} MB, too large)"),
     tr_noop!("install completed but '{arg1}' is missing"),
     tr_noop!("install failed: {e}"),
@@ -246,15 +250,17 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("it resolves outside the project"),
     tr_noop!("it stopped reading its input (nothing accepted for {limit})"),
     tr_noop!("it threw java.lang.ArithmeticException: / by zero"),
-    tr_noop!("it was written by a newer Clew (schema {current}; this client writes {writing})"),
+    tr_noop!("it was written by a newer Clew (schema {current}, but this client writes {writing})"),
     tr_noop!(
         "its configuration defines a filter driver named {arg1}, which cannot be switched off"
     ),
     tr_noop!(
-        "its configuration defines {arg1} filter drivers to switch off, more than the {arg2} git can be run with in reasonable time"
+        "its configuration defines {arg1} filter drivers to switch off, more than the {arg2} that git can handle in reasonable time"
     ),
     tr_noop!("its content is not valid {arg1}"),
-    tr_noop!("its filter drivers cannot be switched off: no scratch directory ({e})"),
+    tr_noop!(
+        "its filter drivers cannot be switched off because there is no scratch directory ({e})"
+    ),
     tr_noop!("its filter drivers cannot be switched off: {e}"),
     tr_noop!("its package is served over {transport}"),
     tr_noop!("larger than {arg1} MB"),
@@ -262,10 +268,10 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("listing the directory took longer than {arg1}s"),
     tr_noop!("lsp.toml command: {e}"),
     tr_noop!("lsp.toml init_options: {e}"),
-    tr_noop!("lsp.toml: a .clew directory is a symlink — refusing to read it"),
+    tr_noop!("lsp.toml: a .clew directory is a symlink, so the file was not read"),
     tr_noop!("lsp.toml: not a regular file"),
     tr_noop!("lsp.toml: unreadable"),
-    tr_noop!("lsp.toml: unreasonably large"),
+    tr_noop!("lsp.toml: too large"),
     tr_noop!("malformed header line {line}"),
     tr_noop!("method not found: {method}"),
     tr_noop!("missing checksum for the clew-server build ({e})"),
@@ -274,17 +280,19 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("no MCP server `{name}` in the configuration"),
     tr_noop!("no answer in {limit}"),
     tr_noop!("no audio in the WAV file"),
-    tr_noop!("no changes for {rel}: it is a symlink, not a file of the project"),
+    tr_noop!("no changes for {rel} because it is a symlink, not a file of the project"),
     tr_noop!("no clew-server build for '{arg1}' at v{version} protocol {protocol} ({e})"),
     tr_noop!("no control socket {name} here"),
     tr_noop!("no control socket {name}: {e}"),
     tr_noop!("no debug adapter for {other}"),
     tr_noop!("no field {name} there"),
-    tr_noop!("no history for {rel}: it is a symlink, not a file of the project"),
-    tr_noop!("no history for {rel}: that is the project itself — ask for a file or folder in it"),
+    tr_noop!("no history for {rel} because it is a symlink, not a file of the project"),
+    tr_noop!(
+        "no history for {rel} because that is the project itself. Ask for a file or folder in it"
+    ),
     tr_noop!("no hover info for `{symbol}`"),
     tr_noop!("no language server is configured for {language}"),
-    tr_noop!("no language server is configured for {language} — use `search` instead"),
+    tr_noop!("no language server is configured for {language}. Use `search` instead"),
     tr_noop!("no language server support for {rel}"),
     tr_noop!("no local port for the sign-in to come back to: {e}"),
     tr_noop!("no managed server '{arg1}'"),
@@ -312,24 +320,24 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("not a ws:// address: {url}"),
     tr_noop!("not an array"),
     tr_noop!(
-        "not looking up {name}: the system's resolver has yet to answer the lookups of {arg1} other names"
+        "did not look up {name} because the system's resolver is still looking up {arg1} other names"
     ),
     tr_noop!("not running git in this repository: {why}"),
     tr_noop!("not supported for this language"),
     tr_noop!("not valid JSON: {e}"),
-    tr_noop!("nothing could be made of it"),
+    tr_noop!("no audio could be made from the text"),
     tr_noop!("nothing to evaluate"),
     tr_noop!("nothing was installed for {language}: {refusal}"),
     tr_noop!("on the remote host: {e}"),
     tr_noop!("path resolves outside the project"),
     tr_noop!("pip install {arg1}: {arg2}"),
-    tr_noop!("process {proc} stopped reading stdin (queue overflow); killed"),
+    tr_noop!("process {proc} stopped reading stdin (queue overflow), so it was killed"),
     tr_noop!("project root unavailable: {e}"),
     tr_noop!(
-        "protocol build mismatch: both sides speak v{PROTOCOL_VERSION} but were built from different protocol sources (client {fingerprint}, server {arg1}) — rebuild/redeploy so they match"
+        "protocol build mismatch: both sides speak v{PROTOCOL_VERSION}, but they were built from different protocol sources (client {fingerprint}, server {arg1}). Rebuild or redeploy so they match"
     ),
     tr_noop!(
-        "protocol mismatch: client speaks v{protocol}, this clew-server speaks v{PROTOCOL_VERSION} — update so both sides match"
+        "protocol mismatch: the client speaks v{protocol}, but this clew-server speaks v{PROTOCOL_VERSION}. Update so both sides match"
     ),
     tr_noop!("pulls in {project} project files and {system} system headers"),
     tr_noop!("put them in its setting, as {example}"),
@@ -340,7 +348,7 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("refused the CONNECT to {authority}: {status_line}"),
     tr_noop!("refused the CONNECT to {target} (SOCKS4 answer {other})"),
     tr_noop!("refused the CONNECT to {target}: {why}"),
-    tr_noop!("refused to overwrite .clew/{rel}: {why} — it was left untouched"),
+    tr_noop!("left .clew/{rel} untouched instead of overwriting it: {why}"),
     tr_noop!("refused: ReadSources batch over {MAX_BATCH} files"),
     tr_noop!("refused: bad commit id: {sha}"),
     tr_noop!("refused: bad edit id for {rel}"),
@@ -351,18 +359,18 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("refused: path escapes the project: {rel}"),
     tr_noop!("refused: state edit too large: {rel}"),
     tr_noop!("refused: state file too large: {rel}"),
-    tr_noop!("refused: state {rel} is for project {want}, this server has {arg1}"),
+    tr_noop!("refused: state {rel} is for project {want}, but this server has {arg1}"),
     tr_noop!(
-        "refused: this project's lsp.toml command for {language} is not approved — open a {language} file in Clew and approve it there"
+        "refused: this project's lsp.toml command for {language} is not approved. Open a {language} file in Clew and approve it there"
     ),
     tr_noop!(
-        "refused: {arg1} bytes of input for process {proc} (limit {MAX_PROC_INPUT_BYTES}); the process was stopped"
+        "refused: {arg1} bytes of input for process {proc} (limit {MAX_PROC_INPUT_BYTES}), so the process was stopped"
     ),
-    tr_noop!("refusing a non-HTTPS URL: {url}"),
-    tr_noop!("refusing non-HTTPS download URL"),
-    tr_noop!("refusing to install outside the server store"),
-    tr_noop!("refusing to install outside the store"),
-    tr_noop!("refusing to remove a path outside the server store"),
+    tr_noop!("only HTTPS URLs are allowed: {url}"),
+    tr_noop!("only HTTPS download URLs are allowed"),
+    tr_noop!("cannot install outside the server store"),
+    tr_noop!("cannot install outside the store"),
+    tr_noop!("cannot remove a path outside the server store"),
     tr_noop!("registering Clew with the authorization server failed: {arg1}"),
     tr_noop!("request failed: {arg1}"),
     tr_noop!("request failed: {m}"),
@@ -370,30 +378,30 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("resolving the {language} server failed"),
     tr_noop!("resolving the {lang} adapter failed"),
     tr_noop!("search error: {e}"),
-    tr_noop!("semantic index unusable ({e}) — use `search` instead"),
+    tr_noop!("the semantic index is unusable ({e}). Use `search` instead"),
     tr_noop!(
-        "server {arg1} is not a plain name: ASCII letters, digits and . - _ + only, starting with a letter or digit, at most {arg2} characters"
+        "server {arg1} is not a plain name. It can use only ASCII letters, digits and . - _ +, must start with a letter or digit, and can be at most {arg2} characters long"
     ),
-    tr_noop!("set by the project (.clew/lsp.toml), nothing to install"),
+    tr_noop!("set by the project (.clew/lsp.toml), so there is nothing to install"),
     tr_noop!("stream error: {m}"),
     tr_noop!("stream read: {e}"),
     tr_noop!("tar extract failed: {e}"),
     tr_noop!("the Dart SDK you chose cannot be run: {why}"),
-    tr_noop!("the Erlang node exited before its debugger connected — see its output"),
+    tr_noop!("the Erlang node exited before its debugger connected. See its output"),
     tr_noop!("the JVM did not answer in time"),
     tr_noop!("the JVM did not say where its debugger listens"),
     tr_noop!("the JVM exited before its debugger started listening"),
-    tr_noop!("the JVM exited before its debugger started — see its output"),
+    tr_noop!("the JVM exited before its debugger started. See its output"),
     tr_noop!("the JVM is gone"),
     tr_noop!("the JVM is gone: {e}"),
-    tr_noop!("the JVM's agent did not shake hands: {e}"),
+    tr_noop!("the JVM's agent did not complete the handshake: {e}"),
     tr_noop!("the JVM's debug agent gave an unexpected handshake reply"),
     tr_noop!("the JVM's debugger listens at {address}"),
     tr_noop!("the SOCKS proxy {arg1} {why}"),
     tr_noop!("the SOCKS proxy {name} broke off its handshake: {e}"),
     tr_noop!("the SOCKS proxy {name} closed the connection in its handshake"),
     tr_noop!("the Zig toolchain you chose cannot be run: {why}"),
-    tr_noop!("the `{name}` tool failed on these arguments — try different ones, or another tool"),
+    tr_noop!("the `{name}` tool failed with these arguments. Try different ones, or another tool"),
     tr_noop!("the agent did not answer in time"),
     tr_noop!("the agent needs you to sign in: {how}"),
     tr_noop!("the agent speaks ACP version {arg1}, and Clew speaks {PROTOCOL_VERSION}"),
@@ -407,14 +415,16 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("the authorization server does not support PKCE (S256)"),
     tr_noop!("the authorization server has no {key}"),
     tr_noop!("the authorization server's metadata names another issuer ({named}, not {issuer})"),
-    tr_noop!("the clew-speak beside Clew is older than it and cannot listen for the wake phrase"),
-    tr_noop!("the clew-speak beside Clew is older than it and cannot run {arg1}"),
-    tr_noop!("the connect failed: {e}"),
+    tr_noop!(
+        "the clew-speak installed with Clew is older than Clew and cannot listen for the wake phrase"
+    ),
+    tr_noop!("the clew-speak installed with Clew is older than Clew and cannot run {arg1}"),
+    tr_noop!("the connection failed: {e}"),
     tr_noop!("the connection to Xdebug broke: {e}"),
     tr_noop!("the connection to it broke: {why}"),
     tr_noop!("the connection to the server broke: {error}"),
     tr_noop!(
-        "the conversation is too large to send ({arg1} KB) — ask a narrower question or clear the chat"
+        "the conversation is too large to send ({arg1} KB). Ask a narrower question or clear the chat"
     ),
     tr_noop!("the current work {other}"),
     tr_noop!("the current work {vs}, uncommitted edits included"),
@@ -423,17 +433,17 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("the debug adapter exited ({status}) before accepting a connection on {addr}"),
     tr_noop!("the debug adapter exited ({status}) before it was ready"),
     tr_noop!("the debug adapter failed: {e}"),
-    tr_noop!("the debug adapter listens on {addr}, not on loopback — refusing to connect"),
+    tr_noop!("the debug adapter listens on {addr}, not on loopback, so Clew did not connect to it"),
     tr_noop!("the debug adapter printed too much before reporting its port"),
     tr_noop!(
-        "the deprecated SSE transport is not supported — use the server's Streamable HTTP URL or its command"
+        "the deprecated SSE transport is not supported. Use the server's Streamable HTTP URL or its command"
     ),
     tr_noop!("the download could not be opened: {e}"),
     tr_noop!(
-        "the download does not match the published {arg1} (its {arg2} is {digest}, not {arg3}) — it was discarded"
+        "the download does not match the published {arg1} (its {arg2} is {digest}, not {arg3}), so it was discarded"
     ),
     tr_noop!(
-        "the download does not match the published {arg1} ({arg2} bytes, not {bytes}) — it was discarded"
+        "the download does not match the published {arg1} ({arg2} bytes, not {bytes}), so it was discarded"
     ),
     tr_noop!("the download is larger than {arg1} should be"),
     tr_noop!("the download is not an archive: {e}"),
@@ -442,7 +452,7 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("the embedding model could not start: {why}"),
     tr_noop!("the embedding model ended unexpectedly: {why}"),
     tr_noop!("the embedding model returned a vector with invalid values"),
-    tr_noop!("the embedding model said something unreadable: {e}"),
+    tr_noop!("the embedding model sent an invalid reply: {e}"),
     tr_noop!("the embedding model stopped answering"),
     tr_noop!("the embedding model took too long to load"),
     tr_noop!("the embedding model's reply could not be read: {e}"),
@@ -451,18 +461,20 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("the endpoint returned no vector"),
     tr_noop!("the endpoint returned vectors of different lengths ({arg1} and {arg2})"),
     tr_noop!("the file at this path was replaced"),
-    tr_noop!("the install approval is malformed — refusing"),
+    tr_noop!("the install approval is malformed, so Clew did not run the install"),
     tr_noop!(
-        "the install changed after it was approved (was .clew/lsp.toml edited?) — refusing it; review the new prompt and approve that instead"
+        "the install changed after it was approved (was .clew/lsp.toml edited?), so Clew did not run it. Review the new prompt and approve that instead"
     ),
-    tr_noop!("the install was prepared for version {arg1} but {version} was requested — refusing"),
+    tr_noop!(
+        "the install was prepared for version {arg1}, but {version} was requested, so Clew did not run it"
+    ),
     tr_noop!("the keyword spotter answered before it was ready"),
-    tr_noop!("the keyword spotter could not keep up — this computer may be too busy"),
+    tr_noop!("the keyword spotter could not keep up. This computer may be too busy"),
     tr_noop!("the keyword spotter ended"),
-    tr_noop!("the keyword spotter said something unreadable: {e}"),
+    tr_noop!("the keyword spotter sent an invalid reply: {e}"),
     tr_noop!("the keyword spotter stopped accepting audio"),
     tr_noop!("the keyword spotter stopped answering"),
-    tr_noop!("the keyword spotter stopped while starting — it may be damaged"),
+    tr_noop!("the keyword spotter stopped while starting. It may be damaged"),
     tr_noop!("the keyword spotter took too long to load"),
     tr_noop!("the microphone did not open in time"),
     tr_noop!("the microphone failed: {e}"),
@@ -488,8 +500,8 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("the node did not connect: {e}"),
     tr_noop!("the node is gone"),
     tr_noop!("the node is gone: {e}"),
-    tr_noop!("the program did not compile — see the output"),
-    tr_noop!("the program ended before Xdebug connected — see its output"),
+    tr_noop!("the program did not compile. See the output"),
+    tr_noop!("the program ended before Xdebug connected. See its output"),
     tr_noop!("the program ended before Xdebug read the command"),
     tr_noop!("the program has ended"),
     tr_noop!("the program is gone"),
@@ -504,7 +516,7 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("the proxy {name} broke off its answer to the CONNECT to {authority} ({how})"),
     tr_noop!("the proxy {name} closed the connection instead of answering the CONNECT"),
     tr_noop!(
-        "the proxy {name} did not answer the CONNECT to {authority} ({arg1}); it may have rejected the user name and password in its setting"
+        "the proxy {name} did not answer the CONNECT to {authority} ({arg1}). It may have rejected the user name and password in its setting"
     ),
     tr_noop!("the proxy {name} failed the CONNECT to {authority}: {arg1}"),
     tr_noop!("the proxy {name} failed the CONNECT to {authority}: {how}"),
@@ -517,12 +529,12 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("the response headers exceed {arg1} KiB"),
     tr_noop!("the response is not valid HTTP: {e}"),
     tr_noop!(
-        "the semantic index holds {dims}-dimensional vectors but the query embedding has {arg1} — the embedding endpoint changed its output; rebuild the index"
+        "the semantic index has {dims}-dimensional vectors, but the query embedding has {arg1}. The embedding endpoint changed its output, so rebuild the index"
     ),
-    tr_noop!("the semantic index {arg1} is not a plain file; ignored"),
-    tr_noop!("the semantic index {arg1} is unreadable ({e}); it will be rebuilt"),
+    tr_noop!("the semantic index {arg1} is not a plain file, so it was ignored"),
+    tr_noop!("the semantic index {arg1} is unreadable ({e}) and will be rebuilt"),
     tr_noop!(
-        "the semantic index {arg1} is {arg2} MiB, over the {arg3} MiB read cap; ignored and rebuilt"
+        "the semantic index {arg1} is {arg2} MiB, over the {arg3} MiB read limit, so it will be ignored and rebuilt"
     ),
     tr_noop!("the server answered HTTP {status}"),
     tr_noop!("the server answered HTTP {status}: {body}"),
@@ -530,22 +542,24 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("the server chose MCP {version}, which Clew does not speak"),
     tr_noop!("the server did not answer in time"),
     tr_noop!("the server does not say where to sign in (no protected resource metadata)"),
-    tr_noop!("the server needs you to sign in (HTTP {status}) — Settings → Integrations → Sign in"),
-    tr_noop!("the server redirected to {arg1} — configure that URL instead"),
     tr_noop!(
-        "the server refused the request (HTTP {status}) — it needs credentials: add them as a header (e.g. Authorization) in the server's settings"
+        "the server needs you to sign in (HTTP {status}). Go to Settings → Integrations → Sign in"
+    ),
+    tr_noop!("the server redirected to {arg1}. Configure that URL instead"),
+    tr_noop!(
+        "the server refused the request (HTTP {status}) because it needs credentials. Add them as a header (such as Authorization) in the server's settings"
     ),
     tr_noop!(
-        "the server refused the request (HTTP {status}) — it needs credentials: add them as a header (e.g. Authorization) in the server's settings ({detail})"
+        "the server refused the request (HTTP {status}) because it needs credentials. Add them as a header (such as Authorization) in the server's settings ({detail})"
     ),
     tr_noop!("the server speaks MCP {arg1}, and Clew speaks {arg2} and {arg3}"),
     tr_noop!("the server speaks MCP {arg1}, which Clew does not"),
     tr_noop!("the server's answer is not valid MCP: {why}"),
     tr_noop!("the server's metadata describes another resource ({named})"),
     tr_noop!("the session is ending"),
-    tr_noop!("the sign-in came back from another authorization server — refused"),
-    tr_noop!("the sign-in response did not say who sent it — refused"),
-    tr_noop!("the sign-in response does not match the request — refused"),
+    tr_noop!("the sign-in came back from another authorization server, so it was rejected"),
+    tr_noop!("the sign-in response did not say who sent it, so it was rejected"),
+    tr_noop!("the sign-in response does not match the request, so it was rejected"),
     tr_noop!("the sign-in was not finished in the browser in time"),
     tr_noop!("the sign-in was refused: {error}"),
     tr_noop!("the sign-in was refused: {error}: {d}"),
@@ -553,7 +567,7 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("the speaker failed: {e}"),
     tr_noop!("the speaker's sample format ({other}) is not supported"),
     tr_noop!("the speech model failed: {e}"),
-    tr_noop!("the staged command has mode {mode}, not 0500 — refusing to run it"),
+    tr_noop!("the staged command has mode {mode}, not 0500, so Clew did not run it"),
     tr_noop!("the state operation on .clew/{rel} failed unexpectedly"),
     tr_noop!("the state worker is gone: {rel}"),
     tr_noop!("the stream ended inside a message"),
@@ -564,7 +578,7 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("the token endpoint gave a malformed {field}"),
     tr_noop!("the tokenizer could not be read: {e}"),
     tr_noop!(
-        "the update contains Clew {v}, which is not newer than the running {running} — refusing to install it"
+        "the update contains Clew {v}, which is not newer than the running {running}, so it was not installed"
     ),
     tr_noop!("the update declares an unreadable version {candidate}"),
     tr_noop!("the voice answered before it was ready"),
@@ -573,9 +587,9 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("the voice failed: {e}"),
     tr_noop!("the voice is not downloaded"),
     tr_noop!("the voice is not running"),
-    tr_noop!("the voice said something unreadable: {e}"),
+    tr_noop!("the voice sent an invalid reply: {e}"),
     tr_noop!("the voice stopped accepting text: {e}"),
-    tr_noop!("the voice stopped while starting — its model may be damaged"),
+    tr_noop!("the voice stopped while starting. Its model may be damaged"),
     tr_noop!("the voice took too long to load"),
     tr_noop!("the voice took too long to speak"),
     tr_noop!("the voice's audio is unreadable: {e}"),
@@ -586,40 +600,42 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("the {arg1} server program you chose cannot be run: {why}"),
     tr_noop!("the {arg1} tool failed unexpectedly"),
     tr_noop!(
-        "the {language} language server is not installed — the user can open a {language} file in Clew to install it; use `search` for now"
+        "the {language} language server is not installed. The user can open a {language} file in Clew to install it. Use `search` for now"
     ),
     tr_noop!("the {language} server is not installed"),
     tr_noop!(
-        "the {language} server is not installed on this host — it must be installed (with the user's consent) first"
+        "the {language} server is not installed on this host. It must be installed first, with the user's consent"
     ),
     tr_noop!("the {language} server is set by the project (.clew/lsp.toml)"),
-    tr_noop!("the {language} server is set by the project (.clew/lsp.toml), nothing to install"),
+    tr_noop!(
+        "the {language} server is set by the project (.clew/lsp.toml), so there is nothing to install"
+    ),
     tr_noop!(
         "the {lang} debug adapter speaks DAP over a TCP port on this host, which a remote client cannot reach"
     ),
     tr_noop!(
-        "this Xdebug cannot pause a running PHP program: it takes no command while the program runs (supports_async is off), and has no control socket (Xdebug 3.4 and later, on Linux)"
+        "this Xdebug cannot pause a running PHP program. It takes no commands while the program runs (supports_async is off), and it has no control socket (Xdebug 3.4 and later, on Linux)"
     ),
     tr_noop!("this build of Clew ships no clew-server named {asset}"),
     tr_noop!(
-        "this project's lsp.toml init_options for {language} are not approved — they were NOT sent to the language server"
+        "this project's lsp.toml init_options for {language} are not approved, so they were not sent to the language server"
     ),
     tr_noop!(
-        "this project's lsp.toml init_options for {language} cannot be fingerprinted ({e}) — they were not sent to the server"
+        "this project's lsp.toml init_options for {language} cannot be fingerprinted ({e}), so they were not sent to the server"
     ),
-    tr_noop!("this server is not installed by Clew — nothing to install"),
+    tr_noop!("this server is not installed by Clew, so there is nothing to install"),
     tr_noop!(
-        "this server speaks only the old HTTP+SSE transport (MCP 2024-11-05), which Clew does not — use its Streamable HTTP endpoint, or run it over stdio"
+        "this server speaks only the old HTTP+SSE transport (MCP 2024-11-05), which Clew does not support. Use its Streamable HTTP endpoint, or run it over stdio"
     ),
     tr_noop!("through the proxy {proxy}: {why}"),
     tr_noop!("timed out connecting to {arg1}"),
     tr_noop!("timed out looking up {host}"),
-    tr_noop!("timed out: the SOCKS proxy {name} did not finish its handshake"),
+    tr_noop!("timed out because the SOCKS proxy {name} did not finish its handshake"),
     tr_noop!(
-        "timed out: the download stayed below {arg1} KiB/s for {arg2} s (after the first {arg3} s)"
+        "timed out because the download stayed below {arg1} KiB/s for {arg2} s (after the first {arg3} s)"
     ),
-    tr_noop!("timed out: the peer {what} for {seconds} s"),
-    tr_noop!("too much sign-in data to save — sign out of an MCP server"),
+    tr_noop!("timed out because the peer {what} for {seconds} s"),
+    tr_noop!("too much sign-in data to save. Sign out of an MCP server"),
     tr_noop!("unexpected answer from {arg1}"),
     tr_noop!("unexpected ls-tree entry for {rel}"),
     tr_noop!("unknown tool: {name}"),
@@ -631,10 +647,12 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("unusable proxy setting {arg1}: {why}"),
     tr_noop!("update check failed: {e}"),
     tr_noop!(
-        "version {arg1} is not a plain version: ASCII letters, digits and . - _ + only, starting with a letter or digit, at most {arg2} characters"
+        "version {arg1} is not a plain version. It can use only ASCII letters, digits and . - _ +, must start with a letter or digit, and can be at most {arg2} characters long"
     ),
     tr_noop!("waiting for {name}: {e}"),
-    tr_noop!("was written by a newer Clew (schema {found}; this version understands {supported})"),
+    tr_noop!(
+        "was written by a newer Clew (schema {found}, but this version understands {supported})"
+    ),
     tr_noop!("writing to it failed: {e}"),
     tr_noop!("x-mcp-header `{header}` appears twice"),
     tr_noop!("x-mcp-header of `{arg1}` is not a header name"),
@@ -647,72 +665,72 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("{arg1} (requires {arg2} on PATH)"),
     tr_noop!("{arg1} answered before it was ready"),
     tr_noop!("{arg1} answered {p}, not a probability"),
-    tr_noop!("{arg1} cannot be read ({e}) — fix or remove it"),
+    tr_noop!("{arg1} cannot be read ({e}). Fix or remove it"),
     tr_noop!("{arg1} cannot be read: {e}"),
     tr_noop!("{arg1} could not be run as Python 3"),
     tr_noop!("{arg1} did not answer in time"),
-    tr_noop!("{arg1} ended while it was judging a pause"),
+    tr_noop!("{arg1} ended while checking whether you had finished speaking"),
     tr_noop!(
-        "{arg1} has not been allowed to build this project (it runs {runs}) — open a {arg2} file in Clew to allow it"
+        "{arg1} has not been allowed to build this project (it runs {runs}). Open a {arg2} file in Clew to allow it"
     ),
     tr_noop!("{arg1} is not a directory"),
     tr_noop!("{arg1} is not a project state file"),
     tr_noop!("{arg1} is not an Erlang source file (.erl)"),
     tr_noop!("{arg1} is not an executable file"),
     tr_noop!("{arg1} is not available for this platform"),
-    tr_noop!("{arg1} is not installed on the remote host — install it there: {arg2}"),
+    tr_noop!("{arg1} is not installed on the remote host. Install it there: {arg2}"),
     tr_noop!("{arg1} is not loaded"),
     tr_noop!("{arg1} is not running"),
     tr_noop!("{arg1} is not valid TOML: {e}"),
-    tr_noop!("{arg1} is outside the project — Clew serves only the project's files"),
+    tr_noop!("{arg1} is outside the project. Clew serves only the project's files"),
     tr_noop!("{arg1} made at line {arg2}"),
     tr_noop!("{arg1} more tools past the first {MAX_TOOLS}"),
-    tr_noop!("{arg1} said something unreadable: {e}"),
+    tr_noop!("{arg1} sent an invalid reply: {e}"),
     tr_noop!("{arg1} stopped accepting audio: {e}"),
-    tr_noop!("{arg1} stopped while starting — its model may be damaged"),
+    tr_noop!("{arg1} stopped while starting. Its model may be damaged"),
     tr_noop!("{arg1} took too long to answer"),
     tr_noop!("{arg1} took too long to load"),
     tr_noop!(
-        "{arg1} {arg2} is not available: Clew ships a verified {arg3} only at {arg4}. Remove the version from .clew/lsp.toml, or set a command of your own there."
+        "{arg1} {arg2} is not available. Clew ships a verified {arg3} only in version {arg4}. Remove the version from .clew/lsp.toml, or set a command of your own there."
     ),
-    tr_noop!("{arg1} — the first {MAX_NODES} shown of {arg2}"),
+    tr_noop!("{arg1} (showing the first {MAX_NODES} of {arg2})"),
     tr_noop!("{arg1}: a staged copy that does not match the approval could not be removed: {e}"),
-    tr_noop!("{arg1}: changed while it was being staged — refusing to run it"),
+    tr_noop!("{arg1}: changed while it was being staged, so Clew did not run it"),
     tr_noop!("{arg1}: grew past the size cap"),
     tr_noop!("{arg1}: grew past the size cap while being staged"),
-    tr_noop!("{arg1}: larger than {arg2} MB — refusing to fingerprint"),
+    tr_noop!("{arg1}: larger than {arg2} MB, so it was not fingerprinted"),
     tr_noop!("{arg1}: not a readable regular file"),
-    tr_noop!("{arg1}: version {arg2} is not a plain version — refusing to provision it"),
-    tr_noop!("{arg1}: {e} — it changed after it was approved; open the file again to re-approve"),
+    tr_noop!("{arg1}: version {arg2} is not a plain version, so Clew will not install it"),
+    tr_noop!("{arg1}: {e}. It changed after it was approved. Open the file again to re-approve it"),
     tr_noop!("{base} is not a revision"),
     tr_noop!("{base} shares no commit with HEAD"),
     tr_noop!("{current} (through the proxy {arg1}): {arg2}"),
     tr_noop!("{current}: HTTP {status} with a Location that is not UTF-8"),
     tr_noop!("{current}: HTTP {status} without a Location"),
     tr_noop!("{current}: an unreadable redirect to {location} ({e})"),
-    tr_noop!("{current}: refusing a redirect to a non-HTTPS URL: {next}"),
-    tr_noop!("{current}: the transfer took too long — giving up"),
+    tr_noop!("{current}: did not follow a redirect to a non-HTTPS URL: {next}"),
+    tr_noop!("{current}: the transfer took too long and was stopped"),
     tr_noop!("{cwd} is not a folder"),
     tr_noop!("{c} is not understood here"),
     tr_noop!("{edit_id} is not an edit id"),
     tr_noop!(
-        "{e} — a {arg1}:// proxy is handed the address Clew looks up here; for a name only the proxy's side of the network knows, set it as {instead}://, which hands the proxy the name"
+        "{e}. A {arg1}:// proxy gets the address that Clew looks up on this computer. For a name that only the proxy's side of the network knows, use {instead}:// instead, which passes the name to the proxy"
     ),
-    tr_noop!("{e} — left untouched rather than overwritten"),
+    tr_noop!("{e}. It was left untouched, not overwritten"),
     tr_noop!("{host} has no address"),
     tr_noop!("{host} is not a host name TLS can verify: {e}"),
     tr_noop!("{issuer} publishes no authorization server metadata"),
     tr_noop!("{lock_name} is not a lock file name"),
     tr_noop!("{mime} ({arg1} MB, too large)"),
-    tr_noop!("{module} did not compile — see the output"),
+    tr_noop!("{module} did not compile. See the output"),
     tr_noop!("{name} did not finish within {arg1} s and was stopped"),
     tr_noop!("{name} in the archive is not the file it should be"),
     tr_noop!("{name} in the archive is not the size it should be"),
     tr_noop!("{name} needs an object to call it on"),
     tr_noop!("{name} was cancelled and stopped"),
     tr_noop!("{name} was cancelled before it started"),
-    tr_noop!("{name} — run the agent's command in a terminal, then ask again"),
-    tr_noop!("{name} — run the agent's command with {arg1} in a terminal, then ask again"),
+    tr_noop!("{name}. Run the agent's command in a terminal, then ask again"),
+    tr_noop!("{name}. Run the agent's command with {arg1} in a terminal, then ask again"),
     tr_noop!("{n} entries skipped (name is not UTF-8)"),
     tr_noop!("{n} tracked files shown despite .gitignore or a build-directory name"),
     tr_noop!("{n} unreadable entries (first: {error})"),
@@ -740,21 +758,21 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("{url}: a range other than `bytes=N-` was asked for: {value}"),
     tr_noop!("{url}: an MCP server is reached over http(s), not {other}"),
     tr_noop!(
-        "{url}: an authorization endpoint must be https — refusing to send credentials in the clear"
+        "{url}: an authorization endpoint must use https. Clew will not send credentials unencrypted"
     ),
     tr_noop!("{url}: could not start the transfer: {e}"),
     tr_noop!("{url}: more than {MAX_REDIRECTS} redirects"),
-    tr_noop!("{url}: not sent — its host name is ambiguous"),
-    tr_noop!("{url}: plain http to another machine would send everything in the clear — use https"),
+    tr_noop!("{url}: not sent because its host name is ambiguous"),
+    tr_noop!("{url}: plain http to another machine would send everything unencrypted. Use https"),
     tr_noop!("{url}: the response exceeds the {arg1} byte limit"),
     tr_noop!("{url}: the response is {total} bytes, over the {cap} byte limit"),
     tr_noop!("{url}: the server sent part of the download without saying which part"),
     tr_noop!("{url}: the server sent the download from byte {start}, not {from}"),
     tr_noop!("{url}: the server sent the rest of the download compressed"),
     tr_noop!("{url}: the transfer stopped unexpectedly"),
-    tr_noop!("{url}: the transfer took too long — giving up"),
+    tr_noop!("{url}: the transfer took too long and was stopped"),
     tr_noop!(
-        "{who} endpoint redirected to {location}; not following, because the API key would travel with it — set the Base URL in Settings to the real endpoint"
+        "{who} endpoint redirected to {location}, which Clew didn't follow to keep the API key safe. Set the Base URL in Settings to the real endpoint"
     ),
 ];
 
@@ -783,17 +801,17 @@ pub(crate) const PARTS: &[&str] = &[
     tr_noop!("list the host in no_proxy, which Clew reads in place of NO_PROXY"),
 ];
 
-/// Advice those crates add to a message after a dash; said apart from the
-/// message it follows. Kept by hand, checked as [`PARTS`] are.
+/// Advice those crates add to a message as a sentence after it, said apart
+/// from the message it follows. Kept by hand, checked as [`PARTS`] are.
 pub(crate) const TAILS: &[&str] = &[
     tr_noop!(
-        " — if they are wrong, correct them in its setting ({arg1}, {PERCENT_ENCODING}); if they are right, try again later, or {bypass}"
+        ". If they are wrong, correct them in its setting ({arg1}, {PERCENT_ENCODING}). If they are right, try again later, or {bypass}"
     ),
     tr_noop!(
-        " — set a local relay that can log in for Clew, such as cntlm or px, as the proxy instead, or {bypass}"
+        ". Set a local relay that can log in for Clew, such as cntlm or px, as the proxy instead, or {bypass}"
     ),
-    tr_noop!(" — to reach the host without the proxy, {bypass}"),
-    tr_noop!(" — {give}, or {bypass}"),
+    tr_noop!(". To reach the host without the proxy, {bypass}"),
+    tr_noop!(". To fix this, {give}, or {bypass}"),
 ];
 
 /// What other programs clew runs say that reaches the screen inside clew's

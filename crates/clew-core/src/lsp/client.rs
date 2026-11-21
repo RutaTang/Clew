@@ -238,7 +238,7 @@ pub struct StatePoisoned;
 
 impl std::fmt::Display for StatePoisoned {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Clew lost track of this language server after an internal error; restart it")
+        f.write_str("Clew lost track of this language server after an internal error. Restart it")
     }
 }
 
@@ -3797,7 +3797,7 @@ mod session_tests {
         assert_eq!(client.logs(), Err(StatePoisoned));
         assert_eq!(client.log_tail(2), Err(StatePoisoned));
         let error = client.error().expect("poisoning is reported as an error");
-        assert!(error.contains("restart"), "{error}");
+        assert!(error.contains("Restart"), "{error}");
     }
 
     #[tokio::test]

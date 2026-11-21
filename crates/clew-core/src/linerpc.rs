@@ -329,7 +329,7 @@ impl Session {
     pub fn spawn(launch: &Launch, options: Options) -> Result<Session, String> {
         let program = resolve_program(&launch.program).ok_or_else(|| {
             format!(
-                "`{}` was not found — give its full path, or install it",
+                "`{}` was not found. Give its full path, or install it",
                 launch.program
             )
         })?;

@@ -104,7 +104,7 @@ impl Speaker {
                 for line in BufReader::new(stdout).lines() {
                     let answer = match line {
                         Ok(line) => serde_json::from_str::<Answer>(&line)
-                            .map_err(|e| format!("the voice said something unreadable: {e}")),
+                            .map_err(|e| format!("the voice sent an invalid reply: {e}")),
                         Err(e) => Err(format!("the voice's reply could not be read: {e}")),
                     };
                     let stop = answer.is_err();
@@ -132,7 +132,7 @@ impl Speaker {
             Ok(Ok(_)) => Err("the voice answered before it was ready".into()),
             Err(mpsc::RecvTimeoutError::Timeout) => Err("the voice took too long to load".into()),
             Err(mpsc::RecvTimeoutError::Disconnected) => {
-                Err("the voice stopped while starting — its model may be damaged".into())
+                Err("the voice stopped while starting. Its model may be damaged".into())
             }
         }
     }

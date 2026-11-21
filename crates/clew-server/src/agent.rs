@@ -984,8 +984,7 @@ impl Turn<'_> {
         }
         if size > CONTEXT_HARD_BYTES {
             return Err(Halt::Failed(format!(
-                "the conversation is too large to send ({} KB) — ask a narrower question or \
-                 clear the chat",
+                "the conversation is too large to send ({} KB). Ask a narrower question or clear the chat",
                 size / 1024
             )));
         }
@@ -1409,7 +1408,7 @@ fn guard_tool(
         // progress.
         Err(_) => (
             format!(
-                "the `{name}` tool failed on these arguments — try different ones, or another tool"
+                "the `{name}` tool failed with these arguments. Try different ones, or another tool"
             ),
             format!("{name} (failed)"),
             Vec::new(),
@@ -1440,7 +1439,9 @@ fn dispatch_tool(
         // it led to, under the link's name.
         if link_at(ctx, rel) {
             return (
-                format!("cannot ask about {rel}: it is a symlink, not a file of the project"),
+                format!(
+                    "cannot ask about {rel} because it is a symlink, not a file of the project"
+                ),
                 title,
                 Vec::new(),
                 true,
@@ -1746,7 +1747,9 @@ fn exec_tool_basic(
             // would open to a refusal.
             if link_at(ctx, rel) {
                 return (
-                    format!("no history for {rel}: it is a symlink, not a file of the project"),
+                    format!(
+                        "no history for {rel} because it is a symlink, not a file of the project"
+                    ),
                     format!("history {rel}"),
                     Vec::new(),
                 );
@@ -1763,7 +1766,7 @@ fn exec_tool_basic(
             if tracked.is_empty() {
                 return (
                     format!(
-                        "no history for {rel}: that is the project itself — ask for a file or folder in it"
+                        "no history for {rel} because that is the project itself. Ask for a file or folder in it"
                     ),
                     format!("history {rel}"),
                     Vec::new(),
@@ -1868,7 +1871,7 @@ fn exec_tool_basic(
                 Ok(v) => v,
                 Err(e) => {
                     return (
-                        format!("embedding the query failed ({e}) — use `search` instead"),
+                        format!("embedding the query failed ({e}). Use `search` instead"),
                         format!("find \"{query}\" (failed)"),
                         Vec::new(),
                     );
@@ -1882,7 +1885,7 @@ fn exec_tool_basic(
                 Ok(hits) => hits,
                 Err(e) => {
                     return (
-                        format!("semantic index unusable ({e}) — use `search` instead"),
+                        format!("the semantic index is unusable ({e}). Use `search` instead"),
                         format!("find \"{query}\" (index mismatch)"),
                         Vec::new(),
                     );
@@ -1930,7 +1933,9 @@ fn exec_tool_basic(
                 }
                 if link_at(ctx, rel) {
                     return (
-                        format!("no changes for {rel}: it is a symlink, not a file of the project"),
+                        format!(
+                            "no changes for {rel} because it is a symlink, not a file of the project"
+                        ),
                         title(""),
                         Vec::new(),
                     );
@@ -3869,7 +3874,7 @@ mod tests {
         );
         assert_eq!(
             content,
-            "cannot ask about src/alias.rs: it is a symlink, not a file of the project"
+            "cannot ask about src/alias.rs because it is a symlink, not a file of the project"
         );
         assert!(refs.is_empty());
         // Nor through a spelling that names a folder: macOS resolved
@@ -4212,7 +4217,7 @@ mod tests {
             assert_eq!(
                 content,
                 format!(
-                    "no history for {root}: that is the project itself — ask for a file or folder in it"
+                    "no history for {root} because that is the project itself. Ask for a file or folder in it"
                 )
             );
             assert!(refs.is_empty());

@@ -527,7 +527,7 @@ impl std::fmt::Display for StoreError {
             StoreError::Unparseable(e) => write!(f, "cannot be parsed: {e}"),
             StoreError::NewerSchema { found, supported } => write!(
                 f,
-                "was written by a newer Clew (schema {found}; this version understands {supported})"
+                "was written by a newer Clew (schema {found}, but this version understands {supported})"
             ),
         }
     }
@@ -555,10 +555,7 @@ impl From<StoreError> for std::io::Error {
             },
             _ => std::io::ErrorKind::InvalidData,
         };
-        std::io::Error::new(
-            kind,
-            format!("{e} — left untouched rather than overwritten"),
-        )
+        std::io::Error::new(kind, format!("{e}. It was left untouched, not overwritten"))
     }
 }
 

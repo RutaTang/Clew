@@ -403,7 +403,7 @@ fn speak(tts: &sherpa_onnx::OfflineTts, family: Family, say: &Say) -> Result<Vec
     let config = generation(family, say, tts.num_speakers());
     let Some(audio) = tts.generate_with_config(&say.text, &config, None::<fn(&[f32], f32) -> bool>)
     else {
-        return Err("nothing could be made of it".into());
+        return Err("no audio could be made from the text".into());
     };
     Ok(audio.samples().to_vec())
 }

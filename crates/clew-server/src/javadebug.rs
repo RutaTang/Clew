@@ -325,7 +325,7 @@ impl Jdwp {
         stream
             .read_exact(&mut answer)
             .await
-            .map_err(|e| format!("the JVM's agent did not shake hands: {e}"))?;
+            .map_err(|e| format!("the JVM's agent did not complete the handshake: {e}"))?;
         if &answer != b"JDWP-Handshake" {
             return Err("the JVM's debug agent gave an unexpected handshake reply".into());
         }
@@ -1089,7 +1089,7 @@ impl Adapter {
                 Err(_) => return Err("the JVM did not say where its debugger listens".into()),
             },
             _ = exited.wait_for(Option::is_some) => {
-                return Err("the JVM exited before its debugger started — see its output".into());
+                return Err("the JVM exited before its debugger started. See its output".into());
             }
         };
         tokio::spawn(forward(Box::new(stdout), "stdout", self.out.clone()));
@@ -1142,7 +1142,7 @@ impl Adapter {
         }
         match output.status.success() {
             true => Ok(()),
-            false => Err("the program did not compile — see the output".into()),
+            false => Err("the program did not compile. See the output".into()),
         }
     }
 
@@ -1938,7 +1938,7 @@ impl Parser {
                 Some(".") => {
                     self.at += 1;
                     let Some(Token::Name(name)) = self.tokens.get(self.at).cloned() else {
-                        return Err("a name expected after .".into());
+                        return Err("expected a name after .".into());
                     };
                     self.at += 1;
                     expr = match self.peek_op() {
@@ -2176,7 +2176,7 @@ impl Frame<'_> {
         args: &[JValue],
     ) -> Result<JValue, String> {
         if !self.calls {
-            return Err("hovering does not run methods — evaluate the expression instead".into());
+            return Err("hovering does not run methods. Evaluate the expression instead".into());
         }
         self.vm
             .invoke(object, class, self.thread, method, args)

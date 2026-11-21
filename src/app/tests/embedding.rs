@@ -289,8 +289,7 @@ fn what_is_missing_to_make_embeddings_is_said() {
     assert_eq!(app.proj.ask_notice.as_deref(), Some(download.as_str()));
     assert!(app.proj.ask_notice_embeddings);
     // Downloaded: the program is what is missing.
-    let program =
-        "clew-speak, which makes embeddings on this computer, is not installed beside Clew";
+    let program = "clew-speak, which makes embeddings on this computer, is not installed with Clew";
     install_all(&local::dir().unwrap());
     let _ = app.update(Message::Semantic(SemanticMsg::Search));
     assert_eq!(app.status, program);

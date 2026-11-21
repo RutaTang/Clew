@@ -60,7 +60,7 @@ fn is_file(path: &std::path::Path) -> bool {
 /// beside Clew.
 pub(crate) fn missing_here() -> String {
     if local::installed() {
-        tr!("clew-speak, which makes embeddings on this computer, is not installed beside Clew")
+        tr!("clew-speak, which makes embeddings on this computer, is not installed with Clew")
             .into()
     } else {
         tr!(

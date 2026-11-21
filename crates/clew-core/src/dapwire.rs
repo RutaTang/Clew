@@ -118,7 +118,7 @@ pub fn usable(token: &str) -> Result<SocketAddr, String> {
         .ok_or_else(|| format!("the debug adapter announced an unusable address {token:?}"))?;
     if !addr.ip().is_loopback() {
         return Err(format!(
-            "the debug adapter listens on {addr}, not on loopback — refusing to connect"
+            "the debug adapter listens on {addr}, not on loopback, so Clew did not connect to it"
         ));
     }
     Ok(addr)

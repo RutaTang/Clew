@@ -257,24 +257,22 @@ impl std::fmt::Display for McpError {
                 ..
             } => write!(
                 f,
-                "the server needs you to sign in (HTTP {status}) — Settings → Integrations → Sign in"
+                "the server needs you to sign in (HTTP {status}). Go to Settings → Integrations → Sign in"
             ),
             // Two messages, not one with an optional tail: each is then
             // whole, and said whole in the reader's language.
             McpError::Unauthorized { status, detail, .. } if detail.is_empty() => write!(
                 f,
-                "the server refused the request (HTTP {status}) — it needs credentials: \
-                 add them as a header (e.g. Authorization) in the server's settings"
+                "the server refused the request (HTTP {status}) because it needs credentials. Add them as a header (such as Authorization) in the server's settings"
             ),
             McpError::Unauthorized { status, detail, .. } => write!(
                 f,
-                "the server refused the request (HTTP {status}) — it needs credentials: \
-                 add them as a header (e.g. Authorization) in the server's settings ({detail})"
+                "the server refused the request (HTTP {status}) because it needs credentials. Add them as a header (such as Authorization) in the server's settings ({detail})"
             ),
             McpError::Protocol(why) => write!(f, "the server's answer is not valid MCP: {why}"),
             McpError::OldSse => write!(
                 f,
-                "this server speaks only the old HTTP+SSE transport (MCP 2024-11-05), which Clew does not — use its Streamable HTTP endpoint, or run it over stdio"
+                "this server speaks only the old HTTP+SSE transport (MCP 2024-11-05), which Clew does not support. Use its Streamable HTTP endpoint, or run it over stdio"
             ),
             McpError::Cancelled => write!(f, "cancelled"),
         }

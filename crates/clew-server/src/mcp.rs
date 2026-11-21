@@ -222,8 +222,7 @@ impl CodeTools {
                     .into(),
             ),
             Waited::NotTaken => Err(format!(
-                "No Clew window has this project open, so the try was not run. Ask the user \
-                 to open {} in Clew, then try again.",
+                "No Clew window has this project open, so the test run did not start. Ask the user to open {} in Clew, then try again.",
                 self.root.display()
             )),
             Waited::NoAnswer if installing => Err(
@@ -231,7 +230,7 @@ impl CodeTools {
                  whether they want it, then try again."
                     .into(),
             ),
-            Waited::NoAnswer => Err("The try did not finish in time.".into()),
+            Waited::NoAnswer => Err("The test run did not finish in time.".into()),
         }
     }
 }

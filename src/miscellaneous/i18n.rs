@@ -822,7 +822,7 @@ pub fn message(text: &str) -> String {
 fn message_at(text: &str, depth: usize) -> String {
     let lang = current();
     // Each level says a strictly shorter part of the text (what fills a
-    // place, what precedes a dash, one of several lines), so the depth only
+    // place, what precedes its advice, one of several lines), so the depth only
     // bounds the work; real messages nest five or six deep ("request
     // failed: " around a proxy's refusal, its advice, the advice's parts).
     if lang == Lang::En || depth > MAX_DEPTH || text.is_empty() {
@@ -839,15 +839,15 @@ fn message_at(text: &str, depth: usize) -> String {
         all.extend(templates(EXTERNAL));
         all
     });
-    // A message with advice added after a dash ("…: refused — to reach the
-    // host without the proxy, …"): each said apart. First where what
-    // precedes the dash is a whole message itself — before a looser
+    // A message with advice added as a sentence after it ("…: refused. To
+    // reach the host without the proxy, …"): each said apart. First where
+    // what precedes the advice is a whole message itself — before a looser
     // template, whose last place would take the advice in, is tried on all
     // of it; then whatever precedes it.
     let ends = ENDS.get_or_init(|| templates(TAILS));
     let advice = |head_whole: bool| {
         let mut from = 0;
-        while let Some(at) = text[from..].find(" — ").map(|at| from + at) {
+        while let Some(at) = text[from..].find(ADVICE).map(|at| from + at) {
             let head = &text[..at];
             let whole_head =
                 catalog(lang).contains_key(head) || said_as(whole, head, depth + 1).is_some();
@@ -856,7 +856,7 @@ fn message_at(text: &str, depth: usize) -> String {
             {
                 return Some(message_at(head, depth + 1) + &tail);
             }
-            from = at + " — ".len();
+            from = at + ADVICE.len();
         }
         None
     };
@@ -901,6 +901,11 @@ fn one_counted(english: &str, said: &str) -> String {
         said.to_string()
     }
 }
+
+/// What begins the advice other crates add to a message ([`TAILS`]).
+///
+/// [`TAILS`]: crate::miscellaneous::extern_messages::TAILS
+const ADVICE: &str = ". ";
 
 /// How deep [`message`] says the parts of parts of a message.
 const MAX_DEPTH: usize = 8;
@@ -1616,7 +1621,7 @@ mod tests {
     }
 
     /// The parts those crates put into their messages and the advice they
-    /// add after a dash are still theirs: each is in their source.
+    /// add after a message are still theirs: each is in their source.
     #[test]
     fn message_parts_and_tails_are_the_crates_own() {
         use crate::miscellaneous::extern_messages::{PARTS, TAILS};
@@ -1638,7 +1643,7 @@ mod tests {
         }
     }
 
-    /// Advice added after a dash is said in the reader's language, apart
+    /// Advice added after a message is said in the reader's language, apart
     /// from what it follows, and a part the code puts into a message (why
     /// a time-out happened) too.
     #[test]
@@ -1646,9 +1651,9 @@ mod tests {
         with_lang(Lang::Fr, || {
             let fr = catalog(Lang::Fr);
             let bypass = "list the host in no_proxy, which Clew reads in place of NO_PROXY";
-            let tail = " — to reach the host without the proxy, {bypass}";
+            let tail = ". To reach the host without the proxy, {bypass}";
             let said = message(&format!(
-                "the session is ending — to reach the host without the proxy, {bypass}"
+                "the session is ending. To reach the host without the proxy, {bypass}"
             ));
             assert_eq!(
                 said,
@@ -1658,7 +1663,7 @@ mod tests {
                     format(fr[tail], &[("bypass", &fr[bypass])])
                 )
             );
-            let timed = message("timed out: the peer sent nothing for 30 s");
+            let timed = message("timed out because the peer sent nothing for 30 s");
             assert!(timed.contains(fr["sent nothing"]), "{timed}");
         });
     }
@@ -1817,8 +1822,9 @@ mod tests {
     #[test]
     fn a_refusal_is_said_with_or_without_its_detail() {
         with_lang(Lang::Ja, || {
-            let refused = "the server refused the request (HTTP 401) — it needs credentials: \
-                           add them as a header (e.g. Authorization) in the server's settings";
+            let refused = "the server refused the request (HTTP 401) because it needs \
+                           credentials. Add them as a header (such as Authorization) in the \
+                           server's settings";
             let said = message(refused);
             assert!(!said.contains("refused"), "{said}");
             let said = message(&format!("{refused} (invalid_token)"));
@@ -1836,7 +1842,7 @@ mod tests {
         with_lang(Lang::Fr, || {
             let said = message(
                 "the proxy http://…@proxy.corp:3128 answered HTTP 407 (Proxy Authentication \
-                 Required): it accepts only NTLM or Negotiate logins, which Clew does not support — set a local relay that can log in for Clew, such as cntlm or px, as the proxy instead, or list the host in no_proxy, which Clew reads in place of \
+                 Required): it accepts only NTLM or Negotiate logins, which Clew does not support. Set a local relay that can log in for Clew, such as cntlm or px, as the proxy instead, or list the host in no_proxy, which Clew reads in place of \
                  NO_PROXY",
             );
             for english in ["answered", "accepts only", "local relay", "list the host"] {
@@ -1852,7 +1858,7 @@ mod tests {
     }
 
     /// A proxy's failure as Ask and Explain show it — inside "request
-    /// failed: …", with advice after a dash whose own parts are said too —
+    /// failed: …", with advice after it whose own parts are said too —
     /// comes out in the reader's language to its last part; and advice is
     /// said apart before a looser message is tried on all of it, which
     /// would take the advice into its last place.
@@ -1863,7 +1869,7 @@ mod tests {
         with_lang(Lang::Fr, || {
             let said = message(&format!(
                 "request failed: the proxy http://proxy.corp:3128 answered HTTP 407 (Proxy \
-                 Authentication Required): it asks for a user name and password — Clew cannot read proxy passwords from the keychain: put them in environment variables (percent-encoding any character in them that is not a letter or a digit); Clew then uses those instead of all of the system's proxy settings, so set \
+                 Authentication Required): it asks for a user name and password. To fix this, Clew needs the user name and password in environment variables (percent-encoding any character in them that is not a letter or a digit) because it cannot read proxy passwords from the keychain. It then uses those variables instead of all of the system's proxy settings, so set \
                  https_proxy=http://user:password@proxy.corp:3128, or {system_bypass}"
             ));
             for english in [
@@ -1878,7 +1884,7 @@ mod tests {
             }
             let said = message(&format!(
                 "request failed: the SOCKS proxy 10.0.0.1:1080 could not reach api.x.com:443 \
-                 (SOCKS4 answer 91: rejected or failed) — to reach the host without the proxy, \
+                 (SOCKS4 answer 91: rejected or failed). To reach the host without the proxy, \
                  {env_bypass}"
             ));
             for english in [
@@ -1890,7 +1896,7 @@ mod tests {
                 assert!(!said.contains(english), "{english}: {said}");
             }
             let said = message(&format!(
-                "the SOCKS proxy 10.0.0.1:1080 closed the connection in its handshake — to \
+                "the SOCKS proxy 10.0.0.1:1080 closed the connection in its handshake. To \
                  reach the host without the proxy, {env_bypass}"
             ));
             assert!(!said.contains("closed the connection"), "{said}");
@@ -2112,8 +2118,10 @@ mod tests {
         words >= 3
             && said.contains(' ')
             && said.matches('\n').count() <= 1
-            && said.chars().count() <= 220
+            && said.chars().count() <= 240
             && !said.starts_with(char::is_whitespace)
+            // Advice added to another message (`TAILS`), listed apart.
+            && !said.starts_with(ADVICE)
             && !said.starts_with(['[', '<', '$'])
             && (!said.starts_with('{') || opens_with_a_place(said))
             && !said.starts_with("--")
@@ -2132,7 +2140,9 @@ mod tests {
             .is_some_and(|(inner, after)| {
                 let name = inner.split(':').next().unwrap_or_default();
                 name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-                    && (after.starts_with(' ') || after.starts_with(": "))
+                    && (after.starts_with(' ')
+                        || after.starts_with(": ")
+                        || after.starts_with(ADVICE))
             })
     }
 
