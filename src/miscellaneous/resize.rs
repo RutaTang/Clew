@@ -229,6 +229,10 @@ where
             renderer.fill_quad(
                 renderer::Quad {
                     bounds: rect,
+                    border: iced::Border {
+                        radius: cap(rect).into(),
+                        ..iced::Border::default()
+                    },
                     ..Default::default()
                 },
                 color,
@@ -297,6 +301,12 @@ pub fn paint(
         }
         Panel::Before | Panel::After => Vec::new(),
     }
+}
+
+/// The corner radius that rounds a line's ends: half its width, so each
+/// end is a half circle rather than cut square.
+pub fn cap(rect: Rectangle) -> f32 {
+    rect.width.min(rect.height) / 2.0
 }
 
 /// `rect`, a line along the strip, stopped `inset` short of each end.
@@ -423,6 +433,15 @@ mod tests {
             height: 12.0,
         };
         assert_eq!(shorten(stub, true, 10.0).height, 0.0);
+    }
+
+    /// A lit line's ends are round — half its width — however it lies.
+    #[test]
+    fn a_lit_line_has_round_ends() {
+        let side = paint(strip(true), true, Panel::Before, true, COLORS)[0].0;
+        assert_eq!(cap(side), ACTIVE_LINE / 2.0);
+        let across = paint(strip(false), false, Panel::After, true, COLORS)[0].0;
+        assert_eq!(cap(across), ACTIVE_LINE / 2.0);
     }
 
     /// Between two parts of one panel it keeps its hairline down the middle.
