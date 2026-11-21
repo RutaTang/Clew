@@ -166,8 +166,11 @@ pub(crate) fn sidebar(app: &App) -> Element<'_, Message> {
     let tabs = container(tabs_row.push(more))
         .padding(2)
         .style(theme::trough);
-    // A view not on the strip, opened by what shows it, is named over it,
-    // with the way back to the files.
+    // A view not on the strip, opened by what shows it, is named over it:
+    // the ⋯ it was chosen from, raised, does not say which it is. Left as
+    // the views on the strip are, by choosing another there — a × beside
+    // its name, "back to the files", read as closing something, and was a
+    // way out the other views do not have.
     let titled: Element<'_, Message> = if elsewhere {
         container(
             row![
@@ -176,28 +179,15 @@ pub(crate) fn sidebar(app: &App) -> Element<'_, Message> {
                     .size(ts::BASE)
                     .font(crate::fonts::UI_SEMIBOLD)
                     .color(theme::fg()),
-                space().width(Fill),
-                tip_at(
-                    button(glyph::icon(Glyph::Close, theme::fg_muted(), 13.0))
-                        .style(theme::icon_button(false))
-                        .padding(5)
-                        .on_press(super::heard::said(
-                            tr!("Close"),
-                            Message::Window(WindowMsg::SidebarTabPicked(SidebarTab::Files,))
-                        )),
-                    tr!("Back to the files"),
-                    None,
-                    tooltip::Position::Bottom,
-                ),
             ]
             .spacing(8)
             .align_y(iced::Center),
         )
         .padding(Padding {
             top: 0.0,
-            right: 8.0,
+            right: SIDE_PAD,
             bottom: SIDEBAR_GAP,
-            left: 14.0,
+            left: SIDE_TEXT_X,
         })
         .into()
     } else {
@@ -314,9 +304,9 @@ pub(crate) fn walk_tab(app: &App) -> Element<'_, Message> {
     }
     let review = container(actions).padding(Padding {
         top: 0.0,
-        right: 8.0,
+        right: SIDE_PAD,
         bottom: 6.0,
-        left: 8.0,
+        left: SIDE_PAD,
     });
 
     // The library list is always shown under the input; selecting a tour expands
@@ -556,8 +546,16 @@ pub(crate) fn walk_header(app: &App) -> Element<'_, Message> {
             iced::widget::tooltip::Position::Bottom,
         ));
     }
+    // At the sidebar's line for boxes, just under the views' switch, as
+    // the Files view's filter is: 8 in all round set it 2 wider than the
+    // switch above it and 8 lower than the filter.
     container(column![toggle, field].spacing(8))
-        .padding(8)
+        .padding(Padding {
+            top: 0.0,
+            right: SIDE_PAD,
+            bottom: 8.0,
+            left: SIDE_PAD,
+        })
         .into()
 }
 
@@ -1889,7 +1887,12 @@ pub(crate) fn search_tab(app: &App) -> Element<'_, Message> {
         ],
     }
     .spacing(6)
-    .padding(8);
+    .padding(Padding {
+        top: 0.0,
+        right: SIDE_PAD,
+        bottom: 8.0,
+        left: SIDE_PAD,
+    });
     if let Some((status, color)) = status_line {
         col = col.push(text(status).size(ts::SMALL).color(color));
     }
@@ -2113,13 +2116,21 @@ pub(crate) fn trail_tab(app: &App) -> Element<'_, Message> {
             )),
     ]
     .align_y(iced::Center)
+    // Its name at the line for words, its Clear's word ending where the
+    // rows' bands do less their padding.
     .padding(Padding {
-        top: 4.0,
-        right: 8.0,
-        bottom: 2.0,
-        left: 8.0,
+        top: 0.0,
+        right: SIDE_PAD,
+        bottom: 4.0,
+        left: SIDE_TEXT_X,
     });
 
+    // The arrow's column only where the trail forks somewhere: a straight
+    // trail kept an empty one, and its rows began 34 in.
+    let any_fold = visits
+        .iter()
+        .any(|v| v.has_children && (v.forks || v.collapsed));
+    let fold_w = if any_fold { CHEVRON_W } else { 0.0 };
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
     for v in &visits {
         // Indented under each fork above it — a hop that just followed the
@@ -2129,8 +2140,9 @@ pub(crate) fn trail_tab(app: &App) -> Element<'_, Message> {
         // What is left for its name and file after the row's indent, chevron,
         // mark and icon: cut with an ellipsis, where they were cut bare.
         let room = (app.sidebar_width
+            - 2.0 * SIDE_PAD
             - indent
-            - CHEVRON_W
+            - fold_w
             - 10.0
             - 12.0
             - 3.0 * 6.0
@@ -2151,7 +2163,7 @@ pub(crate) fn trail_tab(app: &App) -> Element<'_, Message> {
                 }),
             )
         } else {
-            space().width(CHEVRON_W).into()
+            space().width(fold_w).into()
         };
         // Status marker: current dot (accent), fork ⋔ (accent), other visited
         // nodes a grey dot so the trail reads as a string of nodes. The dots
@@ -2174,54 +2186,56 @@ pub(crate) fn trail_tab(app: &App) -> Element<'_, Message> {
                 .align_x(iced::Center)
                 .into()
         };
-        // The row is the whole width, as the file tree's are — its depth
-        // indents what is in it, not the row — and the place being read is
-        // the row lit as the open file is, its name in the medium weight.
+        // The row's band is as wide as the file tree's — its depth indents
+        // what is in it, not the band — and the place being read is the
+        // row lit as the open file is, its name in the medium weight.
         let name_font = if v.is_current {
             crate::fonts::UI_MEDIUM
         } else {
             crate::fonts::UI
         };
         let jump = button(
-            row![
-                space().width(indent),
-                toggle,
-                marker,
-                container(glyph::icon(Glyph::File, theme::dim(), 12.0)).width(12),
-                container(column![
-                    text(super::steady::elide_end(
-                        &stop_label(app, &v.loc, v.label.as_deref()),
-                        ts::BODY,
-                        name_font,
-                        room,
-                    ))
-                    .size(ts::BODY)
-                    .font(name_font)
-                    .color(theme::fg())
-                    .wrapping(Wrapping::None),
-                    text(super::steady::elide_start(
-                        &trail_caption(app, v),
-                        ts::CAPTION,
-                        crate::fonts::UI,
-                        room,
-                    ))
-                    .size(ts::CAPTION)
-                    .color(theme::dim())
-                    .wrapping(Wrapping::None),
-                ])
-                .width(Fill)
-                .clip(true),
-            ]
-            .spacing(6)
-            .align_y(iced::Center),
+            Row::new()
+                .extend((indent > 0.0).then(|| space().width(indent).into()))
+                .extend(any_fold.then_some(toggle))
+                .push(marker)
+                .push(container(glyph::icon(Glyph::File, theme::dim(), 12.0)).width(12))
+                .push(
+                    container(column![
+                        text(super::steady::elide_end(
+                            &stop_label(app, &v.loc, v.label.as_deref()),
+                            ts::BODY,
+                            name_font,
+                            room,
+                        ))
+                        .size(ts::BODY)
+                        .font(name_font)
+                        .color(theme::fg())
+                        .wrapping(Wrapping::None),
+                        text(super::steady::elide_start(
+                            &trail_caption(app, v),
+                            ts::CAPTION,
+                            crate::fonts::UI,
+                            room,
+                        ))
+                        .size(ts::CAPTION)
+                        .color(theme::dim())
+                        .wrapping(Wrapping::None),
+                    ])
+                    .width(Fill)
+                    .clip(true),
+                )
+                .spacing(6)
+                .align_y(iced::Center),
         )
         .style(theme::list_row(v.is_current))
         .width(Fill)
+        // Its first mark at the line for words, under the trail's name.
         .padding(Padding {
             top: 3.0,
             right: 8.0,
             bottom: 3.0,
-            left: 6.0,
+            left: SIDE_TEXT_X - SIDE_PAD,
         })
         .on_press(super::heard::row(
             || stop_label(app, &v.loc, v.label.as_deref()),
@@ -2235,11 +2249,16 @@ pub(crate) fn trail_tab(app: &App) -> Element<'_, Message> {
     }
     column![
         header,
-        scrollable(Column::with_children(rows).spacing(1))
-            .id(super::trail_scroll_id())
-            .direction(thin_scroll())
-            .style(theme::overlay_scrollbar)
-            .height(Fill),
+        scrollable(Column::with_children(rows).spacing(1).padding(Padding {
+            top: 0.0,
+            right: SIDE_PAD,
+            bottom: 8.0,
+            left: SIDE_PAD,
+        }))
+        .id(super::trail_scroll_id())
+        .direction(thin_scroll())
+        .style(theme::overlay_scrollbar)
+        .height(Fill),
     ]
     .into()
 }
@@ -2458,47 +2477,73 @@ pub(crate) fn marks_tab(app: &App) -> Element<'_, Message> {
 pub(crate) fn notes_tab(app: &App) -> Element<'_, Message> {
     if app.active_viewer().is_none() {
         return column![
-            row![space().width(Fill), notes_export(app)],
+            section_head(tr!("All notes"), notes_export(app), SIDE_PAD - 2.0),
             notes_list(app)
         ]
         .into();
     }
-    let label = |s: &'static str| {
-        container(
-            text(s)
-                .size(ts::SMALL)
-                .font(crate::fonts::UI_SEMIBOLD)
-                .color(theme::dim()),
-        )
-        .padding(Padding {
-            top: 8.0,
-            right: 14.0,
-            bottom: 2.0,
-            left: 14.0,
-        })
-    };
+    // The count's words end where the rows' pencils do; the Export button's,
+    // inside its own padding, the same.
     column![
-        label(tr!("In this file")),
+        section_head(
+            tr!("In this file"),
+            super::panes::outline_understood(app),
+            SIDE_TEXT_X + 4.0
+        ),
         container(outline_content(app)).height(Length::FillPortion(1)),
         hairline(),
-        row![
-            label(tr!("All notes")),
-            space().width(Fill),
-            notes_export(app)
-        ]
-        .align_y(iced::Bottom),
+        section_head(tr!("All notes"), notes_export(app), SIDE_PAD - 2.0),
         container(notes_list(app)).height(Length::FillPortion(1)),
     ]
     .into()
 }
 
+/// How far a sidebar view's boxes — fields, switches, rows' bands — stand
+/// in from its edges: the views' switch above them, and the Files view's
+/// filter and rows, do.
+pub(crate) const SIDE_PAD: f32 = 10.0;
+/// Where a sidebar view's words and marks begin: its title's icon, its
+/// sections' names, and the first mark of a row in a band.
+pub(crate) const SIDE_TEXT_X: f32 = 14.0;
+
+/// A section's name, at the sidebar's line for words, and what it counts
+/// or offers at its other end, `right` in from the edge. The Your notes
+/// view's count stood on a line of its own under its name, 4 to the left
+/// of it, and the rows' circles 6 further left again.
+fn section_head<'a>(
+    name: &'a str,
+    end: Option<Element<'a, Message>>,
+    right: f32,
+) -> Element<'a, Message> {
+    container(
+        row![
+            text(name)
+                .size(ts::SMALL)
+                .font(crate::fonts::UI_SEMIBOLD)
+                .color(theme::dim())
+                .wrapping(Wrapping::None),
+            space().width(Fill),
+        ]
+        .extend(end)
+        .spacing(8)
+        .align_y(iced::Center),
+    )
+    .padding(Padding {
+        top: 8.0,
+        right,
+        bottom: 4.0,
+        left: SIDE_TEXT_X,
+    })
+    .into()
+}
+
 /// The notes exported, as one Markdown file — here, where they are: none
 /// yet, nothing to export.
-fn notes_export(app: &App) -> Element<'_, Message> {
+fn notes_export(app: &App) -> Option<Element<'_, Message>> {
     if app.proj.notes.is_empty() {
-        return space().into();
+        return None;
     }
-    container(
+    Some(
         button(
             text(tr!("Export…"))
                 .size(ts::SMALL)
@@ -2509,13 +2554,9 @@ fn notes_export(app: &App) -> Element<'_, Message> {
         .on_press(super::heard::said(
             tr!("Export notes"),
             Message::Export(ExportMsg::Start),
-        )),
+        ))
+        .into(),
     )
-    .padding(Padding {
-        right: 8.0,
-        ..Padding::ZERO
-    })
-    .into()
 }
 
 /// Every reading note in the project, file by file — the notes on
@@ -3009,7 +3050,12 @@ pub(crate) fn semantic_tab(app: &App) -> Element<'_, Message> {
                 .height(Fill),
         ]
         .spacing(8)
-        .padding([8, 8]),
+        .padding(Padding {
+            top: 0.0,
+            right: SIDE_PAD,
+            bottom: 8.0,
+            left: SIDE_PAD,
+        }),
     )
     .height(Fill)
     .into()
@@ -3088,8 +3134,40 @@ fn walk_action<'a>(
 /// A sidebar view's filter: the filter mark, the field, and — once there is
 /// something in it — a × that empties it; Escape in it does too
 /// (`escaped`). The Files view's and the API docs': the docs' was a plain
-/// field of another style.
+/// field of another style. At the sidebar's line for boxes, with the room
+/// under it the views keep before their lists.
 pub(crate) fn filter_field<'a>(
+    placeholder: &'a str,
+    value: &'a str,
+    id: Option<iced::widget::Id>,
+    on_input: fn(String) -> Message,
+    on_submit: Option<Message>,
+    escaped: Message,
+    down: Option<Message>,
+) -> Element<'a, Message> {
+    container(filter_box(
+        placeholder,
+        value,
+        id,
+        on_input,
+        on_submit,
+        escaped,
+        down,
+    ))
+    .padding(Padding {
+        top: 0.0,
+        right: SIDE_PAD,
+        bottom: SIDEBAR_GAP,
+        left: SIDE_PAD,
+    })
+    .into()
+}
+
+/// [`filter_field`] alone, with no room round it: for a row that sets it
+/// beside something of its own (History's Refresh). Inside that room as
+/// well, History's filter stood 10 in from the switch under it, and its
+/// Refresh 6 below the field's middle.
+pub(crate) fn filter_box<'a>(
     placeholder: &'a str,
     value: &'a str,
     id: Option<iced::widget::Id>,
@@ -3131,24 +3209,16 @@ pub(crate) fn filter_field<'a>(
             tooltip::Position::Bottom,
         ));
     }
-    container(
-        super::escape_clears::EscapeClears::new(
-            container(field)
-                .height(Length::Fixed(FILTER_H))
-                // The design's 10 inside its 1 px border, which here
-                // takes no room of its own.
-                .padding([1, 11])
-                .style(theme::field(!value.is_empty())),
-            escaped,
-        )
-        .ringed(9.0)
-        .on_down(down),
+    super::escape_clears::EscapeClears::new(
+        container(field)
+            .height(Length::Fixed(FILTER_H))
+            // The design's 10 inside its 1 px border, which here
+            // takes no room of its own.
+            .padding([1, 11])
+            .style(theme::field(!value.is_empty())),
+        escaped,
     )
-    .padding(Padding {
-        top: 0.0,
-        right: 10.0,
-        bottom: SIDEBAR_GAP,
-        left: 10.0,
-    })
+    .ringed(9.0)
+    .on_down(down)
     .into()
 }

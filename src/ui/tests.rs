@@ -4752,6 +4752,256 @@ fn the_proof_panel_marks_what_each_tactic_did() {
     assert!(shows(&mut sim_of(&app), "No goals left: proved."));
 }
 
+/// The Your notes view's count stands on its section's line, at its other
+/// end — it stood under the name, 4 to the left of it — and a row's circle
+/// is centred on the name it belongs to: top-aligned beside the row's
+/// column, it sat 3 below it.
+#[test]
+fn the_notes_count_and_circles_sit_on_their_lines() {
+    let mut app = reader_app();
+    app.proj.panes[0].as_mut().unwrap().symbols = vec![clew_protocol::Symbol {
+        name: "OutOfStock".into(),
+        kind: "class".into(),
+        line: 1,
+        end_line: 4,
+    }];
+    let view = || sim_elem(super::sidebar::notes_tab(&app));
+    let label = text_at(&mut view(), |t| t == "In this file", 0).expect("the section");
+    let count = text_at(&mut view(), |t| t == "0/1 understood", 0).expect("its count");
+    assert!(
+        (label.center_y() - count.center_y()).abs() < 1.0,
+        "{label:?} / {count:?}"
+    );
+    assert!(count.x > label.x + label.width, "{label:?} / {count:?}");
+    // The circle: left of the name, where a press marks it understood.
+    let name = text_at(&mut view(), |t| t == "OutOfStock", 0).expect("the row");
+    let toggles = |at: Point| {
+        let mut sim = view();
+        sim.point_at(at);
+        let _ = sim.simulate(iced_test::simulator::click());
+        sent_by(sim)
+            .iter()
+            .any(|m| matches!(m, Message::Reading(ReadingMsg::NoteToggleUnderstood { .. })))
+    };
+    let x = (4..80)
+        .map(|dx| name.x - dx as f32)
+        .find(|&x| toggles(Point::new(x, name.center_y())))
+        .expect("no circle left of the name");
+    let hit: Vec<f32> = (-16..=16)
+        .map(|dy| name.center_y() + dy as f32)
+        .filter(|&y| toggles(Point::new(x, y)))
+        .collect();
+    let (top, bottom) = (hit[0], hit[hit.len() - 1]);
+    assert!(
+        ((top + bottom) / 2.0 - name.center_y()).abs() <= 1.5,
+        "circle {top}..{bottom}, name at {}",
+        name.center_y()
+    );
+    // The section's name starts where the view's words do.
+    assert!(
+        (label.x - super::sidebar::SIDE_TEXT_X).abs() < 1.5,
+        "{label:?}"
+    );
+}
+
+/// A tree view heads its root once — "give_back loans.py:45" over its
+/// callers, not again as their first row — pressed to go there, and its
+/// rows are as tall as the Files view's, at the sidebar's line for boxes.
+#[test]
+fn a_tree_view_heads_its_root_once_with_rows_like_the_files() {
+    let mut app = reader_app();
+    let mut tree = crate::callgraph::CallTree::new(
+        7,
+        crate::callgraph::Direction::Incoming,
+        "python",
+        vec![call_item("give_back")],
+    );
+    tree.set_children(0, vec![call_item("main"), call_item("teardown")]);
+    app.proj.call_graph = Some(tree);
+    let view = || sim_elem(super::calls_tab(&app));
+    assert!(text_at(&mut view(), |t| t == "give_back", 0).is_some());
+    assert!(
+        text_at(&mut view(), |t| t == "give_back", 1).is_none(),
+        "the root said twice"
+    );
+    assert!(shows(&mut view(), "x.rs:1"), "where the root is");
+    let sent = click(view(), "give_back");
+    assert!(
+        sent.iter().any(|m| matches!(
+            m,
+            Message::Editor(EditorMsg::OpenAbs { abs, line: Some(1), .. })
+                if abs.as_path() == std::path::Path::new("/p/x.rs")
+        )),
+        "{sent:?}"
+    );
+    let a = text_at(&mut view(), |t| t == "main", 0).expect("a caller");
+    let b = text_at(&mut view(), |t| t == "teardown", 0).expect("another");
+    let pitch = super::sidebar::TREE_ROW_H + super::sidebar::TREE_ROW_GAP;
+    assert!(
+        (b.center_y() - a.center_y() - pitch).abs() < 0.5,
+        "rows {} apart",
+        b.center_y() - a.center_y()
+    );
+    // A press on the band, right of the words, goes to the caller.
+    let sent = click_right_of(view, "main", |m| {
+        matches!(m, Message::Editor(EditorMsg::OpenAbs { .. }))
+    });
+    assert!(!sent.is_empty(), "the band is not pressed past its words");
+
+    // The import tree heads its file once too.
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    app.proj.import_tree = Some(crate::imports::ImportTree::new(
+        &crate::imports::ImportGraph::default(),
+        &root,
+        root.join("src/lib.rs"),
+        crate::imports::Dir::Imports,
+    ));
+    let mut tab = sim_elem(super::imports_tab(&app));
+    assert!(text_at(&mut tab, |t| t == "lib.rs", 0).is_some());
+    assert!(
+        text_at(&mut tab, |t| t == "lib.rs", 1).is_none(),
+        "the file said twice"
+    );
+}
+
+/// A view chosen from ⋯ is named over it, with no × beside its name: "back
+/// to the files" read as closing something, and is the views' switch's
+/// to do, as it is for every other view.
+#[test]
+fn a_view_from_more_views_has_no_close_beside_its_name() {
+    let mut app = reader_app();
+    app.sidebar = crate::SidebarTab::Imports;
+    let view = || sim_elem(super::sidebar::sidebar(&app));
+    let title = text_at(&mut view(), |t| t == "Imports", 0).expect("the view's name");
+    // Pressed anywhere along the name's line, nothing goes back to the files.
+    let back = (0..(app.sidebar_width / 3.0) as usize)
+        .map(|i| i as f32 * 3.0 + 1.0)
+        .find(|&x| {
+            let mut sim = view();
+            sim.point_at(Point::new(x, title.center_y()));
+            let _ = sim.simulate(iced_test::simulator::click());
+            sent_by(sim).iter().any(|m| {
+                matches!(
+                    m,
+                    Message::Window(WindowMsg::SidebarTabPicked(crate::SidebarTab::Files))
+                )
+            })
+        });
+    assert_eq!(back, None, "a × beside the view's name");
+}
+
+/// The sidebar's views start their fields at its line for boxes, under
+/// the views' switch, as the Files view's filter does — Search, Find by
+/// meaning and the reading guide's stood 8 in, 2 wider than the switch —
+/// and the Reading trail's name at its line for words.
+#[test]
+fn the_sidebar_views_start_on_its_lines() {
+    let app = reader_app();
+    let first_field_x = |elem: Element<'_, Message>| {
+        let mut sim = sim_elem(elem);
+        sim.find(|c: iced_test::selector::Candidate<'_>| match c {
+            iced_test::selector::Candidate::TextInput { bounds, .. } => Some(bounds.x),
+            _ => None,
+        })
+        .expect("a field")
+    };
+    for (view, x) in [
+        ("search", first_field_x(super::sidebar::search_tab(&app))),
+        ("meaning", first_field_x(super::semantic_tab(&app))),
+    ] {
+        assert!(
+            (x - super::sidebar::SIDE_PAD).abs() < 0.5,
+            "{view}'s field at {x}"
+        );
+    }
+}
+
+/// A run's tab holds its ×: pressed just past the ×, it is still the tab —
+/// the × stood outside it, as though it were the next control along — and
+/// the × follows the name with no empty slot between them, where an ended
+/// run's mark of how it was doing had been. Resting on the ×, only its own
+/// tooltip shows, not the tab's over it.
+#[test]
+fn a_run_tab_holds_its_close_button() {
+    use crate::app::state::RunTab;
+    let mut app = reader_app();
+    app.show_bottom = true;
+    app.debug.session = Some(crate::DebugSession {
+        client: None,
+        status: crate::DebugStatus::Terminated,
+        exit_code: Some(0),
+        thread_id: None,
+        frames: Vec::new(),
+        scopes: Vec::new(),
+        watches: Vec::new(),
+        output: Vec::new(),
+        current: None,
+        program: PathBuf::from("/p/main.py"),
+        args: Vec::new(),
+        cwd: PathBuf::from("/p"),
+        addr: None,
+    });
+    app.debug.tab = 1;
+    app.run_shown = Some(RunTab::Real(1));
+    let name = text_at(&mut sim_of(&app), |t| t == "Debug main.py", 0).expect("the tab");
+    // What a press sends, point by point along the tab's line past its
+    // name: S shows the tab, C closes it, - is nothing.
+    let along: String = (0..40)
+        .map(|i| {
+            let at = Point::new(name.x + name.width + 0.5 + i as f32, name.center_y());
+            let mut sim = sim_of(&app);
+            sim.point_at(at);
+            let _ = sim.simulate(iced_test::simulator::click());
+            let sent = sent_by(sim);
+            if sent
+                .iter()
+                .any(|m| matches!(m, Message::Debug(DebugMsg::CloseTab(RunTab::Real(1)))))
+            {
+                'C'
+            } else if sent
+                .iter()
+                .any(|m| matches!(m, Message::Debug(DebugMsg::ShowTab(RunTab::Real(1)))))
+            {
+                'S'
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let first = along.find('C').unwrap_or_else(|| panic!("no ×: {along}"));
+    let last = along.rfind('C').expect("found");
+    assert!(first <= 8, "a gap before the ×: {along}");
+    assert!(
+        along[last + 1..].starts_with('S'),
+        "the × outside the tab: {along}"
+    );
+    // Rested on: the ×'s name alone.
+    let on_close = Point::new(
+        name.x + name.width + 0.5 + (first + last) as f32 / 2.0,
+        name.center_y(),
+    );
+    super::tip::warm_now();
+    let mut sim = sim_of(&app);
+    sim.point_at(on_close);
+    let _ = sim.simulate([Event::Mouse(iced::mouse::Event::CursorMoved {
+        position: on_close,
+    })]);
+    assert!(text_at(&mut sim, |t| t == "Close Debug main.py", 0).is_some());
+    assert!(
+        text_at(&mut sim, |t| t == "Debug main.py — ended", 0).is_none(),
+        "the tab's tooltip over the ×'s"
+    );
+    // On its name, the tab's.
+    let on_name = name.center();
+    super::tip::warm_now();
+    let mut sim = sim_of(&app);
+    sim.point_at(on_name);
+    let _ = sim.simulate([Event::Mouse(iced::mouse::Event::CursorMoved {
+        position: on_name,
+    })]);
+    assert!(text_at(&mut sim, |t| t == "Debug main.py — ended", 0).is_some());
+}
+
 /// The bottom panel has a tab for each run, named by what it runs — the
 /// second of two Debugs of one program numbered — each pressed to show it
 /// and closed by its ×; with none, it offers the four ways to run.
@@ -9096,17 +9346,17 @@ fn the_call_tree_names_its_tree_and_shows_what_the_cap_hid() {
         "the cap's note is not under its node"
     );
     drop(sim);
-    // (The header names the root too: the row is the second "root".)
+    // The root heads the tree; its first caller's arrow opens that caller.
     let sent = click_left_of(
         || sim_elem(super::calls_tab(&app)),
-        "root",
-        1,
+        "caller_0",
+        0,
         |m| matches!(m, Message::Calls(CallsMsg::ExpandNode { .. })),
     );
     assert!(
         matches!(
             sent.as_slice(),
-            [Message::Calls(CallsMsg::ExpandNode { token: 7, id: 0 })]
+            [Message::Calls(CallsMsg::ExpandNode { token: 7, id: 1 })]
         ),
         "{sent:?}"
     );
@@ -20018,6 +20268,37 @@ fn the_uncommitted_row_lines_up_with_the_commits() {
         letter.x,
         words.x
     );
+}
+
+/// A commit's dot is drawn on its subject's line: in the row's middle it
+/// stood between the subject and the line under it, level with neither.
+#[test]
+fn a_commits_dot_is_on_its_subjects_line() {
+    use crate::HistoryMsg;
+    let (app, _new, old) = history_app();
+    let view = || sim_elem(super::history::history_tab(&app));
+    let subject = text_at(&mut view(), |t| t == "Start the shop", 0).expect("a commit");
+    let opens = |y: f32| {
+        let mut sim = view();
+        sim.point_at(Point::new(subject.x + 2.0, y));
+        let _ = sim.simulate(iced_test::simulator::click());
+        sent_by(sim)
+            .iter()
+            .any(|m| matches!(m, Message::History(HistoryMsg::Toggle(s)) if *s == old))
+    };
+    // The row's top: the highest point over the subject that still opens it.
+    let top = (0..60)
+        .map(|d| subject.center_y() - d as f32)
+        .take_while(|&y| opens(y))
+        .last()
+        .expect("the row");
+    let dot = super::history::DOT_Y;
+    assert!(
+        (subject.center_y() - top - dot).abs() <= 1.5,
+        "subject {} below the row's top, dot {dot}",
+        subject.center_y() - top
+    );
+    assert!(dot < super::history::ROW_H / 2.0 - 4.0, "the dot mid-row");
 }
 
 /// The History view lists the project's commits, newest first: the name

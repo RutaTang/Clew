@@ -3358,11 +3358,22 @@ pub(crate) fn outline_content(app: &App) -> Element<'_, Message> {
             None
         };
 
-        let mut col = Column::new().spacing(1).push(label);
+        // What is said under the name — its summary, the reader's note —
+        // starting a little past where the name does.
+        let mut under: Vec<Element<'_, Message>> = Vec::new();
+        let under_left = indent + OUTLINE_TOGGLE_W + 2.0 + 44.0;
+        let under_right = 6.0 + 2.0 + OUTLINE_PENCIL_W;
         // What a row's second line has, beside its indent and the list's
         // scrollbar: its words cut to it with an ellipsis — cut at 52
         // characters, then at the panel's edge, they ended mid-word.
-        let line_room = (app.sidebar_width - 44.0 - 6.0 - SCROLLBAR_W - 12.0 - indent).max(40.0);
+        let line_room = (app.sidebar_width
+            - 2.0 * super::sidebar::SIDE_PAD
+            - 44.0
+            - 6.0
+            - SCROLLBAR_W
+            - 12.0
+            - indent)
+            .max(40.0);
         let fit = |s: &str| super::steady::cut(s, line_room, ts::CAPTION, crate::fonts::UI);
         if let Some(full) = summary {
             // A one-line table-of-contents entry: the first sentence, truncated
@@ -3380,9 +3391,9 @@ pub(crate) fn outline_content(app: &App) -> Element<'_, Message> {
             .width(Fill)
             .padding(Padding {
                 top: 0.0,
-                right: 6.0,
+                right: under_right,
                 bottom: 0.0,
-                left: 44.0,
+                left: under_left,
             });
             let bubble = container(text(clean).size(ts::SMALL).color(theme::fg()))
                 .padding(Padding {
@@ -3393,7 +3404,11 @@ pub(crate) fn outline_content(app: &App) -> Element<'_, Message> {
                 })
                 .max_width(TIP_MAX_W)
                 .style(theme::modal_panel);
-            col = col.push(super::tip::tip(line, bubble, tooltip::Position::Bottom).gap(4.0));
+            under.push(
+                super::tip::tip(line, bubble, tooltip::Position::Bottom)
+                    .gap(4.0)
+                    .into(),
+            );
         }
         if let Some(n) = note.filter(|n| !n.text.is_empty()) {
             // The reader's own note, in accent so it's distinct from the
@@ -3416,9 +3431,9 @@ pub(crate) fn outline_content(app: &App) -> Element<'_, Message> {
             .width(Fill)
             .padding(Padding {
                 top: 0.0,
-                right: 4.0,
+                right: under_right,
                 bottom: 0.0,
-                left: 44.0,
+                left: under_left,
             });
             let bubble = container(text(n.text.as_str()).size(ts::SMALL).color(theme::fg()))
                 .padding(Padding {
@@ -3429,7 +3444,11 @@ pub(crate) fn outline_content(app: &App) -> Element<'_, Message> {
                 })
                 .max_width(TIP_MAX_W)
                 .style(theme::modal_panel);
-            col = col.push(super::tip::tip(line, bubble, tooltip::Position::Bottom).gap(4.0));
+            under.push(
+                super::tip::tip(line, bubble, tooltip::Position::Bottom)
+                    .gap(4.0)
+                    .into(),
+            );
         }
 
         // Leading "understood" toggle and trailing note pencil sit inside
@@ -3502,20 +3521,27 @@ pub(crate) fn outline_content(app: &App) -> Element<'_, Message> {
             None,
             tooltip::Position::Bottom,
         );
-        // Top-align so the toggle circle and pencil sit on the kind-badge/name
-        // line rather than floating in the middle of the multi-line row.
+        // The circle, the name and the pencil centred on one line, what is
+        // said of the symbol under it: top-aligned beside the whole column,
+        // the circle and pencil sat 3 below the name they belong to.
         let jump = button(
-            row![space().width(indent), toggle, col.width(Fill), pencil]
-                .spacing(2)
-                .align_y(iced::alignment::Vertical::Top),
+            column![
+                row![space().width(indent), toggle, label.width(Fill), pencil]
+                    .spacing(2)
+                    .align_y(iced::Center),
+            ]
+            .extend(under)
+            .spacing(1),
         )
         .style(theme::list_row(is_current))
         .width(Fill)
+        // Its circle at the sidebar's line for words, under the section's
+        // name; its pencil's end where the name's count ends.
         .padding(Padding {
             top: 2.0,
             right: 2.0,
             bottom: 2.0,
-            left: 2.0,
+            left: 0.0,
         })
         .on_press(super::heard::row(
             || symbol.name.clone(),
@@ -3524,11 +3550,32 @@ pub(crate) fn outline_content(app: &App) -> Element<'_, Message> {
         rows.push(jump.into());
     }
 
-    // Sub-label under "OUTLINE": the reader's manual "understood" coverage for
-    // this file. Plain text, left-aligned with the section header — no decorative
-    // leading circle (that read as a stray, non-clickable control). Explain-All
-    // progress lives only in the status bar, so it isn't duplicated here.
-    // What is read through, not every field and constant.
+    // The wrapping column must be Fill so the scrollable has a bounded height to
+    // scroll within — otherwise it grows to its content and never scrolls (which
+    // made long outlines like main.rs's 224 symbols un-navigable).
+    // Its rows' bands stand in from the sidebar's edges as the Files view's
+    // do, under the views' switch: they ran from edge to edge.
+    scrollable(Column::with_children(rows).width(Fill).padding(Padding {
+        top: 0.0,
+        right: super::sidebar::SIDE_PAD,
+        bottom: 0.0,
+        left: super::sidebar::SIDE_PAD,
+    }))
+    .id(outline_scroll_id())
+    .direction(thin_scroll())
+    .style(theme::overlay_scrollbar)
+    .height(Fill)
+    .into()
+}
+
+/// How much of the open file's outline the reader has marked understood —
+/// "0/7 understood", what is read through and not every field and
+/// constant — beside the section's name: none with no outline.
+pub(crate) fn outline_understood(app: &App) -> Option<Element<'_, Message>> {
+    let v = app.active_viewer()?;
+    if v.symbols.is_empty() {
+        return None;
+    }
     let names: Vec<String> = crate::notes::note_keys(&v.symbols)
         .into_iter()
         .zip(&v.symbols)
@@ -3538,34 +3585,15 @@ pub(crate) fn outline_content(app: &App) -> Element<'_, Message> {
     let (done, total) = crate::notes::coverage(&app.proj.notes, &v.rel, &names);
     // What "understood" counts, said where the pointer rests: the circle
     // beside each name was never explained.
-    let header_content: Element<'_, Message> = super::toolbar::tip_at(
+    Some(super::toolbar::tip_at(
         text(tr!("{done}/{total} understood", done = done, total = total))
             .size(ts::SMALL)
-            .color(theme::fg_muted()),
+            .color(theme::fg_muted())
+            .wrapping(Wrapping::None),
         tr!("Tick the circle beside a function once you've read it; this counts them"),
         None,
         iced::widget::tooltip::Position::Bottom,
-    );
-    let header = container(header_content).padding(Padding {
-        top: 2.0,
-        right: 10.0,
-        bottom: 4.0,
-        left: 10.0,
-    });
-
-    // The wrapping column must be Fill so the scrollable has a bounded height to
-    // scroll within — otherwise it grows to its content and never scrolls (which
-    // made long outlines like main.rs's 224 symbols un-navigable).
-    column![
-        header,
-        scrollable(Column::with_children(rows).width(Fill))
-            .id(outline_scroll_id())
-            .direction(thin_scroll())
-            .style(theme::overlay_scrollbar)
-            .height(Fill),
-    ]
-    .height(Fill)
-    .into()
+    ))
 }
 
 /// How far an outline row at `depth` stands in: a step per level, four at
@@ -3630,6 +3658,7 @@ fn outline_group_row<'a>(
 ) -> Element<'a, Message> {
     let indent = outline_indent(depth);
     let room = (app.sidebar_width
+        - 2.0 * super::sidebar::SIDE_PAD
         - indent
         - OUTLINE_TOGGLE_W
         - OUTLINE_PENCIL_W
@@ -3680,7 +3709,12 @@ fn outline_group_row<'a>(
     let row = button(face)
         .style(theme::list_row(false))
         .width(Fill)
-        .padding(2.0)
+        .padding(Padding {
+            top: 2.0,
+            right: 2.0,
+            bottom: 2.0,
+            left: 0.0,
+        })
         .on_press(super::heard::row(
             move || name.clone(),
             Message::Editor(EditorMsg::OutlineJump(group.line)),

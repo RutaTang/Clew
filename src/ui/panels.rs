@@ -211,8 +211,18 @@ pub(crate) fn run_tab_said(face: &crate::app::runs::TabFace, label: &str) -> Str
     }
 }
 
-/// One tab: the kind of run by its icon (the strip's own), what it runs, a
-/// mark of how it is doing, and a × that ends and closes it.
+/// The size of a run tab's icon, and of the box round it that its mark of
+/// how the run is doing sits in a corner of.
+const TAB_ICON: f32 = 13.0;
+const TAB_ICON_BOX: f32 = 15.0;
+/// The mark's size, its ring in the panel's ground included.
+const TAB_MARK: f32 = 8.0;
+
+/// One tab: the kind of run by its icon (the strip's own), with a mark of
+/// how it is doing on the icon's corner, what it runs, and a × that ends
+/// and closes it — the three in one tab. The × stood outside the tab, as
+/// though it were the next control along, and the mark took a slot of its
+/// own after the name that stood empty once the run had ended.
 fn run_tab<'a>(
     face: &crate::app::runs::TabFace,
     label: String,
@@ -238,56 +248,77 @@ fn run_tab<'a>(
         TabState::Done => (None, tr!("ended")),
         TabState::Failed => (Some(theme::danger()), tr!("failed")),
     };
-    let dot: Element<'a, Message> = match mark {
-        Some(c) => container(space().width(6).height(6))
-            .style(move |_: &iced::Theme| container::Style {
-                background: Some(c.into()),
-                border: iced::Border {
-                    radius: 3.0.into(),
+    let icon = container(glyph::icon(g, color, TAB_ICON)).center(TAB_ICON_BOX);
+    // On the icon's lower corner, ringed in the panel's ground so that it
+    // reads apart from the icon it sits on: no room of its own, so the
+    // tab neither grows nor leaves a gap as the run starts and ends.
+    let icon: Element<'a, Message> = match mark {
+        Some(c) => stack![
+            icon,
+            container(container(space().width(TAB_MARK).height(TAB_MARK)).style(
+                move |_: &iced::Theme| container::Style {
+                    background: Some(c.into()),
+                    border: iced::Border {
+                        radius: (TAB_MARK / 2.0).into(),
+                        width: 1.5,
+                        color: theme::bg(),
+                    },
                     ..Default::default()
-                },
-                ..Default::default()
-            })
-            .into(),
-        None => space().width(6).into(),
+                }
+            ))
+            .width(TAB_ICON_BOX)
+            .height(TAB_ICON_BOX)
+            .align_x(iced::alignment::Horizontal::Right)
+            .align_y(iced::alignment::Vertical::Bottom),
+        ]
+        .into(),
+        None => icon.into(),
     };
     // Said with its kind — "Run main.py", "Debug main.py": a run and a debug
     // of one program read the same, "main.py", told apart only by an icon.
     let said = run_tab_said(face, &label);
+    let close_said = tr!("Close {name}", name = said.clone());
+    // Inside the tab, at its end, as a tab's × is; its own press, washed a
+    // shade more than the tab under the pointer.
+    let close = super::toolbar::tip_at(
+        button(glyph::icon(Glyph::Close, theme::fg_muted(), 10.0))
+            .style(theme::icon_button(false))
+            .padding(3)
+            .on_press(super::heard::said(
+                &close_said,
+                Message::Debug(DebugMsg::CloseTab(face.tab)),
+            )),
+        close_said.clone(),
+        None,
+        tooltip::Position::Top,
+    );
     let pick = button(
         row![
-            glyph::icon(g, color, 13.0),
+            icon,
             text(said.clone())
                 .size(ts::SMALL)
                 .color(color)
                 .wrapping(Wrapping::None),
-            dot,
+            close,
         ]
-        .spacing(6)
+        .spacing(5)
         .align_y(iced::Center),
     )
     .style(theme::segment(shown))
-    .padding([3, 8])
+    // The icon's box gives it a point of room on its left: 7 and the ×'s
+    // own 3 set both ends 8 from the tab's edge, as the words were.
+    .padding(Padding {
+        top: 2.0,
+        right: 3.0,
+        bottom: 2.0,
+        left: 7.0,
+    })
     .on_press(super::heard::said(
         &said,
         Message::Debug(DebugMsg::ShowTab(face.tab)),
     ));
-    let close_said = tr!("Close {name}", name = said.clone());
-    let close = button(glyph::icon(Glyph::Close, theme::fg_muted(), 10.0))
-        .style(theme::list_row(false))
-        .padding([5, 5])
-        .on_press(super::heard::said(
-            &close_said,
-            Message::Debug(DebugMsg::CloseTab(face.tab)),
-        ));
     let tip = format!("{said} — {state}");
-    row![
-        super::toolbar::tip_at(pick, tip, None, tooltip::Position::Top),
-        super::toolbar::tip_at(close, close_said, None, tooltip::Position::Top),
-    ]
-    .spacing(0)
-    .align_y(iced::Center)
-    .into()
+    super::toolbar::tip_at(pick, tip, None, tooltip::Position::Top)
 }
 
 /// The bottom debugger panel: status + step controls, and four columns —
@@ -1082,7 +1113,7 @@ fn tree_empty_row<'a>(depth: usize, note: String) -> Element<'a, Message> {
         top: 0.0,
         right: 4.0,
         bottom: 2.0,
-        left: depth as f32 * 12.0 + 16.0 + 6.0,
+        left: tree_name_x(depth),
     })
     .into()
 }
@@ -1101,9 +1132,8 @@ fn tree_note_row<'a>(depth: usize, note: String) -> Element<'a, Message> {
         top: 0.0,
         right: 4.0,
         bottom: 2.0,
-        // The note sits where the node's children start: past its indent,
-        // its arrow slot and its badge.
-        left: depth as f32 * 12.0 + 16.0 + 6.0,
+        // The note sits where the node's children's names start.
+        left: tree_name_x(depth),
     })
     .width(Fill)
     .into()
@@ -2508,19 +2538,24 @@ fn agent_step_chip<'a>(
     chip.into()
 }
 
-/// The head of a tree in the sidebar (Calls, Imports, Value flow): what it
-/// is rooted at and `detail` beside it, then its controls, and under them
-/// the way it reads (`switch`) — over a hairline, with no band of its own
-/// (the sidebar is the band).
+/// A tree view's head (Imports, Call hierarchy, Value flow): what the tree
+/// is of — `root`, with where it is (`detail`) — pressed to go to it when
+/// `open` says how, the view's `controls` at its other end, and under them
+/// the `switch` between its directions. The tree's root no longer stands
+/// again as its first row: "loans.py src/library/services" was said twice,
+/// one under the other. Its words at the sidebar's line for words, its
+/// switch and controls at its line for boxes.
 fn tree_head<'a>(
     root: &'a str,
     detail: Option<String>,
+    open: Option<Message>,
     controls: Vec<Element<'a, Message>>,
     switch: Option<Element<'a, Message>>,
 ) -> Element<'a, Message> {
-    let mut head = row![
+    use super::sidebar::{SIDE_PAD, SIDE_TEXT_X};
+    let mut face = row![
         text(root)
-            .size(ts::BODY)
+            .size(ts::BASE)
             .font(crate::fonts::UI_MEDIUM)
             .color(theme::fg())
             .wrapping(Wrapping::None),
@@ -2528,27 +2563,158 @@ fn tree_head<'a>(
     .spacing(6)
     .align_y(iced::Center);
     if let Some(detail) = detail {
-        head = head.push(text(detail).size(ts::CAPTION).color(theme::dim()));
+        face = face.push(
+            text(detail)
+                .size(ts::SMALL)
+                .color(theme::dim())
+                .wrapping(Wrapping::None),
+        );
     }
-    head = head.push(space().width(Fill));
-    for control in controls {
-        head = head.push(control);
-    }
-    let head: Element<'a, Message> = match switch {
-        Some(switch) => column![head, switch].spacing(6).into(),
-        None => head.into(),
+    // Its words at the line for words: the button's own padding takes it
+    // from the line for boxes.
+    let pad = SIDE_TEXT_X - SIDE_PAD;
+    let name: Element<'a, Message> = match open {
+        Some(msg) => button(face)
+            .style(theme::list_row(false))
+            .padding([3.0, pad])
+            .on_press(super::heard::said(root, msg))
+            .into(),
+        None => container(face).padding([3.0, pad]).into(),
     };
-    column![
-        container(head)
+    let top = row![container(name).clip(true).width(Fill)]
+        .extend(controls)
+        .spacing(4)
+        .align_y(iced::Center);
+    let mut head = column![top].spacing(8);
+    if let Some(switch) = switch {
+        head = head.push(switch);
+    }
+    container(head)
+        .padding(Padding {
+            top: 0.0,
+            right: SIDE_PAD,
+            bottom: 8.0,
+            left: SIDE_PAD,
+        })
+        .width(Fill)
+        .into()
+}
+
+/// Where a tree row's name begins, `depth` levels under the root, from its
+/// band's edge: the band's own padding, the levels above it, the arrow's
+/// column and the room after it. A note about a row's children starts
+/// where their names do.
+fn tree_name_x(depth: usize) -> f32 {
+    TREE_ROW_PAD + depth as f32 * TREE_INDENT + super::sidebar::CHEVRON_W + TREE_GAP
+}
+
+/// A tree row's padding inside its band, one level's indent, and the room
+/// between its parts.
+const TREE_ROW_PAD: f32 = 4.0;
+const TREE_INDENT: f32 = 12.0;
+const TREE_GAP: f32 = 4.0;
+/// The column a call's kind ("fn", "meth") takes before its name.
+const TREE_BADGE_W: f32 = 22.0;
+
+/// One row of a tree view, as the Files view's are: a band as tall as
+/// theirs at the sidebar's line for boxes, its arrow (or the room for one),
+/// what kind of thing it is where that is said (`badge`), its name in the
+/// tree's size and where it is, dimmer, beside it — the whole band pressed
+/// to go there when `press` says how. They were 18 high, their words a
+/// size smaller than the Files view's, and pressed only on the words.
+#[allow(clippy::too_many_arguments)]
+fn tree_band<'a>(
+    sidebar_w: f32,
+    depth: usize,
+    arrow: Element<'a, Message>,
+    badge: Option<&'static str>,
+    name: String,
+    detail: String,
+    dim: bool,
+    press: Option<Message>,
+) -> Element<'a, Message> {
+    let badge = badge.filter(|b| !b.is_empty());
+    // What the band has for its words, past its indent, arrow and badge:
+    // the name first, where it is with what is left — each cut with an
+    // ellipsis, where they ran on under the panel's edge mid-word.
+    let room = (sidebar_w
+        - 2.0 * super::sidebar::SIDE_PAD
+        - tree_name_x(depth)
+        - badge.map_or(0.0, |_| TREE_BADGE_W + TREE_GAP)
+        - TREE_ROW_PAD
+        - SCROLLBAR_W)
+        .max(0.0);
+    let font = crate::fonts::UI;
+    let shown = super::steady::cut(&name, room, ts::BASE, font);
+    let left = room - super::steady::width_of(&shown, ts::BASE, font) - 6.0;
+    // Where it is, only where there is room for some of it to be read.
+    let detail = if left >= 24.0 {
+        super::steady::cut(&detail, left, ts::SMALL, font)
+    } else {
+        String::new()
+    };
+    let mut face = row![space().width(depth as f32 * TREE_INDENT), arrow]
+        .spacing(TREE_GAP)
+        .align_y(iced::Center);
+    if let Some(badge) = badge {
+        face = face.push(
+            text(badge)
+                .size(ts::CAPTION)
+                .color(theme::dim())
+                .width(TREE_BADGE_W),
+        );
+    }
+    face = face.push(
+        row![
+            text(shown)
+                .size(ts::BASE)
+                .color(if dim { theme::dim() } else { theme::fg() })
+                .wrapping(Wrapping::None),
+            text(detail)
+                .size(ts::SMALL)
+                .color(theme::dim())
+                .wrapping(Wrapping::None),
+        ]
+        .spacing(6)
+        .align_y(iced::Center),
+    );
+    let face = container(face.push(space().width(Fill)))
+        .clip(true)
+        .height(Fill)
+        .align_y(iced::Center);
+    match press {
+        Some(msg) => button(face)
+            .style(theme::list_row(false))
+            .width(Fill)
+            .height(Length::Fixed(super::sidebar::TREE_ROW_H))
+            .padding([0.0, TREE_ROW_PAD])
+            .on_press(super::heard::row(move || name.clone(), msg))
+            .into(),
+        None => container(face)
+            .width(Fill)
+            .height(Length::Fixed(super::sidebar::TREE_ROW_H))
+            .padding([0.0, TREE_ROW_PAD])
+            .into(),
+    }
+}
+
+/// A tree view's rows, at the sidebar's line for boxes as the Files
+/// view's are: they ran from edge to edge.
+fn tree_rows<'a>(rows: Vec<Element<'a, Message>>) -> Element<'a, Message> {
+    scrollable(
+        Column::with_children(rows)
+            .spacing(super::sidebar::TREE_ROW_GAP)
+            .width(Fill)
             .padding(Padding {
-                top: 4.0,
-                right: 8.0,
-                bottom: 6.0,
-                left: 10.0,
-            })
-            .width(Fill),
-        super::panes::hairline(),
-    ]
+                top: 0.0,
+                right: super::sidebar::SIDE_PAD,
+                bottom: 8.0,
+                left: super::sidebar::SIDE_PAD,
+            }),
+    )
+    .direction(thin_scroll())
+    .style(theme::overlay_scrollbar)
+    .height(Fill)
     .into()
 }
 
@@ -2812,6 +2978,7 @@ pub(crate) fn flow_tab(app: &App) -> Element<'_, Message> {
         } else {
             trn!("1 place", "{n} places", tree.node_count())
         }),
+        None,
         vec![
             button(text(tr!("Clear")).size(ts::SMALL))
                 .style(theme::toolbar_button)
@@ -3026,9 +3193,23 @@ pub(crate) fn calls_tab(app: &App) -> Element<'_, Message> {
     };
 
     use crate::graph::callgraph::Direction;
+    // The function asked about heads the tree, where it is beside it, a
+    // press away; the rows under it are its callers or its calls.
+    let root = tree.node(0);
+    let root_file = root
+        .item
+        .path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
     let header = tree_head(
         &tree.root_name,
-        None,
+        Some(format!("{root_file}:{}", root.item.line + 1)),
+        Some(Message::Editor(EditorMsg::OpenAbs {
+            abs: root.item.path.clone(),
+            line: Some(root.item.line + 1),
+            push: true,
+        })),
         vec![expand_all(Message::Calls(CallsMsg::ExpandAll))],
         Some(super::form::segmented_across(
             [Direction::Incoming, Direction::Outgoing].map(|d| {
@@ -3075,57 +3256,39 @@ pub(crate) fn calls_tab(app: &App) -> Element<'_, Message> {
             )
         };
 
-        let kind = kind_short(node.item.kind);
-        let fname = node
-            .item
-            .path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("");
-        let name_btn = button(
-            row![
-                text(&node.item.name)
-                    .size(ts::BODY)
-                    .wrapping(Wrapping::None),
-                space().width(6),
-                text(format!("{fname}:{}", node.item.line + 1))
-                    .size(ts::CAPTION)
-                    .color(theme::dim())
-                    .wrapping(Wrapping::None),
-            ]
-            .align_y(iced::Center),
-        )
-        .style(theme::list_row(false))
-        .width(Fill)
-        .padding([1, 4])
-        .on_press(super::heard::row(
-            || node.item.name.clone(),
-            Message::Editor(EditorMsg::OpenAbs {
-                abs: node.item.path.clone(),
-                line: Some(node.item.line + 1),
-                push: true,
-            }),
-        ));
-
-        let badge = text(kind)
-            .size(ts::CAPTION)
-            .color(theme::dim())
-            .width(if kind.is_empty() { 0.0 } else { 22.0 });
-
-        rows.push(
-            row![
-                space().width(node.depth as f32 * 12.0),
+        // The root heads the tree: its rows start with what is under it.
+        if node.depth == 0 {
+            if node.loading {
+                rows.push(tree_empty_row(
+                    0,
+                    tr!("Building call hierarchy…").to_string(),
+                ));
+            }
+        } else {
+            let fname = node
+                .item
+                .path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("");
+            rows.push(tree_band(
+                app.sidebar_width,
+                node.depth - 1,
                 arrow,
-                badge,
-                name_btn,
-            ]
-            .spacing(2)
-            .align_y(iced::Center)
-            .into(),
-        );
+                Some(kind_short(node.item.kind)),
+                node.item.name.clone(),
+                format!("{fname}:{}", node.item.line + 1),
+                false,
+                Some(Message::Editor(EditorMsg::OpenAbs {
+                    abs: node.item.path.clone(),
+                    line: Some(node.item.line + 1),
+                    push: true,
+                })),
+            ));
+        }
         // The tree's node cap cut this node short: say how many it holds back.
         if let Some(note) = tree.hidden_note(id) {
-            rows.push(tree_note_row(node.depth + 1, note));
+            rows.push(tree_note_row(node.depth, note));
         }
         // The function asked about has none: said, where the panel otherwise
         // showed its name and nothing under it, as if it were still loading.
@@ -3134,7 +3297,7 @@ pub(crate) fn calls_tab(app: &App) -> Element<'_, Message> {
                 Direction::Incoming => tr!("No callers found"),
                 Direction::Outgoing => tr!("No calls found"),
             };
-            rows.push(tree_empty_row(1, none.to_string()));
+            rows.push(tree_empty_row(0, none.to_string()));
         }
     }
 
@@ -3146,15 +3309,7 @@ pub(crate) fn calls_tab(app: &App) -> Element<'_, Message> {
     } else {
         slot()
     };
-    column![
-        header,
-        stale,
-        scrollable(Column::with_children(rows).width(Fill))
-            .direction(thin_scroll())
-            .style(theme::overlay_scrollbar)
-            .height(Fill),
-    ]
-    .into()
+    column![header, stale, tree_rows(rows)].into()
 }
 
 /// The import tree: a header with the focus file + an Imports/Importers toggle,
@@ -3185,9 +3340,16 @@ pub(crate) fn imports_tab(app: &App) -> Element<'_, Message> {
     };
 
     use crate::graph::imports::Dir;
+    // The file in focus heads the tree, its folder beside it; the rows
+    // under it are what it imports, or what imports it.
     let header = tree_head(
         &tree.root_name,
-        None,
+        Some(tree.node(0).detail.clone()).filter(|d| !d.is_empty()),
+        Some(Message::Editor(EditorMsg::OpenAbs {
+            abs: tree.root_path.clone(),
+            line: None,
+            push: true,
+        })),
         vec![expand_all(Message::Graph(GraphMsg::ImportExpandAll))],
         Some(super::form::segmented_across(
             [Dir::Imports, Dir::Importers].map(|d| {
@@ -3225,70 +3387,37 @@ pub(crate) fn imports_tab(app: &App) -> Element<'_, Message> {
             )
         };
 
-        // Internal files open on click; external/unresolved are dim leaves.
-        let name: Element<'_, Message> = match &node.target {
-            Target::Internal(path) => button(
-                row![
-                    text(&node.label).size(ts::BODY).wrapping(Wrapping::None),
-                    space().width(6),
-                    text(&node.detail)
-                        .size(ts::CAPTION)
-                        .color(theme::dim())
-                        .wrapping(Wrapping::None),
-                ]
-                .align_y(iced::Center),
-            )
-            .style(theme::list_row(false))
-            .width(Fill)
-            .padding([1, 4])
-            .on_press(super::heard::row(
-                || node.label.clone(),
-                Message::Editor(EditorMsg::OpenAbs {
-                    abs: path.clone(),
-                    line: None,
-                    push: true,
-                }),
-            ))
-            .into(),
-            Target::External(_) => container(
-                row![
-                    text(&node.label)
-                        .size(ts::BODY)
-                        .color(theme::dim())
-                        .wrapping(Wrapping::None),
-                    space().width(6),
-                    text(tr!("external")).size(ts::CAPTION).color(theme::dim()),
-                ]
-                .align_y(iced::Center),
-            )
-            .padding([1, 4])
-            .width(Fill)
-            .into(),
-            Target::Unresolved(_) => container(
-                row![
-                    text(&node.label)
-                        .size(ts::BODY)
-                        .color(theme::dim())
-                        .wrapping(Wrapping::None),
-                    space().width(6),
-                    text("?").size(ts::CAPTION).color(theme::dim()),
-                ]
-                .align_y(iced::Center),
-            )
-            .padding([1, 4])
-            .width(Fill)
-            .into(),
-        };
-
-        rows.push(
-            row![space().width(node.depth as f32 * 12.0), arrow, name]
-                .spacing(2)
-                .align_y(iced::Center)
-                .into(),
-        );
+        // The root heads the tree: its rows start with what is under it.
+        if node.depth > 0 {
+            // Internal files open on a press; external and unresolved ones
+            // are dim leaves.
+            let (detail, dim, press) = match &node.target {
+                Target::Internal(path) => (
+                    node.detail.clone(),
+                    false,
+                    Some(Message::Editor(EditorMsg::OpenAbs {
+                        abs: path.clone(),
+                        line: None,
+                        push: true,
+                    })),
+                ),
+                Target::External(_) => (tr!("external").to_string(), true, None),
+                Target::Unresolved(_) => ("?".to_string(), true, None),
+            };
+            rows.push(tree_band(
+                app.sidebar_width,
+                node.depth - 1,
+                arrow,
+                None,
+                node.label.clone(),
+                detail,
+                dim,
+                press,
+            ));
+        }
         // The tree's node cap cut this node short: say how many it holds back.
         if let Some(note) = tree.hidden_note(id) {
-            rows.push(tree_note_row(node.depth + 1, note));
+            rows.push(tree_note_row(node.depth, note));
         }
     }
 
@@ -3299,16 +3428,7 @@ pub(crate) fn imports_tab(app: &App) -> Element<'_, Message> {
     // The graph under this tree is built from the symbol index; files the
     // index had to leave out have no edges here, so say which were left out.
     let capped = index_left_out_note(app);
-    column![
-        header,
-        cycles,
-        capped,
-        scrollable(Column::with_children(rows).width(Fill))
-            .direction(thin_scroll())
-            .style(theme::overlay_scrollbar)
-            .height(Fill),
-    ]
-    .into()
+    column![header, cycles, capped, tree_rows(rows)].into()
 }
 
 /// How deep the variables panel opens values into values.
