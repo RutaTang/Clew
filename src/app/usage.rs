@@ -234,9 +234,15 @@ const fn p(input: f64, cached: f64, output: f64) -> Price {
     }
 }
 
-/// Clew's own price for `model`, if it knows one.
+/// Clew's own price for `model`, if it knows one: the `llm-prices` table's
+/// first, which carries every current model (`gpt-5.5` was priced as
+/// `gpt-5`, at a quarter of its input rate, and Gemini not at all), else the
+/// fallback table above.
 pub(crate) fn builtin_price(model: &str) -> Option<Price> {
     let model = model.trim().to_ascii_lowercase();
+    if let Some(price) = listed_price(model.split(':').next().unwrap_or(&model)) {
+        return Some(price);
+    }
     // OpenRouter's ids name their maker first, write a version with dots,
     // and may carry a variant: `anthropic/claude-opus-4.5:beta`. Dotted, it
     // was priced as `claude-opus-4`, three times over, and `claude-haiku-4.5`
@@ -247,6 +253,18 @@ pub(crate) fn builtin_price(model: &str) -> Option<Price> {
         .iter()
         .find(|(start, _)| model.starts_with(&start.replace('.', "-")))
         .map(|(_, price)| *price)
+}
+
+/// `model`'s price in the `llm-prices` table, where it lists an input and
+/// an output rate: a cache read bills at the input rate where none is listed.
+fn listed_price(model: &str) -> Option<Price> {
+    let row = llm_prices::lookup(model)?;
+    let input = row.input?;
+    Some(Price {
+        input,
+        cached: row.cache_read.unwrap_or(input),
+        output: row.output?,
+    })
 }
 
 /// The reader's own prices, `config.toml`'s `[prices]`, as last read: read
@@ -1104,6 +1122,18 @@ mod tests {
         );
         assert_eq!(builtin_price("openai/gpt-4.1-mini").unwrap().input, 0.4);
         assert_eq!(builtin_price("gpt-4.1").unwrap().input, 2.0);
+        // Newer GPT-5 releases are not GPT-5's price: matched by the
+        // `gpt-5` start, gpt-5.5 read at a quarter of its input rate and a
+        // third of its output rate.
+        let gpt55 = builtin_price("gpt-5.5").unwrap();
+        assert_eq!((gpt55.input, gpt55.cached, gpt55.output), (5.0, 0.5, 30.0));
+        assert_eq!(builtin_price("openai/gpt-5.4").unwrap().output, 15.0);
+        assert_eq!(builtin_price("gpt-5.2").unwrap().output, 14.0);
+        assert_eq!(builtin_price("gpt-5").unwrap().input, 1.25);
+        // Gemini is priced, not left unpriced.
+        let gemini = builtin_price("gemini-2.5-pro").unwrap();
+        assert_eq!((gemini.input, gemini.output), (1.25, 10.0));
+        assert!(builtin_price("models/gemini-2.5-flash").is_some());
         // Cached tokens bill at the cache's rate; never more than the prompt.
         let price = Price {
             input: 1.0,
