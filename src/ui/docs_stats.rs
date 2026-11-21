@@ -1030,15 +1030,20 @@ pub(crate) fn stats_home(app: &App) -> Element<'_, Message> {
             .color(theme::fg_muted())
             .width(Length::Fixed(w))
     };
+    // Counts set right, as a table's numbers are: their digits in
+    // columns, the larger read as larger at a glance.
+    let right = iced::alignment::Horizontal::Right;
+    let num = |s: String, w: f32, color: iced::Color| cell(s, w, color).align_x(right);
+    let head_num = |s: &'static str, w: f32| head(s, w).align_x(right);
     let table_header = row![
         // Match the color swatch's width so headers line up with the cells below.
         space().width(10),
         head(tr!("programming language\u{4}Language"), LANG_COL_W),
-        head(tr!("Files"), 70.0),
-        head(tr!("Code"), 90.0),
-        head(tr!("Comments"), 90.0),
-        head(tr!("Blanks"), 80.0),
-        head(tr!("Share"), 70.0),
+        head_num(tr!("Files"), 70.0),
+        head_num(tr!("Code"), 90.0),
+        head_num(tr!("Comments"), 90.0),
+        head_num(tr!("Blanks"), 80.0),
+        head_num(tr!("Share"), 70.0),
     ]
     .spacing(8)
     .align_y(iced::Center);
@@ -1056,11 +1061,11 @@ pub(crate) fn stats_home(app: &App) -> Element<'_, Message> {
                     theme::fg(),
                 )
                 .wrapping(Wrapping::None),
-                cell(fmt_thousands(l.files), 70.0, theme::fg_muted()),
-                cell(fmt_thousands(l.code), 90.0, theme::fg()),
-                cell(fmt_thousands(l.comments), 90.0, theme::fg_muted()),
-                cell(fmt_thousands(l.blanks), 80.0, theme::fg_muted()),
-                cell(share_label(share), 70.0, theme::dim()),
+                num(fmt_thousands(l.files), 70.0, theme::fg_muted()),
+                num(fmt_thousands(l.code), 90.0, theme::fg()),
+                num(fmt_thousands(l.comments), 90.0, theme::fg_muted()),
+                num(fmt_thousands(l.blanks), 80.0, theme::fg_muted()),
+                num(share_label(share), 70.0, theme::dim()),
             ]
             .spacing(8)
             .align_y(iced::Center),
@@ -1074,7 +1079,9 @@ pub(crate) fn stats_home(app: &App) -> Element<'_, Message> {
     // cells inside their padding.
     let files_header = row![
         space().width(Fill),
-        head(tr!("Lines"), 80.0),
+        head_num(tr!("Lines"), 80.0),
+        // Apart from the count beside it, as the table's columns are.
+        space().width(8),
         head(tr!("programming language\u{4}Language"), 90.0),
     ]
     .spacing(8)
@@ -1086,7 +1093,9 @@ pub(crate) fn stats_home(app: &App) -> Element<'_, Message> {
     })
     .align_y(iced::Center);
     let mut files = Column::new().spacing(2).push(files_header);
-    for f in &report.top_files {
+    // An empty file is no "largest" one: a package's bare `__init__.py`
+    // listed at 0 lines.
+    for f in report.top_files.iter().filter(|f| f.lines > 0) {
         let inner = row![
             text(f.rel.clone())
                 .size(ts::BODY)
@@ -1096,7 +1105,9 @@ pub(crate) fn stats_home(app: &App) -> Element<'_, Message> {
             text(fmt_thousands(f.lines))
                 .size(ts::BODY)
                 .color(theme::fg_muted())
-                .width(Length::Fixed(80.0)),
+                .width(Length::Fixed(80.0))
+                .align_x(right),
+            space().width(8),
             text(f.lang.clone())
                 .size(ts::SMALL)
                 .color(theme::dim())

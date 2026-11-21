@@ -4168,6 +4168,32 @@ fn back_end_words_beside_the_status_line_are_said_in_the_readers_language() {
     });
 }
 
+/// A peek that is all prepared Markdown — the language server's answer,
+/// or the local peek of a documented name — is drawn: asked only of its
+/// plain text, the summary and the diagnostic, every hover with a server
+/// went unshown, the pointer resting on a call bringing up nothing.
+#[test]
+fn a_peek_of_prepared_markdown_is_drawn() {
+    let mut app = reader_app();
+    let (prepared, _) =
+        app.prepare_segments("```python\ndef fine_for(due, returned)\n```\n\nThe fine owed.");
+    assert!(!prepared.is_empty());
+    app.proj.hover = Some(crate::HoverState {
+        prepared,
+        ..hover_at(10.0, 10.0)
+    });
+    assert!(
+        matches!(
+            super::active_overlay(&app),
+            Some(super::ActiveOverlay::Hover(_))
+        ),
+        "the peek is the overlay drawn"
+    );
+    // Nothing at all to say: nothing drawn, rather than an empty box.
+    app.proj.hover = Some(hover_at(10.0, 10.0));
+    assert!(super::active_overlay(&app).is_none());
+}
+
 /// E2-6: Escape dismisses exactly the overlay that is drawn on top.
 #[test]
 fn escape_names_the_topmost_overlay() {
@@ -16640,6 +16666,8 @@ fn the_set_up_sheet_says_why_apply_waits() {
         &app,
         "Nothing to apply: the language servers are already set up."
     ));
+    // Nothing it could do: the sheet only closes — no "Cancel" of nothing.
+    assert!(says(&app, "Close") && !says(&app, "Cancel"));
     // A server to set up, but unticked: tick it.
     let pyright = SetupServer {
         language: "python".into(),
@@ -16649,6 +16677,7 @@ fn the_set_up_sheet_says_why_apply_waits() {
     };
     app.setup = Some(setup(false, false, census(vec![pyright.clone()])));
     assert!(says(&app, "Nothing to apply: tick what to set up."));
+    assert!(says(&app, "Cancel"), "a tick undone is a choice cancelled");
     // Something to do: nothing said.
     app.setup = Some(setup(true, false, census(vec![pyright])));
     assert!(!says(&app, "Nothing to apply"));
@@ -19961,6 +19990,34 @@ fn history_app() -> (App, String, String) {
         })),
     );
     (app, new, old)
+}
+
+/// The uncommitted changes head the graph as a commit's row does: their
+/// words where the commits' subjects begin, and their files under the
+/// words. The clock stood off the rail and the words off the subjects.
+#[test]
+fn the_uncommitted_row_lines_up_with_the_commits() {
+    let (mut app, ..) = history_app();
+    app.proj.git_status = [("teashop/pricing.py".to_string(), 'M')]
+        .into_iter()
+        .collect();
+    app.proj.git_log.changes_open = true;
+    let mut sim = sim_elem(super::history::history_tab(&app));
+    let words = text_at(&mut sim, |t| t == "Uncommitted changes", 0).expect("the row");
+    let subject = text_at(&mut sim, |t| t == "Start the shop", 0).expect("a commit");
+    assert!(
+        (words.x - subject.x).abs() < 0.5,
+        "words at {}, subjects at {}",
+        words.x,
+        subject.x
+    );
+    let letter = text_at(&mut sim, |t| t == "M", 0).expect("its file");
+    assert!(
+        (letter.x - words.x).abs() < 0.5,
+        "file at {}, words at {}",
+        letter.x,
+        words.x
+    );
 }
 
 /// The History view lists the project's commits, newest first: the name

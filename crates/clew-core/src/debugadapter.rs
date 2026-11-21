@@ -941,8 +941,16 @@ fn python_with(
     // the package sits in goes on the import path. One that imports its
     // siblings relatively (`from .models import …`) has no package at all
     // as a script, so it runs as Python runs a package's module: `-m`.
-    if let Some(package) = python_package(&in_dir(cwd, program)) {
-        let mut path = vec![package.root.clone()];
+    let package = python_package(&in_dir(cwd, program));
+    let mut path: Vec<PathBuf> = package.iter().map(|p| p.root.clone()).collect();
+    // A `src/` layout not installed (`src/library/…`, the tests beside it):
+    // its tests and programs import the package by name, and pytest run
+    // from the project's folder could not ("No module named 'library'").
+    // Its `src` goes on the path, as pytest's `pythonpath = ["src"]` puts it.
+    if let Some(src) = src_layout(cwd).filter(|src| !path.contains(src)) {
+        path.push(src);
+    }
+    if !path.is_empty() {
         path.extend(
             std::env::var_os("PYTHONPATH")
                 .map_or_else(Vec::new, |p| std::env::split_paths(&p).collect::<Vec<_>>()),
@@ -950,12 +958,13 @@ fn python_with(
         if let Ok(joined) = std::env::join_paths(path) {
             launch["env"]["PYTHONPATH"] = json!(joined.to_string_lossy());
         }
-        if package.relative_imports
-            && let Some(launch) = launch.as_object_mut()
-        {
-            launch.remove("program");
-            launch.insert("module".into(), json!(package.module));
-        }
+    }
+    if let Some(package) = package
+        && package.relative_imports
+        && let Some(launch) = launch.as_object_mut()
+    {
+        launch.remove("program");
+        launch.insert("module".into(), json!(package.module));
     }
     // A test file is run as its tests are: under pytest, which collects
     // and runs them. Run as a script it defined its tests and ended, and
@@ -1059,6 +1068,23 @@ fn python_package(file: &Path) -> Option<PythonPackage> {
         relative_imports,
     })
 }
+
+/// The project's `src` folder, when it holds a package (`src/library/
+/// __init__.py`): the `src` layout, whose package is imported by name
+/// from beside it once installed — or once `src` is on the path.
+fn src_layout(root: &Path) -> Option<PathBuf> {
+    let src = root.join("src");
+    std::fs::read_dir(&src)
+        .ok()?
+        .flatten()
+        .take(MAX_SRC_ENTRIES)
+        .any(|entry| entry.path().join("__init__.py").is_file())
+        .then_some(src)
+}
+
+/// How many of `src`'s entries are looked at for a package: a `src` of
+/// thousands is no Python layout, and the look happens before each run.
+const MAX_SRC_ENTRIES: usize = 512;
 
 /// Dart's SDK ships a DAP adapter: `dart debug_adapter` over stdio.
 fn dart_spec(command: PathBuf, program: &str, args: &[String], cwd: &Path) -> AdapterSpec {
@@ -2071,6 +2097,56 @@ mod tests {
             assert_eq!(launch["env"]["PYTHONDONTWRITEBYTECODE"], "1", "{launch}");
         }
         assert_eq!(python_package(&root.join("teashop/__init__.py")), None);
+    }
+
+    /// A `src` layout's tests and programs import its package by name: run
+    /// from the project's folder, its `src` is on the path — pytest said
+    /// "No module named 'library'" of an uninstalled project's every test.
+    /// A `src` of plain modules, no package, is no such layout.
+    #[test]
+    #[cfg(unix)]
+    fn a_src_layouts_package_is_on_the_path() {
+        let dir = TempDir::new("dap-py-src");
+        let python = fake_python(&dir, "echo '1 0 1'");
+        let root = dir.join("proj");
+        std::fs::create_dir_all(root.join("src/library/services")).unwrap();
+        std::fs::create_dir_all(root.join("tests")).unwrap();
+        std::fs::write(root.join("src/library/__init__.py"), "").unwrap();
+        std::fs::write(root.join("src/library/services/__init__.py"), "").unwrap();
+        std::fs::write(root.join("src/library/services/fines.py"), "X = 1\n").unwrap();
+        std::fs::write(
+            root.join("tests/test_fines.py"),
+            "from library.services.fines import X\n",
+        )
+        .unwrap();
+        let launch = |program: &str| {
+            let Resolution::Ready(spec) = python_with(&python, program, &[], &root).unwrap() else {
+                panic!("debugpy and pytest are present");
+            };
+            spec.launch
+        };
+        let paths = |launch: &serde_json::Value| -> Vec<PathBuf> {
+            launch["env"]["PYTHONPATH"]
+                .as_str()
+                .map(|p| std::env::split_paths(p).collect())
+                .unwrap_or_default()
+        };
+        let test = launch("tests/test_fines.py");
+        assert_eq!(test["module"], "pytest", "{test}");
+        assert_eq!(paths(&test).first(), Some(&root.join("src")), "{test}");
+        // The package's own module: its folder — `src` — once, not twice.
+        let module = launch("src/library/services/fines.py");
+        let src = root.join("src");
+        assert_eq!(
+            paths(&module).iter().filter(|p| **p == src).count(),
+            1,
+            "{module}"
+        );
+        // Plain modules in `src`: no layout, nothing added.
+        std::fs::remove_dir_all(root.join("src/library")).unwrap();
+        std::fs::write(root.join("src/tool.py"), "").unwrap();
+        let plain = launch("tests/test_fines.py");
+        assert!(plain["env"].get("PYTHONPATH").is_none(), "{plain}");
     }
 
     #[test]

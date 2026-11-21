@@ -864,6 +864,18 @@ pub struct HoverState {
     pub diagnostic: Option<String>,
 }
 
+impl HoverState {
+    /// Whether the peek has anything to say. The server's answer and the
+    /// local peek are `prepared`, not `text`: asked only of `text`, every
+    /// language server's hover went unshown.
+    pub fn says_something(&self) -> bool {
+        self.diagnostic.is_some()
+            || self.summary.is_some()
+            || self.text.is_some()
+            || !self.prepared.is_empty()
+    }
+}
+
 /// The "Why is this here?" popup: an LLM explanation of why a line/selection
 /// exists, grounded in the commit(s) that last touched it.
 #[derive(Debug)]

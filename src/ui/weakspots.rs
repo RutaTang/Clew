@@ -67,17 +67,24 @@ pub(crate) fn weak_home(app: &App) -> Element<'_, Message> {
         .into();
     };
     if spots.is_empty() {
+        // An empty result as every view's is: its sign, its title and what
+        // was looked for, centred — a dim sentence at the page's top read
+        // as a page still loading.
+        let looked_for = tr!(
+            "No function is over {lines} lines, nests {depth} or more levels deep, has more than {branches} branches, or makes a risky call such as eval or a shell command.",
+            lines = clew_core::weakspots::LONG_LINES,
+            depth = clew_core::weakspots::DEEP_NESTING,
+            branches = clew_core::weakspots::MANY_BRANCHES
+        );
         return container(
             column![
                 header,
-                text(tr!(
-                    "Nothing stands out: no function is over {lines} lines, nests {depth} or more levels deep, has more than {branches} branches, or makes a risky call such as eval or a shell command.",
-                    lines = clew_core::weakspots::LONG_LINES,
-                    depth = clew_core::weakspots::DEEP_NESTING,
-                    branches = clew_core::weakspots::MANY_BRANCHES
-                ))
-                .size(ts::BASE)
-                .color(theme::dim()),
+                super::sidebar::empty_state(
+                    Glyph::CheckCircle,
+                    tr!("Nothing stands out"),
+                    &looked_for,
+                    None
+                ),
             ]
             .spacing(14),
         )

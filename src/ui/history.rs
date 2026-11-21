@@ -17,6 +17,10 @@ const LANE_W: f32 = 12.0;
 const MAX_LANES: usize = 8;
 /// The lanes' space before the first.
 const LANE_PAD: f32 = 6.0;
+/// The lanes' width with one lane: before any commit is drawn.
+const ONE_LANE_W: f32 = LANE_PAD * 2.0 + LANE_W;
+/// The uncommitted row's clock.
+const CLOCK: f32 = 13.0;
 
 /// The History view.
 pub(crate) fn history_tab(app: &App) -> Element<'_, Message> {
@@ -73,7 +77,7 @@ pub(crate) fn history_tab(app: &App) -> Element<'_, Message> {
             .padding([12, 12])
             .into()
         };
-        let mut col = column![changes_rows(app, h), by_id_row(app, h), note];
+        let mut col = column![changes_rows(app, h, ONE_LANE_W), by_id_row(app, h), note];
         col = col.spacing(2);
         col.into()
     } else {
@@ -178,7 +182,8 @@ fn commit_list<'a>(app: &'a App, h: &'a HistoryView) -> Element<'a, Message> {
     // What a row has for its words, right of its lanes: cut to it with an
     // ellipsis, not clipped mid-letter.
     let room = (app.sidebar_width - lanes_w - ROW_PAD_R - 2.0).max(0.0);
-    let mut rows: Vec<Element<'a, Message>> = vec![changes_rows(app, h), by_id_row(app, h)];
+    let mut rows: Vec<Element<'a, Message>> =
+        vec![changes_rows(app, h, lanes_w), by_id_row(app, h)];
     for (c, g) in h.commits.iter().zip(&h.graph) {
         let open = h.open.as_deref() == Some(c.sha.as_str());
         rows.push(commit_row(c, g, lanes_w, room, open, now));
@@ -610,7 +615,7 @@ fn file_row<'a>(sha: &str, f: &'a clew_protocol::CommitFile, room: f32) -> Eleme
 
 /// The working tree's changes, above the commits: a row that opens to the
 /// files changed, each opened in its Diff.
-fn changes_rows<'a>(app: &'a App, h: &'a HistoryView) -> Element<'a, Message> {
+fn changes_rows<'a>(app: &'a App, h: &'a HistoryView, lanes_w: f32) -> Element<'a, Message> {
     let mut changed: Vec<(&String, &char)> = app
         .proj
         .git_status
@@ -627,20 +632,27 @@ fn changes_rows<'a>(app: &'a App, h: &'a HistoryView) -> Element<'a, Message> {
     // What git tracks first, then the files it does not: one real change
     // came last, under nine untracked build files.
     changed.sort_by_key(|(rel, letter)| (**letter == 'U', rel.as_str()));
-    let room = (app.sidebar_width - 34.0 - 12.0 - 12.0 - 4.0 - 2.0).max(0.0);
+    let room = (app.sidebar_width - lanes_w - 12.0 - 12.0 - 4.0 - 2.0).max(0.0);
     // On one line at any width: the count whole, the words cut with an
     // ellipsis — each wrapped on to two lines in a narrow sidebar.
     let count = trn!("1 file", "{n} files", changed.len());
     let words_room = (app.sidebar_width
-        - 2.0 * 12.0
-        - 13.0
-        - 2.0 * 8.0
+        - lanes_w
+        - ROW_PAD_R
+        - 8.0
         - super::steady::width_of(&count, ts::SMALL, crate::fonts::UI)
         - crate::ui::SCROLLBAR_W)
         .max(0.0);
+    // Laid out as a commit's row: its clock on the graph's first lane,
+    // where the commits' dots and rail are, and its words where their
+    // subjects begin — the clock stood off the rail, the words off the
+    // subjects under them.
+    let clock_left = LANE_PAD + LANE_W / 2.0 - CLOCK / 2.0;
     let head = button(
         row![
-            glyph::icon(Glyph::Clock, theme::accent(), 13.0),
+            space().width(clock_left),
+            glyph::icon(Glyph::Clock, theme::accent(), CLOCK),
+            space().width(lanes_w - clock_left - CLOCK),
             text(super::steady::cut(
                 tr!("Uncommitted changes"),
                 words_room,
@@ -651,16 +663,21 @@ fn changes_rows<'a>(app: &'a App, h: &'a HistoryView) -> Element<'a, Message> {
             .color(theme::fg())
             .wrapping(Wrapping::None),
             space().width(Fill),
+            space().width(8),
             text(count)
                 .size(ts::SMALL)
                 .color(theme::dim())
                 .wrapping(Wrapping::None),
         ]
-        .spacing(8)
         .align_y(iced::Center),
     )
     .style(theme::list_row(h.changes_open))
-    .padding([8, 12])
+    .padding(Padding {
+        top: 8.0,
+        right: ROW_PAD_R,
+        bottom: 8.0,
+        left: 0.0,
+    })
     .width(Fill)
     .on_press(super::heard::said(
         tr!("Uncommitted changes"),
@@ -718,11 +735,12 @@ fn changes_rows<'a>(app: &'a App, h: &'a HistoryView) -> Element<'a, Message> {
             .align_y(iced::Center),
         )
         .style(theme::menu_row)
+        // Under the words above them, where a commit's files begin.
         .padding(Padding {
             top: 3.0,
             right: 12.0,
             bottom: 3.0,
-            left: 34.0,
+            left: lanes_w,
         })
         .width(Fill)
         .on_press_maybe((!gone && !binary).then(|| {

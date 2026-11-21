@@ -451,6 +451,13 @@ pub(crate) fn setup_sheet<'a>(
                 accept_msg,
             ))
         });
+    // Nothing it could do, every server already set up: "Cancel" had
+    // nothing to cancel — the sheet only closes.
+    let decline_label = if idle == Some(NOTHING_SET_UP) {
+        tr!("Close")
+    } else {
+        decline_label
+    };
     let decline_ready = !decline_gated || asked.ready;
     let decline_button = button(text(decline_label).size(ts::BASE))
         .style(theme::toolbar_button)

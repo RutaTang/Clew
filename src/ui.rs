@@ -490,12 +490,7 @@ pub(crate) fn active_overlay(app: &App) -> Option<ActiveOverlay<'_>> {
         O::ContextMenu(menu)
     } else if let Some(menu) = &app.proj.tree_menu {
         O::TreeMenu(menu)
-    } else if let Some(hover) = app
-        .proj
-        .hover
-        .as_ref()
-        .filter(|h| h.text.is_some() || h.summary.is_some() || h.diagnostic.is_some())
-    {
+    } else if let Some(hover) = app.proj.hover.as_ref().filter(|h| h.says_something()) {
         O::Hover(hover)
     } else {
         return None;

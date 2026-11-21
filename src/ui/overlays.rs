@@ -16,7 +16,7 @@ pub(crate) fn hover_tooltip<'a>(
 ) -> Element<'a, Message> {
     // Nothing to say (no summary, no LSP text, no diagnostic): show nothing
     // rather than an empty box — an empty peek reads as "hover is broken".
-    if h.diagnostic.is_none() && h.summary.is_none() && h.text.is_none() && h.prepared.is_empty() {
+    if !h.says_something() {
         return slot();
     }
     let mut parts: Vec<Element<'_, Message>> = Vec::new();

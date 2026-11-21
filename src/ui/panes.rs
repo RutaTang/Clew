@@ -1948,7 +1948,7 @@ fn notes_beside_code<'a>(
                 active_note(app, name, tr!("file").into(), NoteOf::File, size.width),
             ));
         }
-        for (sym, &ordinal) in v.symbols.iter().zip(&ordinals) {
+        for (index, (sym, &ordinal)) in v.symbols.iter().zip(&ordinals).enumerate() {
             if !matches!(sym.kind.as_str(), "function" | "method") {
                 continue;
             }
@@ -1990,8 +1990,9 @@ fn notes_beside_code<'a>(
             if !replaced && (y + h < 0.0 || y - lift > size.height) {
                 continue;
             }
-            // "function, line 15": the kind in words, not "fn".
-            let kind = if sym.kind == "method" {
+            // "function, line 15": the kind in words, not "fn" — and a
+            // Python class's `def` a method, as a Rust `impl`'s `fn` is.
+            let kind = if shown_kind(&v.symbols, index) == "method" {
                 tr!("method")
             } else {
                 tr!("function")
@@ -3319,10 +3320,11 @@ pub(crate) fn outline_content(app: &App) -> Element<'_, Message> {
         let understood = note.is_some_and(|n| n.understood);
         let has_text = note.is_some_and(|n| !n.text.is_empty());
 
+        let kind = shown_kind(&v.symbols, index);
         let label = row![
-            text(short_kind(&symbol.kind))
+            text(short_kind(kind))
                 .size(ts::CAPTION)
-                .color(theme::kind_color(&symbol.kind))
+                .color(theme::kind_color(kind))
                 .width(34),
             // Understood symbols dim, so the outline shows at a glance what's left.
             text(&symbol.name)
@@ -3583,6 +3585,32 @@ const OUTLINE_PENCIL_W: f32 = 20.0;
 /// for Point` — as deep as what holds it, and as tall as an item's row: a
 /// jump to the block's line. It has no circle or pencil: a block is not
 /// read and ticked off, its items are.
+/// The kind symbol `index` is shown as: a function whose innermost holder
+/// is a class is that class's method — Python's `def` in a `class` was
+/// listed "fn" and named a "function", while a Rust `impl`'s and a
+/// JavaScript class's were methods.
+pub(crate) fn shown_kind(symbols: &[crate::outline::Symbol], index: usize) -> &str {
+    let Some(sym) = symbols.get(index) else {
+        return "";
+    };
+    if sym.kind != "function" {
+        return &sym.kind;
+    }
+    let holder = symbols
+        .iter()
+        .enumerate()
+        .filter(|(i, s)| {
+            *i != index && s.line <= sym.line && s.end_line >= sym.end_line && s.end_line > s.line
+        })
+        .max_by_key(|(i, s)| (s.line, *i));
+    match holder {
+        Some((_, h)) if matches!(h.kind.as_str(), "class" | "struct" | "interface" | "trait") => {
+            "method"
+        }
+        _ => &sym.kind,
+    }
+}
+
 /// Whether an `impl` block holds none of the outline's items:
 /// `impl Eq for P {}` heads no rows.
 fn holds_nothing(
@@ -3674,6 +3702,25 @@ pub(crate) fn short_sha(sha: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A Python class's `def` is shown a method; a module's, and one
+    /// nested in a method, a function.
+    #[test]
+    fn a_def_in_a_class_is_shown_a_method() {
+        let src = "def top():\n    pass\n\n\
+                   class Desk:\n    def lend(self):\n        def helper():\n            pass\n        return helper\n";
+        let symbols = crate::outline::extract(src, "python");
+        let kind = |name: &str| {
+            let i = symbols.iter().position(|s| s.name == name).unwrap();
+            shown_kind(&symbols, i)
+        };
+        assert_eq!(kind("top"), "function");
+        assert_eq!(kind("lend"), "method");
+        assert_eq!(kind("Desk"), "class");
+        if symbols.iter().any(|s| s.name == "helper") {
+            assert_eq!(kind("helper"), "function", "{symbols:?}");
+        }
+    }
 
     /// `impl Eq for P {}` holds nothing; `impl P { fn new() }` holds its
     /// method, one line or many.
