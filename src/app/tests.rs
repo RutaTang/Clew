@@ -38977,6 +38977,70 @@ fn a_trail_stop_keeps_its_function_once_its_file_is_closed() {
     assert_eq!(app.function_around(&closed, 4), None);
 }
 
+/// Two stops in one function read as two places: one inside it says its
+/// line, as a stop noted by line does. Both read "give_back()", the same
+/// place twice in a row on the trail.
+#[test]
+fn a_stop_inside_a_function_says_its_line() {
+    let mut app = scanned_app("trail-inside-fn");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let file = root.join("src/lib.rs");
+    app.proj.symbol_index_by_file.insert(
+        file.clone(),
+        std::sync::Arc::new(vec![crate::index::SymbolEntry {
+            name: "give_back".into(),
+            kind: "method".into(),
+            rel: "src/lib.rs".into(),
+            abs: file.clone(),
+            line: 45,
+            is_test: false,
+            entry: None,
+        }]),
+    );
+    let at = |line| crate::history::Loc {
+        path: file.clone(),
+        line: Some(line),
+    };
+    assert_eq!(
+        crate::ui::stop_label(&app, &at(45), Some("give_back")),
+        "give_back()"
+    );
+    assert_eq!(
+        crate::ui::stop_label(&app, &at(50), Some("give_back")),
+        "give_back():50"
+    );
+}
+
+/// An edit above a function moves the trail's stops in it with it, each as
+/// far into it as it was: a stop inside the function went to its first line
+/// — where the stop before it often is — and the trail read the same
+/// function twice in a row.
+#[test]
+fn an_edit_moves_a_stop_inside_a_function_with_it() {
+    let mut app = scanned_app("trail-reanchor-inside");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let abs = root.join("src/lib.rs");
+    let body = "pub fn give_back() {\n    let a = 1;\n    let b = 2;\n    let c = 3;\n}\n";
+    let first = rehashed(&app, vec![modified(&abs, 7101, body)]);
+    apply_rehash(&mut app, first);
+    let at = |line| crate::history::Loc {
+        path: abs.clone(),
+        line: Some(line),
+    };
+    app.proj.history.push(at(1), Some("give_back".into()));
+    app.proj.history.push(at(4), Some("give_back".into()));
+    let edited = rehashed(&app, vec![modified(&abs, 7102, &format!("\n\n{body}"))]);
+    apply_rehash(&mut app, edited);
+    let lines: Vec<_> = app
+        .proj
+        .history
+        .flatten()
+        .into_iter()
+        .map(|v| v.loc.line)
+        .collect();
+    assert_eq!(lines, [Some(3), Some(6)]);
+}
+
 /// A walkthrough being made can be stopped from its row: the request goes,
 /// the row is no longer "Generating…", and a late answer to it opens
 /// nothing. While generating, its row had no control at all.

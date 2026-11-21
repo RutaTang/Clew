@@ -3700,6 +3700,50 @@ fn the_trail_leaves_out_a_file_gone() {
     assert!(!shows(&mut tab, "gone_away.rs"), "left out of the tab");
 }
 
+/// A fork in the reading trail is folded from its own mark, named for what
+/// it does to which stop, and once folded says how many stops it hides: a
+/// folded fork said only that something was under it.
+#[test]
+fn a_folded_fork_says_how_many_stops_it_hides() {
+    let mut app = reader_app();
+    let abs = app.active_viewer().unwrap().abs.clone();
+    let loc = |line| crate::history::Loc {
+        path: abs.clone(),
+        line: Some(line),
+    };
+    for (line, name) in [(1, "line_0"), (20, "Fork"), (30, "First"), (40, "Next")] {
+        app.proj.history.push(loc(line), Some(name.into()));
+    }
+    app.proj.history.back();
+    app.proj.history.back();
+    app.proj.history.push(loc(50), Some("Other".into()));
+    let folds = |app: &App| -> Vec<(String, Message)> {
+        crate::ui::heard::gather_of(|| super::sidebar::trail_tab(app))
+            .into_iter()
+            .filter(|t| t.title.contains("its branches"))
+            .map(|t| (t.title, t.message))
+            .collect()
+    };
+    let open = folds(&app);
+    assert_eq!(
+        open.iter().map(|(t, _)| t.as_str()).collect::<Vec<_>>(),
+        ["Hide its branches: Fork"]
+    );
+    assert!(!shows(&mut sim_elem(super::sidebar::trail_tab(&app)), "+3"));
+    let _ = app.update(open[0].1.clone());
+    assert_eq!(
+        folds(&app)
+            .iter()
+            .map(|(t, _)| t.as_str())
+            .collect::<Vec<_>>(),
+        ["Show its branches: Fork"]
+    );
+    let mut tab = sim_elem(super::sidebar::trail_tab(&app));
+    // First, Next and Other: under it, on either branch.
+    assert!(shows(&mut tab, "+3"));
+    assert!(!shows(&mut tab, "Other"));
+}
+
 /// A stop named for what is on its line — a type gone to — keeps its name
 /// while the caret is on that line: it read "lib.rs", where it read
 /// "Point". Left, the crumb says where the caret is: the file.

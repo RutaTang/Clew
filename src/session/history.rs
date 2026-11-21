@@ -94,6 +94,21 @@ pub struct History {
     renumbered: u64,
 }
 
+/// What a trail row draws at one level of the forks above it: the lines
+/// that tell one branch from the next. Without them a fork's branches sat
+/// one under another at the same indent and read as a single path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Guide {
+    /// Nothing: that fork's last branch began above.
+    Clear,
+    /// The fork's line runs on past this row, to a later branch.
+    Through,
+    /// A branch of that fork begins here, and another follows it: ├
+    Tee,
+    /// The fork's last branch begins here: └
+    Elbow,
+}
+
 /// One row of the flattened history tree, for display.
 pub struct Visit {
     pub id: usize,
@@ -105,6 +120,9 @@ pub struct Visit {
     /// for a hop that simply followed the one before — a trail of seven hops
     /// stepped seven levels in, its names cut to nothing.
     pub indent: usize,
+    /// One for each fork above it ([`Self::indent`] of them), outermost
+    /// first.
+    pub guides: Vec<Guide>,
     pub is_current: bool,
     /// True at a fork — this node has more than one child branch.
     pub forks: bool,
@@ -112,6 +130,9 @@ pub struct Visit {
     pub has_children: bool,
     /// True if this node's subtree is currently collapsed in the trail view.
     pub collapsed: bool,
+    /// How many stops its fold hides while [`Self::collapsed`]; else none.
+    /// A folded fork said only that something was under it, not how much.
+    pub hidden: usize,
 }
 
 impl History {
@@ -171,12 +192,23 @@ impl History {
         self.current = Some(child);
     }
 
-    /// Re-anchor this file's entries after it changed: an entry whose stored
-    /// symbol name still exists moves to that symbol's current line (following
-    /// edits above it), choosing the same-named symbol nearest its old line when
-    /// there are several. Entries without a label, or whose symbol vanished, keep
-    /// their line. Returns whether anything moved (so the caller can re-persist).
-    pub fn reanchor(&mut self, file: &Path, symbols: &[(String, usize)]) -> bool {
+    /// Re-anchor this file's entries after it changed, from its symbols
+    /// `before` the change to those `after` it: an entry whose stored symbol
+    /// name still exists moves with that symbol (following edits above it),
+    /// as far into it as it was — choosing the same-named symbol nearest
+    /// where it stood when there are several. Entries without a label, or
+    /// whose symbol vanished, keep their line. Returns whether anything moved
+    /// (so the caller can re-persist).
+    ///
+    /// A stop inside a function went to the function's first line: one at
+    /// line 50 of a function begun at 45 became the stop at 45 before it,
+    /// and the trail read "give_back()" twice.
+    pub fn reanchor(
+        &mut self,
+        file: &Path,
+        before: &[(String, usize)],
+        after: &[(String, usize)],
+    ) -> bool {
         let mut changed = false;
         for n in &mut self.nodes {
             if n.loc.path != file {
@@ -185,15 +217,25 @@ impl History {
             let (Some(label), Some(old)) = (&n.label, n.loc.line) else {
                 continue;
             };
-            let best = symbols
+            // Where its symbol began before the change: the nearest of that
+            // name at or above it. Unknown (a file not indexed before), it
+            // is taken to be at its symbol's first line.
+            let began = before
+                .iter()
+                .filter(|(name, line)| name == label && *line <= old)
+                .map(|&(_, line)| line)
+                .max()
+                .unwrap_or(old);
+            let best = after
                 .iter()
                 .filter(|(name, _)| name == label)
-                .min_by_key(|(_, line)| line.abs_diff(old));
-            if let Some(&(_, line)) = best
-                && n.loc.line != Some(line)
-            {
-                n.loc.line = Some(line);
-                changed = true;
+                .min_by_key(|(_, line)| line.abs_diff(began));
+            if let Some(&(_, begins)) = best {
+                let line = begins + (old - began);
+                if n.loc.line != Some(line) {
+                    n.loc.line = Some(line);
+                    changed = true;
+                }
             }
         }
         changed
@@ -460,30 +502,62 @@ impl History {
     }
 
     fn dfs(&self, id: usize, depth: usize, collapsed: &HashSet<usize>, out: &mut Vec<Visit>) {
-        let mut stack = vec![(id, depth, 0)];
-        while let Some((id, depth, indent)) = stack.pop() {
+        // Each entry: the node, its depth, for each fork above it whether a
+        // later branch of that fork follows this node's, and — when its
+        // parent forks — whether it begins the last branch.
+        let mut stack: Vec<(usize, usize, Vec<bool>, Option<bool>)> =
+            vec![(id, depth, Vec::new(), None)];
+        while let Some((id, depth, rails, begins)) = stack.pop() {
             let n = &self.nodes[id];
             let is_collapsed = collapsed.contains(&id);
+            let mut guides: Vec<Guide> = rails
+                .iter()
+                .map(|&on| if on { Guide::Through } else { Guide::Clear })
+                .collect();
+            if let (Some(last), Some(guide)) = (begins, guides.last_mut()) {
+                *guide = if last { Guide::Elbow } else { Guide::Tee };
+            }
             out.push(Visit {
                 id,
                 loc: n.loc.clone(),
                 label: n.label.clone(),
                 depth,
-                indent,
+                indent: rails.len(),
+                guides,
                 is_current: self.current == Some(id),
                 forks: n.children.len() > 1,
                 has_children: !n.children.is_empty(),
                 collapsed: is_collapsed,
+                hidden: if is_collapsed { self.below(id) } else { 0 },
             });
             if is_collapsed {
                 continue;
             }
             // Reversed so the LIFO stack emits children in their real order.
-            let branch = usize::from(n.children.len() > 1);
-            for &c in n.children.iter().rev() {
-                stack.push((c, depth + 1, indent + branch));
+            // A fork's children each begin a branch, one step in; a single
+            // child follows on in line.
+            let count = n.children.len();
+            for (i, &c) in n.children.iter().enumerate().rev() {
+                if count > 1 {
+                    let mut rails = rails.clone();
+                    rails.push(i + 1 < count);
+                    stack.push((c, depth + 1, rails, Some(i + 1 == count)));
+                } else {
+                    stack.push((c, depth + 1, rails.clone(), None));
+                }
             }
         }
+    }
+
+    /// How many visits sit under `id`, at any depth.
+    fn below(&self, id: usize) -> usize {
+        let mut stack = self.nodes[id].children.clone();
+        let mut count = 0;
+        while let Some(i) = stack.pop() {
+            count += 1;
+            stack.extend(self.nodes[i].children.iter().copied());
+        }
+        count
     }
 
     /// Drop the whole tree if any stored index is out of range (corrupt file).
@@ -1080,6 +1154,73 @@ mod tests {
         );
     }
 
+    /// A fork's branches sit at one indent, so each row says which branch
+    /// it is on: the first stop of a branch joins the fork's line (├, or └
+    /// for its last branch), and the line runs on beside the rows of every
+    /// branch but the last. c, d, e and f read as one path without them.
+    #[test]
+    fn the_trail_says_where_each_branch_begins() {
+        use Guide::{Clear, Elbow, Tee, Through};
+        let mut h = History::default();
+        for name in ["a", "b", "c", "d"] {
+            push(&mut h, name, None);
+        }
+        h.back();
+        h.back();
+        push(&mut h, "e", None);
+        push(&mut h, "f", None);
+        // And back to e, off a third way: e forks too, a level further in.
+        h.back();
+        push(&mut h, "g", None);
+        let shape: Vec<(String, Vec<Guide>)> = h
+            .flatten()
+            .iter()
+            .map(|v| (v.loc.path.display().to_string(), v.guides.clone()))
+            .collect();
+        let row = |name: &str, guides: &[Guide]| (name.to_string(), guides.to_vec());
+        assert_eq!(
+            shape,
+            [
+                row("a", &[]),
+                row("b", &[]),
+                row("c", &[Tee]),
+                row("d", &[Through]),
+                row("e", &[Elbow]),
+                row("f", &[Clear, Tee]),
+                row("g", &[Clear, Elbow]),
+            ]
+        );
+        assert!(h.flatten().iter().all(|v| v.guides.len() == v.indent));
+    }
+
+    #[test]
+    fn a_folded_fork_says_how_many_stops_it_hides() {
+        let mut h = History::default();
+        for name in ["a", "b", "c", "d"] {
+            push(&mut h, name, None);
+        }
+        h.back();
+        h.back();
+        push(&mut h, "e", None);
+        push(&mut h, "f", None);
+        let b = h
+            .flatten()
+            .iter()
+            .find(|v| v.loc.path.ends_with("b"))
+            .unwrap()
+            .id;
+        let folded = h.flatten_with(&HashSet::from([b]));
+        let names: Vec<_> = folded
+            .iter()
+            .map(|v| v.loc.path.display().to_string())
+            .collect();
+        assert_eq!(names, ["a", "b"]);
+        // c, d, e and f: both branches, each to its end.
+        assert_eq!(folded[1].hidden, 4);
+        assert_eq!(folded[0].hidden, 0);
+        assert!(h.flatten().iter().all(|v| v.hidden == 0));
+    }
+
     #[test]
     fn back_and_forward_walk_the_spine() {
         let mut h = History::default();
@@ -1224,13 +1365,42 @@ mod tests {
         );
 
         // After an edit, foo moved 10→14, bar 30→34; a b.rs symbol is irrelevant.
+        let before = vec![("foo".to_string(), 10), ("bar".to_string(), 30)];
         let symbols = vec![("foo".to_string(), 14), ("bar".to_string(), 34)];
-        assert!(h.reanchor(std::path::Path::new("a.rs"), &symbols));
+        assert!(h.reanchor(std::path::Path::new("a.rs"), &before, &symbols));
 
         let lines: Vec<Option<usize>> = h.flatten().into_iter().map(|v| v.loc.line).collect();
         assert_eq!(lines, vec![Some(14), Some(34), Some(50)]); // labelled moved, plain kept
         // Idempotent: a second pass with the same symbols moves nothing.
-        assert!(!h.reanchor(std::path::Path::new("a.rs"), &symbols));
+        assert!(!h.reanchor(std::path::Path::new("a.rs"), &symbols, &symbols));
+    }
+
+    #[test]
+    fn a_stop_inside_a_function_moves_with_it_and_keeps_its_place() {
+        let mut h = History::default();
+        let at = |line| Loc {
+            path: PathBuf::from("a.rs"),
+            line: Some(line),
+        };
+        h.push(at(45), Some("give_back".into()));
+        h.push(at(50), Some("give_back".into()));
+        // Two lines added above give_back, which began at 45.
+        let before = vec![("give_back".to_string(), 45)];
+        let after = vec![("give_back".to_string(), 47)];
+        assert!(h.reanchor(std::path::Path::new("a.rs"), &before, &after));
+        let lines: Vec<Option<usize>> = h.flatten().into_iter().map(|v| v.loc.line).collect();
+        // Five lines in, still: not on the function's first line, where the
+        // stop before it is.
+        assert_eq!(lines, vec![Some(47), Some(52)]);
+        // With nothing known of before, a stop is taken to be at its start.
+        let mut h = History::default();
+        h.push(at(10), Some("foo".into()));
+        assert!(h.reanchor(
+            std::path::Path::new("a.rs"),
+            &[],
+            &[("foo".to_string(), 12)]
+        ));
+        assert_eq!(h.loc(0).and_then(|l| l.line), Some(12));
     }
 
     #[test]

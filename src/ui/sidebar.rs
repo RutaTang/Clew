@@ -2044,23 +2044,28 @@ pub(crate) fn loc_label(loc: &crate::history::Loc, label: Option<&str>) -> Strin
 /// row over the code said "cents()" — anything else by its name, a file by
 /// its file name and line.
 pub(crate) fn stop_label(app: &App, loc: &crate::history::Loc, label: Option<&str>) -> String {
-    match label {
-        Some(name)
-            if app
-                .proj
-                .symbol_index_by_file
-                .get(&loc.path)
-                .is_some_and(|symbols| {
-                    symbols
-                        .iter()
-                        .any(|s| s.name == name && matches!(s.kind.as_str(), "function" | "method"))
-                }) =>
-        {
-            format!("{name}()")
-        }
+    // The functions of that name in the stop's file, by the line each
+    // starts on.
+    let starts: Option<Vec<usize>> = label.and_then(|name| {
+        let symbols = app.proj.symbol_index_by_file.get(&loc.path)?;
+        let starts: Vec<usize> = symbols
+            .iter()
+            .filter(|s| s.name == name && matches!(s.kind.as_str(), "function" | "method"))
+            .map(|s| s.line)
+            .collect();
+        (!starts.is_empty()).then_some(starts)
+    });
+    match (label, starts) {
+        // Inside the function, not at its head: its line too, as a stop
+        // noted by line says it — two stops in give_back() read as the same
+        // place twice.
+        (Some(name), Some(starts)) => match loc.line {
+            Some(line) if !starts.contains(&line) => format!("{name}():{line}"),
+            _ => format!("{name}()"),
+        },
         // A stop recorded by its line: the function it was in, and the
         // line — "pricing.py:20" did not say it was inside discounts().
-        None => match loc
+        (None, _) => match loc
             .line
             .and_then(|line| Some((app.function_around(&loc.path, line)?, line)))
         {
@@ -2123,67 +2128,109 @@ pub(crate) fn trail_tab(app: &App) -> Element<'_, Message> {
         left: SIDE_TEXT_X,
     });
 
-    // The arrow's column only where the trail forks somewhere: a straight
-    // trail kept an empty one, and its rows began 34 in.
-    let any_fold = visits
-        .iter()
-        .any(|v| v.has_children && (v.forks || v.collapsed));
-    let fold_w = if any_fold { CHEVRON_W } else { 0.0 };
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
     for v in &visits {
         // Indented under each fork above it — a hop that just followed the
         // one before stays in line — and capped: past ~8 branches a deep one
-        // would push the node off the panel's right edge.
-        let indent = (v.indent.min(8) as f32) * 14.0;
-        // What is left for its name and file after the row's indent, chevron,
-        // mark and icon: cut with an ellipsis, where they were cut bare.
+        // would push the node off the panel's right edge. The steps are the
+        // forks' lines: where each branch begins, and which branch a row is
+        // on. Without them a fork's branches sat one under another at one
+        // indent and read as a single path.
+        let shown = v.indent.min(TRAIL_MAX_STEPS);
+        let lead_w = (shown + 1) as f32 * TRAIL_STEP;
+        // What is left for its name and file after the row's lines, mark
+        // and icon: cut with an ellipsis, where they were cut bare.
+        // A folded fork's count of what it hides, at the row's end: its
+        // fold said only that something was under it, not how much.
+        let hides = (v.collapsed && v.hidden > 0).then(|| format!("+{}", v.hidden));
+        let hides_w = hides.as_deref().map_or(0.0, |n| {
+            super::steady::width_of(n, ts::CAPTION, crate::fonts::UI) + 6.0
+        });
         let room = (app.sidebar_width
             - 2.0 * SIDE_PAD
-            - indent
-            - fold_w
-            - 10.0
+            - lead_w
             - 12.0
-            - 3.0 * 6.0
-            - 14.0
+            - 2.0 * 6.0
+            - (SIDE_TEXT_X - SIDE_PAD)
+            - 8.0
+            - hides_w
             - crate::ui::SCROLLBAR_W)
             .max(0.0);
 
-        // A collapse chevron for nodes with children (forks stand out in accent);
-        // leaves get a fixed-width spacer so names still line up.
-        // Only where the trail branches (or was folded there): in a straight
-        // run every row had one, and folding one hid every later stop.
-        let toggle: Element<'_, Message> = if v.has_children && (v.forks || v.collapsed) {
-            chevron(
-                !v.collapsed,
+        // Its mark: where the trail forks, the fork's fold — its line
+        // running on down to its branches while they are shown — and
+        // elsewhere a dot. Either is the accent for where the reader is,
+        // and the tree's grey elsewhere. The dots are drawn shapes rather
+        // than a tiny "●" glyph (text stays at or above the type scale's
+        // floor). The fold was a column of its own left of the marks, with
+        // a ⋔ beside it: the marks of a forked trail stood 18 further in
+        // than a straight one's.
+        let mark_color = if v.is_current {
+            theme::accent()
+        } else {
+            theme::dim()
+        };
+        let mark: Element<'_, Message> = if v.has_children && (v.forks || v.collapsed) {
+            let does = if v.collapsed {
+                tr!("Show its branches")
+            } else {
+                tr!("Hide its branches")
+            };
+            let fold = button(
+                container(glyph::icon(
+                    if v.collapsed {
+                        Glyph::ChevronRight
+                    } else {
+                        Glyph::ChevronDown
+                    },
+                    mark_color,
+                    10.0,
+                ))
+                .center(Fill),
+            )
+            .style(theme::list_row(false))
+            .width(Length::Fixed(TRAIL_STEP))
+            .height(Length::Fixed(TRAIL_STEP))
+            .padding(0)
+            .on_press(super::heard::said_to_with(
+                does,
+                || stop_label(app, &v.loc, v.label.as_deref()),
                 Message::Reading(ReadingMsg::TrailToggleCollapse {
                     id: v.id,
                     loc: v.loc.clone(),
                 }),
-            )
-        } else {
-            space().width(fold_w).into()
-        };
-        // Status marker: current dot (accent), fork ⋔ (accent), other visited
-        // nodes a grey dot so the trail reads as a string of nodes. The dots
-        // are drawn shapes rather than a tiny "●" glyph (text stays at or
-        // above the type scale's floor); the fork glyph stays readable.
-        let marker: Element<'_, Message> = if v.forks && !v.is_current {
-            text("⋔")
-                .size(ts::SMALL)
-                .color(theme::accent())
-                .width(10)
-                .into()
-        } else {
-            let color = if v.is_current {
-                theme::accent()
+            ));
+            let fold = super::toolbar::tip_at(fold, does, None, tooltip::Position::Bottom);
+            let below: Element<'_, Message> = if v.collapsed {
+                space().height(Fill).into()
             } else {
-                theme::dim()
+                iced::widget::canvas(TrailStub)
+                    .width(Length::Fixed(TRAIL_STEP))
+                    .height(Fill)
+                    .into()
             };
-            container(trail_dot(color))
-                .width(10)
-                .align_x(iced::Center)
+            column![space().height(Fill), fold, below]
+                .width(Length::Fixed(TRAIL_STEP))
+                .height(Fill)
+                .into()
+        } else {
+            container(trail_dot(mark_color))
+                .center_x(Length::Fixed(TRAIL_STEP))
+                .center_y(Fill)
                 .into()
         };
+        // The lines and the mark, side by side with no gap: a fork's line
+        // runs under its mark, and a branch's ├ reaches its first mark.
+        let lead = Row::new()
+            .extend((shown > 0).then(|| {
+                iced::widget::canvas(TrailGuides(v.guides[..shown].to_vec()))
+                    .width(Length::Fixed(shown as f32 * TRAIL_STEP))
+                    .height(Fill)
+                    .into()
+            }))
+            .push(mark)
+            .width(Length::Fixed(lead_w))
+            .height(Fill);
         // The row's band is as wide as the file tree's — its depth indents
         // what is in it, not the band — and the place being read is the
         // row lit as the open file is, its name in the medium weight.
@@ -2194,9 +2241,7 @@ pub(crate) fn trail_tab(app: &App) -> Element<'_, Message> {
         };
         let jump = button(
             Row::new()
-                .extend((indent > 0.0).then(|| space().width(indent).into()))
-                .extend(any_fold.then_some(toggle))
-                .push(marker)
+                .push(lead)
                 .push(container(glyph::icon(Glyph::File, theme::dim(), 12.0)).width(12))
                 .push(
                     container(column![
@@ -2220,19 +2265,29 @@ pub(crate) fn trail_tab(app: &App) -> Element<'_, Message> {
                         .color(theme::dim())
                         .wrapping(Wrapping::None),
                     ])
+                    .padding([3, 0])
                     .width(Fill)
                     .clip(true),
                 )
+                .extend(hides.map(|n| {
+                    text(n)
+                        .size(ts::CAPTION)
+                        .color(theme::dim())
+                        .wrapping(Wrapping::None)
+                        .into()
+                }))
                 .spacing(6)
                 .align_y(iced::Center),
         )
         .style(theme::list_row(v.is_current))
         .width(Fill)
-        // Its first mark at the line for words, under the trail's name.
+        // Its first mark at the line for words, under the trail's name;
+        // no room above or below, so the forks' lines run on unbroken from
+        // row to row (the words keep theirs).
         .padding(Padding {
-            top: 3.0,
+            top: 0.0,
             right: 8.0,
-            bottom: 3.0,
+            bottom: 0.0,
             left: SIDE_TEXT_X - SIDE_PAD,
         })
         .on_press(super::heard::row(
@@ -2247,7 +2302,7 @@ pub(crate) fn trail_tab(app: &App) -> Element<'_, Message> {
     }
     column![
         header,
-        scrollable(Column::with_children(rows).spacing(1).padding(Padding {
+        scrollable(Column::with_children(rows).padding(Padding {
             top: 0.0,
             right: SIDE_PAD,
             bottom: 8.0,
@@ -2259,6 +2314,94 @@ pub(crate) fn trail_tab(app: &App) -> Element<'_, Message> {
         .height(Fill),
     ]
     .into()
+}
+
+/// A step of the trail's indent: one fork's column, its line down the
+/// middle; a row's mark is one step wide too, so a fork's line runs on
+/// under its fold.
+const TRAIL_STEP: f32 = 14.0;
+/// The most steps the trail indents: past ~8 branches a deep one would push
+/// the row off the panel's right edge.
+const TRAIL_MAX_STEPS: usize = 8;
+
+/// The colour of the forks' lines: quieter than the marks they join.
+fn trail_line_color() -> iced::Color {
+    iced::Color {
+        a: 0.45,
+        ..theme::dim()
+    }
+}
+
+/// The forks' lines across a trail row ([`crate::history::Guide`]), one
+/// [`TRAIL_STEP`] for each fork above it.
+struct TrailGuides(Vec<crate::history::Guide>);
+
+impl iced::widget::canvas::Program<Message> for TrailGuides {
+    type State = ();
+
+    fn draw(
+        &self,
+        _state: &(),
+        renderer: &iced::Renderer,
+        _theme: &iced::Theme,
+        bounds: iced::Rectangle,
+        _cursor: iced::advanced::mouse::Cursor,
+    ) -> Vec<iced::widget::canvas::Geometry> {
+        use crate::history::Guide;
+        use iced::widget::canvas::{Frame, Path, Stroke};
+        let mut frame = Frame::new(renderer, bounds.size());
+        let pen = Stroke::default()
+            .with_width(1.0)
+            .with_color(trail_line_color());
+        let (h, mid) = (bounds.height, (bounds.height / 2.0).round());
+        let p = iced::Point::new;
+        for (step, guide) in self.0.iter().enumerate() {
+            // On the pixel grid, so a 1 px line is one pixel, not two half.
+            let x = (step as f32 * TRAIL_STEP + TRAIL_STEP / 2.0).floor() + 0.5;
+            match guide {
+                Guide::Clear => {}
+                Guide::Through => frame.stroke(&Path::line(p(x, 0.0), p(x, h)), pen),
+                // A branch begins: across to its mark, the line going on
+                // (├) or, for the fork's last branch, turning (└).
+                Guide::Tee | Guide::Elbow => {
+                    let end = if *guide == Guide::Tee { h } else { mid };
+                    frame.stroke(&Path::line(p(x, 0.0), p(x, end)), pen);
+                    frame.stroke(
+                        &Path::line(p(x, mid + 0.5), p(bounds.width, mid + 0.5)),
+                        pen,
+                    );
+                }
+            }
+        }
+        vec![frame.into_geometry()]
+    }
+}
+
+/// Under a fork's fold, its line on down to its first branch.
+struct TrailStub;
+
+impl iced::widget::canvas::Program<Message> for TrailStub {
+    type State = ();
+
+    fn draw(
+        &self,
+        _state: &(),
+        renderer: &iced::Renderer,
+        _theme: &iced::Theme,
+        bounds: iced::Rectangle,
+        _cursor: iced::advanced::mouse::Cursor,
+    ) -> Vec<iced::widget::canvas::Geometry> {
+        use iced::widget::canvas::{Frame, Path, Stroke};
+        let mut frame = Frame::new(renderer, bounds.size());
+        let x = (TRAIL_STEP / 2.0).floor() + 0.5;
+        frame.stroke(
+            &Path::line(iced::Point::new(x, 2.0), iced::Point::new(x, bounds.height)),
+            Stroke::default()
+                .with_width(1.0)
+                .with_color(trail_line_color()),
+        );
+        vec![frame.into_geometry()]
+    }
 }
 
 /// What a trail row says under its name: the file a place is in — or, for
