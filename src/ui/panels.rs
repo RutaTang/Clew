@@ -988,16 +988,16 @@ fn trace_control_w(app: &App) -> f32 {
     let w = |s: &str, size: f32| super::steady::width_of(s, size, crate::fonts::UI);
     let n = app.debug.trace.len();
     if n == 0 {
-        return w(tr!("Trace: no stops yet"), ts::CAPTION);
+        return w(tr!("No stops traced yet"), ts::CAPTION);
     }
     let count = if app.debug.trace_cut {
         trn!(
-            "Trace: 1 stop (cut short)",
-            "Trace: {n} stops (cut short)",
+            "1 stop traced (cut short)",
+            "{n} stops traced (cut short)",
             n
         )
     } else {
-        trn!("Trace: 1 stop", "Trace: {n} stops", n)
+        trn!("1 stop traced", "{n} stops traced", n)
     };
     w(&count, ts::CAPTION) + 6.0 + w(tr!("Walk this run"), ts::SMALL) + 16.0 + 18.0
 }
@@ -1015,9 +1015,9 @@ pub(crate) fn trace_control(app: &App) -> Element<'_, Message> {
             .as_ref()
             .is_some_and(|s| s.status == crate::DebugStatus::Terminated);
         return text(if ended {
-            tr!("Trace: no stops")
+            tr!("No stops traced")
         } else {
-            tr!("Trace: no stops yet")
+            tr!("No stops traced yet")
         })
         .size(ts::CAPTION)
         .color(theme::dim())
@@ -1025,12 +1025,12 @@ pub(crate) fn trace_control(app: &App) -> Element<'_, Message> {
     }
     let count = if app.debug.trace_cut {
         trn!(
-            "Trace: 1 stop (cut short)",
-            "Trace: {n} stops (cut short)",
+            "1 stop traced (cut short)",
+            "{n} stops traced (cut short)",
             n
         )
     } else {
-        trn!("Trace: 1 stop", "Trace: {n} stops", n)
+        trn!("1 stop traced", "{n} stops traced", n)
     };
     row![
         text(count)

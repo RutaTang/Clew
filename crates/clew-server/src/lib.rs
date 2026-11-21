@@ -433,7 +433,7 @@ impl Server {
     fn root_or_refuse(&self) -> Result<PathBuf, Box<Event>> {
         self.root
             .clone()
-            .ok_or_else(|| Box::new(refused("refused: no project open")))
+            .ok_or_else(|| Box::new(refused("refused because no project is open")))
     }
 
     /// Wait (bounded) for `root`'s file list to commit — an `OpenProject`
@@ -521,7 +521,7 @@ impl Server {
                     return Some(Event::error(
                         ErrorCode::Handshake,
                         format!(
-                            "protocol mismatch: the client speaks v{protocol}, but this clew-server speaks v{PROTOCOL_VERSION}. Update so both sides match"
+                            "the client speaks protocol v{protocol}, but this clew-server speaks v{PROTOCOL_VERSION}. Update so both sides match"
                         ),
                     ));
                 }
@@ -535,7 +535,7 @@ impl Server {
                     return Some(Event::error(
                         ErrorCode::Handshake,
                         format!(
-                            "protocol build mismatch: both sides speak v{PROTOCOL_VERSION}, but they were built from different protocol sources (client {fingerprint}, server {}). Rebuild or redeploy so they match",
+                            "both sides speak protocol v{PROTOCOL_VERSION}, but they were built from different protocol sources (client {fingerprint}, server {}). Rebuild or redeploy so they match",
                             clew_protocol::SCHEMA_FINGERPRINT
                         ),
                     ));
@@ -553,7 +553,7 @@ impl Server {
             // connection whose protocol neither side has confirmed.
             _ if !self.hello_ok => Some(Event::error(
                 ErrorCode::Handshake,
-                "refused: the protocol handshake has not completed — send Hello first, with \
+                "refused because the protocol handshake has not completed. Send Hello first, with \
                  matching versions on both sides",
             )),
             // Scan the project: store the file list for search/read, and reply
@@ -1092,7 +1092,7 @@ impl Server {
                 };
                 if rels.len() > MAX_BATCH {
                     return Some(refused(format!(
-                        "refused: ReadSources batch over {MAX_BATCH} files"
+                        "refused to read more than {MAX_BATCH} files in one request"
                     )));
                 }
                 spawn_reply(&self.out, id, "reading sources", move || {
@@ -1145,7 +1145,7 @@ impl Server {
                     return Some(refusal);
                 }
                 if !clew_core::statefile::safe_rel(&rel) {
-                    return Some(refused(format!("refused: bad state path: {rel}")));
+                    return Some(refused(format!("refused the invalid state path {rel}")));
                 }
                 if self
                     .state_jobs
@@ -1181,13 +1181,15 @@ impl Server {
                     return Some(refusal);
                 }
                 if !clew_core::statefile::safe_rel(&rel) {
-                    return Some(refused(format!("refused: bad state path: {rel}")));
+                    return Some(refused(format!("refused the invalid state path {rel}")));
                 }
                 if text
                     .as_ref()
                     .is_some_and(|t| t.len() as u64 > state::read_limit(&rel))
                 {
-                    return Some(refused(format!("refused: state file too large: {rel}")));
+                    return Some(refused(format!(
+                        "refused {rel} because the state file is too large"
+                    )));
                 }
                 // A dropped job would leave the client waiting for an
                 // acknowledgement that can never come, and it would keep the
@@ -1225,11 +1227,11 @@ impl Server {
                     return Some(refusal);
                 }
                 if !clew_core::statefile::safe_rel(&rel) {
-                    return Some(refused(format!("refused: bad state path: {rel}")));
+                    return Some(refused(format!("refused the invalid state path {rel}")));
                 }
                 // Recorded on disk once applied (see `StateWork::Merge`).
                 if !clew_protocol::valid_edit_id(&edit_id) {
-                    return Some(refused(format!("refused: bad edit id for {rel}")));
+                    return Some(refused(format!("refused an invalid edit id for {rel}")));
                 }
                 // The merged file is bounded by the file it merges into, which
                 // the read caps; only the incoming entry is unbounded here, so
@@ -1243,7 +1245,9 @@ impl Server {
                     clew_core::statefile::MAX_STATE_BYTES
                 };
                 if !matches!(edit_bytes, Ok(n) if n <= edit_limit) {
-                    return Some(refused(format!("refused: state edit too large: {rel}")));
+                    return Some(refused(format!(
+                        "refused the edit to {rel} because it is too large"
+                    )));
                 }
                 if self
                     .state_jobs
@@ -1274,9 +1278,9 @@ impl Server {
                         event: Event::ProcessExited { proc, code: None },
                     });
                     return Some(refused(
-                        "refused: a remote clew-server does not run arbitrary commands \
-                         (SpawnProcess) — language servers and debug adapters start through \
-                         SpawnLsp / SpawnAdapter",
+                        "refused because a remote clew-server does not run arbitrary commands \
+                         (SpawnProcess). Language servers and debug adapters start through \
+                         SpawnLsp and SpawnAdapter",
                     ));
                 }
                 let cwd =
@@ -1599,7 +1603,7 @@ impl Server {
                         kill_removed(&self.out, proc, p);
                     }
                     return Some(refused(format!(
-                        "refused: {} bytes of input for process {proc} (limit {MAX_PROC_INPUT_BYTES}), so the process was stopped",
+                        "refused {} bytes of input for process {proc} (the limit is {MAX_PROC_INPUT_BYTES}), so the process was stopped",
                         data.len()
                     )));
                 }

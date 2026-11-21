@@ -1189,7 +1189,7 @@ fn sh_c(script: &str) -> Result<String, Failure> {
         Some(command) => Ok(String::from_utf8_lossy(&command).into_owned()),
         None => Err(Failure::new(
             FailureKind::Other,
-            tr!("internal error: a remote script contains a single quote"),
+            tr!("A remote script Clew built contains a single quote. This is a bug in Clew."),
         )),
     }
 }
@@ -1420,7 +1420,7 @@ where
             )
         } else {
             tr!(
-                "the clew-server deployed to {label} did not pass the protocol check (wanted '{wanted}', got: {got}). Is the home directory mounted noexec?",
+                "the clew-server deployed to {label} did not pass the protocol check (it answered {got} instead of '{wanted}'). Is the home directory mounted noexec?",
                 label = label,
                 wanted = layout.probe_line,
                 got = last_line(&check.stdout)

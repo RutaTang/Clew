@@ -543,7 +543,7 @@ fn chip<'a>(label: String, on: bool, msg: Message) -> Element<'a, Message> {
 fn project_sets_note(sets: &[String]) -> Option<String> {
     (!sets.is_empty()).then(|| {
         tr!(
-            "Also set in .clew/lsp.toml: {settings}. Settings here take precedence.",
+            ".clew/lsp.toml also sets {settings}. The settings here take precedence.",
             settings = sets.join(", ")
         )
     })
@@ -2863,20 +2863,20 @@ pub(crate) fn shortcuts_body(app: &App) -> Element<'_, Message> {
         (tr!("Toggle fold"), "za"),
         (tr!("Open all folds"), "zR"),
         (tr!("Close all folds"), "zM"),
-        (tr!("Time Travel: older / newer commit"), "⌘←   ⌘→"),
+        (tr!("Older / newer commit in Time Travel"), "⌘←   ⌘→"),
         (tr!("Next / previous control or field"), "Tab   ⇧Tab"),
         (tr!("Activate the focused control"), press_keys),
         (tr!("Code / sidebar / file tree / Ask"), "F6   ⇧F6"),
         (
-            tr!("File tree: move up / down, open / close a folder"),
+            tr!("Move up / down in the file tree, open / close a folder"),
             "↑ ↓ → ←   j k l h",
         ),
         (tr!("Close the top panel / clear selection"), "Esc"),
         (tr!("Open the context menu"), "⇧F10"),
-        (tr!("Debugger: breakpoint on this line"), "F9"),
-        (tr!("Debugger: start / continue, stop"), "F5   ⇧F5"),
-        (tr!("Debugger: step over"), "F10"),
-        (tr!("Debugger: step into / out"), "F11   ⇧F11"),
+        (tr!("Toggle a breakpoint on this line"), "F9"),
+        (tr!("Start or continue debugging / stop"), "F5   ⇧F5"),
+        (tr!("Step over the current line"), "F10"),
+        (tr!("Step into a call / out of the function"), "F11   ⇧F11"),
     ];
     let vim: Vec<_> = motions
         .into_iter()

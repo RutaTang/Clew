@@ -30696,7 +30696,7 @@ fn a_step_the_reader_superseded_still_notes_a_missing_symbol() {
         .clone()
         .expect("the superseded step lost its note");
     assert!(
-        note.contains("couldn't find") && note.contains("no_such_fn"),
+        note.contains("Couldn't find") && note.contains("no_such_fn"),
         "{note}"
     );
     assert!(
@@ -30722,7 +30722,7 @@ fn after_a_jump(app: &mut App, highlight: Task<Message>) {
         .clone()
         .expect("the jump cost the step its note");
     assert!(
-        note.contains("couldn't find") && note.contains("no_such_fn"),
+        note.contains("Couldn't find") && note.contains("no_such_fn"),
         "{note}"
     );
     assert!(!app.status.contains("no_such_fn"), "{}", app.status);
@@ -30831,7 +30831,7 @@ fn markdown_step_landed(tag: &str) -> (App, Task<Message>) {
 /// had landed.
 #[test]
 fn the_readers_scroll_in_a_markdown_steps_file_supersedes_the_step() {
-    let note = "couldn't find “usage” in README.md";
+    let note = "Couldn't find “usage” in README.md";
 
     // Left alone, the step says where it landed.
     let (mut app, highlight) = markdown_step_landed("walk-md-alone");
@@ -33461,7 +33461,7 @@ fn a_walkthrough_step_whose_symbol_is_missing_says_so_once_its_file_lands() {
         .anchor_note
         .clone()
         .expect("the step says where it landed");
-    assert!(note.contains("couldn't find"), "{note}");
+    assert!(note.contains("Couldn't find"), "{note}");
     assert!(note.contains("no_such_fn"), "{note}");
     assert_eq!(
         app.status, note,
@@ -33903,7 +33903,7 @@ fn a_render_batch_that_rendered_nothing_says_so() {
     }));
     assert_eq!(
         app.status,
-        "Could not render math & diagrams: all 2 failed (the render task failed: panicked)"
+        "Could not render any of the 2 math and diagram blocks (the render task failed: panicked)"
     );
     assert!(app.proj.explain.svg_failed.contains_key(&1));
     assert!(app.proj.explain.svg_failed.contains_key(&2));

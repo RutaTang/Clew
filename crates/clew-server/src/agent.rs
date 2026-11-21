@@ -859,8 +859,7 @@ impl Turn<'_> {
                 Plan::OverCap => self.msgs.push(llm::AgentMsg::ToolResult {
                     call,
                     content: format!(
-                        "Not run: at most {MAX_CALLS_PER_STEP} tool calls run per step. Request \
-                         it again in your next step if you still need it."
+                        "This call was not run because at most {MAX_CALLS_PER_STEP} tool calls run per step. Request it again in your next step if you still need it."
                     ),
                 }),
                 Plan::External => {
@@ -1665,7 +1664,7 @@ fn exec_tool_basic(
             if notebook {
                 let Some(nb) = clew_core::notebook::parse(&source) else {
                     return (
-                        format!("cannot read {rel}: not a notebook Clew can parse"),
+                        format!("{rel} is not a notebook Clew can parse"),
                         format!("outline {rel}"),
                         Vec::new(),
                     );
@@ -2217,7 +2216,7 @@ fn file_at(ctx: &Ctx, rel: &str) -> bool {
 fn resolve(ctx: &Ctx, rel: &str) -> Result<PathBuf, String> {
     clew_core::confine::confine(&ctx.root, rel).map_err(|e| {
         if e.is_escape() {
-            format!("refused: path escapes the project: {rel}")
+            format!("refused {rel} because it lies outside the project")
         } else {
             format!("cannot open {rel}: {e}")
         }
@@ -3549,7 +3548,7 @@ mod tests {
         let refused = turn
             .msgs
             .iter()
-            .filter(|m| matches!(m, llm::AgentMsg::ToolResult { content, .. } if content.starts_with("Not run")))
+            .filter(|m| matches!(m, llm::AgentMsg::ToolResult { content, .. } if content.starts_with("This call was not run")))
             .count();
         assert_eq!(refused, 3, "the rest were answered, not run");
     }

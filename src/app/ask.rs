@@ -842,7 +842,7 @@ impl App {
         if messages.is_empty() {
             self.proj.asking = false;
             self.return_question(pending.question, pending.spoken);
-            self.status = tr!("Ask failed: the question's context could not be assembled").into();
+            self.status = tr!("Couldn't gather the context for this question").into();
             return Task::none();
         }
         let cfg = match self.require_llm() {

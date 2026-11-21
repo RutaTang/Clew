@@ -20,7 +20,7 @@ pub(crate) fn validate_git_op(op: &clew_protocol::GitOp) -> Result<(), String> {
     // be resolved (the history of a deleted or renamed file).
     let rel_ok = |rel: &str| {
         clew_core::confine::check_lexical(rel)
-            .map_err(|e| format!("refused: bad path: {rel} ({e})"))
+            .map_err(|e| format!("refused the invalid path {rel} ({e})"))
     };
     // One definition of "a sha" for both paths: the local GUI reaches these
     // same git helpers directly, and a second copy of the predicate here is
@@ -28,7 +28,7 @@ pub(crate) fn validate_git_op(op: &clew_protocol::GitOp) -> Result<(), String> {
     let sha_ok = |sha: &str| {
         clew_core::git::is_hex_sha(sha)
             .then_some(())
-            .ok_or_else(|| format!("refused: bad commit id: {sha}"))
+            .ok_or_else(|| format!("refused the invalid commit id {sha}"))
     };
     let ref_ok = |base: &str| {
         (!base.is_empty()
@@ -38,17 +38,17 @@ pub(crate) fn validate_git_op(op: &clew_protocol::GitOp) -> Result<(), String> {
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || "._/@~^-".contains(c)))
         .then_some(())
-        .ok_or_else(|| format!("refused: bad ref: {base}"))
+        .ok_or_else(|| format!("refused the invalid ref {base}"))
     };
     let limit_ok = |n: usize| {
         (n <= MAX_LIMIT)
             .then_some(())
-            .ok_or_else(|| "refused: history limit too large".to_string())
+            .ok_or_else(|| "refused a history limit that is too large".to_string())
     };
     let bytes_ok = |n: usize| {
         (n <= MAX_DIFF_BYTES)
             .then_some(())
-            .ok_or_else(|| "refused: diff cap too large".to_string())
+            .ok_or_else(|| "refused a diff size limit that is too large".to_string())
     };
     match op {
         GitOp::FileHistory { rel, limit } => rel_ok(rel).and(limit_ok(*limit)),
@@ -84,7 +84,7 @@ pub(crate) fn validate_git_op(op: &clew_protocol::GitOp) -> Result<(), String> {
                 .map_err(|e| format!("refused: {e}"))?;
             (*skip <= clew_core::git::MAX_LOG_SKIP)
                 .then_some(())
-                .ok_or_else(|| "refused: history offset too large".to_string())
+                .ok_or_else(|| "refused a history offset that is too large".to_string())
         }
         GitOp::CommitDetail { sha } => sha_ok(sha),
     }
@@ -122,7 +122,7 @@ mod tests {
         }
         assert!(
             validate_git_op(&GitOp::DiffLines { rel: "../x".into() })
-                .is_err_and(|e| e.starts_with("refused: bad path"))
+                .is_err_and(|e| e.starts_with("refused the invalid path"))
         );
     }
 

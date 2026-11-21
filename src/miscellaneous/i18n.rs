@@ -1884,11 +1884,11 @@ mod tests {
             }
             let said = message(&format!(
                 "request failed: the SOCKS proxy 10.0.0.1:1080 could not reach api.x.com:443 \
-                 (SOCKS4 answer 91: rejected or failed). To reach the host without the proxy, \
+                 (SOCKS4 code 91, request rejected or failed). To reach the host without the proxy, \
                  {env_bypass}"
             ));
             for english in [
-                "SOCKS4 answer",
+                "SOCKS4 code",
                 "rejected",
                 "to reach the host",
                 "list the host",

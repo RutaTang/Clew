@@ -545,24 +545,24 @@ pub(crate) struct Estimate {
 }
 
 impl Estimate {
-    /// `calls` of them, in one sentence of one weight: "About 44 AI calls:
-    /// 75k tokens, $0.03." The count stood bold over a dim line of the
+    /// `calls` of them, in one sentence of one weight: "About 44 AI calls
+    /// using 75k tokens ($0.03)." The count stood bold over a dim line of the
     /// tokens and money — the figure that matters most said least.
     pub(crate) fn said(&self, calls: usize) -> String {
         let count = crate::app::setup::about(calls);
         let tokens = tokens(self.tokens);
         match self.cost {
             Some(cost) => trn!(
-                "About {count} AI call: {tokens} tokens, {cost}.",
-                "About {count} AI calls: {tokens} tokens, {cost}.",
+                "About {count} AI call using {tokens} tokens ({cost}).",
+                "About {count} AI calls using {tokens} tokens ({cost}).",
                 calls,
                 count = count,
                 tokens = tokens,
                 cost = money(cost)
             ),
             None => trn!(
-                "About {count} AI call: {tokens} tokens.",
-                "About {count} AI calls: {tokens} tokens.",
+                "About {count} AI call using {tokens} tokens.",
+                "About {count} AI calls using {tokens} tokens.",
                 calls,
                 count = count,
                 tokens = tokens
@@ -1184,12 +1184,12 @@ mod tests {
         assert_eq!(estimate(&lately, EXPLAIN, 1, "mystery").cost, None);
         assert_eq!(
             estimate(&lately, EXPLAIN, 1, "mystery").said(1),
-            "About 1 AI call: 1.1k tokens."
+            "About 1 AI call using 1.1k tokens."
         );
         assert_eq!(
             drawn.said(10),
             format!(
-                "About 10 AI calls: 11k tokens, {}.",
+                "About 10 AI calls using 11k tokens ({}).",
                 money(drawn.cost.unwrap())
             )
         );

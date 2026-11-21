@@ -1528,10 +1528,12 @@ impl Socks {
             return Err(match reply[1] {
                 91 => self.answered(
                     ProxyFault::Unavailable,
-                    format!("could not reach {target} (SOCKS4 answer 91: rejected or failed)"),
+                    format!(
+                        "could not reach {target} (SOCKS4 code 91, request rejected or failed)"
+                    ),
                 ),
                 other => self.failed(format!(
-                    "refused the CONNECT to {target} (SOCKS4 answer {other})"
+                    "refused the CONNECT to {target} (SOCKS4 code {other})"
                 )),
             });
         }
@@ -7010,13 +7012,13 @@ mod tests {
             (
                 "socks4a://proxy",
                 vec![0, 91, 0, 0, 0, 0, 0, 0],
-                "could not reach x.example:443 (SOCKS4 answer 91",
+                "could not reach x.example:443 (SOCKS4 code 91",
                 Unavailable,
             ),
             (
                 "socks4a://proxy",
                 vec![0, 93, 0, 0, 0, 0, 0, 0],
-                "refused the CONNECT to x.example:443 (SOCKS4 answer 93)",
+                "refused the CONNECT to x.example:443 (SOCKS4 code 93)",
                 Refused,
             ),
             // fixR5 #11: and SOCKS4's with its version (0).

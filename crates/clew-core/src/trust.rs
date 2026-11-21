@@ -577,7 +577,7 @@ impl CommandProbe {
     ///   outside the repository for those.
     pub fn into_exec(self) -> Result<PathBuf, String> {
         self.run_as(true)?
-            .ok_or_else(|| "refused: the command is not approved".to_string())
+            .ok_or_else(|| "refused because the command is not approved".to_string())
     }
 
     /// The path to spawn, as `clew_rules::location::launch` decides — proved

@@ -187,8 +187,8 @@ impl App {
             self.status = match first_reason {
                 None => tr!("Rendered math & diagrams").into(),
                 Some(reason) if rendered == 0 => trn!(
-                    "Could not render math & diagrams: 1 failed ({reason})",
-                    "Could not render math & diagrams: all {n} failed ({reason})",
+                    "Could not render the math or diagram ({reason})",
+                    "Could not render any of the {n} math and diagram blocks ({reason})",
                     failed,
                     reason = reason
                 ),

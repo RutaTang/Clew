@@ -104,7 +104,7 @@ pub fn lsp_command_allowed(
     })?;
     staged.exec_path.ok_or_else(|| {
         format!(
-            "refused: this project's lsp.toml command for {language} is not approved. Open a {language} file in Clew and approve it there",
+            "refused to run this project's lsp.toml command for {language} because it is not approved. Open a {language} file in Clew and approve it there",
             language = shown(language)
         )
     })

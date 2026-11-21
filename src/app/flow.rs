@@ -470,8 +470,8 @@ impl App {
             ));
         }
         self.status = trn!(
-            "`{symbol}`: 1 occurrence",
-            "`{symbol}`: {n} occurrences",
+            "1 occurrence of `{symbol}`",
+            "{n} occurrences of `{symbol}`",
             n,
             symbol = symbol
         );
@@ -776,8 +776,8 @@ impl App {
             tree.set_children(id, children);
         }
         self.status = trn!(
-            "`{symbol}`: 1 occurrence",
-            "`{symbol}`: {n} occurrences",
+            "1 occurrence of `{symbol}`",
+            "{n} occurrences of `{symbol}`",
             n,
             symbol = followed.symbol
         );

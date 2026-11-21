@@ -406,7 +406,7 @@ fn install_hint(binary: &str) -> &'static str {
     match binary {
         "dart" => "install the Dart or Flutter SDK",
         "lake" => "install Lean with elan",
-        "jdtls" => "install Eclipse JDT LS (with Homebrew: “brew install jdtls”)",
+        "jdtls" => "install Eclipse JDT LS, for example with “brew install jdtls”",
         "ruby-lsp" => "install it with “gem install ruby-lsp”",
         "csharp-ls" => "install it with “dotnet tool install --global csharp-ls”",
         "elp" => "install the Erlang Language Platform (elp) from its releases",
@@ -904,7 +904,7 @@ fn install_bytes(
     let actual = Sha256::of(bytes);
     if actual != download.sha256 {
         return Err(format!(
-            "checksum mismatch: expected {}, got {actual}",
+            "the download's checksum is {actual}, but {} was expected",
             download.sha256
         ));
     }
@@ -1148,7 +1148,7 @@ mod tests {
             let mut dl = download(&gz, Archive::Gzip, "rust-analyzer");
             dl.sha256 = Sha256::of(b"something else");
             let err = install_bytes(&gz, &dl, &dest, &store(dir), archive::BUDGET).unwrap_err();
-            assert!(err.contains("checksum mismatch"), "{err}");
+            assert!(err.contains("checksum is"), "{err}");
             assert_eq!(std::fs::read(dest.join("rust-analyzer")).unwrap(), b"old");
 
             // A verified archive that lacks the binary fails the same way:

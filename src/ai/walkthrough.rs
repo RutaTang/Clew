@@ -828,13 +828,13 @@ impl Anchor {
         let symbol = step.symbol.as_deref().map(str::trim).unwrap_or_default();
         match self {
             Anchor::NotFound => Some(tr!(
-                "Walkthrough step {step}: couldn't find “{symbol}” in {file}",
+                "Couldn't find “{symbol}” in {file} (walkthrough step {step})",
                 step = step_no,
                 symbol = symbol,
                 file = step.file
             )),
             Anchor::Fallback(line) => Some(tr!(
-                "Walkthrough step {step}: couldn't find “{symbol}” in {file}. Showing line {line} instead.",
+                "Couldn't find “{symbol}” in {file} (walkthrough step {step}). Showing line {line} instead.",
                 step = step_no,
                 symbol = symbol,
                 file = step.file,
@@ -1278,12 +1278,12 @@ mod tests {
         let s = step(Some(" Parser::parse "), Some(12));
         assert_eq!(
             Anchor::NotFound.note(3, &s).as_deref(),
-            Some("Walkthrough step 3: couldn't find “Parser::parse” in src/a.rs")
+            Some("Couldn't find “Parser::parse” in src/a.rs (walkthrough step 3)")
         );
         assert_eq!(
             Anchor::Fallback(12).note(3, &s).as_deref(),
             Some(
-                "Walkthrough step 3: couldn't find “Parser::parse” in src/a.rs. Showing line 12 instead."
+                "Couldn't find “Parser::parse” in src/a.rs (walkthrough step 3). Showing line 12 instead."
             )
         );
         for landed in [Anchor::Symbol(4), Anchor::Line(4), Anchor::File] {

@@ -42,7 +42,7 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("Node.js exited before its debugger started listening: {said}"),
     tr_noop!("Not interpreted (no breakpoints there): {arg1}\n"),
     tr_noop!(
-        "Not run: at most {MAX_CALLS_PER_STEP} tool calls run per step. Request it again in your next step if you still need it."
+        "This call was not run because at most {MAX_CALLS_PER_STEP} tool calls run per step. Request it again in your next step if you still need it."
     ),
     tr_noop!("TLS with the proxy {name} failed: {arg1}"),
     tr_noop!("The MCP server failed: {why}"),
@@ -145,11 +145,11 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("cannot read {arg1}: {e}"),
     tr_noop!("cannot read {rel} (missing, a symlink, too large, or not text)"),
     tr_noop!("cannot read {rel} (missing, too large, or not text)"),
-    tr_noop!("cannot read {rel}: not a notebook Clew can parse"),
+    tr_noop!("{rel} is not a notebook Clew can parse"),
     tr_noop!("cannot resolve path: {e}"),
     tr_noop!("cannot run {arg1}: {e}"),
     tr_noop!("cannot run {program_name}: {e}"),
-    tr_noop!("checksum mismatch: expected {arg1}, got {actual}"),
+    tr_noop!("the download's checksum is {actual}, but {arg1} was expected"),
     tr_noop!("chose a login method Clew did not offer ({other})"),
     tr_noop!(
         "clew-server download failed checksum verification (expected {expected}, got {actual})"
@@ -172,7 +172,7 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("could not look up {name}: {e}"),
     tr_noop!("could not probe {arg1}: {e}"),
     tr_noop!("could not reach {authority} (it answered the CONNECT with {status_line})"),
-    tr_noop!("could not reach {target} (SOCKS4 answer 91: rejected or failed)"),
+    tr_noop!("could not reach {target} (SOCKS4 code 91, request rejected or failed)"),
     tr_noop!("could not reach {target}: {why}"),
     tr_noop!("could not run {name}: {e}"),
     tr_noop!("could not save the model: {e}"),
@@ -268,10 +268,10 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("listing the directory took longer than {arg1}s"),
     tr_noop!("lsp.toml command: {e}"),
     tr_noop!("lsp.toml init_options: {e}"),
-    tr_noop!("lsp.toml: a .clew directory is a symlink, so the file was not read"),
-    tr_noop!("lsp.toml: not a regular file"),
-    tr_noop!("lsp.toml: unreadable"),
-    tr_noop!("lsp.toml: too large"),
+    tr_noop!("lsp.toml was not read because a .clew directory is a symlink"),
+    tr_noop!("lsp.toml is not a regular file"),
+    tr_noop!("lsp.toml could not be read"),
+    tr_noop!("lsp.toml is too large"),
     tr_noop!("malformed header line {line}"),
     tr_noop!("method not found: {method}"),
     tr_noop!("missing checksum for the clew-server build ({e})"),
@@ -334,10 +334,10 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("process {proc} stopped reading stdin (queue overflow), so it was killed"),
     tr_noop!("project root unavailable: {e}"),
     tr_noop!(
-        "protocol build mismatch: both sides speak v{PROTOCOL_VERSION}, but they were built from different protocol sources (client {fingerprint}, server {arg1}). Rebuild or redeploy so they match"
+        "both sides speak protocol v{PROTOCOL_VERSION}, but they were built from different protocol sources (client {fingerprint}, server {arg1}). Rebuild or redeploy so they match"
     ),
     tr_noop!(
-        "protocol mismatch: the client speaks v{protocol}, but this clew-server speaks v{PROTOCOL_VERSION}. Update so both sides match"
+        "the client speaks protocol v{protocol}, but this clew-server speaks v{PROTOCOL_VERSION}. Update so both sides match"
     ),
     tr_noop!("pulls in {project} project files and {system} system headers"),
     tr_noop!("put them in its setting, as {example}"),
@@ -346,25 +346,27 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("read response: {arg1}"),
     tr_noop!("reading git's output failed: {e}"),
     tr_noop!("refused the CONNECT to {authority}: {status_line}"),
-    tr_noop!("refused the CONNECT to {target} (SOCKS4 answer {other})"),
+    tr_noop!("refused the CONNECT to {target} (SOCKS4 code {other})"),
     tr_noop!("refused the CONNECT to {target}: {why}"),
     tr_noop!("left .clew/{rel} untouched instead of overwriting it: {why}"),
-    tr_noop!("refused: ReadSources batch over {MAX_BATCH} files"),
-    tr_noop!("refused: bad commit id: {sha}"),
-    tr_noop!("refused: bad edit id for {rel}"),
-    tr_noop!("refused: bad path: {rel} ({e})"),
-    tr_noop!("refused: bad ref: {base}"),
-    tr_noop!("refused: bad state path: {rel}"),
-    tr_noop!("refused: path escapes project: {rel}"),
-    tr_noop!("refused: path escapes the project: {rel}"),
-    tr_noop!("refused: state edit too large: {rel}"),
-    tr_noop!("refused: state file too large: {rel}"),
-    tr_noop!("refused: state {rel} is for project {want}, but this server has {arg1}"),
+    tr_noop!("refused to read more than {MAX_BATCH} files in one request"),
+    tr_noop!("refused the invalid commit id {sha}"),
+    tr_noop!("refused an invalid edit id for {rel}"),
+    tr_noop!("refused the invalid path {rel} ({e})"),
+    tr_noop!("refused the invalid ref {base}"),
+    tr_noop!("refused the invalid state path {rel}"),
+    tr_noop!("refused {rel} because it is outside the project"),
+    tr_noop!("refused {rel} because it lies outside the project"),
+    tr_noop!("refused the edit to {rel} because it is too large"),
+    tr_noop!("refused {rel} because the state file is too large"),
     tr_noop!(
-        "refused: this project's lsp.toml command for {language} is not approved. Open a {language} file in Clew and approve it there"
+        "refused the state file {rel}, which belongs to project {want} while this server has {arg1} open"
     ),
     tr_noop!(
-        "refused: {arg1} bytes of input for process {proc} (limit {MAX_PROC_INPUT_BYTES}), so the process was stopped"
+        "refused to run this project's lsp.toml command for {language} because it is not approved. Open a {language} file in Clew and approve it there"
+    ),
+    tr_noop!(
+        "refused {arg1} bytes of input for process {proc} (the limit is {MAX_PROC_INPUT_BYTES}), so the process was stopped"
     ),
     tr_noop!("only HTTPS URLs are allowed: {url}"),
     tr_noop!("only HTTPS download URLs are allowed"),
@@ -788,7 +790,7 @@ pub(crate) const PARTS: &[&str] = &[
     tr_noop!("accepted no data"),
     tr_noop!("install the Dart or Flutter SDK"),
     tr_noop!("install Lean with elan"),
-    tr_noop!("install Eclipse JDT LS (with Homebrew: “brew install jdtls”)"),
+    tr_noop!("install Eclipse JDT LS, for example with “brew install jdtls”"),
     tr_noop!("install it with “gem install ruby-lsp”"),
     tr_noop!("install it with “dotnet tool install --global csharp-ls”"),
     tr_noop!("install the Erlang Language Platform (elp) from its releases"),

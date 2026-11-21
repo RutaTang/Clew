@@ -1246,7 +1246,7 @@ pub(crate) fn lsp_command_modal(
             .color(theme::fg()),
             column(blocks).spacing(8),
             text(tr!(
-                "Language: {language}, server: {server} {version}",
+                "{language} language server ({server} {version})",
                 language = crate::app::languages::language_name(&pending.language),
                 server = pending.server_name,
                 version = pending.version

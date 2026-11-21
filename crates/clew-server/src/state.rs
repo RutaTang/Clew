@@ -307,7 +307,7 @@ fn run_job(job: StateJob) -> Event {
 pub(crate) fn wrong_project(root: &Path, want: &str, rel: &str) -> Option<Event> {
     (root.to_string_lossy() != want).then(|| {
         refused(format!(
-            "refused: state {rel} is for project {want}, but this server has {}",
+            "refused the state file {rel}, which belongs to project {want} while this server has {} open",
             root.display()
         ))
     })

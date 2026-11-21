@@ -6671,7 +6671,7 @@ fn the_setup_sheet_says_what_each_choice_takes() {
     // sentence of one weight.
     let estimate = app.explain_estimate(3617).expect("an estimate");
     let said = estimate.said(3617);
-    assert!(said.starts_with("About 3,600 AI calls: "), "{said:?}");
+    assert!(said.starts_with("About 3,600 AI calls using "), "{said:?}");
     assert!(shows(&mut sim, &said), "{said:?}");
     assert!(matches!(
         click(sim_elem(sheet(&app, &root)), "Language servers").as_slice(),
@@ -11793,7 +11793,7 @@ fn the_last_runs_trace_is_offered_as_a_walkthrough_and_listed_on_the_call_graph(
     assert_eq!(super::scope_label("@trace app"), "Debug run (app)");
     assert_eq!(super::scope_label("@trace"), "Debug run");
     let mut sim = sim_elem(super::trace_control(&app));
-    assert!(shows(&mut sim, "Trace: no stops yet"));
+    assert!(shows(&mut sim, "No stops traced yet"));
     drop(sim);
     // A run that ended without stopping has no stops, not "yet".
     app.debug.session = Some(crate::DebugSession {
@@ -11812,8 +11812,8 @@ fn the_last_runs_trace_is_offered_as_a_walkthrough_and_listed_on_the_call_graph(
         addr: None,
     });
     let mut sim = sim_elem(super::trace_control(&app));
-    assert!(shows(&mut sim, "Trace: no stops"));
-    assert!(!shows(&mut sim, "Trace: no stops yet"));
+    assert!(shows(&mut sim, "No stops traced"));
+    assert!(!shows(&mut sim, "No stops traced yet"));
     drop(sim);
     app.debug.session = None;
     let frame = |name: &str, line: usize| crate::TraceFrame {
@@ -11837,7 +11837,7 @@ fn the_last_runs_trace_is_offered_as_a_walkthrough_and_listed_on_the_call_graph(
     ];
     app.debug.trace_rev += 1;
     let mut sim = sim_elem(super::trace_control(&app));
-    assert!(shows(&mut sim, "Trace: 3 stops"));
+    assert!(shows(&mut sim, "3 stops traced"));
     let _ = sim.click("Walk this run");
     let sent: Vec<Message> = sent_by(sim).into_iter().collect();
     assert!(
@@ -12946,7 +12946,7 @@ fn the_languages_section_offers_each_languages_build_choices() {
     let mut sim = sim_tall(super::connect::languages_section(&app));
     for shown in [
         "What rust-analyzer checks the project with. \
-         Also set in .clew/lsp.toml: cargo.features. Settings here take precedence.",
+         .clew/lsp.toml also sets cargo.features. The settings here take precedence.",
         "Features",
         "Target",
         "cli:",
@@ -21061,7 +21061,7 @@ fn explaining_says_what_it_will_likely_cost() {
     let estimate = app.explain_estimate(45).expect("an estimate");
     let said = estimate.said(45);
     assert!(
-        said.starts_with("About 45 AI calls: ") && said.contains("tokens"),
+        said.starts_with("About 45 AI calls using ") && said.contains("tokens"),
         "{said:?}"
     );
     assert!(!estimate.from_history, "no explanations in the ledger yet");
@@ -22739,7 +22739,7 @@ fn the_debug_header_keeps_walk_this_run_beside_the_ask_card() {
     let walk = text_at(&mut sim, |t| t == "Walk this run", 0).expect("Walk this run");
     assert!(walk.width > 20.0, "drawn whole: {walk:?}");
     assert!(
-        text_at(&mut sim, |t| t == "Trace: 1 stop", 0).is_some(),
+        text_at(&mut sim, |t| t == "1 stop traced", 0).is_some(),
         "the trace"
     );
     assert!(
@@ -23085,7 +23085,7 @@ fn a_narrow_debug_header_keeps_its_trace_and_walk_this_run() {
             Size::new(width, 260.0),
             super::debug_panel(&app),
         );
-        let count = text_at(&mut sim, |t| t == "Trace: 1 stop", 0).expect("the trace's count");
+        let count = text_at(&mut sim, |t| t == "1 stop traced", 0).expect("the trace's count");
         assert!(count.height < 20.0, "{width}: on one line: {count:?}");
         let walk = text_at(&mut sim, |t| t == "Walk this run", 0).expect("Walk this run");
         assert!(

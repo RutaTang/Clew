@@ -756,7 +756,7 @@ impl App {
         self.proj.walk.prepared = prepared;
         let Some(abs) = self.resolve_walk_file(&step.file) else {
             self.set_walk_anchor_note(Some(tr!(
-                "Walkthrough step {step}: {file} is not in this project",
+                "{file} is not in this project (walkthrough step {step})",
                 step = i + 1,
                 file = step.file
             )));

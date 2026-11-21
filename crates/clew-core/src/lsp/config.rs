@@ -113,9 +113,7 @@ impl ProjectLspConfig {
         // classification below, where a link pointing at nothing would look
         // like "no config" and silently resolve to defaults.
         if !crate::statefile::repo_dirs_are_real(&path) {
-            return Err(
-                "lsp.toml: a .clew directory is a symlink, so the file was not read".into(),
-            );
+            return Err("lsp.toml was not read because a .clew directory is a symlink".into());
         }
         // Read through `statefile`, where the `.clew` rules live, rather than
         // spelling them again here: it opens the leaf ONCE with `O_NOFOLLOW |
@@ -134,9 +132,9 @@ impl ProjectLspConfig {
             return match std::fs::symlink_metadata(&path) {
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
                 Err(e) => Err(format!("lsp.toml: {e}")),
-                Ok(meta) if !meta.is_file() => Err("lsp.toml: not a regular file".into()),
-                Ok(meta) if meta.len() > MAX_CONFIG_BYTES => Err("lsp.toml: too large".into()),
-                Ok(_) => Err("lsp.toml: unreadable".into()),
+                Ok(meta) if !meta.is_file() => Err("lsp.toml is not a regular file".into()),
+                Ok(meta) if meta.len() > MAX_CONFIG_BYTES => Err("lsp.toml is too large".into()),
+                Ok(_) => Err("lsp.toml could not be read".into()),
             };
         };
         toml::from_str(&text).map_err(|e| format!("lsp.toml: {e}"))
