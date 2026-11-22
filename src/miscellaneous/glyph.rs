@@ -122,6 +122,10 @@ pub enum Glyph {
     Check,
     /// A file: a page with its corner folded.
     File,
+    /// A page of text: the file's page, lines on it.
+    TextFile,
+    /// A picture: a frame, a hill and the sun (an image file).
+    Image,
     /// A pair of braces: a symbol, in the command bar.
     Braces,
     /// What leans on a function: one box over the boxes under it.
@@ -255,23 +259,25 @@ fn body(g: Glyph) -> &'static str {
             "<path d='M10.3 4.2 L2.6 17.5 A2 2 0 0 0 4.3 20.5 H19.7 A2 2 0 0 0 21.4 17.5 L13.7 4.2 A2 2 0 0 0 10.3 4.2 Z'/>\
              <path d='M12 9.5 V13.5'/><circle cx='12' cy='16.8' r='0.9' fill='STROKE' stroke='none'/>"
         }
-        // Play, and the spark of what the AI writes (as on TextLines).
+        // Run's own play, where Run draws it, and the spark of what the AI
+        // writes in the corner it leaves free: in the strip's column, the
+        // play lines up with Run's above it.
         FakeRun => {
-            "<path d='M5 7 L14 13 L5 19 Z'/>\
-             <path d='M18 2.5C18.4 5 19 5.6 21.5 6C19 6.4 18.4 7 18 9.5C17.6 7 17 6.4 14.5 6C17 5.6 17.6 5 18 2.5Z' fill='STROKE' stroke-width='1.2'/>"
+            "<path d='M8.5 5.5 L18 12 L8.5 18.5 Z'/>\
+             <path d='M20 0.6C20.39 3.03 20.97 3.61 23.4 4C20.97 4.39 20.39 4.97 20 7.4C19.61 4.97 19.03 4.39 16.6 4C19.03 3.61 19.61 3.03 20 0.6Z' fill='STROKE' stroke-width='1'/>"
         }
-        // Debug's own bug, and the spark — as Fake Run is Run's play and
-        // the spark: each fake one its real twin, worked out by the AI.
-        // The bug drawn smaller, its lines as thick as the rest.
+        // Debug's own bug, where Debug draws it and as large, the spark in
+        // place of its right antenna and upper leg — as Fake Run is Run's
+        // play and the spark: each fake one its real twin, worked out by
+        // the AI, lined up with it.
         FakeDebug => {
-            "<g transform='translate(0.2 6.6) scale(0.74)' stroke-width='2.6'>\
-             <path d='m8 2 1.88 1.88'/><path d='M14.12 3.88 16 2'/>\
+            "<path d='m8 2 1.88 1.88'/>\
              <path d='M9 7.13v-1a3.003 3.003 0 1 1 6 0v1'/>\
              <path d='M12 20c-3.3 0-6-2.7-6-6v-3a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v3c0 3.3-2.7 6-6 6'/>\
              <path d='M12 20v-9'/><path d='M6.53 9C4.6 8.8 3 7.1 3 5'/><path d='M6 13H2'/>\
-             <path d='M3 21c0-2.1 1.7-3.9 3.8-4'/><path d='M20.97 5c0 2.1-1.6 3.8-3.5 4'/>\
-             <path d='M22 13h-4'/><path d='M17.2 17c2.1.1 3.8 1.9 3.8 4'/></g>\
-             <path d='M18 2.5C18.4 5 19 5.6 21.5 6C19 6.4 18.4 7 18 9.5C17.6 7 17 6.4 14.5 6C17 5.6 17.6 5 18 2.5Z' fill='STROKE' stroke-width='1.2'/>"
+             <path d='M3 21c0-2.1 1.7-3.9 3.8-4'/>\
+             <path d='M22 13h-4'/><path d='M17.2 17c2.1.1 3.8 1.9 3.8 4'/>\
+             <path d='M20 0.6C20.39 3.03 20.97 3.61 23.4 4C20.97 4.39 20.39 4.97 20 7.4C19.61 4.97 19.03 4.39 16.6 4C19.03 3.61 19.61 3.03 20 0.6Z' fill='STROKE' stroke-width='1'/>"
         }
         // Ask's bubble, and the spark Explain and the fake runs carry: what
         // spends an AI call bears it. The bubble drawn smaller, its lines
@@ -420,6 +426,16 @@ fn body(g: Glyph) -> &'static str {
             "<path d='M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z'/>\
              <path d='M14 2v4a2 2 0 0 0 2 2h4'/>"
         }
+        TextFile => {
+            "<path d='M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z'/>\
+             <path d='M14 2v4a2 2 0 0 0 2 2h4'/>\
+             <path d='M8 13h8'/><path d='M8 17h8'/><path d='M8 9h2'/>"
+        }
+        Image => {
+            "<rect x='3' y='4' width='18' height='16' rx='2.5'/>\
+             <circle cx='8.75' cy='9.25' r='1.75'/>\
+             <path d='M3.5 17.5 L9.5 12 L14 16 L16.5 13.75 L20.5 17.5'/>"
+        }
         Braces => {
             "<path d='M8 3H7a2 2 0 0 0-2 2v5a2 2 0 0 1-2 2 2 2 0 0 1 2 2v5c0 1.1.9 2 2 2h1'/>\
              <path d='M16 21h1a2 2 0 0 0 2-2v-5c0-1.1.9-2 2-2a2 2 0 0 1-2-2V5a2 2 0 0 0-2-2h-1'/>"
@@ -491,6 +507,33 @@ fn hex(c: Color) -> String {
     format!("#{:02x}{:02x}{:02x}", u(c.r), u(c.g), u(c.b))
 }
 
+/// `glyph` in `color` at `size`, framed by `view` — its left, top and side
+/// in the glyph's 24-unit grid — in place of the whole grid: a glyph drawn
+/// small in its grid filled out as one drawn large is. Its stroke stays
+/// as wide as [`icon`] draws it at `size`, however tight the frame.
+pub fn icon_framed<'a, M: 'a>(
+    glyph: Glyph,
+    color: Color,
+    size: f32,
+    view: [f32; 3],
+) -> Element<'a, M> {
+    let stroke = hex(color);
+    let [x, y, side] = view;
+    let doc = format!(
+        "<svg xmlns='http://www.w3.org/2000/svg' viewBox='{x} {y} {side} {side}' fill='none' \
+         stroke='{stroke}' stroke-width='{width}' stroke-linecap='round' stroke-linejoin='round'>{}</svg>",
+        body(glyph).replace("STROKE", &stroke),
+        width = STROKE * side / 24.0,
+    );
+    svg(svg::Handle::from_memory(doc.into_bytes()))
+        .width(size)
+        .height(size)
+        .into()
+}
+
+/// A glyph's stroke in its 24-unit grid.
+pub const STROKE: f32 = 1.9;
+
 /// A square icon widget: `glyph` stroked in `color` at `size` logical px.
 pub fn icon<'a, M: 'a>(glyph: Glyph, color: Color, size: f32) -> Element<'a, M> {
     svg(handle(glyph, color)).width(size).height(size).into()
@@ -517,7 +560,7 @@ pub fn handle(glyph: Glyph, color: Color) -> svg::Handle {
     let stroke = hex(color);
     let doc = format!(
         "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='{stroke}' \
-         stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'>{}</svg>",
+         stroke-width='{STROKE}' stroke-linecap='round' stroke-linejoin='round'>{}</svg>",
         body(glyph).replace("STROKE", &stroke),
     );
     svg::Handle::from_memory(doc.into_bytes())

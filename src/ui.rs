@@ -69,6 +69,7 @@ pub(crate) mod placed;
 mod reader_scroll;
 pub(crate) use reader_scroll::*;
 mod docs_stats;
+mod file_icon;
 pub(crate) use docs_stats::*;
 mod panels;
 pub(crate) use panels::*;

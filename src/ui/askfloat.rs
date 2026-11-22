@@ -1,10 +1,11 @@
 //! The Ask window: the conversation with Clew about the whole project. It
 //! is the window's, not a file's, so it floats in the window's bottom-right
-//! corner — over the margin's corner, the code above and beside it in view —
-//! rather than taking a panel's room. Hidden, it is a pill in that corner;
-//! made large, a window centred over the dimmed rest. Voice lives there too:
-//! the pill says what it hears while the card is hidden ([`ask_pill`]), the
-//! card while it is open ([`voice_strip`]).
+//! corner, beside Ask on the tool strip ([`StripTool::Ask`]) — over the
+//! margin's corner, the code above and beside it in view — rather than
+//! taking a panel's room. Made large, it is a window centred over the
+//! dimmed rest. Voice lives there too: while the card is put away, a pill
+//! in that corner says what voice is doing, and only then ([`voice_pill`]);
+//! while it is open, the card does ([`voice_strip`]).
 //!
 //! The card and the large window are one widget tree, sized and placed
 //! differently: going from one to the other keeps the conversation's
@@ -24,16 +25,21 @@ pub(crate) const ASK_CARD_W: f32 = 400.0;
 pub(crate) const ASK_CARD_H: f32 = 520.0;
 /// Least height the card shrinks to in a short window.
 pub(crate) const ASK_CARD_MIN_H: f32 = 120.0;
-/// Space between the card and the edges around it.
-pub(crate) const ASK_MARGIN: f32 = 16.0;
+/// Space between the card and the edges around it: as far in from the
+/// sheet's edges, past their border, as the margin's notes stand from its
+/// right edge — the card's right edge in one line with theirs, and its
+/// corner as far from the sheet's foot as from its side (it stood 4 from
+/// the side and 16 from the foot).
+pub(crate) const ASK_MARGIN: f32 = 1.0 + super::panes::NOTE_INSET_RIGHT;
 /// Gap between the window's top bar and what Ask may cover under it.
 const TOP_GAP: f32 = 6.0;
-/// Space between the card (or the pill) and the tool strip at its right.
-const STRIP_GAP: f32 = 12.0;
+/// How far the card's (and the pill's) right edge is from the window's:
+/// [`ASK_MARGIN`] in from the sheet's right edge.
+pub(crate) const ASK_RIGHT: f32 = STRIP_W + super::sheet::SHEET_GAP + ASK_MARGIN;
 /// Widest the large window grows, and its share of the window.
 pub(crate) const ASK_LARGE_MAX_W: f32 = 960.0;
 pub(crate) const ASK_LARGE_SHARE: f32 = 0.72;
-/// Height of the pill Ask hides to.
+/// Height of the pill voice speaks from while Ask is put away.
 pub(crate) const PILL_H: f32 = 40.0;
 
 /// Room at the foot of what the pill floats over (a page over the code,
@@ -43,22 +49,29 @@ pub(crate) fn pill_foot<'a, M: 'a>() -> Element<'a, M> {
     space().height(PILL_H + ASK_MARGIN).into()
 }
 
+/// Whether voice's pill is in Ask's corner: Ask put away, and voice with
+/// something to say ([`voice_pill`]). Nothing is there otherwise — Ask
+/// itself is on the strip — so nothing is kept clear of it.
+pub(crate) fn pill_shown(app: &App) -> bool {
+    app.ask_view == AskView::Hidden && pill_voice(app).is_some()
+}
+
 /// Whether the pill floats over a page over the panes (the glossary, the
-/// statistics, the overview, a docs page, the weak spots): Ask hidden to
-/// it, and nothing else under it there — no margin, no bottom panel.
+/// statistics, the overview, a docs page, the weak spots): shown, and
+/// nothing else under it there — no margin, no bottom panel.
 pub(crate) fn pill_over_page(app: &App) -> bool {
-    app.ask_view == AskView::Hidden && !right_panel_shown(app) && !app.show_bottom
+    pill_shown(app) && !right_panel_shown(app) && !app.show_bottom
 }
 
 /// How far up from the foot of `pane`'s code view the pill floats over its
-/// lines: while Ask is hidden to it and nothing else is under it there — no
-/// margin (which is always wider than the pill), no debugger's panel, no
-/// page over the panes — in the pane at the window's right. Else nothing.
-/// The caret is kept above it ([`App::code_seen_h`](crate::App)): moved
-/// down a line at a time in a narrow window, it went on under the pill.
+/// lines: while it shows and nothing else is under it there — no margin
+/// (which is always wider than the pill), no debugger's panel, no page over
+/// the panes — in the pane at the window's right. Else nothing. The caret
+/// is kept above it ([`App::code_seen_h`](crate::App)): moved down a line
+/// at a time in a narrow window, it went on under the pill.
 pub(crate) fn pill_over_code(app: &App, pane: usize) -> f32 {
     let rightmost = usize::from(app.proj.split);
-    let over = app.ask_view == AskView::Hidden
+    let over = pill_shown(app)
         && pane == rightmost
         && !right_panel_shown(app)
         && !app.show_bottom
@@ -86,12 +99,13 @@ fn band(app: &App) -> (f32, f32) {
     (top, bottom.max(top))
 }
 
-/// The corner the card and the pill sit in, as how far their right edge is
-/// from the window's (left of the tool strip) and their bottom edge from its
-/// bottom (over the status bar), whatever panels are open.
+/// The corner the card and the pill sit in, beside Ask on the strip, as how
+/// far their right edge is from the window's (left of the tool strip) and
+/// their bottom edge from its bottom (over the status bar), whatever panels
+/// are open.
 fn corner(app: &App) -> (f32, f32) {
     let (_, bottom) = band(app);
-    (STRIP_W + STRIP_GAP, app.window_height - bottom)
+    (ASK_RIGHT, app.window_height - bottom)
 }
 
 /// Whether the conversation is a card in the corner.
@@ -99,8 +113,7 @@ pub(crate) fn ask_is_card(app: &App) -> bool {
     app.ask_view == AskView::Compact
 }
 
-/// Where the Ask window is drawn now; `None` while it is hidden to its pill
-/// or put away.
+/// Where the Ask window is drawn now; `None` while it is put away.
 pub(crate) fn ask_place(app: &App) -> Option<AskPlace> {
     let (top, bottom) = band(app);
     match app.ask_view {
@@ -153,23 +166,25 @@ pub(crate) fn card_reach(app: &App, right: f32, bottom: f32) -> f32 {
     (right - place.left + 8.0).max(0.0)
 }
 
-/// About how wide the pill is with Ask's own face on it.
-const PILL_W: f32 = 150.0;
-
-/// Where Ask is in its corner, in window coordinates: the card, as tall as
-/// it may grow, or the pill it hides to. (The large window is centred; the
-/// tutorial only points at the corner.)
+/// Where Ask is, in window coordinates: the card in its corner, as tall as
+/// it may grow — else Ask on the strip, which opens it. (The large window
+/// is centred; the tutorial only points at the corner.)
 pub(crate) fn ask_corner_rect(app: &App) -> iced::Rectangle {
-    let (right, bottom) = corner(app);
-    let (width, height) = match ask_place(app) {
-        Some(place) if ask_is_card(app) => (place.width, place.height),
-        _ => (PILL_W, PILL_H),
+    let Some(place) = ask_place(app).filter(|_| ask_is_card(app)) else {
+        let c = strip_tool_center(app, StripTool::Ask);
+        return iced::Rectangle {
+            x: c.x - ICON_BTN / 2.0,
+            y: c.y - ICON_BTN / 2.0,
+            width: ICON_BTN,
+            height: ICON_BTN,
+        };
     };
+    let (right, bottom) = corner(app);
     iced::Rectangle {
-        x: app.window_width - right - width,
-        y: app.window_height - bottom - height,
-        width,
-        height,
+        x: app.window_width - right - place.width,
+        y: app.window_height - bottom - place.height,
+        width: place.width,
+        height: place.height,
     }
 }
 
@@ -190,11 +205,11 @@ fn in_corner<'a>(app: &App, what: Element<'a, Message>) -> Element<'a, Message> 
 }
 
 /// The floating Ask layer of the window: its card in the corner, or its
-/// large window over a dimmed backdrop — or, while it is hidden, its pill
-/// there, which says what voice is doing too.
+/// large window over a dimmed backdrop — or, while it is put away, voice's
+/// pill there while voice has something to say.
 pub(crate) fn ask_layer(app: &App) -> Element<'_, Message> {
     let Some(place) = ask_place(app) else {
-        return match ask_pill(app) {
+        return match voice_pill(app) {
             Some(pill) => in_corner(app, pill),
             None => slot(),
         };
@@ -239,122 +254,59 @@ pub(crate) fn ask_layer(app: &App) -> Element<'_, Message> {
     stack![backdrop, frame].into()
 }
 
-/// The pill Ask hides and closes to: what voice is doing while it hears,
-/// waits for a yes, speaks, or has just done what was said — else Ask's own
-/// face, a click from opening.
-fn ask_pill(app: &App) -> Option<Element<'_, Message>> {
-    let voice = pill_voice(app);
-    let listening = app.voice.mic_on;
-    let mic = tip_at(
-        button(
-            container(glyph::icon(
-                Glyph::Mic,
-                if listening {
-                    crate::theme::active().on_accent
-                } else {
-                    talk_tint(app, theme::fg_muted())
-                },
-                14.0,
-            ))
-            .center(Fill),
+/// Ask's mark, `size` across, in the accent — with a dot on it for an
+/// answer that came while the card was put away, until it is opened:
+/// nothing beside it, so what it is on keeps its size.
+pub(crate) fn ask_mark(app: &App, size: f32) -> Element<'static, Message> {
+    let mark = glyph::icon(Glyph::AskAi, theme::accent(), size);
+    if !app.proj.ask_unread {
+        return mark;
+    }
+    stack![
+        mark,
+        container(
+            container(space().width(UNREAD_DOT).height(UNREAD_DOT)).style(|_: &iced::Theme| {
+                container::Style {
+                    background: Some(theme::accent().into()),
+                    // Ringed in the strip's colour, apart from the mark it
+                    // sits on.
+                    border: iced::Border {
+                        color: crate::theme::active().bg_panel,
+                        width: 1.5,
+                        radius: (UNREAD_DOT / 2.0).into(),
+                    },
+                    ..container::Style::default()
+                }
+            })
         )
-        .style(move |t: &iced::Theme, status| {
-            if listening {
-                theme::round_button(true)(t, status)
-            } else {
-                theme::icon_button(false)(t, status)
-            }
-        })
-        .padding(0)
-        .width(Length::Fixed(26.0))
-        .height(Length::Fixed(26.0))
-        .on_press(super::heard::named_only(
-            if listening {
-                tr!("Stop listening")
-            } else {
-                tr!("Talk")
-            },
-            Message::Voice(VoiceMsg::Toggle),
-        )),
-        if listening {
-            stop_listening_tip()
-        } else {
-            talk_tip(app)
-        },
-        Some(app.keymap.chord(crate::keymap::Action::Voice).caps()),
-        tooltip::Position::Top,
-    );
-    // Clew speaking: the button lit, as while it listens, to stop it.
-    let mic = match voice_lit(app, 26.0, 14.0) {
-        Some(lit) if app.voice.speech.is_speaking() => lit,
-        _ => mic,
-    };
-    let face: Element<'_, Message> = match voice {
-        Some(said) => said,
-        None => {
-            // Ask's face, and nothing more: a count of its answers beside it
-            // said nothing the card does not, and moved the pill's edge as
-            // it grew.
-            // An answer that came while the card was put away: a dot on
-            // the mark, until the card is opened — nothing beside it, so
-            // the pill keeps its size.
-            let mark: Element<'_, Message> = if app.proj.ask_unread {
-                stack![
-                    glyph::icon(Glyph::AskAi, theme::accent(), 15.0),
-                    container(
-                        container(space().width(UNREAD_DOT).height(UNREAD_DOT)).style(
-                            |_: &iced::Theme| container::Style {
-                                background: Some(theme::accent().into()),
-                                // Ringed in the pill's surface, apart
-                                // from the mark it sits on.
-                                border: iced::Border {
-                                    color: crate::theme::active().elevated,
-                                    width: 1.5,
-                                    radius: (UNREAD_DOT / 2.0).into(),
-                                },
-                                ..container::Style::default()
-                            }
-                        )
-                    )
-                    .width(Length::Fixed(15.0))
-                    .height(Length::Fixed(15.0))
-                    .align_x(iced::Right)
-                    .align_y(iced::Top),
-                ]
-                .into()
-            } else {
-                glyph::icon(Glyph::AskAi, theme::accent(), 15.0)
-            };
-            let face = row![
-                mark,
-                text(tr!("Ask"))
-                    .size(ts::BASE)
-                    .font(crate::fonts::UI_MEDIUM)
-                    .color(theme::fg()),
-            ]
-            .spacing(9)
-            .align_y(iced::Center);
-            tip_at(
-                button(face)
-                    .style(theme::pill_face)
-                    .padding([4, 8])
-                    .on_press(super::heard::said(
-                        tr!("Open Ask"),
-                        Message::Ask(AskMsg::Open),
-                    )),
-                tr!("Ask"),
-                Some(app.keymap.chord(crate::keymap::Action::ToggleAsk).caps()),
-                tooltip::Position::Top,
-            )
-        }
-    };
+        .width(Length::Fixed(size))
+        .height(Length::Fixed(size))
+        .align_x(iced::Right)
+        .align_y(iced::Top),
+    ]
+    .into()
+}
+
+/// Voice's pill, in Ask's corner while the card is put away: what voice is
+/// doing while it listens, waits for a yes, speaks, or has just done what
+/// was said ([`pill_voice`]) — and, while it listens or Clew speaks, the
+/// button lit to stop it ([`voice_lit`]). `None` — nothing there — when it
+/// has nothing to say: Ask is on the strip, its microphone in the card.
+fn voice_pill(app: &App) -> Option<Element<'_, Message>> {
+    let said = pill_voice(app)?;
+    let lit = voice_lit(app, PILL_BUTTON, 14.0);
+    let right = if lit.is_some() { 7.0 } else { 8.0 };
+    let mut face = row![said].spacing(8).align_y(iced::Center);
+    if let Some(lit) = lit {
+        face = face.push(lit);
+    }
     Some(
-        container(opaque(row![face, mic].spacing(8).align_y(iced::Center)))
+        container(opaque(face))
             .height(Length::Fixed(PILL_H))
             .align_y(iced::Center)
             .padding(Padding {
                 top: 0.0,
-                right: 7.0,
+                right,
                 bottom: 0.0,
                 left: 8.0,
             })
@@ -362,6 +314,9 @@ fn ask_pill(app: &App) -> Option<Element<'_, Message>> {
             .into(),
     )
 }
+
+/// Side of the round button on voice's pill.
+pub(crate) const PILL_BUTTON: f32 = 26.0;
 
 /// What voice says on the pill: a command waiting for a yes, Clew
 /// speaking, a question being answered — or, for a moment, what was just
@@ -1196,9 +1151,14 @@ pub(crate) fn talk_tip(app: &App) -> &'static str {
 }
 
 /// The microphone's tip while it listens: "Bye, Clew" turns it off too —
-/// or, called by its name, has it wait for it again.
-pub(crate) fn stop_listening_tip() -> &'static str {
-    tr!("Stop listening, or say “Bye, Clew”")
+/// or, called by its name, has it wait for it again. Listening for one
+/// thing said, it is only a stop.
+pub(crate) fn stop_listening_tip(app: &App) -> &'static str {
+    if app.voice.once {
+        tr!("Stop listening")
+    } else {
+        tr!("Stop listening, or say “Bye, Clew”")
+    }
 }
 
 /// The voice key's round button, `side` across, lit in the accent while
@@ -1213,7 +1173,7 @@ pub(crate) fn voice_lit(app: &App, side: f32, icon: f32) -> Option<Element<'_, M
             true,
         )
     } else if app.voice.mic_on {
-        (Glyph::Mic, VoiceMsg::Toggle, stop_listening_tip(), true)
+        (Glyph::Mic, VoiceMsg::Toggle, stop_listening_tip(app), true)
     } else {
         return None;
     };

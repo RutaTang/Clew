@@ -3942,7 +3942,7 @@ fn the_chrome_geometry_matches_what_is_drawn() {
         end_line: 1,
     }];
     let app = app;
-    let expected: [(StripTool, Sends); 14] = [
+    let expected: [(StripTool, Sends); 15] = [
         (StripTool::Overview, |m| {
             matches!(m, Message::Overview(crate::OverviewMsg::Show))
         }),
@@ -3993,6 +3993,9 @@ fn the_chrome_geometry_matches_what_is_drawn() {
         }),
         (StripTool::More, |m| {
             matches!(m, Message::Window(WindowMsg::ToggleToolsMenu))
+        }),
+        (StripTool::Ask, |m| {
+            matches!(m, Message::Ask(AskMsg::Toggle))
         }),
         (StripTool::Settings, |m| {
             matches!(m, Message::Settings(crate::SettingsMsg::Open))
@@ -4667,11 +4670,12 @@ fn the_context_menu_has_each_languages_own_rows() {
     );
 }
 
-/// A page over the code has nothing under the Ask pill floating at the
-/// window's foot, scrolled to its end or not: it ends above the pill (the
-/// weak spots here; the statistics, the glossary, the overview and a docs
-/// page alike). With room only after its last row, the rows on their way
-/// there were under it — a file's language in the statistics.
+/// A page over the code has nothing under voice's pill floating at the
+/// window's foot, scrolled to its end or not: while the pill shows, it ends
+/// above it (the weak spots here; the statistics, the glossary, the
+/// overview and a docs page alike). With room only after its last row, the
+/// rows on their way there were under it — a file's language in the
+/// statistics. With no pill, no room is kept.
 #[test]
 fn a_pages_last_row_scrolls_clear_of_the_ask_pill() {
     use clew_core::weakspots::{Reason, Spot};
@@ -4690,7 +4694,15 @@ fn a_pages_last_row_scrolls_clear_of_the_ask_pill() {
             })
             .collect(),
     ));
-    let pill = super::askfloat::ask_corner_rect(&app);
+    assert!(!super::askfloat::pill_over_page(&app), "no pill, no room");
+    listening(&mut app);
+    assert!(super::askfloat::pill_over_page(&app));
+    let pill = Rectangle {
+        x: 0.0,
+        y: pill_top(),
+        width: WINDOW.width,
+        height: super::askfloat::PILL_H,
+    };
     let mut sim = sim_of(&app);
     // At rest: what is shown of the page ends above the pill.
     let page = text_at(&mut sim, |t| t.starts_with("spot"), 0).expect("a row");
@@ -5708,7 +5720,7 @@ fn every_tool_on_the_strip_has_a_shortcut() {
     let app = reader_app();
     for tool in super::STRIP_TOP
         .into_iter()
-        .chain([StripTool::Settings])
+        .chain(super::toolbar::STRIP_FOOT)
         .filter(|t| !matches!(t, StripTool::More | StripTool::RunMenu))
     {
         let (_, label, keys, _) = super::strip_tool(&app, tool);
@@ -5757,7 +5769,10 @@ fn the_tutorial_points_at_each_tool_and_leaves_no_field_holding_its_keys() {
     let mut app = reader_app();
     let _ = app.update(Message::Tutorial(TutorialMsg::Begin));
     let all = steps(&app);
-    for tool in super::STRIP_TOP.into_iter().chain([StripTool::Settings]) {
+    for tool in super::STRIP_TOP
+        .into_iter()
+        .chain(super::toolbar::STRIP_FOOT)
+    {
         let on: Vec<&str> = all
             .iter()
             .filter(|s| s.anchor == Anchor::Strip(tool))
@@ -10171,12 +10186,12 @@ fn a_feature_is_called_the_same_wherever_it_is_named() {
 #[test]
 fn an_icon_stands_for_one_thing() {
     use super::toolbar::{
-        STRIP_TOP, StripTool, TOOLS_MENU_ROWS, app_menu_head, strip_tool, tools_row,
+        STRIP_FOOT, STRIP_TOP, TOOLS_MENU_ROWS, app_menu_head, strip_tool, tools_row,
     };
     use crate::SidebarTab as T;
     let app = reader_app();
     let mut named: Vec<(String, crate::glyph::Glyph)> = Vec::new();
-    for tool in STRIP_TOP.into_iter().chain([StripTool::Settings]) {
+    for tool in STRIP_TOP.into_iter().chain(STRIP_FOOT) {
         let (glyph, name, ..) = strip_tool(&app, tool);
         named.push((name.to_string(), glyph));
     }
@@ -13817,13 +13832,15 @@ fn a_plain_note_ends_in_an_ellipsis_and_keeps_its_head_whole() {
     );
 }
 
-/// The raised note keeps clear of the Ask pill floating over the margin's
-/// foot: low in the view, its references, date and Ask went under the pill.
+/// The raised note keeps clear of voice's pill floating over the margin's
+/// foot while it shows: low in the view, its references, date and Ask went
+/// under the pill.
 #[test]
 fn the_raised_note_keeps_clear_of_the_ask_pill() {
     let mut app = reader_app();
     app.show_right_panel = true;
-    assert_eq!(app.ask_view, crate::AskView::Hidden, "the pill shows");
+    listening(&mut app);
+    assert!(super::askfloat::pill_shown(&app), "the pill shows");
     let abs = app.proj.panes[0].as_ref().unwrap().abs.clone();
     app.proj.explain.view = Some(crate::explain::Node::Function {
         file: abs,
@@ -13839,13 +13856,10 @@ fn the_raised_note_keeps_clear_of_the_ask_pill() {
             end_line: line + 2,
         }];
         let mut sim = sim_of(&app);
-        let asks: Vec<iced::Rectangle> = (0..3)
-            .filter_map(|n| text_at(&mut sim, |t| t == "Ask", n))
-            .collect();
-        if asks.len() < 2 {
+        let Some(note) = text_at(&mut sim, |t| t == "Ask", 0) else {
             continue; // the note is out of view
-        }
-        let (note, pill) = (asks[0], asks[1]);
+        };
+        let pill = text_at(&mut sim, |t| t == "Listening", 0).expect("the pill");
         seen_low |= note.y > app.window_height * 0.6;
         // The pill's box, around its label: the height it is drawn at.
         let pill_h = crate::ui::askfloat::PILL_H;
@@ -13858,9 +13872,9 @@ fn the_raised_note_keeps_clear_of_the_ask_pill() {
     assert!(seen_low, "the note was never brought low in the view");
 }
 
-/// The Ask pill floats over the bottom panel's foot at its right, where a
-/// run's output is: the output's column ends above it, so no line of it
-/// runs under the pill, scrolled to its end or not.
+/// Voice's pill floats over the bottom panel's foot at its right, where a
+/// run's output is: while it shows, the output's column ends above it, so
+/// no line of it runs under the pill, scrolled to its end or not.
 #[test]
 fn no_line_of_a_runs_output_is_under_the_ask_pill() {
     let mut app = reader_app();
@@ -13887,8 +13901,9 @@ fn no_line_of_a_runs_output_is_under_the_ask_pill() {
     });
     app.show_bottom = true;
     app.ask_view = crate::AskView::Hidden;
+    listening(&mut app);
     let mut sim = sim_of(&app);
-    let pill = text_at(&mut sim, |t| t == "Ask", 0).expect("the pill");
+    let pill = text_at(&mut sim, |t| t == "Listening", 0).expect("the pill");
     let pill_h = crate::ui::askfloat::PILL_H;
     let pill_top = pill.center_y() - pill_h / 2.0;
     // The output, as much of it as is on screen (clipped to where its
@@ -14639,9 +14654,32 @@ fn the_palette_lists_commands_with_their_keys() {
 /// edge, left of the tool strip, and their bottom edge, over the status bar.
 fn ask_corner_edges() -> (f32, f32) {
     (
-        WINDOW.width - super::STRIP_W - 12.0,
+        WINDOW.width - super::askfloat::ASK_RIGHT,
         WINDOW.height - super::STATUSBAR_H - super::askfloat::ASK_MARGIN,
     )
+}
+
+/// Voice listening, with nothing heard yet: its pill in Ask's corner while
+/// Ask is put away.
+fn listening(app: &mut App) {
+    app.voice.mic_on = true;
+    app.voice.phase = crate::app::voice::VoicePhase::Listening {
+        since: std::time::Instant::now(),
+        level: 0.0,
+    };
+}
+
+/// The top of voice's pill in Ask's corner, while it shows.
+fn pill_top() -> f32 {
+    ask_corner_edges().1 - super::askfloat::PILL_H
+}
+
+/// What a click at `at` sends.
+fn press_at(app: &App, at: Point) -> Vec<Message> {
+    let mut sim = sim_of(app);
+    sim.point_at(at);
+    let _ = sim.simulate(iced_test::simulator::click());
+    sent_by(sim)
 }
 
 /// The floating Ask, on screen: the field at the top searches, and the
@@ -14702,21 +14740,23 @@ fn the_floating_ask_is_driven_from_the_screen() {
             crate::session::finder::FinderMode::Files
         ))]
     ));
-    // The pill in the corner opens Ask.
-    {
-        let mut sim = sim_of(&app);
-        let pill = text_at(&mut sim, |t| t == "Ask", 0).expect("the pill says Ask");
-        let (right, bottom) = ask_corner_edges();
-        assert!(
-            pill.x > right - 200.0 && pill.x < right && pill.y > bottom - 60.0,
-            "in the corner: {pill:?}"
-        );
-    }
-    let sent = click(sim_of(&app), "Ask");
+    // Ask is on the strip, right above Settings, and opens it; nothing of
+    // it is in the corner, where the code is the code's.
+    let ask_at = super::strip_tool_center(&app, super::StripTool::Ask);
+    let settings_at = super::strip_tool_center(&app, super::StripTool::Settings);
+    assert_eq!(ask_at.x, settings_at.x);
     assert!(
-        sent.iter().any(|m| matches!(m, Message::Ask(AskMsg::Open))),
-        "{sent:?}"
+        ask_at.y < settings_at.y && settings_at.y - ask_at.y < super::ICON_BTN + 4.0,
+        "right above Settings: {ask_at:?} {settings_at:?}"
     );
+    let asks = |app: &App| {
+        press_at(app, super::strip_tool_center(app, super::StripTool::Ask))
+            .iter()
+            .any(|m| matches!(m, Message::Ask(AskMsg::Toggle)))
+    };
+    assert!(asks(&app));
+    assert!(!super::askfloat::pill_shown(&app));
+    assert!(!shows(&mut sim_of(&app), "Ask"), "no label in the corner");
     // A card in the corner, with a conversation in it.
     app.ask_view = crate::AskView::Compact;
     app.proj.ask_turns.push(crate::app::model::AskTurn {
@@ -14743,13 +14783,8 @@ fn the_floating_ask_is_driven_from_the_screen() {
             "Ask is the whole project's: it is no tab of a file's margin"
         );
     }
-    // Is Ask's pill in its corner?
-    let pill_shown = |app: &App| {
-        let (right, bottom) = ask_corner_edges();
-        text_at(&mut sim_of(app), |t| t == "Ask", 0)
-            .is_some_and(|at| at.x > right - 200.0 && at.x < right && at.y > bottom - 60.0)
-    };
-    assert!(!pill_shown(&app), "no pill while the card is open");
+    // Ask on the strip, pressed with the card open, puts it away.
+    assert!(asks(&app));
     // The code beside the card takes its own clicks.
     let mut sim = sim_of(&app);
     let beside = super::ask_place(&app).unwrap().left - 60.0;
@@ -14760,20 +14795,18 @@ fn the_floating_ask_is_driven_from_the_screen() {
         !sent.iter().any(|m| matches!(m, Message::Ask(_))),
         "{sent:?}"
     );
-    // Esc hides it to the pill — which says Ask, and no count of its
-    // answers beside it.
+    // Esc puts it away — Ask still on the strip, and no count of its
+    // answers anywhere.
     assert!(app.step_ask_down());
     assert_eq!(app.ask_view, crate::AskView::Hidden);
     assert!(super::ask_place(&app).is_none());
-    assert!(pill_shown(&app));
+    assert!(asks(&app));
     assert!(!shows(&mut sim_of(&app), "1 answer"));
-    // Closed with its ×, it is back on its pill — still there to click.
-    // Put away with nothing in the corner, Ask had gone, with no way back
-    // to it on screen.
+    // Closed with its ×, Ask is still there to click on the strip.
     let _ = app.update(Message::Ask(AskMsg::Open));
     let _ = app.update(Message::Ask(AskMsg::Close));
     assert_eq!(app.ask_view, crate::AskView::Hidden);
-    assert!(pill_shown(&app));
+    assert!(asks(&app));
     let _ = app.update(Message::Ask(AskMsg::Toggle));
     assert_eq!(app.ask_view, crate::AskView::Compact);
     let _ = app.update(Message::Ask(AskMsg::Toggle));
@@ -15148,7 +15181,7 @@ fn the_wake_phrase_is_offered_in_voice_settings() {
     assert!(app.resume_waiting());
     assert_eq!(super::askfloat::talk_tip(&app), "Talk, or say “Hey, Clew”");
     assert_eq!(
-        super::askfloat::stop_listening_tip(),
+        super::askfloat::stop_listening_tip(&app),
         "Stop listening, or say “Bye, Clew”"
     );
     assert_eq!(
@@ -15213,11 +15246,12 @@ fn the_tour_sheet_says_all_set_only_of_a_model_that_answered() {
     assert!(says(&app, "All set."));
 }
 
-/// Why the tour cannot start yet is said beside its Start button, whatever
-/// is missing: in a tip alone (which a held button may not show), a press
-/// on the tour's main button did nothing, with no word why.
+/// What the tour still waits for is said by its steps, the next one lit —
+/// not again in a line beside its Start button. A Tea Shop that could not
+/// be written says why on its step, with Try again there, which writes it
+/// anew.
 #[test]
-fn the_tour_sheet_says_why_it_cannot_start_yet() {
+fn the_tour_sheet_says_what_it_waits_for_on_its_steps() {
     use crate::app::state::ConnectionTest;
     let mut app = reader_app();
     let prep = crate::app::tutorial::TourPrep::default();
@@ -15228,34 +15262,24 @@ fn the_tour_sheet_says_why_it_cannot_start_yet() {
         )
     };
     app.llm_available = false;
-    assert!(says(
-        &app,
-        "The tour needs a language model first (step 1)."
-    ));
+    assert!(says(&app, "Add an API Key…"));
+    assert!(!says(&app, "The tour needs"));
     app.llm_available = true;
     app.model_check.result = ConnectionTest::Untried;
-    assert!(says(
-        &app,
-        "The tour starts once the model answers a test (step 1)."
-    ));
-    assert!(!says(&app, "needs a language model"));
+    assert!(says(&app, "Test connection"));
+    assert!(!says(&app, "The tour starts once"));
     app.model_check.result = ConnectionTest::Answered("m".into());
     assert!(!prep.ready(&app), "Tea Shop is not ready in a reader's app");
-    assert!(says(
-        &app,
-        "The tour starts once Tea Shop is ready (step 3)."
-    ));
-    assert!(!says(&app, "answers a test"));
-    // Tea Shop could not be written: said so, not as a start to come — it
-    // never would — and its step has Try again, which writes it anew.
+    assert!(says(&app, "Getting Tea Shop ready…"));
+    assert!(!says(&app, "The tour starts once"));
+    // Tea Shop could not be written: said on its step, with Try again.
     let prep = crate::app::tutorial::TourPrep {
         sample: Some(Err("disk full".into())),
         ..Default::default()
     };
     let mut sim = sim_elem(super::tutorial::tour_prep_sheet(&app, &prep));
-    assert!(shows(&mut sim, "Tea Shop could not be set up (step 3)."));
-    assert!(!shows(&mut sim, "The tour starts once Tea Shop is ready"));
     assert!(shows(&mut sim, "disk full"));
+    assert!(!shows(&mut sim, "could not be set up"));
     drop(sim);
     assert!(matches!(
         click(
@@ -15733,8 +15757,8 @@ impl crate::app::speech::Playing for Playing {
 }
 
 /// Clew speaking shows as listening does: on the pill, even with Ask put
-/// away, and in the card's composer — the speaker, how loud, and the
-/// button lit to stop it.
+/// away, and in the card's composer — the speaker and how loud — and the
+/// microphone on the strip lit, to stop it.
 #[test]
 fn speaking_shows_with_a_stop() {
     let mut app = reader_app();
@@ -15758,8 +15782,8 @@ fn speaking_shows_with_a_stop() {
             .any(|m| matches!(m, Message::Ask(AskMsg::Open))),
         "the conversation is out of reach while Clew speaks"
     );
-    // Its button, lit, stops it — and no key is named beside it, which
-    // said the same thing twice.
+    // Its button on the pill, lit, stops it — and no key is named beside
+    // it, which said the same thing twice.
     assert!(!shows(&mut sim_of(&app), "Esc"));
     let sent = click_right_of(
         || sim_of(&app),
@@ -15826,19 +15850,26 @@ fn voice_shows_what_it_is_doing() {
             "in the corner, not the field at the top: {listening:?}"
         );
     }
-    // The pill's microphone, lit while it listens, stops it.
+    // The pill's microphone, lit while it listens, stops it — and the
+    // strip has none of its own: Ask's card has it.
+    app.voice.mic_on = true;
+    assert!(
+        !super::STRIP_FOOT
+            .iter()
+            .any(|t| super::strip_tool(&app, *t).0 == crate::glyph::Glyph::Mic)
+    );
     let (right, bottom) = ask_corner_edges();
-    let mut sim = sim_of(&app);
-    sim.point_at(Point::new(
-        right - 7.0 - 1.0 - 13.0,
-        bottom - super::askfloat::PILL_H / 2.0,
-    ));
-    let _ = sim.simulate(iced_test::simulator::click());
     // (Its tooltip opens too, under the pointer.)
-    let voice: Vec<Message> = sent_by(sim)
-        .into_iter()
-        .filter(|m| matches!(m, Message::Voice(_)))
-        .collect();
+    let voice: Vec<Message> = press_at(
+        &app,
+        Point::new(
+            right - 7.0 - 1.0 - super::askfloat::PILL_BUTTON / 2.0,
+            bottom - super::askfloat::PILL_H / 2.0,
+        ),
+    )
+    .into_iter()
+    .filter(|m| matches!(m, Message::Voice(_)))
+    .collect();
     assert!(matches!(
         voice.as_slice(),
         [Message::Voice(crate::VoiceMsg::Toggle)]
@@ -15885,7 +15916,7 @@ fn voice_shows_what_it_is_doing() {
         assert!(shows(&mut sim, "“open the call graph”"));
         assert!(shows(&mut sim, "→ Call Graph"));
     }
-    // Hidden, the pill says it for a moment, then is Ask's again.
+    // Put away, the pill says it for a moment, then that it listens.
     app.ask_view = crate::AskView::Hidden;
     {
         let mut sim = sim_of(&app);
@@ -15898,9 +15929,11 @@ fn voice_shows_what_it_is_doing() {
         assert!(!shows(&mut sim, "“open the call graph”"));
         assert!(shows(&mut sim, "Listening"), "listening, as before");
     }
+    // Nothing more to say: the pill is gone, nothing of it over the code.
     app.voice.mic_on = false;
     app.voice.phase = VoicePhase::Idle;
-    assert!(shows(&mut sim_of(&app), "Ask"));
+    assert!(!super::askfloat::pill_shown(&app));
+    assert!(!shows(&mut sim_of(&app), "Listening"));
 }
 
 /// The settings' Voice section: every model with its size, downloaded
@@ -16517,9 +16550,11 @@ fn the_stats_page_reads_cleanly() {
     assert_eq!(super::lang_color(n + 1), super::lang_color(n));
 
     let size = Size::new(WINDOW.width, 600.0);
-    // As the page is shown over the panes, with its foot.
+    // As the page is shown over the panes, with its foot: voice's pill
+    // there, listening.
     app.proj.stats.showing = true;
     app.ask_view = crate::AskView::Hidden;
+    listening(&mut app);
     let view = || iced_test::Simulator::with_size(Default::default(), size, super::pane_area(&app));
     let mut sim = view();
     assert!(shows(&mut sim, "120"), "the project's files");
@@ -17606,7 +17641,7 @@ fn every_page_over_the_code_has_its_close() {
 #[test]
 fn each_tool_is_on_the_side_it_opens() {
     use super::toolbar::{
-        STRIP_TOP, StripTool, TOOLS_MENU_ROWS, app_menu_head, strip_tool, tools_row,
+        STRIP_FOOT, STRIP_TOP, TOOLS_MENU_ROWS, app_menu_head, strip_tool, tools_row,
     };
     let app = reader_app();
     let elsewhere = |m: &Message| {
@@ -17619,7 +17654,7 @@ fn each_tool_is_on_the_side_it_opens() {
                 | Message::Export(_)
         )
     };
-    for tool in STRIP_TOP.into_iter().chain([StripTool::Settings]) {
+    for tool in STRIP_TOP.into_iter().chain(STRIP_FOOT) {
         let (.., message) = strip_tool(&app, tool);
         assert!(!elsewhere(&message), "{tool:?}");
     }

@@ -890,13 +890,13 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
         });
     }
 
-    // The pill floats over the panel's foot at its right, where the output
-    // is: the output's column ends above it, so no line runs under it —
-    // scrolled to its end alone, the lines on their way there did.
-    // The same column either way, its foot empty while Ask is open: as
-    // one thing or the other, the output's scroll was a new widget's when
-    // Ask closed, back at its top.
-    let foot: Element<'_, Message> = if app.ask_view == crate::AskView::Hidden {
+    // Voice's pill floats over the panel's foot at its right, where the
+    // output is: while it shows, the output's column ends above it, so no
+    // line runs under it — scrolled to its end alone, the lines on their
+    // way there did. The same column either way, its foot empty while the
+    // pill is not there: as one thing or the other, the output's scroll was
+    // a new widget's as it came and went, back at its top.
+    let foot: Element<'_, Message> = if super::askfloat::pill_shown(app) {
         super::askfloat::pill_foot()
     } else {
         space().height(0).into()

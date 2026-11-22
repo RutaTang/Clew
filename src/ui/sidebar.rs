@@ -29,9 +29,6 @@ pub(crate) const SIDEBAR_TABS: [(&str, SidebarTab); 12] = [
 /// title of its own.
 pub(crate) const STRIP_VIEWS: usize = 6;
 
-/// The width of the ⋯ after the strip's views, which lists the rest.
-pub(crate) const MORE_VIEWS_W: f32 = 28.0;
-
 /// Where the strip's views stand: their top edge below the top bar, and
 /// their row's right edge (the ⋯'s) from the sidebar's left — what the
 /// More views menu hangs from.
@@ -153,7 +150,9 @@ pub(crate) fn sidebar(app: &App) -> Element<'_, Message> {
         )
         .style(theme::segment(elsewhere || app.show_views_menu))
         .padding(0)
-        .width(Length::Fixed(MORE_VIEWS_W))
+        // As wide as each view beside it: narrower, its dots stood off the
+        // views' even pitch, nearer the trough's edge than the first view.
+        .width(Fill)
         .height(Length::Fixed(28.0))
         .on_press(super::heard::said(
             tr!("More views"),
@@ -1389,7 +1388,7 @@ fn filtered_file_rows<'a>(
             mouse_area(
                 button(
                     row![
-                        quiet_icon(Glyph::File, theme::dim()),
+                        super::file_icon::file_icon(name, 14.0, theme::dim()),
                         text(crate::highlight::in_order(name))
                             .size(ts::BASE)
                             .color(if is_current {
@@ -1536,8 +1535,9 @@ pub(crate) fn append_tree_rows<'a>(
         };
         let content = row![
             space().width(12), // align names under the folders' chevron column
-            quiet_icon(
-                Glyph::File,
+            super::file_icon::file_icon(
+                name,
+                14.0,
                 if is_current {
                     theme::fg()
                 } else {

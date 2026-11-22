@@ -2385,11 +2385,11 @@ pub(crate) fn connect_picker<'a>(
     // state on as it came and went (a host saved from another window moved
     // the User field's cursor to Name). What is wrong is said beside
     // Connect, after them: above them, it pushed the form down as it came.
-    let mut head = Column::new().spacing(12);
+    let mut head = Column::new().spacing(6);
 
     // Saved hosts: click a row to connect, × to forget.
     if !app.saved_connections.is_empty() {
-        head = head.push(section_header(tr!("Saved hosts")));
+        head = head.push(form_heading(tr!("Saved hosts")));
         let mut list = Column::new().spacing(2);
         super::heard::list();
         for conn in &app.saved_connections {
@@ -2438,8 +2438,11 @@ pub(crate) fn connect_picker<'a>(
         head = head.push(list);
     }
     let has_head = !app.saved_connections.is_empty();
-    let head =
-        container(head).padding(Padding::default().bottom(if has_head { 12.0 } else { 0.0 }));
+    let head = container(head).padding(Padding::default().bottom(if has_head {
+        FORM_SECTION_GAP
+    } else {
+        0.0
+    }));
     let mut col = Column::new().spacing(12);
 
     // New-connection form. Enter in any field connects, like the button.
@@ -2476,11 +2479,17 @@ pub(crate) fn connect_picker<'a>(
     ]
     .spacing(6);
 
-    col = col.push(section_header(tr!("New connection")));
-    col = col.push(field(
+    // Named only below the saved hosts, to tell the two apart: alone, the
+    // dialog's title says what the form is.
+    let name = field(
         tr!("Name (optional)"),
         input(tr!("e.g. prod server"), &ui.name, ConnectField::Name).into(),
-    ));
+    );
+    col = col.push(if has_head {
+        Element::from(column![form_heading(tr!("New connection")), name].spacing(6))
+    } else {
+        name.into()
+    });
     col = col.push(
         row![
             field(
@@ -2586,6 +2595,20 @@ pub(crate) fn connect_picker<'a>(
     .height(Length::Shrink)
     .into()
 }
+
+/// A heading over a part of the Connect form: on the fields' own left
+/// edge, close to what it names — a list's section heading, indented to
+/// its rows' text and spaced from the list above it, stood off the form's
+/// edge with a gap over it as large as a part's.
+fn form_heading<'a>(label: &str) -> Element<'a, Message> {
+    text(crate::i18n::caps(label))
+        .size(ts::CAPTION)
+        .color(theme::fg_muted())
+        .into()
+}
+
+/// The room between the saved hosts and the new-connection form.
+const FORM_SECTION_GAP: f32 = 20.0;
 
 /// Room at the Connect form's right for its scrollbar, out of the modal's
 /// padding (`connect_modal`): the bar and a gap before the fields.

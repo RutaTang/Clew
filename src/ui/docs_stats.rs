@@ -31,10 +31,11 @@ pub(crate) fn overview_map_canvas<'a>(
 }
 
 pub(crate) fn group_header(rel: &str) -> Element<'_, Message> {
-    // The file tree's own quiet file mark, not a coloured one per language.
+    // The file tree's own mark for the file.
+    let name = rel.rsplit_once('/').map_or(rel, |(_, name)| name);
     container(
         row![
-            container(glyph::icon(Glyph::File, theme::dim(), 12.0)).width(12),
+            super::file_icon::file_icon(name, 12.0, theme::dim()),
             // In the order it is spelled (`highlight::in_order`).
             text(crate::highlight::in_order(rel))
                 .size(ts::SMALL)
@@ -143,13 +144,13 @@ pub(crate) fn pane_area(app: &App) -> Element<'_, Message> {
                 super::plugins::plugin_page(page, running, its_own)
             }
         };
-        // The Ask pill floats over a page's foot at its right: the page
-        // ends above it, so no row is under it, scrolled to its end or
-        // not — room only after the last row, the rows on their way there
-        // were (a file's language in the statistics, a term's meaning in
-        // the glossary). The same column either way, its foot empty while
-        // the pill is elsewhere: as one thing or the other, the page's
-        // scroll was a new widget's as Ask opened or closed.
+        // Voice's pill floats over a page's foot at its right while it
+        // shows: the page ends above it, so no row is under it, scrolled
+        // to its end or not — room only after the last row, the rows on
+        // their way there were (a file's language in the statistics, a
+        // term's meaning in the glossary). The same column either way, its
+        // foot empty while the pill is not there: as one thing or the
+        // other, the page's scroll was a new widget's as it came and went.
         let foot: Element<'_, Message> = if cover.is_page() && super::askfloat::pill_over_page(app)
         {
             super::askfloat::pill_foot()

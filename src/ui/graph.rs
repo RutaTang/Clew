@@ -2973,13 +2973,13 @@ pub(crate) fn import_file_row<'a>(app: &'a App, file: &RankedFile) -> Element<'a
     )
     .style(theme::list_row(false))
     .width(Fill)
-    // Left padding matches `section_header` (10) so the file name lines up with
+    // Left padding matches `section_header`'s so the file name lines up with
     // the section title above it.
     .padding(Padding {
         top: 2.0,
-        right: 10.0,
+        right: SECTION_INSET,
         bottom: 2.0,
-        left: 10.0,
+        left: SECTION_INSET,
     })
     .on_press(super::heard::row(
         || path.display().to_string(),
@@ -3054,7 +3054,7 @@ pub(crate) fn project_imports_body(app: &App) -> Element<'_, Message> {
                         .color(theme::warning())
                         .wrapping(Wrapping::None),
                 )
-                .padding([2, 8])
+                .padding([2.0, SECTION_INSET])
                 .into(),
             );
         }
@@ -3083,7 +3083,7 @@ pub(crate) fn project_imports_body(app: &App) -> Element<'_, Message> {
                     .size(ts::SMALL)
                     .color(theme::dim()),
             )
-            .padding([2, 8])
+            .padding([2.0, SECTION_INSET])
             .into(),
         );
     }
@@ -3163,13 +3163,13 @@ pub(crate) fn call_symbol_row_at<'a>(
     )
     .style(theme::list_row(false))
     .width(Fill)
-    // Left padding matches `section_header` (10) so a row's name lines up with
+    // Left padding matches `section_header`'s so a row's name lines up with
     // the section title above it.
     .padding(Padding {
         top: 2.0,
-        right: 10.0,
+        right: SECTION_INSET,
         bottom: 2.0,
-        left: 10.0,
+        left: SECTION_INSET,
     })
     .on_press(super::heard::row(
         || n.name.clone(),
@@ -3267,7 +3267,7 @@ pub(crate) fn project_calls_body(app: &App) -> Element<'_, Message> {
                         .size(ts::CAPTION)
                         .color(theme::dim()),
                 )
-                .padding([2, 8])
+                .padding([2.0, SECTION_INSET])
                 .into(),
             );
         }
@@ -3287,7 +3287,7 @@ pub(crate) fn project_calls_body(app: &App) -> Element<'_, Message> {
                     .size(ts::CAPTION)
                     .color(theme::dim()),
             )
-            .padding([2, 8])
+            .padding([2.0, SECTION_INSET])
             .into(),
         );
     }
@@ -3925,7 +3925,7 @@ pub(crate) fn churn_rows(app: &App) -> Vec<Element<'_, Message>> {
                         .size(ts::CAPTION)
                         .color(theme::dim()),
                 )
-                .padding([2, 8])
+                .padding([2.0, SECTION_INSET])
                 .into(),
             );
         }

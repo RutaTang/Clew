@@ -188,12 +188,14 @@ fn own_store(app: &mut App, tag: &str) -> clew_voice::models::Store {
     store
 }
 
-/// Turn the microphone on, hear a pause after speech, and feed back what
-/// was heard — worked out out of sight, the microphone listening on.
+/// Turn the microphone on, kept on as "Hey, Clew" keeps it
+/// ([`keep_listening`]), hear a pause after speech, and feed back what was
+/// heard — worked out out of sight, the microphone listening on.
 fn say(app: &mut App, script: &Arc<Mutex<MicScript>>) {
     app.voice.reset_for_test();
     script.lock().unwrap().silence = None;
     let _ = app.update(Message::Voice(VoiceMsg::Toggle));
+    keep_listening(app);
     assert!(app.voice.is_listening(), "{}", app.status);
     script.lock().unwrap().silence = Some(END_SILENCE + 0.1);
     let task = app.update(Message::Voice(VoiceMsg::Tick));
@@ -779,14 +781,16 @@ fn a_question_said_is_answered_without_opening_the_card() {
     assert!(!app.proj.ask_unread);
 }
 
-/// The microphone, turned on, listens until it is turned off: a quiet that
-/// goes on is let go and listened past, not reported as a microphone that
-/// hears nothing. Turned off before anything is said, nothing comes of it;
-/// turned off while someone is heard, what they said is still acted on.
+/// Kept on, as "Hey, Clew" keeps it, the microphone listens until it is
+/// turned off: a quiet that goes on is let go and listened past, not
+/// reported as a microphone that hears nothing. Turned off before anything
+/// is said, nothing comes of it; turned off while someone is heard, what
+/// they said is still acted on.
 #[test]
-fn the_microphone_listens_until_it_is_turned_off() {
+fn kept_on_the_microphone_listens_until_it_is_turned_off() {
     let (mut app, script, _) = voice_app("voice-mic-on", "open the call graph");
     let _ = app.update(Message::Voice(VoiceMsg::Toggle));
+    keep_listening(&mut app);
     assert!(app.voice.mic_on);
     assert!(app.voice.is_listening(), "{}", app.status);
     assert_eq!(
@@ -842,6 +846,118 @@ fn the_microphone_listens_until_it_is_turned_off() {
     assert_eq!(app.voice.phase, VoicePhase::Idle, "it stays off");
 }
 
+/// With "Hey, Clew" off, the microphone listens for one thing said: once
+/// it ends — a pause, or Smart Turn — the microphone turns off and what
+/// was said is acted on. Nothing said for long, it turns off. A command
+/// that waits for a yes listens once more, for the yes; a yes or no given
+/// by hand ends that listening too.
+#[test]
+fn the_microphone_listens_for_one_thing_said() {
+    let (mut app, script, _) = voice_app("voice-mic-once", "open the call graph");
+    assert!(!app.voice.prefs.wake);
+    let _ = app.update(Message::Voice(VoiceMsg::Toggle));
+    assert!(app.voice.mic_on);
+    assert!(app.voice.once);
+    assert!(app.voice.is_listening(), "{}", app.status);
+    assert_eq!(app.status, "Listening… say a command or a question");
+    // Nothing said for long: it stops, rather than listen on.
+    if let VoicePhase::Listening { since, .. } = &mut app.voice.phase {
+        *since -= std::time::Duration::from_secs_f32(NO_SPEECH_TIMEOUT + 1.0);
+    }
+    script.lock().unwrap().stopped = false;
+    let task = app.update(Message::Voice(VoiceMsg::Tick));
+    assert!(!app.voice.mic_on);
+    assert_eq!(app.voice.phase, VoicePhase::Idle);
+    assert!(script.lock().unwrap().stopped, "the microphone is closed");
+    assert_eq!(task.units(), 0, "nothing to work out");
+    assert_eq!(app.status, "Stopped listening");
+    // Said, and a pause ends it: the microphone turns off, and what was
+    // said is acted on.
+    app.voice.forget_last_press();
+    let _ = app.update(Message::Voice(VoiceMsg::Toggle));
+    assert!(app.voice.is_listening());
+    script.lock().unwrap().silence = Some(END_SILENCE + 0.1);
+    let task = app.update(Message::Voice(VoiceMsg::Tick));
+    assert!(!app.voice.mic_on, "what was said ends it");
+    assert_eq!(app.voice.phase, VoicePhase::Idle);
+    assert!(app.voice.transcribing());
+    script.lock().unwrap().silence = None;
+    for message in run_task(task) {
+        let _ = app.update(message);
+    }
+    assert_eq!(app.proj.overlay, Some(Overlay::ProjectCalls));
+    assert!(!app.voice.mic_on, "it stays off");
+    assert_eq!(app.voice.phase, VoicePhase::Idle);
+    // Smart Turn hearing a finished turn ends it at its first short
+    // pause, as the longer pause does without it.
+    let (mut app, script, judge) = judged_app("voice-mic-once-turn", vec![Ok(0.9)], true);
+    let _ = app.update(Message::Voice(VoiceMsg::Toggle));
+    assert!(app.voice.once);
+    let task = quiet_for(&mut app, &script, crate::app::turn::JUDGE_AFTER + 0.05);
+    assert!(app.voice.mic_on, "listening while it is judged");
+    for message in run_task(task) {
+        let _ = app.update(message);
+    }
+    assert_eq!(judge.asked.lock().unwrap().len(), 1, "Smart Turn was asked");
+    assert!(!app.voice.mic_on, "the turn ended it");
+    assert!(transcribing(&app));
+}
+
+/// Listening for one thing said, a command that waits for a yes listens
+/// once more, for it — the question still on the status line; answered by
+/// hand, the listening for it stops.
+#[test]
+fn listening_for_one_thing_said_a_costly_command_waits_for_its_yes() {
+    let (mut app, script, _) = voice_app("voice-once-costly", "explain all");
+    let _ = app.update(Message::Voice(VoiceMsg::Toggle));
+    script.lock().unwrap().silence = Some(END_SILENCE + 0.1);
+    let task = app.update(Message::Voice(VoiceMsg::Tick));
+    assert!(!app.voice.mic_on);
+    script.lock().unwrap().silence = None;
+    for message in run_task(task) {
+        let _ = app.update(message);
+    }
+    assert_eq!(
+        app.voice.confirm.as_ref().map(|w| w.said()),
+        Some("Explain All")
+    );
+    assert!(app.voice.is_listening(), "for the yes");
+    assert!(app.voice.once, "for it alone");
+    assert!(app.status.contains("Explain All?"), "{}", app.status);
+    assert!(
+        matches!(
+            app.voice.heard.as_ref().map(|h| &h.outcome),
+            Some(HeardOutcome::Confirm(_))
+        ),
+        "what was heard is still shown: {:?}",
+        app.voice.heard
+    );
+    // Esc: no — and nothing is left to listen for.
+    let _ = app.update(key_press(
+        keyboard::Key::Named(keyboard::key::Named::Escape),
+        keyboard::Modifiers::empty(),
+    ));
+    assert!(app.voice.confirm.is_none());
+    assert_eq!(app.status, "Didn't run Explain All");
+    assert!(!app.voice.mic_on);
+    assert_eq!(app.voice.phase, VoicePhase::Idle);
+    // Again, and its Run button: it runs, and the microphone is off.
+    app.voice.forget_last_press();
+    let _ = app.update(Message::Voice(VoiceMsg::Toggle));
+    script.lock().unwrap().silence = Some(END_SILENCE + 0.1);
+    let task = app.update(Message::Voice(VoiceMsg::Tick));
+    script.lock().unwrap().silence = None;
+    for message in run_task(task) {
+        let _ = app.update(message);
+    }
+    assert!(app.voice.is_listening(), "for the yes");
+    let _ = app.update(Message::Voice(VoiceMsg::Confirm));
+    assert!(app.voice.confirm.is_none());
+    assert!(app.settings.open, "the pass asked for a key");
+    assert!(!app.voice.mic_on);
+    assert_eq!(app.voice.phase, VoicePhase::Idle);
+}
+
 /// What is said while what was said before is still being worked out
 /// waits its turn: each is worked out, and acted on, in the order said —
 /// none dropped for the next.
@@ -856,6 +972,7 @@ fn what_is_said_is_worked_out_in_order() {
     app.voice.transcriber = heard.clone();
     app.voice.prefs.send_questions = false;
     let _ = app.update(Message::Voice(VoiceMsg::Toggle));
+    keep_listening(&mut app);
     script.lock().unwrap().silence = Some(END_SILENCE + 0.1);
     let first = app.update(Message::Voice(VoiceMsg::Tick));
     assert!(app.voice.is_listening(), "listening on at once");
@@ -1940,6 +2057,7 @@ fn a_model_picked_while_listening_is_the_next_listens() {
     app.voice.reset_for_test();
     script.lock().unwrap().silence = None;
     let _ = app.update(Message::Voice(VoiceMsg::Toggle));
+    keep_listening(&mut app);
     let _ = app.update(Message::Voice(VoiceMsg::PickModel("tiny.en")));
     let mut say = || {
         script.lock().unwrap().silence = Some(END_SILENCE + 0.1);
@@ -2042,6 +2160,19 @@ fn turn_app(
     answers: Vec<Result<f32, String>>,
     model: bool,
 ) -> (App, Arc<Mutex<MicScript>>, Arc<FakeJudge>) {
+    let (mut app, script, judge) = judged_app(tag, answers, model);
+    let _ = app.update(Message::Voice(VoiceMsg::Toggle));
+    keep_listening(&mut app);
+    assert!(app.voice.is_listening(), "{}", app.status);
+    (app, script, judge)
+}
+
+/// [`turn_app`]'s app, the microphone not yet turned on.
+fn judged_app(
+    tag: &str,
+    answers: Vec<Result<f32, String>>,
+    model: bool,
+) -> (App, Arc<Mutex<MicScript>>, Arc<FakeJudge>) {
     let (mut app, script, _) = voice_app(tag, "open settings");
     if model {
         let store = app.voice.store.clone().unwrap();
@@ -2057,8 +2188,6 @@ fn turn_app(
     });
     app.voice.turn.judges = Some(judge.clone());
     app.voice.reset_for_test();
-    let _ = app.update(Message::Voice(VoiceMsg::Toggle));
-    assert!(app.voice.is_listening(), "{}", app.status);
     (app, script, judge)
 }
 
@@ -4117,6 +4246,80 @@ fn bye_clew_waits_for_its_name_again() {
     }
 }
 
+/// Called by its name, Clew listens on, one thing said after another —
+/// each ended by Smart Turn as soon as it hears the turn finished, and
+/// done as it ends — until "Bye, Clew", when it waits for its name again.
+#[test]
+fn called_by_name_it_listens_turn_by_turn_until_bye_clew() {
+    use crate::app::turn::JUDGE_AFTER;
+    /// `task` run, and what each of its messages returns, `depth` deep.
+    fn pump(app: &mut App, task: Task<Message>, depth: usize) {
+        if depth == 0 {
+            return;
+        }
+        for message in run_task(task) {
+            let next = app.update(message);
+            pump(app, next, depth - 1);
+        }
+    }
+    let (_turn, mut app, script, _, _) = wake_app("wake-session", "", 1);
+    app.voice.transcriber = Arc::new(InTurn(Mutex::new(
+        [
+            "Hey, Clew, open the call graph.",
+            "Open settings.",
+            "Bye, Clew.",
+        ]
+        .map(String::from)
+        .into(),
+    )));
+    // Smart Turn downloaded, hearing each turn finished.
+    let store = app.voice.store.clone().unwrap();
+    std::fs::create_dir_all(clew_voice::turn::dir(&store)).unwrap();
+    std::fs::File::create(clew_voice::turn::path(&store))
+        .unwrap()
+        .set_len(clew_voice::turn::MODEL.bytes)
+        .unwrap();
+    let judge = Arc::new(FakeJudge {
+        answers: Mutex::new(vec![Ok(0.9), Ok(0.9), Ok(0.9)]),
+        ..FakeJudge::default()
+    });
+    app.voice.turn.judges = Some(judge.clone());
+    assert!(!wait_step(&mut app));
+    assert!(wait_step(&mut app), "called");
+    assert!(app.voice.mic_on && app.voice.is_listening());
+    // Something said, then a pause as short as Smart Turn is asked after:
+    // a finished turn ends it there, long before the pause that ends one
+    // without Smart Turn.
+    let say = |app: &mut App| {
+        script.lock().unwrap().silence = None;
+        let _ = app.update(Message::Voice(VoiceMsg::Tick));
+        let task = quiet_for(app, &script, JUDGE_AFTER + 0.05);
+        pump(app, task, 4);
+    };
+    say(&mut app);
+    assert_eq!(app.proj.overlay, Some(Overlay::ProjectCalls));
+    assert!(
+        app.voice.mic_on && app.voice.is_listening(),
+        "it listens on: {}",
+        app.status
+    );
+    say(&mut app);
+    assert!(app.settings.open, "{:?}", app.voice.heard);
+    assert!(
+        app.voice.mic_on && app.voice.is_listening(),
+        "it listens on: {}",
+        app.status
+    );
+    say(&mut app);
+    assert!(!app.voice.mic_on && !app.voice.is_listening());
+    assert!(app.voice.wake.is_waiting(), "{}", app.status);
+    assert_eq!(
+        judge.asked.lock().unwrap().len(),
+        3,
+        "each turn ended by Smart Turn"
+    );
+}
+
 /// The voice key, while the microphone waits: it listens — with that
 /// microphone — but what was heard before the press is not what is said
 /// now. Pressed again, it waits again.
@@ -4376,6 +4579,7 @@ fn a_late_bye_clew_lets_go_of_what_followed_it() {
         ["Bye, Clew.", "Open settings."].map(String::from).into(),
     )));
     let _ = app.update(Message::Voice(VoiceMsg::Toggle));
+    keep_listening(&mut app);
     script.lock().unwrap().silence = Some(END_SILENCE + 0.1);
     let task = app.update(Message::Voice(VoiceMsg::Tick));
     // Said after it, still being heard as the key turns it off: cut, and
@@ -4387,6 +4591,7 @@ fn a_late_bye_clew_lets_go_of_what_followed_it() {
     script.lock().unwrap().silence = None;
     app.voice.forget_last_press();
     let _ = app.update(Message::Voice(VoiceMsg::Toggle));
+    keep_listening(&mut app);
     assert!(app.voice.mic_on);
     settle(&mut app, task);
     settle(&mut app, off);
@@ -4404,6 +4609,7 @@ fn a_late_bye_clew_lets_go_of_what_followed_it() {
 fn a_late_bye_clew_ends_nothing_of_a_new_listening() {
     let (mut app, script, _) = voice_app("voice-bye-late", "Bye, Clew.");
     let _ = app.update(Message::Voice(VoiceMsg::Toggle));
+    keep_listening(&mut app);
     script.lock().unwrap().silence = Some(END_SILENCE + 0.1);
     let task = app.update(Message::Voice(VoiceMsg::Tick));
     script.lock().unwrap().silence = None;
@@ -4412,6 +4618,7 @@ fn a_late_bye_clew_ends_nothing_of_a_new_listening() {
     assert!(!app.voice.mic_on);
     app.voice.forget_last_press();
     let _ = app.update(Message::Voice(VoiceMsg::Toggle));
+    keep_listening(&mut app);
     assert!(app.voice.mic_on && app.voice.is_listening());
     settle(&mut app, task);
     assert!(

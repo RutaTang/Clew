@@ -130,9 +130,13 @@ fn header_right(app: &App) -> f32 {
     sheet_content_right(app.window_width) - tabs
 }
 
-/// The margin's toggle's width, and the room right of it and the tabs.
+/// The margin's toggle's width, and the room right of it and left of the
+/// tabs: the notes' own, so the tabs start over where the notes start and
+/// the toggle ends over where they end (they stood 9 points in from the
+/// notes' left and 5 short of their right).
 const MARGIN_TOGGLE_W: f32 = 2.0 * FILE_TOOL_PAD_X + FILE_TOOL_GLYPH;
-const MARGIN_TABS_PAD_RIGHT: f32 = 16.0;
+const MARGIN_TABS_PAD_RIGHT: f32 = super::panes::NOTE_INSET_RIGHT;
+const MARGIN_TABS_PAD_LEFT: f32 = super::panes::NOTE_INSET_LEFT;
 
 /// Where the margin's toggle is drawn, in window coordinates: at the
 /// header's right end, the margin shown or hidden.
@@ -719,7 +723,7 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
             .align_y(iced::Top)
             .padding(Padding {
                 right: MARGIN_TABS_PAD_RIGHT,
-                left: 12.0,
+                left: MARGIN_TABS_PAD_LEFT,
                 ..HEADER_ROW_PAD
             })
             .into()

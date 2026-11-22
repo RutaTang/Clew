@@ -815,6 +815,11 @@ fn search_field(app: &App) -> Element<'_, Message> {
 
 /// Width of the tool strip down the window's right edge.
 pub(crate) const STRIP_W: f32 = 44.0;
+/// How far the middle of the strip's tools is from the window's right
+/// edge. The gap after the sheet and the strip are one colour, one column
+/// to the eye: the tools stand in the middle of that, not of the strip
+/// alone, which put them four points right of where they looked to be.
+pub(crate) const STRIP_MID: f32 = (STRIP_W + super::sheet::SHEET_GAP) / 2.0;
 /// Space above the strip's first tool, and below its last.
 const STRIP_PAD_TOP: f32 = 2.0;
 const STRIP_PAD_BOTTOM: f32 = 10.0;
@@ -847,17 +852,25 @@ pub(crate) enum StripTool {
     ProjectMaps,
     /// The ⋯ menu.
     More,
-    /// At the strip's foot.
+    /// Ask, at the strip's foot ([`STRIP_FOOT`]): the conversation with
+    /// Clew, which opens beside it — its microphone in it.
+    Ask,
+    /// At the strip's very foot.
     Settings,
 }
+
+/// The strip's foot, from the top: asking Clew, and Settings at the very
+/// foot. Apart from the tools above, which read the project: these are the
+/// window's, there with no project open too.
+pub(crate) const STRIP_FOOT: [StripTool; 2] = [StripTool::Ask, StripTool::Settings];
 
 /// The strip's tools from the top, in their groups, in the order a project
 /// is come to know: the whole of it (Overview, Stats, its weak spots), how its parts
 /// connect (its graphs and maps), running it ([`RUN_TOOLS`]) — and More. A
 /// rule stands before each group but the first ([`STRIP_RULE_BEFORE`]). The
 /// strip holds what opens over the code or below it; what opens in the
-/// sidebar is the sidebar's to show ([`super::SIDEBAR_TABS`]). Settings
-/// stands apart, at the strip's foot.
+/// sidebar is the sidebar's to show ([`super::SIDEBAR_TABS`]). Ask and
+/// Settings stand apart, at the strip's foot ([`STRIP_FOOT`]).
 pub(crate) const STRIP_TOP: [StripTool; 12] = [
     StripTool::Overview,
     StripTool::Stats,
@@ -899,11 +912,15 @@ pub(crate) enum StripSlot {
     Rule,
 }
 
-/// The least room left between the strip's last tool and Settings at its
-/// foot.
+/// The least room left between the strip's last tool and its foot
+/// ([`STRIP_FOOT`]).
 const STRIP_FOOT_GAP: f32 = 12.0;
 
-/// The strip's slots from the top (Settings, at its foot, apart). Where the
+/// Height of the strip's foot ([`STRIP_FOOT`]).
+const STRIP_FOOT_H: f32 =
+    STRIP_FOOT.len() as f32 * ICON_BTN + (STRIP_FOOT.len() - 1) as f32 * STRIP_SPACING;
+
+/// The strip's slots from the top (its foot, [`STRIP_FOOT`], apart). Where the
 /// strip is tall enough, the ⋯ menu's rows are laid on it too, in their
 /// groups, and the ⋯ is not there: a menu of what the strip had room to
 /// show was a click more for each of them. Shorter, they stay in the menu;
@@ -949,7 +966,7 @@ pub(crate) fn strip_slots(app: &App) -> Vec<StripSlot> {
         - STATUSBAR_H
         - STRIP_PAD_TOP
         - STRIP_PAD_BOTTOM
-        - ICON_BTN
+        - STRIP_FOOT_H
         - STRIP_FOOT_GAP;
     if height(&inline) <= room {
         return inline;
@@ -979,9 +996,13 @@ pub(crate) fn tools_on_strip(app: &App) -> bool {
 /// is not there (the ⋯ while the menu's rows are on the strip, a row while
 /// they are in the menu).
 pub(crate) fn strip_slot_center(app: &App, slot: StripSlot) -> Option<iced::Point> {
-    let x = app.window_width - STRIP_W / 2.0;
-    if slot == StripSlot::Tool(StripTool::Settings) {
-        let y = app.window_height - STATUSBAR_H - STRIP_PAD_BOTTOM - ICON_BTN / 2.0;
+    let x = app.window_width - STRIP_MID;
+    // The foot, up from the strip's bottom: Settings, then Ask.
+    if let StripSlot::Tool(tool) = slot
+        && let Some(i) = STRIP_FOOT.iter().position(|t| *t == tool)
+    {
+        let up = (STRIP_FOOT.len() - 1 - i) as f32 * (ICON_BTN + STRIP_SPACING);
+        let y = app.window_height - STATUSBAR_H - STRIP_PAD_BOTTOM - ICON_BTN / 2.0 - up;
         return Some(iced::Point::new(x, y));
     }
     let mut y = body_top(app) + STRIP_PAD_TOP;
@@ -1003,7 +1024,7 @@ pub(crate) fn strip_slot_center(app: &App, slot: StripSlot) -> Option<iced::Poin
 pub(crate) fn strip_tool_center(app: &App, tool: StripTool) -> iced::Point {
     strip_slot_center(app, StripSlot::Tool(tool))
         .or_else(|| strip_slot_center(app, StripSlot::Row(TOOLS_MENU_ROWS[0])))
-        .unwrap_or_else(|| iced::Point::new(app.window_width - STRIP_W / 2.0, body_top(app)))
+        .unwrap_or_else(|| iced::Point::new(app.window_width - STRIP_MID, body_top(app)))
 }
 
 /// What a tool of the strip shows and does: its icon, its name, its
@@ -1096,6 +1117,12 @@ pub(crate) fn strip_tool(
             None,
             Message::Window(WindowMsg::ToggleToolsMenu),
         ),
+        StripTool::Ask => (
+            Glyph::AskAi,
+            tr!("Ask"),
+            caps(Action::ToggleAsk),
+            Message::Ask(AskMsg::Toggle),
+        ),
         StripTool::Settings => (
             Glyph::Settings,
             tr!("Settings"),
@@ -1112,7 +1139,7 @@ pub(crate) fn strip_tool(
 /// (with no cursor placed, one in view).
 pub(crate) fn strip_tool_able(app: &App, tool: StripTool) -> bool {
     match tool {
-        StripTool::More | StripTool::Settings => true,
+        StripTool::More | StripTool::Ask | StripTool::Settings => true,
         StripTool::FakeRun | StripTool::FakeDebug => app.has_fake_target(),
         _ => app.proj.project.is_some(),
     }
@@ -1205,16 +1232,41 @@ pub(crate) fn tool_strip(app: &App) -> Element<'_, Message> {
     }
     strip = strip
         .push(space().height(Fill))
+        .push(strip_ask(app))
         .push(tool(StripTool::Settings));
+    // The gap after the sheet is the strip's colour too: the tools are in
+    // the middle of the two ([`STRIP_MID`]), the strip keeping the gap's
+    // width clear at its right.
     container(strip.padding(Padding {
         top: STRIP_PAD_TOP,
+        right: 2.0 * STRIP_MID - STRIP_W,
         bottom: STRIP_PAD_BOTTOM,
-        ..Padding::ZERO
+        left: 0.0,
     }))
     .width(Length::Fixed(STRIP_W))
     .height(Fill)
     .style(theme::strip)
     .into()
+}
+
+/// Ask, on the strip's foot: its mark in the accent, as what asks the
+/// model is marked everywhere, with a dot for an answer not read yet
+/// ([`super::askfloat::ask_mark`]). Lit while the conversation is open
+/// beside it; pressed again, it is put away.
+fn strip_ask(app: &App) -> Element<'_, Message> {
+    let (_, label, shortcut, msg) = strip_tool(app, StripTool::Ask);
+    let open = app.ask_view.is_open();
+    tip_at(
+        button(container(super::askfloat::ask_mark(app, ICON)).center(Fill))
+            .style(theme::icon_button(open))
+            .padding(0)
+            .width(Length::Fixed(ICON_BTN))
+            .height(Length::Fixed(ICON_BTN))
+            .on_press(super::heard::said(label, msg)),
+        label,
+        shortcut,
+        tooltip::Position::Left,
+    )
 }
 
 // ------------------------------------------------------------------ ⋯ menu
@@ -1367,8 +1419,8 @@ const MENU_HEADING_H: f32 = 24.0;
 const MENU_ROW_SPACING: f32 = 0.0;
 /// Height of a separator between groups of rows.
 const MENU_SEP_H: f32 = 11.0;
-/// Gap between the strip and a menu it opened.
-const STRIP_MENU_GAP: f32 = 3.0;
+/// Gap between the strip's buttons and a menu one of them opened.
+const STRIP_MENU_GAP: f32 = 10.0;
 
 /// Room the ⋯ menu keeps from the window's foot, and from the top bar.
 const MENU_EDGE: f32 = 8.0;
@@ -1399,8 +1451,8 @@ pub(crate) fn tools_menu_room(app: &App) -> f32 {
 }
 
 /// Distance of the ⋯ menu panel from the window's right edge: just left of
-/// the strip.
-pub(crate) const TOOLS_MENU_RIGHT: f32 = STRIP_W + STRIP_MENU_GAP;
+/// the strip's buttons.
+pub(crate) const TOOLS_MENU_RIGHT: f32 = STRIP_MID + ICON_BTN / 2.0 + STRIP_MENU_GAP;
 
 /// Window-space rectangle covering `count` consecutive ⋯ menu rows starting
 /// at row `first`, spanning the item column (inside the panel's padding).
