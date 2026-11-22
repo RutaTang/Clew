@@ -414,7 +414,7 @@ pub(crate) fn call_flow_rows<'a>(
                         .size(ts::CAPTION)
                         .color(theme::dim()),
                 )
-                .padding([1, 8])
+                .padding([1.0, SECTION_INSET])
                 .into(),
             );
         }
@@ -532,7 +532,7 @@ pub(crate) fn call_flow_rows<'a>(
             let row_button = button(col)
                 .style(theme::list_row(false))
                 .width(Fill)
-                .padding([3, 6])
+                .padding([3.0, SECTION_INSET])
                 .on_press(heard::said(&n.name, msg));
             out.push(if name_cut {
                 super::toolbar::tip_at(row_button, n.name.clone(), None, tooltip::Position::Top)
@@ -550,8 +550,9 @@ fn call_name_room(app: &App) -> f32 {
     (super::margin_w(app) - CALL_ROW_CHROME).max(48.0)
 }
 
-/// What of the margin's width a call-flow row's name does not get.
-const CALL_ROW_CHROME: f32 = 64.0;
+/// What of the margin's width a call-flow row's name does not get: its
+/// insets on the section's line, the arrow, and the scroller's lane.
+const CALL_ROW_CHROME: f32 = 64.0 + 2.0 * (SECTION_INSET - 6.0);
 
 /// How many "reached from" chains the panel shows, and how many calls deep
 /// the walk looks for an entry point.
@@ -577,7 +578,7 @@ fn reached_from_rows<'a>(
     let g = &app.proj.project_calls.graph;
     let caption = |t: String| -> Element<'a, Message> {
         container(text(t).size(ts::CAPTION).color(theme::dim()))
-            .padding([1, 8])
+            .padding([1.0, SECTION_INSET])
             .into()
     };
     if let Some(kind) = app.entry_kind_of(file, name) {
@@ -595,7 +596,7 @@ fn reached_from_rows<'a>(
                 ]
                 .spacing(6),
             )
-            .padding([1, 8])
+            .padding([1.0, SECTION_INSET])
             .into(),
         );
         return out;
@@ -820,7 +821,7 @@ pub(crate) fn explain_content(app: &App) -> Element<'_, Message> {
                 )
                 .style(theme::list_row(false))
                 .width(Fill)
-                .padding([3, 6])
+                .padding([3.0, SECTION_INSET])
                 .on_press(heard::said(
                     label,
                     Message::Explain(ExplainMsg::Show(n.clone())),
@@ -967,12 +968,16 @@ pub(crate) fn section_header<'a>(label: &str) -> Element<'a, Message> {
     )
     .padding(Padding {
         top: 12.0,
-        right: 10.0,
+        right: SECTION_INSET,
         bottom: 4.0,
-        left: 10.0,
+        left: SECTION_INSET,
     })
     .into()
 }
+
+/// How far a panel list's section heading, and every line under it, stands
+/// in from the list's edge: its rows' text starts there.
+pub(crate) const SECTION_INSET: f32 = 10.0;
 
 pub(crate) fn human_size(bytes: u64) -> String {
     const MB: f64 = 1024.0 * 1024.0;

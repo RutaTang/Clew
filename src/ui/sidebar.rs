@@ -1388,7 +1388,7 @@ fn filtered_file_rows<'a>(
             mouse_area(
                 button(
                     row![
-                        quiet_icon(Glyph::File, theme::dim()),
+                        super::file_icon::file_icon(name, 14.0, theme::dim()),
                         text(crate::highlight::in_order(name))
                             .size(ts::BASE)
                             .color(if is_current {
@@ -1535,8 +1535,9 @@ pub(crate) fn append_tree_rows<'a>(
         };
         let content = row![
             space().width(12), // align names under the folders' chevron column
-            quiet_icon(
-                Glyph::File,
+            super::file_icon::file_icon(
+                name,
+                14.0,
                 if is_current {
                     theme::fg()
                 } else {

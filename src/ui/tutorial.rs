@@ -861,29 +861,6 @@ pub(crate) fn tour_prep_sheet<'a>(
         ready
             .then(|| super::heard::said(tr!("Start the tour"), Message::Tutorial(TutorialMsg::Go))),
     );
-    // Why it cannot start yet, said beside it: in a tip alone (which a
-    // held button may not show), a press on the tour's main button did
-    // nothing, with no word why.
-    let waiting: Element<'_, Message> = if ready {
-        space().width(Fill).into()
-    } else {
-        text(if !app.llm_available {
-            tr!("The tour needs a language model first (step 1).")
-        } else if !prep.met(app, Need::Model) {
-            tr!("The tour starts once the model answers a test (step 1).")
-        } else if matches!(sample, Some(Err(_))) {
-            // It never will by itself: said as it is, with Try again on
-            // its step — it promised a start that never came.
-            tr!("Tea Shop could not be set up (step 3).")
-        } else {
-            tr!("The tour starts once Tea Shop is ready (step 3).")
-        })
-        .size(ts::SMALL)
-        .color(theme::dim())
-        .wrapping(Wrapping::WordOrGlyph)
-        .width(Fill)
-        .into()
-    };
     let start: Element<'_, Message> = start.into();
     let not_now = button(text(tr!("Not now")).size(ts::BASE))
         .style(theme::toolbar_button)
@@ -898,7 +875,7 @@ pub(crate) fn tour_prep_sheet<'a>(
             header,
             intro,
             steps,
-            row![waiting, not_now, start]
+            row![space().width(Fill), not_now, start]
                 .spacing(10)
                 .align_y(iced::Center),
         ]

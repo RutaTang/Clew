@@ -15246,11 +15246,12 @@ fn the_tour_sheet_says_all_set_only_of_a_model_that_answered() {
     assert!(says(&app, "All set."));
 }
 
-/// Why the tour cannot start yet is said beside its Start button, whatever
-/// is missing: in a tip alone (which a held button may not show), a press
-/// on the tour's main button did nothing, with no word why.
+/// What the tour still waits for is said by its steps, the next one lit —
+/// not again in a line beside its Start button. A Tea Shop that could not
+/// be written says why on its step, with Try again there, which writes it
+/// anew.
 #[test]
-fn the_tour_sheet_says_why_it_cannot_start_yet() {
+fn the_tour_sheet_says_what_it_waits_for_on_its_steps() {
     use crate::app::state::ConnectionTest;
     let mut app = reader_app();
     let prep = crate::app::tutorial::TourPrep::default();
@@ -15261,34 +15262,24 @@ fn the_tour_sheet_says_why_it_cannot_start_yet() {
         )
     };
     app.llm_available = false;
-    assert!(says(
-        &app,
-        "The tour needs a language model first (step 1)."
-    ));
+    assert!(says(&app, "Add an API Key…"));
+    assert!(!says(&app, "The tour needs"));
     app.llm_available = true;
     app.model_check.result = ConnectionTest::Untried;
-    assert!(says(
-        &app,
-        "The tour starts once the model answers a test (step 1)."
-    ));
-    assert!(!says(&app, "needs a language model"));
+    assert!(says(&app, "Test connection"));
+    assert!(!says(&app, "The tour starts once"));
     app.model_check.result = ConnectionTest::Answered("m".into());
     assert!(!prep.ready(&app), "Tea Shop is not ready in a reader's app");
-    assert!(says(
-        &app,
-        "The tour starts once Tea Shop is ready (step 3)."
-    ));
-    assert!(!says(&app, "answers a test"));
-    // Tea Shop could not be written: said so, not as a start to come — it
-    // never would — and its step has Try again, which writes it anew.
+    assert!(says(&app, "Getting Tea Shop ready…"));
+    assert!(!says(&app, "The tour starts once"));
+    // Tea Shop could not be written: said on its step, with Try again.
     let prep = crate::app::tutorial::TourPrep {
         sample: Some(Err("disk full".into())),
         ..Default::default()
     };
     let mut sim = sim_elem(super::tutorial::tour_prep_sheet(&app, &prep));
-    assert!(shows(&mut sim, "Tea Shop could not be set up (step 3)."));
-    assert!(!shows(&mut sim, "The tour starts once Tea Shop is ready"));
     assert!(shows(&mut sim, "disk full"));
+    assert!(!shows(&mut sim, "could not be set up"));
     drop(sim);
     assert!(matches!(
         click(

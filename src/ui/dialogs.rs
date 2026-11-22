@@ -491,8 +491,7 @@ fn finder_heading<'a>(title: &'static str) -> Element<'a, Message> {
 
 /// A row of the command bar: its icon, what it does, a detail, its keys.
 fn bar_row<'a>(
-    glyph: Glyph,
-    tint: iced::Color,
+    icon: Element<'a, Message>,
     title: String,
     detail: Option<String>,
     keys: Option<String>,
@@ -517,7 +516,7 @@ fn bar_row<'a>(
     let label = title.clone();
     finder_row(
         row![
-            glyph::icon(glyph, tint, 15.0),
+            icon,
             container(ts::set_in(
                 text(title).wrapping(Wrapping::None),
                 row_h,
@@ -600,8 +599,7 @@ fn suggestion_rows<'a>(app: &'a App, rows: &mut Vec<Element<'a, Message>>) {
             }
         };
         rows.push(bar_row(
-            glyph,
-            tint,
+            glyph::icon(glyph, tint, 15.0),
             title,
             detail,
             keys,
@@ -631,8 +629,7 @@ fn bar_rows<'a>(app: &'a App, rows: &mut Vec<Element<'a, Message>>) {
                 (Glyph::Prompt, theme::dim())
             };
             rows.push(bar_row(
-                glyph,
-                tint,
+                glyph::icon(glyph, tint, 15.0),
                 command.shown().to_string(),
                 None,
                 command.keys.clone(),
@@ -666,8 +663,7 @@ fn bar_rows<'a>(app: &'a App, rows: &mut Vec<Element<'a, Message>>) {
             - super::steady::width_of(name, ts::READING, crate::fonts::UI);
         let dir = super::steady::elide_start(dir, BAR_DETAIL_SIZE, crate::fonts::UI, dir_room);
         rows.push(bar_row(
-            Glyph::File,
-            theme::dim(),
+            super::file_icon::file_icon(name, 15.0, theme::dim()),
             crate::highlight::in_order(name).into_owned(),
             Some(crate::highlight::in_order(&dir).into_owned()),
             None,
@@ -734,7 +730,7 @@ pub(crate) fn finder_file_rows<'a>(app: &'a App, rows: &mut Vec<Element<'a, Mess
         let dir = super::steady::elide_start(dir, ts::SMALL, crate::fonts::UI, dir_room);
         rows.push(finder_row(
             row![
-                glyph::icon(Glyph::File, theme::dim(), FILE_ICON_W),
+                super::file_icon::file_icon(name, FILE_ICON_W, theme::dim()),
                 // In the order they are spelled (`highlight::in_order`).
                 text(crate::highlight::in_order(name)).size(ts::READING),
                 space().width(Fill),
