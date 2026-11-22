@@ -155,7 +155,7 @@ fn the_card_stands_in_the_corner() {
         assert_eq!(crate::ui::ask_place(&app), Some(card), "caret {caret}");
     }
     let middle = |left: f32, width: f32| left + width / 2.0;
-    let right = app.window_width - crate::ui::STRIP_W - 12.0;
+    let right = app.window_width - crate::ui::ASK_RIGHT;
     assert!(
         (card.left + card.width - right).abs() < 1.0,
         "{card:?} by the tool strip"
@@ -168,8 +168,8 @@ fn the_card_stands_in_the_corner() {
             < 1.0,
         "{corner:?} over the status bar"
     );
-    // The debugger's panel up, however tall: the card, and the pill it
-    // hides to, stay in the corner.
+    // The debugger's panel up, however tall: the card stays in the corner,
+    // and Ask, on the strip, where it is.
     app.show_bottom = true;
     for height in [200.0, 500.0] {
         app.bottom_height = height;

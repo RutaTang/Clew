@@ -1848,6 +1848,12 @@ fn walkthrough_note_h(room: f32, top: f32) -> f32 {
 const ACTIVE_NOTE_LIFT: f32 = 10.0;
 /// The raised card's edge: the design draws it as a ring round the card.
 const NOTE_EDGE: f32 = 1.0;
+/// The room between the margin's sides and its notes as they are seen:
+/// the design's 4 and 12. The margin's tabs, over it in the sheet's header,
+/// keep the same, so the first tab starts where the notes do and its
+/// toggle ends where they end; Ask's card ends there too.
+pub(crate) const NOTE_INSET_LEFT: f32 = 4.0;
+pub(crate) const NOTE_INSET_RIGHT: f32 = 12.0;
 
 /// The margin's Notes: clew's note on each function of the open file,
 /// level with the function in the code; the note on the one the caret is
@@ -1892,9 +1898,9 @@ fn margin_notes(app: &App) -> Element<'_, Message> {
         )
         .padding(Padding {
             top: 0.0,
-            right: 12.0,
+            right: NOTE_INSET_RIGHT,
             bottom: 0.0,
-            left: 4.0,
+            left: NOTE_INSET_LEFT - NOTE_EDGE,
         })
         .into();
     }
@@ -2077,17 +2083,20 @@ fn notes_beside_code<'a>(
             end = top + h;
             floor = end + NOTE_GAP;
         }
-        // The design's 4 and 12 to a note's box, less the edge the raised
-        // card draws outside its own: a plain note pads that pixel back.
+        // The design's 4 and 12 to a note's box: at the left, 4 from the
+        // margin's edge, the divider's line its first point; at the right,
+        // 12 from the sheet's — the line the margin's toggle over it and
+        // Ask's card under it end on too (it stood at 11, a point past
+        // both).
         container(col)
             .width(Fill)
             .height(Fill)
             .clip(true)
             .padding(Padding {
                 top: 0.0,
-                right: 12.0 - NOTE_EDGE,
+                right: NOTE_INSET_RIGHT,
                 bottom: 0.0,
-                left: 4.0 - NOTE_EDGE,
+                left: NOTE_INSET_LEFT - NOTE_EDGE,
             })
             .into()
     };

@@ -25,12 +25,17 @@ pub(crate) const ASK_CARD_W: f32 = 400.0;
 pub(crate) const ASK_CARD_H: f32 = 520.0;
 /// Least height the card shrinks to in a short window.
 pub(crate) const ASK_CARD_MIN_H: f32 = 120.0;
-/// Space between the card and the edges around it.
-pub(crate) const ASK_MARGIN: f32 = 16.0;
+/// Space between the card and the edges around it: as far in from the
+/// sheet's edges, past their border, as the margin's notes stand from its
+/// right edge — the card's right edge in one line with theirs, and its
+/// corner as far from the sheet's foot as from its side (it stood 4 from
+/// the side and 16 from the foot).
+pub(crate) const ASK_MARGIN: f32 = 1.0 + super::panes::NOTE_INSET_RIGHT;
 /// Gap between the window's top bar and what Ask may cover under it.
 const TOP_GAP: f32 = 6.0;
-/// Space between the card (or the pill) and the tool strip at its right.
-const STRIP_GAP: f32 = 12.0;
+/// How far the card's (and the pill's) right edge is from the window's:
+/// [`ASK_MARGIN`] in from the sheet's right edge.
+pub(crate) const ASK_RIGHT: f32 = STRIP_W + super::sheet::SHEET_GAP + ASK_MARGIN;
 /// Widest the large window grows, and its share of the window.
 pub(crate) const ASK_LARGE_MAX_W: f32 = 960.0;
 pub(crate) const ASK_LARGE_SHARE: f32 = 0.72;
@@ -100,7 +105,7 @@ fn band(app: &App) -> (f32, f32) {
 /// are open.
 fn corner(app: &App) -> (f32, f32) {
     let (_, bottom) = band(app);
-    (STRIP_W + STRIP_GAP, app.window_height - bottom)
+    (ASK_RIGHT, app.window_height - bottom)
 }
 
 /// Whether the conversation is a card in the corner.

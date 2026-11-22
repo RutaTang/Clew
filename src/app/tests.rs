@@ -38225,12 +38225,12 @@ fn the_reading_guide_is_written_kept_and_regenerated_as_a_guide() {
     );
 }
 
-/// Where the Ask pill floats over the code's foot — a narrow window, no
-/// margin under it — the caret moved down a line at a time stays above it:
-/// it went on under the pill. Page Down puts the last line seen whole above
-/// the pill at the top, and find-next scrolls to a match under it. Where
-/// nothing floats over the code, the caret goes down to the view's last
-/// line.
+/// Where voice's pill floats over the code's foot — listening, Ask put
+/// away, a narrow window, no margin under it — the caret moved down a line
+/// at a time stays above it: it went on under the pill. Page Down puts the
+/// last line seen whole above the pill at the top, and find-next scrolls to
+/// a match under it. Where nothing floats over the code, the caret goes
+/// down to the view's last line.
 #[test]
 fn the_caret_keeps_clear_of_the_ask_pill() {
     let mut app = blank_app();
@@ -38253,8 +38253,16 @@ fn the_caret_keeps_clear_of_the_ask_pill() {
         lines,
     ));
     app.proj.active = 0;
-    assert_eq!(app.ask_view, crate::AskView::Hidden, "the pill shows");
+    assert_eq!(app.ask_view, crate::AskView::Hidden);
     app.show_bottom = false;
+    // Nothing said, nothing heard: no pill, and nothing kept clear of it.
+    assert_eq!(crate::ui::pill_over_code(&app, 0), 0.0);
+    app.voice.mic_on = true;
+    app.voice.phase = crate::app::voice::VoicePhase::Listening {
+        since: std::time::Instant::now(),
+        level: 0.0,
+    };
+    assert!(crate::ui::pill_shown(&app), "the pill shows");
     let lh = app.line_height();
     let view_h = 16.0 * lh;
     let foot = crate::ui::PILL_H + crate::ui::ASK_MARGIN;
