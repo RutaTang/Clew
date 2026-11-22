@@ -324,9 +324,12 @@ struct Cut {
     em: f32,
 }
 
+/// Each label's cut, or that the font had none to give.
+type Cuts = Mutex<HashMap<&'static str, Option<Arc<Cut>>>>;
+
 /// `letters` cut from JetBrains Mono Bold, once per label.
 fn outlines(letters: &'static str) -> Option<Arc<Cut>> {
-    static CUTS: OnceLock<Mutex<HashMap<&'static str, Option<Arc<Cut>>>>> = OnceLock::new();
+    static CUTS: OnceLock<Cuts> = OnceLock::new();
     let cuts = CUTS.get_or_init(Default::default);
     let mut cuts = cuts.lock().unwrap_or_else(|e| e.into_inner());
     cuts.entry(letters)
