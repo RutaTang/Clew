@@ -1102,6 +1102,7 @@
  "Listed the window's commands": "Commandes de la fenêtre listées",
  "Listening": "Écoute",
  "Listening…": "Écoute…",
+ "Listening… say a command or a question": "Écoute… dites une commande ou posez une question",
  "Listening… say a command or a question, or “Bye, Clew” to stop": "Écoute… dites une commande ou posez une question, ou dites « Bye, Clew » pour arrêter",
  "Listening… say yes to run {command}, or no": "Écoute… dites oui pour exécuter « {command} », ou non",
  "Listens only for “Hey, Clew”.": "N’écoute que « Hey, Clew ».",

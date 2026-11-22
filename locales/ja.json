@@ -1102,6 +1102,7 @@
  "Listed the window's commands": "ウィンドウのコマンド一覧を取得しました",
  "Listening": "聞き取り",
  "Listening…": "聞き取り中…",
+ "Listening… say a command or a question": "聞き取り中…コマンドか質問をどうぞ",
  "Listening… say a command or a question, or “Bye, Clew” to stop": "聞き取り中…コマンドか質問をどうぞ。「Bye, Clew」で聞き取りを停止します",
  "Listening… say yes to run {command}, or no": "聞き取り中…「はい」で「{command}」を実行、「いいえ」で取り消します",
  "Listens only for “Hey, Clew”.": "「Hey, Clew」だけを聞き取ります。",

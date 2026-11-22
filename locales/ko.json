@@ -1102,6 +1102,7 @@
  "Listed the window's commands": "창의 명령 목록을 가져왔습니다",
  "Listening": "듣기",
  "Listening…": "듣는 중…",
+ "Listening… say a command or a question": "듣는 중… 명령이나 질문을 말하세요",
  "Listening… say a command or a question, or “Bye, Clew” to stop": "듣는 중… 명령이나 질문을 말하세요. 멈추려면 “Bye, Clew”라고 말하세요",
  "Listening… say yes to run {command}, or no": "듣는 중… “네”라고 하면 “{command}” 명령을 실행하고, “아니요”라고 하면 취소합니다",
  "Listens only for “Hey, Clew”.": "“Hey, Clew”만 알아듣습니다.",

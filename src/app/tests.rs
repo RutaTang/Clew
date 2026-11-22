@@ -445,6 +445,18 @@ fn fixture_project(tag: &str) -> PathBuf {
     dir.canonicalize().unwrap()
 }
 
+/// Listening kept on, as it is once Clew is called by its name ("Hey,
+/// Clew"): what is said does not end it, and the microphone listens on for
+/// the next until it is turned off or "Bye, Clew" is said. The voice key
+/// alone, with "Hey, Clew" off, listens for one thing said
+/// ([`VoiceState::once`](crate::app::voice::VoiceState)).
+pub(crate) fn keep_listening(app: &mut App) {
+    app.voice.once = false;
+    if app.voice.mic_on {
+        app.say_listening();
+    }
+}
+
 /// Run `task` the way the iced runtime would — on a multi-thread tokio runtime,
 /// since the app's tasks use `spawn_blocking` — and return the messages it
 /// produces. Widget operations and other runtime actions are dropped. Bounded,

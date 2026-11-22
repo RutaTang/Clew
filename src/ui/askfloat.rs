@@ -289,19 +289,34 @@ pub(crate) fn ask_mark(app: &App, size: f32) -> Element<'static, Message> {
 
 /// Voice's pill, in Ask's corner while the card is put away: what voice is
 /// doing while it listens, waits for a yes, speaks, or has just done what
-/// was said ([`pill_voice`]). `None` — nothing there — when it has nothing
-/// to say: Ask and the microphone are on the strip.
+/// was said ([`pill_voice`]) — and, while it listens or Clew speaks, the
+/// button lit to stop it ([`voice_lit`]). `None` — nothing there — when it
+/// has nothing to say: Ask is on the strip, its microphone in the card.
 fn voice_pill(app: &App) -> Option<Element<'_, Message>> {
     let said = pill_voice(app)?;
+    let lit = voice_lit(app, PILL_BUTTON, 14.0);
+    let right = if lit.is_some() { 7.0 } else { 8.0 };
+    let mut face = row![said].spacing(8).align_y(iced::Center);
+    if let Some(lit) = lit {
+        face = face.push(lit);
+    }
     Some(
-        container(opaque(said))
+        container(opaque(face))
             .height(Length::Fixed(PILL_H))
             .align_y(iced::Center)
-            .padding([0, 8])
+            .padding(Padding {
+                top: 0.0,
+                right,
+                bottom: 0.0,
+                left: 8.0,
+            })
             .style(theme::floating_pill)
             .into(),
     )
 }
+
+/// Side of the round button on voice's pill.
+pub(crate) const PILL_BUTTON: f32 = 26.0;
 
 /// What voice says on the pill: a command waiting for a yes, Clew
 /// speaking, a question being answered — or, for a moment, what was just
@@ -1136,20 +1151,20 @@ pub(crate) fn talk_tip(app: &App) -> &'static str {
 }
 
 /// The microphone's tip while it listens: "Bye, Clew" turns it off too —
-/// or, called by its name, has it wait for it again.
-pub(crate) fn stop_listening_tip() -> &'static str {
-    tr!("Stop listening, or say “Bye, Clew”")
+/// or, called by its name, has it wait for it again. Listening for one
+/// thing said, it is only a stop.
+pub(crate) fn stop_listening_tip(app: &App) -> &'static str {
+    if app.voice.once {
+        tr!("Stop listening")
+    } else {
+        tr!("Stop listening, or say “Bye, Clew”")
+    }
 }
 
 /// The voice key's round button, `side` across, lit in the accent while
 /// the microphone is on — the microphone, which turns it off — or Clew
 /// speaks — a stop. `None` otherwise: the microphone as it is at rest.
-pub(crate) fn voice_lit(
-    app: &App,
-    side: f32,
-    icon: f32,
-    tip_side: tooltip::Position,
-) -> Option<Element<'_, Message>> {
+pub(crate) fn voice_lit(app: &App, side: f32, icon: f32) -> Option<Element<'_, Message>> {
     let (glyph, message, tip, lit) = if app.voice.speech.is_speaking() {
         (
             Glyph::Stop,
@@ -1158,7 +1173,7 @@ pub(crate) fn voice_lit(
             true,
         )
     } else if app.voice.mic_on {
-        (Glyph::Mic, VoiceMsg::Toggle, stop_listening_tip(), true)
+        (Glyph::Mic, VoiceMsg::Toggle, stop_listening_tip(app), true)
     } else {
         return None;
     };
@@ -1179,7 +1194,7 @@ pub(crate) fn voice_lit(
             super::heard::said(tip, Message::Voice(message))
         });
 
-    Some(tip_at(lit, tip, chord, tip_side))
+    Some(tip_at(lit, tip, chord, tooltip::Position::Top))
 }
 
 /// Voice on the card, under its header: what was last heard and what came

@@ -571,6 +571,13 @@ pub(crate) struct VoiceState {
     /// its button or the voice key is pressed again. Closed meanwhile only
     /// while Clew reads an answer aloud ([`App::resume_listening`]).
     pub mic_on: bool,
+    /// Listening for one thing said: begun by the microphone or the voice
+    /// key while Clew does not keep listening for "Hey, Clew"
+    /// ([`VoicePrefs::wake`]). What is said, once it ends, turns the
+    /// microphone off — and a command it said that waits for a yes listens
+    /// once more, for the yes. Called by its name, Clew keeps listening
+    /// until "Bye, Clew".
+    pub once: bool,
     /// What was said, waiting to be worked out after what was said before
     /// it — one at a time, in the order it was said — with the model it is
     /// worked out with.
@@ -643,6 +650,7 @@ impl VoiceState {
             phase: VoicePhase::Idle,
             listening: None,
             mic_on: false,
+            once: false,
             unheard: VecDeque::new(),
             run_said: Said::default(),
             listenings: 0,
@@ -1239,6 +1247,7 @@ impl App {
                         outcome: HeardOutcome::Ran(waiting.done()),
                         ..h
                     });
+                    self.answered_by_hand();
                     self.run_waiting(waiting)
                 }
                 None => Task::none(),
@@ -1654,6 +1663,9 @@ impl App {
         self.voice.mic_on = true;
         if !again {
             self.voice.listenings += 1;
+            // Called by its name, or with "Hey, Clew" on, it keeps
+            // listening; else it listens for what is said next.
+            self.voice.once = call.is_none() && !self.voice.prefs.wake;
         }
         self.voice.wake.listening_began(call);
         self.voice.heard = None;
@@ -1668,7 +1680,7 @@ impl App {
     }
 
     /// The status line, as listening begins.
-    fn say_listening(&mut self) {
+    pub(crate) fn say_listening(&mut self) {
         // A command waiting for a yes keeps waiting: what is said next can
         // be the yes (or the no).
         self.status = match &self.voice.confirm {
@@ -1676,6 +1688,7 @@ impl App {
                 "Listening… say yes to run {command}, or no",
                 command = waiting.said()
             ),
+            None if self.voice.once => tr!("Listening… say a command or a question").into(),
             None => tr!("Listening… say a command or a question, or “Bye, Clew” to stop").into(),
         };
     }
@@ -1821,6 +1834,10 @@ impl App {
             return self.transcribe_next();
         }
         if quiet_for >= NO_SPEECH_TIMEOUT {
+            // Listening for one thing said, and nothing is: it stops.
+            if self.voice.once {
+                return self.mic_off();
+            }
             // Nothing said for a while: the quiet is let go, and the
             // microphone listens afresh for what is said next.
             if self.listen_on_afresh().is_none() {
@@ -1906,6 +1923,11 @@ impl App {
     /// is kept: it is worked out out of sight, after what was said before
     /// it, while the microphone listens on for what is said next.
     pub(crate) fn end_utterance(&mut self) -> Task<Message> {
+        // Listening for one thing said: it ends with it.
+        if self.voice.once && self.voice.mic_on {
+            self.voice.mic_on = false;
+            return self.end_utterance_now();
+        }
         let model = self.voice.listening.as_ref().map(|(_, model)| *model);
         if let (Some((recording, said)), Some(model)) = (self.listen_on_afresh(), model) {
             self.voice.unheard.push_back((recording, model, said));
@@ -2009,10 +2031,23 @@ impl App {
         format!("{}.", words.join(", "))
     }
 
+    /// The yes or no to a command waiting for one, given by hand — its
+    /// button, Esc: listening for one thing said, for that yes, has nothing
+    /// left to listen for, and stops. Kept on, it listens on.
+    fn answered_by_hand(&mut self) {
+        if self.voice.once && self.voice.mic_on {
+            self.voice.mic_on = false;
+            self.wait_again();
+            self.voice.wake.listening_ended();
+        }
+    }
+
     /// Esc, or the Cancel of a command waiting for a yes: no to that
-    /// command — else Clew stops speaking. The microphone is left as it is.
+    /// command — else Clew stops speaking. Kept on, the microphone is left
+    /// as it is.
     fn on_voice_escape(&mut self) {
         if let Some(waiting) = self.voice.confirm.take() {
+            self.answered_by_hand();
             self.status = tr!("Didn't run {command}", command = waiting.said());
             self.voice.heard = None;
             return;
@@ -2138,7 +2173,28 @@ impl App {
             return Task::batch([stop, self.transcribe_next()]);
         }
         let task = self.on_words(result, call);
-        Task::batch([task, self.transcribe_next()])
+        // Listening for one thing said, and it was a command that waits for
+        // a yes: it listens once more, for the yes — what it heard, and the
+        // question, still said.
+        let again = if self.voice.once
+            && !self.voice.mic_on
+            && self.voice.confirm.is_some()
+            && self.voice.unheard.is_empty()
+        {
+            let heard = (self.voice.heard.take(), self.voice.heard_at);
+            let asked = self.status.clone();
+            let task = self.listen_now(None);
+            if self.voice.mic_on {
+                self.status = asked;
+            }
+            if self.voice.heard.is_none() {
+                (self.voice.heard, self.voice.heard_at) = heard;
+            }
+            task
+        } else {
+            Task::none()
+        };
+        Task::batch([task, again, self.transcribe_next()])
     }
 
     /// The words heard: a command, run (or asked about); else a question

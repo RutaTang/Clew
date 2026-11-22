@@ -3942,7 +3942,7 @@ fn the_chrome_geometry_matches_what_is_drawn() {
         end_line: 1,
     }];
     let app = app;
-    let expected: [(StripTool, Sends); 16] = [
+    let expected: [(StripTool, Sends); 15] = [
         (StripTool::Overview, |m| {
             matches!(m, Message::Overview(crate::OverviewMsg::Show))
         }),
@@ -3993,9 +3993,6 @@ fn the_chrome_geometry_matches_what_is_drawn() {
         }),
         (StripTool::More, |m| {
             matches!(m, Message::Window(WindowMsg::ToggleToolsMenu))
-        }),
-        (StripTool::Talk, |m| {
-            matches!(m, Message::Voice(crate::VoiceMsg::Toggle))
         }),
         (StripTool::Ask, |m| {
             matches!(m, Message::Ask(AskMsg::Toggle))
@@ -15184,7 +15181,7 @@ fn the_wake_phrase_is_offered_in_voice_settings() {
     assert!(app.resume_waiting());
     assert_eq!(super::askfloat::talk_tip(&app), "Talk, or say “Hey, Clew”");
     assert_eq!(
-        super::askfloat::stop_listening_tip(),
+        super::askfloat::stop_listening_tip(&app),
         "Stop listening, or say “Bye, Clew”"
     );
     assert_eq!(
@@ -15794,10 +15791,14 @@ fn speaking_shows_with_a_stop() {
             .any(|m| matches!(m, Message::Ask(AskMsg::Open))),
         "the conversation is out of reach while Clew speaks"
     );
-    // The microphone on the strip, lit, stops it — and no key is named
-    // beside it, which said the same thing twice.
+    // Its button on the pill, lit, stops it — and no key is named beside
+    // it, which said the same thing twice.
     assert!(!shows(&mut sim_of(&app), "Esc"));
-    let sent = press_at(&app, super::strip_tool_center(&app, super::StripTool::Talk));
+    let sent = click_right_of(
+        || sim_of(&app),
+        "Speaking",
+        |m| matches!(m, Message::Voice(crate::VoiceMsg::StopSpeaking)),
+    );
     assert!(
         sent.iter()
             .any(|m| matches!(m, Message::Voice(crate::VoiceMsg::StopSpeaking))),
@@ -15814,13 +15815,7 @@ fn speaking_shows_with_a_stop() {
         outcome: crate::app::voice::HeardOutcome::Asked,
     });
     assert!(shows(&mut sim_of(&app), "“what does total do”"));
-    let lit = super::askfloat::voice_lit(
-        &app,
-        super::ROUND_BUTTON,
-        15.0,
-        iced::widget::tooltip::Position::Top,
-    )
-    .expect("lit");
+    let lit = super::askfloat::voice_lit(&app, super::ROUND_BUTTON, 15.0).expect("lit");
     let mut sim = sim_elem(lit);
     sim.point_at(Point::new(
         super::ROUND_BUTTON / 2.0,
@@ -15864,14 +15859,26 @@ fn voice_shows_what_it_is_doing() {
             "in the corner, not the field at the top: {listening:?}"
         );
     }
-    // The microphone on the strip, lit while it listens, stops it.
+    // The pill's microphone, lit while it listens, stops it — and the
+    // strip has none of its own: Ask's card has it.
     app.voice.mic_on = true;
+    assert!(
+        !super::STRIP_FOOT
+            .iter()
+            .any(|t| super::strip_tool(&app, *t).0 == crate::glyph::Glyph::Mic)
+    );
+    let (right, bottom) = ask_corner_edges();
     // (Its tooltip opens too, under the pointer.)
-    let voice: Vec<Message> =
-        press_at(&app, super::strip_tool_center(&app, super::StripTool::Talk))
-            .into_iter()
-            .filter(|m| matches!(m, Message::Voice(_)))
-            .collect();
+    let voice: Vec<Message> = press_at(
+        &app,
+        Point::new(
+            right - 7.0 - 1.0 - super::askfloat::PILL_BUTTON / 2.0,
+            bottom - super::askfloat::PILL_H / 2.0,
+        ),
+    )
+    .into_iter()
+    .filter(|m| matches!(m, Message::Voice(_)))
+    .collect();
     assert!(matches!(
         voice.as_slice(),
         [Message::Voice(crate::VoiceMsg::Toggle)]
@@ -15886,13 +15893,7 @@ fn voice_shows_what_it_is_doing() {
         assert!(!shows(&mut sim, "Keep listening"));
         assert!(!shows(&mut sim, "Transcribing"));
     }
-    let lit = super::askfloat::voice_lit(
-        &app,
-        super::ROUND_BUTTON,
-        15.0,
-        iced::widget::tooltip::Position::Top,
-    )
-    .expect("lit while on");
+    let lit = super::askfloat::voice_lit(&app, super::ROUND_BUTTON, 15.0).expect("lit while on");
     let mut sim = sim_elem(lit);
     sim.point_at(Point::new(
         super::ROUND_BUTTON / 2.0,

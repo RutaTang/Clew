@@ -1951,8 +1951,7 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
         .padding(iced::Padding::default().right(6))
         .into();
     }
-    let talk =
-        super::askfloat::voice_lit(app, ROUND_BUTTON, 15.0, tooltip::Position::Top).unwrap_or(talk);
+    let talk = super::askfloat::voice_lit(app, ROUND_BUTTON, 15.0).unwrap_or(talk);
     // How loud what the microphone hears is, or what Clew says, beside the
     // button that stops it: the field stays to type in.
     let meter: Element<'_, Message> = match super::askfloat::voice_meter(app) {

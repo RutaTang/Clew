@@ -1170,6 +1170,7 @@ fn what_went_unsaid_waits_for_clew_to_be_free_to_say_it() {
         OVER.with(|o| o.set(None));
         GONE.with(|g| g.set(false));
         let _ = app.update(Message::Voice(VoiceMsg::Toggle));
+        keep_listening(&mut app);
         asked(&mut app, 1, true);
         delta(&mut app, 1, "总数是所有价格的和。");
         ended(&mut app, 1, StreamOutcome::Done);
@@ -1210,6 +1211,7 @@ fn what_went_unsaid_waits_for_clew_to_be_free_to_say_it() {
             "keyed" => {
                 app.voice.forget_last_press();
                 let task = app.update(Message::Voice(VoiceMsg::Toggle));
+                keep_listening(&mut app);
                 settle(&mut app, task);
                 let task = app.update(Message::Voice(VoiceMsg::Tick));
                 settle(&mut app, task);
@@ -1247,6 +1249,7 @@ fn what_went_unsaid_waits_for_clew_to_be_free_to_say_it() {
         );
         assert!(!app.voice.speech.has_put_off());
         let _ = app.update(Message::Voice(VoiceMsg::Toggle));
+        keep_listening(&mut app);
     }
 }
 
@@ -2300,6 +2303,7 @@ fn reading_with_mic(tag: &str, heard: &str) -> (App, Arc<Mutex<OutputScript>>) {
     OVER.with(|o| o.set(None));
     GONE.with(|g| g.set(false));
     let _ = app.update(Message::Voice(VoiceMsg::Toggle));
+    keep_listening(&mut app);
     assert!(
         CANCELLED.with(|c| c.get()),
         "opened to take Clew's voice out"
@@ -2445,6 +2449,7 @@ fn bye_clew_lets_go_of_what_it_drops_holding_clew() {
     OVER.with(|o| o.set(None));
     GONE.with(|g| g.set(false));
     let _ = app.update(Message::Voice(VoiceMsg::Toggle));
+    keep_listening(&mut app);
     // "Bye, Clew", said with Clew quiet: worked out meanwhile.
     TALK.with(|t| t.set(Some(crate::app::voice::END_SILENCE + 0.1)));
     let bye = app.update(Message::Voice(VoiceMsg::Tick));

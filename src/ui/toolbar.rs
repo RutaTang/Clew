@@ -852,29 +852,25 @@ pub(crate) enum StripTool {
     ProjectMaps,
     /// The ⋯ menu.
     More,
-    /// The microphone, at the strip's foot ([`STRIP_FOOT`]): talking to
-    /// Clew. Lit while it listens, and while Clew speaks, to stop it.
-    Talk,
     /// Ask, at the strip's foot ([`STRIP_FOOT`]): the conversation with
-    /// Clew, which opens beside it.
+    /// Clew, which opens beside it — its microphone in it.
     Ask,
     /// At the strip's very foot.
     Settings,
 }
 
-/// The strip's foot, from the top: talking to Clew, asking it, and
-/// Settings at the very foot. Apart from the tools above, which read the
-/// project: these are the window's, there with no project open too.
-pub(crate) const STRIP_FOOT: [StripTool; 3] =
-    [StripTool::Talk, StripTool::Ask, StripTool::Settings];
+/// The strip's foot, from the top: asking Clew, and Settings at the very
+/// foot. Apart from the tools above, which read the project: these are the
+/// window's, there with no project open too.
+pub(crate) const STRIP_FOOT: [StripTool; 2] = [StripTool::Ask, StripTool::Settings];
 
 /// The strip's tools from the top, in their groups, in the order a project
 /// is come to know: the whole of it (Overview, Stats, its weak spots), how its parts
 /// connect (its graphs and maps), running it ([`RUN_TOOLS`]) — and More. A
 /// rule stands before each group but the first ([`STRIP_RULE_BEFORE`]). The
 /// strip holds what opens over the code or below it; what opens in the
-/// sidebar is the sidebar's to show ([`super::SIDEBAR_TABS`]). Talk, Ask
-/// and Settings stand apart, at the strip's foot ([`STRIP_FOOT`]).
+/// sidebar is the sidebar's to show ([`super::SIDEBAR_TABS`]). Ask and
+/// Settings stand apart, at the strip's foot ([`STRIP_FOOT`]).
 pub(crate) const STRIP_TOP: [StripTool; 12] = [
     StripTool::Overview,
     StripTool::Stats,
@@ -1001,7 +997,7 @@ pub(crate) fn tools_on_strip(app: &App) -> bool {
 /// they are in the menu).
 pub(crate) fn strip_slot_center(app: &App, slot: StripSlot) -> Option<iced::Point> {
     let x = app.window_width - STRIP_MID;
-    // The foot, up from the strip's bottom: Settings, then Ask, then Talk.
+    // The foot, up from the strip's bottom: Settings, then Ask.
     if let StripSlot::Tool(tool) = slot
         && let Some(i) = STRIP_FOOT.iter().position(|t| *t == tool)
     {
@@ -1121,12 +1117,6 @@ pub(crate) fn strip_tool(
             None,
             Message::Window(WindowMsg::ToggleToolsMenu),
         ),
-        StripTool::Talk => (
-            Glyph::Mic,
-            tr!("Talk"),
-            caps(Action::Voice),
-            Message::Voice(crate::VoiceMsg::Toggle),
-        ),
         StripTool::Ask => (
             Glyph::AskAi,
             tr!("Ask"),
@@ -1149,7 +1139,7 @@ pub(crate) fn strip_tool(
 /// (with no cursor placed, one in view).
 pub(crate) fn strip_tool_able(app: &App, tool: StripTool) -> bool {
     match tool {
-        StripTool::More | StripTool::Talk | StripTool::Ask | StripTool::Settings => true,
+        StripTool::More | StripTool::Ask | StripTool::Settings => true,
         StripTool::FakeRun | StripTool::FakeDebug => app.has_fake_target(),
         _ => app.proj.project.is_some(),
     }
@@ -1242,7 +1232,6 @@ pub(crate) fn tool_strip(app: &App) -> Element<'_, Message> {
     }
     strip = strip
         .push(space().height(Fill))
-        .push(strip_talk(app))
         .push(strip_ask(app))
         .push(tool(StripTool::Settings));
     // The gap after the sheet is the strip's colour too: the tools are in
@@ -1258,29 +1247,6 @@ pub(crate) fn tool_strip(app: &App) -> Element<'_, Message> {
     .height(Fill)
     .style(theme::strip)
     .into()
-}
-
-/// Talk, on the strip's foot: the microphone at rest — in the accent while
-/// it waits for "Hey, Clew" — or lit while it listens, to stop it, and
-/// while Clew speaks, to stop that ([`super::askfloat::voice_lit`]). Its
-/// name is not one to say: said, "Talk" would ask nothing.
-fn strip_talk(app: &App) -> Element<'_, Message> {
-    if let Some(lit) = super::askfloat::voice_lit(app, ICON_BTN, ICON, tooltip::Position::Left) {
-        return lit;
-    }
-    let (glyph, label, shortcut, msg) = strip_tool(app, StripTool::Talk);
-    tip_at(
-        strip_button(
-            glyph,
-            super::askfloat::talk_tint(app, theme::fg_muted()),
-            false,
-            true,
-        )
-        .on_press(super::heard::named_only(label, msg)),
-        super::askfloat::talk_tip(app),
-        shortcut,
-        tooltip::Position::Left,
-    )
 }
 
 /// Ask, on the strip's foot: its mark in the accent, as what asks the
