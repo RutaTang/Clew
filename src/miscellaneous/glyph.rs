@@ -122,6 +122,8 @@ pub enum Glyph {
     Check,
     /// A file: a page with its corner folded.
     File,
+    /// A page of text: the file's page, lines on it.
+    TextFile,
     /// A picture: a frame, a hill and the sun (an image file).
     Image,
     /// A pair of braces: a symbol, in the command bar.
@@ -424,6 +426,11 @@ fn body(g: Glyph) -> &'static str {
             "<path d='M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z'/>\
              <path d='M14 2v4a2 2 0 0 0 2 2h4'/>"
         }
+        TextFile => {
+            "<path d='M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z'/>\
+             <path d='M14 2v4a2 2 0 0 0 2 2h4'/>\
+             <path d='M8 13h8'/><path d='M8 17h8'/><path d='M8 9h2'/>"
+        }
         Image => {
             "<rect x='3' y='4' width='18' height='16' rx='2.5'/>\
              <circle cx='8.75' cy='9.25' r='1.75'/>\
@@ -500,6 +507,33 @@ fn hex(c: Color) -> String {
     format!("#{:02x}{:02x}{:02x}", u(c.r), u(c.g), u(c.b))
 }
 
+/// `glyph` in `color` at `size`, framed by `view` — its left, top and side
+/// in the glyph's 24-unit grid — in place of the whole grid: a glyph drawn
+/// small in its grid filled out as one drawn large is. Its stroke stays
+/// as wide as [`icon`] draws it at `size`, however tight the frame.
+pub fn icon_framed<'a, M: 'a>(
+    glyph: Glyph,
+    color: Color,
+    size: f32,
+    view: [f32; 3],
+) -> Element<'a, M> {
+    let stroke = hex(color);
+    let [x, y, side] = view;
+    let doc = format!(
+        "<svg xmlns='http://www.w3.org/2000/svg' viewBox='{x} {y} {side} {side}' fill='none' \
+         stroke='{stroke}' stroke-width='{width}' stroke-linecap='round' stroke-linejoin='round'>{}</svg>",
+        body(glyph).replace("STROKE", &stroke),
+        width = STROKE * side / 24.0,
+    );
+    svg(svg::Handle::from_memory(doc.into_bytes()))
+        .width(size)
+        .height(size)
+        .into()
+}
+
+/// A glyph's stroke in its 24-unit grid.
+pub const STROKE: f32 = 1.9;
+
 /// A square icon widget: `glyph` stroked in `color` at `size` logical px.
 pub fn icon<'a, M: 'a>(glyph: Glyph, color: Color, size: f32) -> Element<'a, M> {
     svg(handle(glyph, color)).width(size).height(size).into()
@@ -526,7 +560,7 @@ pub fn handle(glyph: Glyph, color: Color) -> svg::Handle {
     let stroke = hex(color);
     let doc = format!(
         "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='{stroke}' \
-         stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'>{}</svg>",
+         stroke-width='{STROKE}' stroke-linecap='round' stroke-linejoin='round'>{}</svg>",
         body(glyph).replace("STROKE", &stroke),
     );
     svg::Handle::from_memory(doc.into_bytes())

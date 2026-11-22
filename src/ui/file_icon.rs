@@ -11,8 +11,17 @@
 //!
 //! The colours are each language's well-known hue, its letters kept
 //! readable on the panel in light and dark themes.
+//!
+//! Every mark fills the same share of its square, centred on what is drawn
+//! of it: a tile's letters are cut from the code font's outlines and set
+//! on their own ink (a line of text sat them a point high on the tile),
+//! and each glyph is framed to its own drawing (a lock drawn small in its
+//! grid read smaller than a gear drawn large), its stroke kept as wide.
 
-use iced::widget::{container, text};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
+
+use iced::widget::{container, svg};
 use iced::{Color, Element, Length};
 
 use crate::Message;
@@ -46,7 +55,7 @@ const fn mark(glyph: Glyph, hue: Option<u32>) -> FileMark {
 /// Settings and build files: a gear, in the row's colour.
 const SETTINGS: FileMark = mark(Glyph::Settings, None);
 /// Text that is read, not run.
-const TEXT: FileMark = mark(Glyph::TextLines, None);
+const TEXT: FileMark = mark(Glyph::TextFile, None);
 
 /// The mark of the file named `name` (its last path part).
 pub(crate) fn mark_of(name: &str) -> FileMark {
@@ -200,53 +209,215 @@ pub(crate) fn readable(hue: Color) -> Color {
 /// graphics (3) and for small text (4.5) — a tile's letters are both.
 const MIN_CONTRAST: f32 = 4.0;
 
-/// The tile's share of the icon's square: a filled tile reads larger than
-/// a stroked glyph of the same box.
-const TILE_SHARE: f32 = 0.93;
+/// The share of the icon's square a tile fills.
+const TILE_SHARE: f32 = 6.0 / 7.0;
+
+/// The share a glyph's drawing fills at its longest, stroke and all: less
+/// than a tile's, as a dark outline out to its edge reads larger than a
+/// pale tile of the same size.
+const GLYPH_SHARE: f32 = 0.74;
 
 /// The icon of the file named `name`, `size` square; `plain` colours a
 /// mark with no hue of its own (as the row's other icons are).
 pub(crate) fn file_icon<'a>(name: &str, size: f32, plain: Color) -> Element<'a, Message> {
     let body: Element<'a, Message> = match mark_of(name) {
         FileMark::Glyph { glyph, hue } => {
-            glyph::icon(glyph, hue.map_or(plain, |h| readable(rgb(h))), size)
+            framed(glyph, hue.map_or(plain, |h| readable(rgb(h))), size)
         }
         FileMark::Tile { letters, hue } => {
-            let alpha = if theme::is_light() { 0.14 } else { 0.24 };
-            let wash = Color {
-                a: alpha,
-                ..rgb(hue)
-            };
-            // Read on the tile, the wash over the panel, not on the panel.
-            let ink = readable_on(rgb(hue), theme::mix(theme::bg_panel(), rgb(hue), alpha));
-            let side = (size * TILE_SHARE).round();
-            // Fewer letters, larger: one fills the tile as two do.
-            let letter = side
-                * match letters.chars().count() {
-                    1 => 0.72,
-                    2 => 0.6,
-                    _ => 0.48,
-                };
-            container(
-                text(letters)
-                    .font(crate::fonts::CODE_BOLD)
-                    .size(letter)
-                    .line_height(1.0)
-                    .color(ink),
-            )
-            .center(Length::Fixed(side))
-            .style(move |_| container::Style {
-                background: Some(wash.into()),
-                border: iced::Border {
-                    radius: (side * 0.22).into(),
-                    ..Default::default()
-                },
-                ..Default::default()
-            })
-            .into()
+            tile_icon(letters, hue, size).unwrap_or_else(|| framed(Glyph::File, plain, size))
         }
     };
     container(body).center(Length::Fixed(size)).into()
+}
+
+/// `glyph` framed to its own drawing, filling [`GLYPH_SHARE`] of `size`.
+fn framed<'a>(glyph: Glyph, color: Color, size: f32) -> Element<'a, Message> {
+    let [x0, y0, x1, y1] = drawn(glyph);
+    // The drawing's longest side, with the stroke round it, fills the
+    // share: the frame is the drawing's centre, out to where that falls.
+    let geometry = GLYPH_SHARE - glyph::STROKE / 24.0;
+    let side = (x1 - x0).max(y1 - y0) / geometry;
+    let (cx, cy) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
+    glyph::icon_framed(glyph, color, size, [cx - side / 2.0, cy - side / 2.0, side])
+}
+
+/// Where a mark's glyph is drawn in its 24-unit grid — left, top, right,
+/// bottom of its lines, without their stroke.
+fn drawn(glyph: Glyph) -> [f32; 4] {
+    match glyph {
+        Glyph::Lock => [5.0, 4.5, 19.0, 20.0],
+        Glyph::Branch => [3.5, 2.5, 20.5, 21.5],
+        Glyph::Settings => [2.95, 2.0, 21.05, 22.0],
+        Glyph::Braces => [3.0, 3.0, 21.0, 21.0],
+        Glyph::Cube => [4.5, 3.8, 19.5, 20.2],
+        Glyph::OpenBook => [2.0, 3.0, 22.0, 21.0],
+        Glyph::Image => [3.0, 4.0, 21.0, 20.0],
+        Glyph::File | Glyph::TextFile => [4.0, 2.0, 20.0, 22.0],
+        _ => [0.0, 0.0, 24.0, 24.0],
+    }
+}
+
+/// A language's `letters` on a tile of its colour, `size` square: the
+/// letters' outlines set on the middle of their own ink. `None` if the
+/// code font has none to give.
+fn tile_icon<'a>(letters: &'static str, hue: u32, size: f32) -> Option<Element<'a, Message>> {
+    let cut = outlines(letters)?;
+    let alpha = if theme::is_light() { 0.14 } else { 0.24 };
+    // Read on the tile, the wash over the panel, not on the panel.
+    let ink = readable_on(rgb(hue), theme::mix(theme::bg_panel(), rgb(hue), alpha));
+    // Whole pixels, for edges as sharp as the glyphs' beside it.
+    let side = (size * TILE_SHARE).round();
+    // Fewer letters, larger: one fills the tile as two do; none wider
+    // than the tile leaves room for.
+    let em = side
+        * match letters.chars().count() {
+            1 => 0.72,
+            2 => 0.6,
+            _ => 0.48,
+        };
+    let scale = (em / cut.em).min(side * 0.8 / cut.width);
+    let (x, y) = (
+        (side - cut.width * scale) / 2.0,
+        (side - cut.height * scale) / 2.0,
+    );
+    // The letters alone in the image, opaque; the tile is the box's own
+    // fill, which blends with whatever row it is on (the image's renderer
+    // greys a translucent fill).
+    let doc = format!(
+        "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 {side} {side}'>\
+         <path transform='translate({x} {y}) scale({scale})' d='{d}' fill='{ink}'/></svg>",
+        d = cut.path,
+        ink = hex(ink),
+    );
+    let wash = Color {
+        a: alpha,
+        ..rgb(hue)
+    };
+    Some(
+        container(
+            svg(svg::Handle::from_memory(doc.into_bytes()))
+                .width(side)
+                .height(side),
+        )
+        .width(side)
+        .height(side)
+        .style(move |_| container::Style {
+            background: Some(wash.into()),
+            border: iced::Border {
+                radius: (side * 0.22).into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .into(),
+    )
+}
+
+/// A label's letters as one outline, in the code font's units: its path
+/// set with its ink's top left at the origin, y down.
+struct Cut {
+    path: String,
+    width: f32,
+    height: f32,
+    /// The font's em, in the same units.
+    em: f32,
+}
+
+/// `letters` cut from JetBrains Mono Bold, once per label.
+fn outlines(letters: &'static str) -> Option<Arc<Cut>> {
+    static CUTS: OnceLock<Mutex<HashMap<&'static str, Option<Arc<Cut>>>>> = OnceLock::new();
+    let cuts = CUTS.get_or_init(Default::default);
+    let mut cuts = cuts.lock().unwrap_or_else(|e| e.into_inner());
+    cuts.entry(letters)
+        .or_insert_with(|| cut(letters).map(Arc::new))
+        .clone()
+}
+
+fn cut(letters: &str) -> Option<Cut> {
+    use ab_glyph::{Font as _, OutlineCurve, Point};
+    let font =
+        ab_glyph::FontRef::try_from_slice(crate::fonts::ALL[crate::fonts::CODE_BOLD_FACE]).ok()?;
+    // Each segment of every letter, set along the line, y down.
+    let mut curves: Vec<Vec<Point>> = Vec::new();
+    let mut pen = 0.0;
+    for ch in letters.chars() {
+        let id = font.glyph_id(ch);
+        if id.0 == 0 {
+            return None;
+        }
+        if let Some(outline) = font.outline(id) {
+            let at = |p: Point| Point {
+                x: p.x + pen,
+                y: -p.y,
+            };
+            for curve in outline.curves {
+                curves.push(match curve {
+                    OutlineCurve::Line(a, b) => vec![at(a), at(b)],
+                    OutlineCurve::Quad(a, b, c) => vec![at(a), at(b), at(c)],
+                    OutlineCurve::Cubic(a, b, c, d) => vec![at(a), at(b), at(c), at(d)],
+                });
+            }
+        }
+        pen += font.h_advance_unscaled(id);
+    }
+    // The ink's bounds: each curve walked, not its control points, which
+    // stand off a round letter's edge.
+    let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+    for c in &curves {
+        for step in 0..=16 {
+            let p = point_on(c, step as f32 / 16.0);
+            (x0, y0, x1, y1) = (x0.min(p.x), y0.min(p.y), x1.max(p.x), y1.max(p.y));
+        }
+    }
+    if curves.is_empty() || x1 <= x0 || y1 <= y0 {
+        return None;
+    }
+    let mut path = String::new();
+    let mut last: Option<Point> = None;
+    let f = |p: &Point| format!("{:.1} {:.1}", p.x - x0, p.y - y0);
+    for c in &curves {
+        if last.is_none_or(|l| (l.x - c[0].x).abs() > 0.01 || (l.y - c[0].y).abs() > 0.01) {
+            if last.is_some() {
+                path.push('Z');
+            }
+            path.push_str(&format!("M{}", f(&c[0])));
+        }
+        match c.len() {
+            2 => path.push_str(&format!("L{}", f(&c[1]))),
+            3 => path.push_str(&format!("Q{} {}", f(&c[1]), f(&c[2]))),
+            _ => path.push_str(&format!("C{} {} {}", f(&c[1]), f(&c[2]), f(&c[3]))),
+        }
+        last = c.last().copied();
+    }
+    path.push('Z');
+    Some(Cut {
+        path,
+        width: x1 - x0,
+        height: y1 - y0,
+        em: font.units_per_em().unwrap_or(1000.0),
+    })
+}
+
+/// The point at `t` along a line or Bézier curve through `c`.
+fn point_on(c: &[ab_glyph::Point], t: f32) -> ab_glyph::Point {
+    let mut ps = c.to_vec();
+    while ps.len() > 1 {
+        ps = ps
+            .windows(2)
+            .map(|w| ab_glyph::Point {
+                x: w[0].x + (w[1].x - w[0].x) * t,
+                y: w[0].y + (w[1].y - w[0].y) * t,
+            })
+            .collect();
+    }
+    ps[0]
+}
+
+/// `#rrggbb` of `c`.
+fn hex(c: Color) -> String {
+    let [r, g, b, _] = c.into_rgba8();
+    format!("#{r:02x}{g:02x}{b:02x}")
 }
 
 #[cfg(test)]
@@ -290,13 +461,50 @@ mod tests {
         assert_eq!(glyph("Makefile"), Some(Glyph::Settings));
         assert_eq!(glyph(".env.local"), Some(Glyph::Settings));
         assert_eq!(glyph("logo.PNG"), Some(Glyph::Image));
-        assert_eq!(glyph("LICENSE"), Some(Glyph::TextLines));
-        assert_eq!(glyph("notes.txt"), Some(Glyph::TextLines));
+        assert_eq!(glyph("LICENSE"), Some(Glyph::TextFile));
+        assert_eq!(glyph("notes.txt"), Some(Glyph::TextFile));
         // Nothing known: the plain page — a dotfile's dot is not an
         // extension, nor is an unknown one.
         assert_eq!(mark_of("data.xyz"), PLAIN);
         assert_eq!(mark_of(".bashrc"), PLAIN);
         assert_eq!(mark_of("rs"), PLAIN);
+    }
+
+    /// Every mark is drawn to its frame: each tile's letters cut from the
+    /// code font, to fit the tile, and each glyph framed to its drawing.
+    #[test]
+    fn every_mark_is_drawn_to_its_frame() {
+        let exts = [
+            "rs", "py", "ipynb", "ts", "js", "go", "c", "h", "cpp", "hpp", "java", "kt", "scala",
+            "groovy", "cs", "fs", "php", "rb", "swift", "m", "zig", "lean", "hs", "cabal", "erl",
+            "ex", "sql", "lua", "dart", "r", "jl", "ml", "clj", "elm", "nim", "v", "pl", "vue",
+            "svelte", "astro", "sh", "ps1", "bat", "html", "xml", "css", "scss", "less", "md",
+            "rst", "txt", "json", "toml", "lock", "proto", "graphql", "wasm", "csv", "pdf", "png",
+        ];
+        let names = [".gitignore", "Dockerfile", "README", "Makefile", "data.xyz"];
+        let all = exts
+            .iter()
+            .map(|e| format!("a.{e}"))
+            .chain(names.iter().map(|n| n.to_string()));
+        for name in all {
+            match mark_of(&name) {
+                FileMark::Tile { letters, .. } => {
+                    let cut = outlines(letters).unwrap_or_else(|| panic!("{name}: {letters} cut"));
+                    assert!(cut.width > 0.0 && cut.height > 0.0, "{name}");
+                    assert!(
+                        cut.path.starts_with('M') && cut.path.ends_with('Z'),
+                        "{name}"
+                    );
+                }
+                FileMark::Glyph { glyph, .. } => {
+                    assert_ne!(
+                        drawn(glyph),
+                        [0.0, 0.0, 24.0, 24.0],
+                        "{name}: {glyph:?} framed"
+                    );
+                }
+            }
+        }
     }
 
     /// A tile's letters stand out from the tile under them, and a glyph's

@@ -54,6 +54,10 @@ pub const fn titled(font: Font) -> Font {
     }
 }
 
+/// JetBrains Mono Bold's place in [`ALL`]: the face a file icon's letters
+/// are cut from.
+pub const CODE_BOLD_FACE: usize = 5;
+
 /// Every embedded face: Inter regular, medium and semibold; JetBrains Mono
 /// regular, semibold, bold and italic.
 pub const ALL: [&[u8]; 7] = [
