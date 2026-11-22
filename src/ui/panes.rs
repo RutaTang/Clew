@@ -1917,10 +1917,10 @@ fn notes_beside_code<'a>(
         let offset = (size.height - v.viewport_h).max(0.0);
         let y_of =
             |line1: usize| offset + v.row_of(line1.saturating_sub(1)) as f32 * lh - v.scroll_y;
-        // The Ask pill floats over the margin's foot while Ask is hidden: a
+        // Voice's pill floats over the margin's foot while it shows: a
         // raised note low in the view had its references, date and Ask
         // under it. The raised note stops above it.
-        let foot = if app.ask_view == crate::AskView::Hidden {
+        let foot = if super::askfloat::pill_shown(app) {
             super::askfloat::PILL_H + super::askfloat::ASK_MARGIN + NOTE_GAP
         } else {
             0.0

@@ -4117,6 +4117,80 @@ fn bye_clew_waits_for_its_name_again() {
     }
 }
 
+/// Called by its name, Clew listens on, one thing said after another —
+/// each ended by Smart Turn as soon as it hears the turn finished, and
+/// done as it ends — until "Bye, Clew", when it waits for its name again.
+#[test]
+fn called_by_name_it_listens_turn_by_turn_until_bye_clew() {
+    use crate::app::turn::JUDGE_AFTER;
+    /// `task` run, and what each of its messages returns, `depth` deep.
+    fn pump(app: &mut App, task: Task<Message>, depth: usize) {
+        if depth == 0 {
+            return;
+        }
+        for message in run_task(task) {
+            let next = app.update(message);
+            pump(app, next, depth - 1);
+        }
+    }
+    let (_turn, mut app, script, _, _) = wake_app("wake-session", "", 1);
+    app.voice.transcriber = Arc::new(InTurn(Mutex::new(
+        [
+            "Hey, Clew, open the call graph.",
+            "Open settings.",
+            "Bye, Clew.",
+        ]
+        .map(String::from)
+        .into(),
+    )));
+    // Smart Turn downloaded, hearing each turn finished.
+    let store = app.voice.store.clone().unwrap();
+    std::fs::create_dir_all(clew_voice::turn::dir(&store)).unwrap();
+    std::fs::File::create(clew_voice::turn::path(&store))
+        .unwrap()
+        .set_len(clew_voice::turn::MODEL.bytes)
+        .unwrap();
+    let judge = Arc::new(FakeJudge {
+        answers: Mutex::new(vec![Ok(0.9), Ok(0.9), Ok(0.9)]),
+        ..FakeJudge::default()
+    });
+    app.voice.turn.judges = Some(judge.clone());
+    assert!(!wait_step(&mut app));
+    assert!(wait_step(&mut app), "called");
+    assert!(app.voice.mic_on && app.voice.is_listening());
+    // Something said, then a pause as short as Smart Turn is asked after:
+    // a finished turn ends it there, long before the pause that ends one
+    // without Smart Turn.
+    let say = |app: &mut App| {
+        script.lock().unwrap().silence = None;
+        let _ = app.update(Message::Voice(VoiceMsg::Tick));
+        let task = quiet_for(app, &script, JUDGE_AFTER + 0.05);
+        pump(app, task, 4);
+    };
+    say(&mut app);
+    assert_eq!(app.proj.overlay, Some(Overlay::ProjectCalls));
+    assert!(
+        app.voice.mic_on && app.voice.is_listening(),
+        "it listens on: {}",
+        app.status
+    );
+    say(&mut app);
+    assert!(app.settings.open, "{:?}", app.voice.heard);
+    assert!(
+        app.voice.mic_on && app.voice.is_listening(),
+        "it listens on: {}",
+        app.status
+    );
+    say(&mut app);
+    assert!(!app.voice.mic_on && !app.voice.is_listening());
+    assert!(app.voice.wake.is_waiting(), "{}", app.status);
+    assert_eq!(
+        judge.asked.lock().unwrap().len(),
+        3,
+        "each turn ended by Smart Turn"
+    );
+}
+
 /// The voice key, while the microphone waits: it listens — with that
 /// microphone — but what was heard before the press is not what is said
 /// now. Pressed again, it waits again.

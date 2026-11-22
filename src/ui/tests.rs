@@ -3942,7 +3942,7 @@ fn the_chrome_geometry_matches_what_is_drawn() {
         end_line: 1,
     }];
     let app = app;
-    let expected: [(StripTool, Sends); 14] = [
+    let expected: [(StripTool, Sends); 16] = [
         (StripTool::Overview, |m| {
             matches!(m, Message::Overview(crate::OverviewMsg::Show))
         }),
@@ -3993,6 +3993,12 @@ fn the_chrome_geometry_matches_what_is_drawn() {
         }),
         (StripTool::More, |m| {
             matches!(m, Message::Window(WindowMsg::ToggleToolsMenu))
+        }),
+        (StripTool::Talk, |m| {
+            matches!(m, Message::Voice(crate::VoiceMsg::Toggle))
+        }),
+        (StripTool::Ask, |m| {
+            matches!(m, Message::Ask(AskMsg::Toggle))
         }),
         (StripTool::Settings, |m| {
             matches!(m, Message::Settings(crate::SettingsMsg::Open))
@@ -5708,7 +5714,7 @@ fn every_tool_on_the_strip_has_a_shortcut() {
     let app = reader_app();
     for tool in super::STRIP_TOP
         .into_iter()
-        .chain([StripTool::Settings])
+        .chain(super::toolbar::STRIP_FOOT)
         .filter(|t| !matches!(t, StripTool::More | StripTool::RunMenu))
     {
         let (_, label, keys, _) = super::strip_tool(&app, tool);
@@ -5757,7 +5763,10 @@ fn the_tutorial_points_at_each_tool_and_leaves_no_field_holding_its_keys() {
     let mut app = reader_app();
     let _ = app.update(Message::Tutorial(TutorialMsg::Begin));
     let all = steps(&app);
-    for tool in super::STRIP_TOP.into_iter().chain([StripTool::Settings]) {
+    for tool in super::STRIP_TOP
+        .into_iter()
+        .chain(super::toolbar::STRIP_FOOT)
+    {
         let on: Vec<&str> = all
             .iter()
             .filter(|s| s.anchor == Anchor::Strip(tool))
@@ -10171,12 +10180,12 @@ fn a_feature_is_called_the_same_wherever_it_is_named() {
 #[test]
 fn an_icon_stands_for_one_thing() {
     use super::toolbar::{
-        STRIP_TOP, StripTool, TOOLS_MENU_ROWS, app_menu_head, strip_tool, tools_row,
+        STRIP_FOOT, STRIP_TOP, TOOLS_MENU_ROWS, app_menu_head, strip_tool, tools_row,
     };
     use crate::SidebarTab as T;
     let app = reader_app();
     let mut named: Vec<(String, crate::glyph::Glyph)> = Vec::new();
-    for tool in STRIP_TOP.into_iter().chain([StripTool::Settings]) {
+    for tool in STRIP_TOP.into_iter().chain(STRIP_FOOT) {
         let (glyph, name, ..) = strip_tool(&app, tool);
         named.push((name.to_string(), glyph));
     }
@@ -15782,7 +15791,13 @@ fn speaking_shows_with_a_stop() {
         outcome: crate::app::voice::HeardOutcome::Asked,
     });
     assert!(shows(&mut sim_of(&app), "“what does total do”"));
-    let lit = super::askfloat::voice_lit(&app, super::ROUND_BUTTON, 15.0).expect("lit");
+    let lit = super::askfloat::voice_lit(
+        &app,
+        super::ROUND_BUTTON,
+        15.0,
+        iced::widget::tooltip::Position::Top,
+    )
+    .expect("lit");
     let mut sim = sim_elem(lit);
     sim.point_at(Point::new(
         super::ROUND_BUTTON / 2.0,
@@ -15853,7 +15868,13 @@ fn voice_shows_what_it_is_doing() {
         assert!(!shows(&mut sim, "Keep listening"));
         assert!(!shows(&mut sim, "Transcribing"));
     }
-    let lit = super::askfloat::voice_lit(&app, super::ROUND_BUTTON, 15.0).expect("lit while on");
+    let lit = super::askfloat::voice_lit(
+        &app,
+        super::ROUND_BUTTON,
+        15.0,
+        iced::widget::tooltip::Position::Top,
+    )
+    .expect("lit while on");
     let mut sim = sim_elem(lit);
     sim.point_at(Point::new(
         super::ROUND_BUTTON / 2.0,
@@ -17606,7 +17627,7 @@ fn every_page_over_the_code_has_its_close() {
 #[test]
 fn each_tool_is_on_the_side_it_opens() {
     use super::toolbar::{
-        STRIP_TOP, StripTool, TOOLS_MENU_ROWS, app_menu_head, strip_tool, tools_row,
+        STRIP_FOOT, STRIP_TOP, TOOLS_MENU_ROWS, app_menu_head, strip_tool, tools_row,
     };
     let app = reader_app();
     let elsewhere = |m: &Message| {
@@ -17619,7 +17640,7 @@ fn each_tool_is_on_the_side_it_opens() {
                 | Message::Export(_)
         )
     };
-    for tool in STRIP_TOP.into_iter().chain([StripTool::Settings]) {
+    for tool in STRIP_TOP.into_iter().chain(STRIP_FOOT) {
         let (.., message) = strip_tool(&app, tool);
         assert!(!elsewhere(&message), "{tool:?}");
     }
