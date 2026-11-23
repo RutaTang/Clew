@@ -2,8 +2,10 @@
 //! reaches, read from how each framework declares them —
 //!
 //! - Python: Flask and FastAPI decorators (`@app.get("/x")`,
-//!   `@bp.route("/x", methods=[…])`, a router's or blueprint's prefix),
-//!   Django's `urls.py` (`path`, `re_path`, `url`, `include`);
+//!   `@bp.route("/x", methods=[…])`, `add_url_rule`, `add_api_route`), a
+//!   router's or blueprint's prefix, and where it is mounted, in any file
+//!   (`include_router(…, prefix=…)`, `register_blueprint(…, url_prefix=…)`,
+//!   nested); Django's `urls.py` (`path`, `re_path`, `url`, `include`);
 //! - JavaScript and TypeScript: Express-style servers (`app.get("/x", h)`,
 //!   `router.route("/x").post(h)`), NestJS controllers (`@Controller` and
 //!   `@Get`), Next.js pages and app-router files;
@@ -19,8 +21,11 @@
 //!
 //! A handler named rather than written in place is found by name — a member
 //! of the class named, else the definition nearest the route's file. A
-//! router mounted at a prefix in another file (`app.use("/api", router)`, a
-//! Laravel `prefix` group) is not followed: its routes show their own paths.
+//! JavaScript router mounted at a prefix in another file (`app.use("/api",
+//! router)`) or a Laravel `prefix` group is not followed: its routes show
+//! their own paths.
+
+use std::collections::HashMap;
 
 use clew_protocol::ProjectMap;
 use tree_sitter::Node;
@@ -36,6 +41,7 @@ pub fn maps(corpus: &Corpus) -> Vec<ProjectMap> {
             "each route, with its method and path, and an arrow to the handler it reaches (an inline handler is shown as the route itself)",
         ),
         corpus,
+        mounts: python_mounts(corpus),
     };
     let next = corpus.files.iter().any(|s| {
         s.name().starts_with("next.config.")
@@ -81,6 +87,8 @@ enum Handler {
 struct Routes<'c> {
     map: MapBuilder,
     corpus: &'c Corpus,
+    /// Where each Python router or blueprint is served ([`python_mounts`]).
+    mounts: PyMounts,
 }
 
 impl Routes<'_> {
@@ -184,31 +192,6 @@ fn python(routes: &mut Routes, source: &Source) {
     };
     let src = source.text.as_str();
     let root = tree.root_node();
-    // `router = APIRouter(prefix="/x")`, `bp = Blueprint("b", __name__, url_prefix="/x")`.
-    let mut prefixes: Vec<(String, String)> = Vec::new();
-    for assignment in all_of(root, "assignment") {
-        let (Some(left), Some(right)) = (
-            assignment.child_by_field_name("left"),
-            assignment.child_by_field_name("right"),
-        ) else {
-            continue;
-        };
-        if right.kind() != "call" {
-            continue;
-        }
-        for arg in args(right) {
-            if arg.kind() == "keyword_argument"
-                && let (Some(name), Some(value)) = (
-                    arg.child_by_field_name("name"),
-                    arg.child_by_field_name("value"),
-                )
-                && matches!(text(name, src), "prefix" | "url_prefix")
-                && let Some(prefix) = string(value, src)
-            {
-                prefixes.push((text(left, src).to_string(), prefix));
-            }
-        }
-    }
     // `@app.get(...)` is Flask's (2.0 on) and FastAPI's alike: the file's
     // own import says whose. A file importing neither says both.
     let imports = |module: &str| {
@@ -299,24 +282,107 @@ fn python(routes: &mut Routes, source: &Source) {
             if methods.is_empty() {
                 methods.push("GET".into());
             }
-            let object = text(object, src);
-            let path = match prefixes.iter().find(|(o, _)| o == object) {
-                Some((_, prefix)) => join(prefix, &path),
-                None => path,
-            };
             let framework = if verb == "route" { "Flask" } else { either };
-            for method in methods {
+            for prefix in routes.mounts.prefixes(&source.rel, text(object, src)) {
+                for method in &methods {
+                    routes.add(
+                        framework,
+                        method,
+                        &join(&prefix, &path),
+                        &source.rel,
+                        line(decorator),
+                        Handler::At {
+                            rel: source.rel.clone(),
+                            line: line(def),
+                            label: handler_name.clone(),
+                        },
+                    );
+                }
+            }
+        }
+    }
+    // `app.add_url_rule("/x", "name", view)` (Flask) and
+    // `app.add_api_route("/x", endpoint)` (FastAPI): the handler is named.
+    for call in all_of(root, "call") {
+        let Some(function) = call
+            .child_by_field_name("function")
+            .filter(|f| f.kind() == "attribute")
+        else {
+            continue;
+        };
+        let (Some(object), Some(attr)) = (
+            function.child_by_field_name("object"),
+            function.child_by_field_name("attribute"),
+        ) else {
+            continue;
+        };
+        let (framework, handler_at) = match text(attr, src) {
+            "add_url_rule" => ("Flask", 2),
+            "add_api_route" => ("FastAPI", 1),
+            _ => continue,
+        };
+        let all = args(call);
+        let positional: Vec<Node> = all
+            .iter()
+            .copied()
+            .filter(|a| a.kind() != "keyword_argument")
+            .collect();
+        let keyword = |key: &str| {
+            all.iter().copied().find_map(|a| {
+                (a.kind() == "keyword_argument"
+                    && a.child_by_field_name("name")
+                        .is_some_and(|n| text(n, src) == key))
+                .then(|| a.child_by_field_name("value"))
+                .flatten()
+            })
+        };
+        let Some(path) = positional
+            .first()
+            .copied()
+            .or_else(|| keyword("rule"))
+            .or_else(|| keyword("path"))
+            .and_then(|a| string(a, src))
+            .filter(|p| p.starts_with('/'))
+        else {
+            continue;
+        };
+        let view = positional
+            .get(handler_at)
+            .copied()
+            .or_else(|| keyword("view_func"))
+            .or_else(|| keyword("endpoint"));
+        let handler = match view.map(|v| view_name(v, src)) {
+            Some(name) if !name.is_empty() => Handler::Named { name, class: None },
+            _ => Handler::Inline,
+        };
+        let mut methods: Vec<String> = keyword("methods")
+            .map(|list| {
+                let mut c = list.walk();
+                list.named_children(&mut c)
+                    .filter_map(|m| string(m, src))
+                    .map(|m| m.to_ascii_uppercase())
+                    .collect()
+            })
+            .unwrap_or_default();
+        if methods.is_empty() {
+            methods.push("GET".into());
+        }
+        for prefix in routes.mounts.prefixes(&source.rel, text(object, src)) {
+            for method in &methods {
+                let handler = match &handler {
+                    Handler::Named { name, class } => Handler::Named {
+                        name: name.clone(),
+                        class: class.clone(),
+                    },
+                    _ => Handler::Inline,
+                };
                 routes.add(
                     framework,
-                    &method,
-                    &path,
+                    method,
+                    &join(&prefix, &path),
                     &source.rel,
-                    line(decorator),
-                    Handler::At {
-                        rel: source.rel.clone(),
-                        line: line(def),
-                        label: handler_name.clone(),
-                    },
+                    line(call),
+                    handler,
                 );
             }
         }
@@ -324,6 +390,275 @@ fn python(routes: &mut Routes, source: &Source) {
     if source.name() == "urls.py" {
         django(routes, source, root);
     }
+}
+
+/// The name of a view given by value: `views.index` → `index`, a class's
+/// `ItemView.as_view("item")` → `ItemView`.
+fn view_name(view: Node<'_>, src: &str) -> String {
+    let written = match view.kind() {
+        "call" => view
+            .child_by_field_name("function")
+            .map(|f| text(f, src).trim_end_matches(".as_view"))
+            .unwrap_or(""),
+        "identifier" | "attribute" => text(view, src),
+        _ => "",
+    };
+    last_name(written)
+}
+
+/// Most mounts followed up from a router to its app: nesting deeper than
+/// this, or a cycle, is not a real app's.
+const MAX_MOUNT_DEPTH: usize = 8;
+
+/// Where each Python router (FastAPI's `APIRouter`) and blueprint (Flask's
+/// `Blueprint`) is served: its own prefix, where it is mounted in any file
+/// (`include_router(r, prefix=…)`, `register_blueprint(bp, url_prefix=…)`),
+/// and where what it is mounted on is in turn.
+#[derive(Default)]
+struct PyMounts {
+    /// `(file, name)` of each router or blueprint, and its own prefix.
+    routers: HashMap<(String, String), RouterDef>,
+    /// Each mount: what is mounted where.
+    mounts: Vec<Mount>,
+    /// Each file's imported names: local name → (module, the name imported
+    /// from it, if one was).
+    imports: HashMap<String, HashMap<String, (String, Option<String>)>>,
+}
+
+struct RouterDef {
+    prefix: String,
+    flask: bool,
+}
+
+struct Mount {
+    rel: String,
+    /// What it is mounted on, as written in `rel`.
+    parent: String,
+    /// What is mounted, as written in `rel`.
+    child: String,
+    prefix: Option<String>,
+}
+
+impl PyMounts {
+    /// The router or blueprint `written` names in `rel`: one defined there,
+    /// or one imported from the module whose file it is (or the only one of
+    /// its name).
+    fn resolve(&self, rel: &str, written: &str) -> Option<(String, String)> {
+        let here = (rel.to_string(), written.to_string());
+        if self.routers.contains_key(&here) {
+            return Some(here);
+        }
+        let imports = self.imports.get(rel);
+        let (module, name) = match written.rsplit_once('.') {
+            // `users.router`: the module `users` (imported as such), name `router`.
+            Some((module, name)) => {
+                let module = match imports.and_then(|i| i.get(module)) {
+                    Some((from, Some(imported))) => format!("{from}.{imported}"),
+                    Some((from, None)) => from.clone(),
+                    None => module.to_string(),
+                };
+                (Some(module), name.to_string())
+            }
+            None => match imports.and_then(|i| i.get(written)) {
+                Some((from, imported)) => (
+                    Some(from.clone()),
+                    imported.clone().unwrap_or_else(|| written.to_string()),
+                ),
+                None => (None, written.to_string()),
+            },
+        };
+        let named: Vec<&(String, String)> =
+            self.routers.keys().filter(|(_, n)| *n == name).collect();
+        let stem = module
+            .as_deref()
+            .map(|m| m.trim_start_matches('.').rsplit('.').next().unwrap_or(m));
+        let of_module = |key: &&&(String, String)| {
+            let Some(stem) = stem else {
+                return false;
+            };
+            let path = std::path::Path::new(&key.0);
+            let file = path.file_stem().and_then(|s| s.to_str());
+            let dir = path
+                .parent()
+                .and_then(|d| d.file_name())
+                .and_then(|d| d.to_str());
+            file == Some(stem) || (file == Some("__init__") && dir == Some(stem))
+        };
+        match named
+            .iter()
+            .filter(of_module)
+            .collect::<Vec<_>>()
+            .as_slice()
+        {
+            [one] => Some((**one).clone()),
+            _ if named.len() == 1 => Some(named[0].clone()),
+            _ => None,
+        }
+    }
+
+    /// Every full prefix `written`'s routes in `rel` are served under: one
+    /// per place it is mounted; its own prefix where it is mounted nowhere
+    /// known; "" for an app.
+    fn prefixes(&self, rel: &str, written: &str) -> Vec<String> {
+        match self.resolve(rel, written) {
+            Some(key) => self.served(&key, 0),
+            None => vec![String::new()],
+        }
+    }
+
+    fn served(&self, key: &(String, String), depth: usize) -> Vec<String> {
+        let Some(def) = self.routers.get(key) else {
+            return vec![String::new()];
+        };
+        let mut out: Vec<String> = Vec::new();
+        if depth < MAX_MOUNT_DEPTH {
+            for mount in &self.mounts {
+                if self.resolve(&mount.rel, &mount.child).as_ref() != Some(key) {
+                    continue;
+                }
+                let above = match self.resolve(&mount.rel, &mount.parent) {
+                    Some(parent) if &parent != key => self.served(&parent, depth + 1),
+                    Some(_) => continue,
+                    None => vec![String::new()],
+                };
+                // Flask's `url_prefix` at registration replaces the
+                // blueprint's own; FastAPI's goes before the router's.
+                let own = match (def.flask, &mount.prefix) {
+                    (true, Some(given)) => given.clone(),
+                    (true, None) => def.prefix.clone(),
+                    (false, given) => join(given.as_deref().unwrap_or(""), &def.prefix),
+                };
+                for above in above {
+                    let full = join(&above, &own);
+                    if !out.contains(&full) {
+                        out.push(full);
+                    }
+                }
+            }
+        }
+        if out.is_empty() {
+            out.push(def.prefix.clone());
+        }
+        out
+    }
+}
+
+/// [`PyMounts`] of every Python file.
+fn python_mounts(corpus: &Corpus) -> PyMounts {
+    let mut mounts = PyMounts::default();
+    for source in corpus.in_langs(&[Lang::Python]) {
+        let Some(tree) = source.tree() else {
+            continue;
+        };
+        let src = source.text.as_str();
+        let root = tree.root_node();
+        let keyword = |call: Node<'_>, keys: &[&str]| {
+            args(call).into_iter().find_map(|a| {
+                (a.kind() == "keyword_argument"
+                    && a.child_by_field_name("name")
+                        .is_some_and(|n| keys.contains(&text(n, src))))
+                .then(|| a.child_by_field_name("value"))
+                .flatten()
+                .and_then(|v| string(v, src))
+            })
+        };
+        for assignment in all_of(root, "assignment") {
+            let (Some(left), Some(right)) = (
+                assignment.child_by_field_name("left"),
+                assignment.child_by_field_name("right"),
+            ) else {
+                continue;
+            };
+            if right.kind() != "call" || left.kind() != "identifier" {
+                continue;
+            }
+            let made = right
+                .child_by_field_name("function")
+                .map(|f| last_name(text(f, src)))
+                .unwrap_or_default();
+            let flask = match made.as_str() {
+                "APIRouter" => false,
+                "Blueprint" => true,
+                _ => continue,
+            };
+            mounts.routers.insert(
+                (source.rel.clone(), text(left, src).to_string()),
+                RouterDef {
+                    prefix: keyword(right, &["prefix", "url_prefix"]).unwrap_or_default(),
+                    flask,
+                },
+            );
+        }
+        for call in all_of(root, "call") {
+            let Some(function) = call
+                .child_by_field_name("function")
+                .filter(|f| f.kind() == "attribute")
+            else {
+                continue;
+            };
+            let (Some(object), Some(attr)) = (
+                function.child_by_field_name("object"),
+                function.child_by_field_name("attribute"),
+            ) else {
+                continue;
+            };
+            if !matches!(text(attr, src), "include_router" | "register_blueprint") {
+                continue;
+            }
+            let Some(child) = args(call)
+                .into_iter()
+                .find(|a| matches!(a.kind(), "identifier" | "attribute"))
+            else {
+                continue;
+            };
+            mounts.mounts.push(Mount {
+                rel: source.rel.clone(),
+                parent: text(object, src).to_string(),
+                child: text(child, src).to_string(),
+                prefix: keyword(call, &["prefix", "url_prefix"]),
+            });
+        }
+        let mut names: HashMap<String, (String, Option<String>)> = HashMap::new();
+        for statement in all_of(root, "import_from_statement") {
+            let Some(module) = statement.child_by_field_name("module_name") else {
+                continue;
+            };
+            let module = text(module, src).to_string();
+            let mut cursor = statement.walk();
+            for name in statement.children_by_field_name("name", &mut cursor) {
+                let (imported, local) = match name.kind() {
+                    "aliased_import" => (
+                        name.child_by_field_name("name").map(|n| text(n, src)),
+                        name.child_by_field_name("alias").map(|n| text(n, src)),
+                    ),
+                    _ => (Some(text(name, src)), Some(text(name, src))),
+                };
+                if let (Some(imported), Some(local)) = (imported, local) {
+                    names.insert(
+                        local.to_string(),
+                        (module.clone(), Some(imported.to_string())),
+                    );
+                }
+            }
+        }
+        for statement in all_of(root, "import_statement") {
+            let mut cursor = statement.walk();
+            for name in statement.children_by_field_name("name", &mut cursor) {
+                let (module, local) = match name.kind() {
+                    "aliased_import" => (
+                        name.child_by_field_name("name").map(|n| text(n, src)),
+                        name.child_by_field_name("alias").map(|n| text(n, src)),
+                    ),
+                    _ => (Some(text(name, src)), Some(text(name, src))),
+                };
+                if let (Some(module), Some(local)) = (module, local) {
+                    names.insert(local.to_string(), (module.to_string(), None));
+                }
+            }
+        }
+        mounts.imports.insert(source.rel.clone(), names);
+    }
+    mounts
 }
 
 fn django(routes: &mut Routes, source: &Source, root: Node<'_>) {
@@ -1521,6 +1856,65 @@ mod tests {
                 r("GET /users/{id}", "read", "app/api.py:5"),
                 r("POST /login", "login", "app/api.py:9"),
             ]
+        );
+    }
+
+    /// A router or blueprint mounted in another file is served where it is
+    /// mounted: FastAPI's `include_router` prefix goes before the router's
+    /// own, nested mounts add up, and Flask's `url_prefix` at registration
+    /// replaces the blueprint's own. `add_url_rule` and `add_api_route`
+    /// routes name their handler.
+    #[test]
+    fn python_routes_are_served_where_their_router_is_mounted() {
+        let got = routes_of(&[
+            (
+                "app/main.py",
+                "from fastapi import FastAPI\nfrom app.api import api_router\napp = FastAPI()\napp.include_router(api_router, prefix=\"/api\")\n",
+            ),
+            (
+                "app/api/__init__.py",
+                "from fastapi import APIRouter\nfrom app.api import users, items as it\napi_router = APIRouter()\napi_router.include_router(users.router, prefix=\"/v1\")\napi_router.include_router(it.router)\n",
+            ),
+            (
+                "app/api/users.py",
+                "from fastapi import APIRouter\nrouter = APIRouter(prefix=\"/users\")\n\n@router.get(\"/{id}\")\ndef read(id: int):\n    pass\n",
+            ),
+            (
+                "app/api/items.py",
+                "from fastapi import APIRouter\nrouter = APIRouter(prefix=\"/items\")\n\n@router.post(\"/\")\ndef create():\n    pass\n\ndef listing():\n    pass\n\nrouter.add_api_route(\"/all\", listing, methods=[\"GET\"])\n",
+            ),
+            (
+                "shop/__init__.py",
+                "from flask import Flask\nfrom shop.auth import bp as auth_bp\napp = Flask(__name__)\napp.register_blueprint(auth_bp, url_prefix=\"/account\")\napp.add_url_rule(\"/\", \"index\", views.index)\napp.add_url_rule(\"/teas/<int:id>\", view_func=TeaView.as_view(\"tea\"), methods=[\"GET\", \"PUT\"])\n",
+            ),
+            (
+                "shop/auth.py",
+                "from flask import Blueprint\nbp = Blueprint(\"auth\", __name__, url_prefix=\"/auth\")\n\n@bp.route(\"/login\")\ndef login():\n    pass\n",
+            ),
+            (
+                "shop/views.py",
+                "def index():\n    pass\n\nclass TeaView(MethodView):\n    pass\n",
+            ),
+        ]);
+        for want in [
+            r("GET /api/v1/users/{id}", "read", "app/api/users.py:5"),
+            r("POST /api/items", "create", "app/api/items.py:5"),
+            r("GET /api/items/all", "listing", "app/api/items.py:8"),
+            r("GET /account/login", "login", "shop/auth.py:5"),
+            r("GET /", "index", "shop/views.py:1"),
+            r("GET /teas/<int:id>", "TeaView", "shop/views.py:4"),
+            r("PUT /teas/<int:id>", "TeaView", "shop/views.py:4"),
+        ] {
+            assert!(got.contains(&want), "{want:?} in {got:?}");
+        }
+        // Not also under the router's own prefix alone.
+        assert!(
+            !got.iter().any(|(route, _, _)| route == "GET /users/{id}"),
+            "{got:?}"
+        );
+        assert!(
+            !got.iter().any(|(route, _, _)| route == "GET /auth/login"),
+            "{got:?}"
         );
     }
 
