@@ -593,6 +593,13 @@ const DW_LANG_RUST: u16 = 0x1c;
 /// panic.
 pub const DEBUG_ONLY_KEYS: &[&str] = &["preRunCommands"];
 
+/// What lets Rust's summaries show an enum — `Some(7)`, `Circle(1.5)` — in
+/// an lldb older than 19: they ask a value for `GetSyntheticValue`, which
+/// lldb 18 (a Linux distribution's) has not, and every enum showed a Python
+/// error in its place. Given there, it answers no synthetic value, and the
+/// summary reads the value itself.
+const SYNTHETIC_VALUE_SHIM: &str = "script import lldb; lldb.SBValue.GetSyntheticValue = getattr(lldb.SBValue, 'GetSyntheticValue', None) or (lambda self: lldb.SBValue())";
+
 /// A Rust program debugged as `rust-lldb` sets lldb up for it: the type
 /// summaries Rust's toolchain ships (`Vec`, `String`, `HashMap`, `Option`…
 /// shown as their values — `size=2`, `"ada"` — not as their fields), read
@@ -612,6 +619,7 @@ fn rust_setup(launch: &mut serde_json::Value, sysroot: Option<&Path>, quiet: boo
         };
         (lookup.is_file() && commands.is_file()).then(|| {
             Some(vec![
+                format!("{mark}{SYNTHETIC_VALUE_SHIM}"),
                 format!("{mark}command script import {}", quoted(&lookup)?),
                 format!("{mark}command source -s 1 {}", quoted(&commands)?),
             ])
@@ -1896,6 +1904,7 @@ mod tests {
         assert_eq!(
             launch["initCommands"],
             json!([
+                SYNTHETIC_VALUE_SHIM,
                 format!(
                     "command script import \"{}\"",
                     etc.join("lldb_lookup.py").display()

@@ -262,11 +262,15 @@ pub(crate) enum NoProgram {
     NoPackage,
     /// It is a library's, and the package has no program to run.
     Library,
+    /// It is a library's, and the package has these programs, with no
+    /// `default-run` to say which `cargo run` runs.
+    Several(Vec<String>),
 }
 
 /// What Run runs for the Rust file `file`: the program it is compiled in —
 /// a binary or an example — or a test target's tests; a library's module,
-/// the package's own program when it has one (`src/main.rs`).
+/// the program `cargo run` runs in its package (its `default-run`, or its
+/// only binary, wherever Cargo finds it).
 pub(crate) fn cargo_plan_for(file: &Path) -> Result<RunPlan, NoProgram> {
     let target = clew_core::cargorun::target_of(file).ok_or(NoProgram::NoPackage)?;
     match target.kind {
@@ -278,17 +282,15 @@ pub(crate) fn cargo_plan_for(file: &Path) -> Result<RunPlan, NoProgram> {
             test: None,
         }),
         TargetKind::Lib | TargetKind::Bench(_) => {
-            let main = target.package_dir().join("src").join("main.rs");
-            let program = main
-                .is_file()
-                .then(|| clew_core::cargorun::target_of(&main))
-                .flatten()
-                .filter(|t| t.runs())
-                .ok_or(NoProgram::Library)?;
-            Ok(RunPlan::Cargo {
-                target: program,
-                test: None,
-            })
+            use clew_core::cargorun::PackageProgram;
+            match clew_core::cargorun::package_program(&target.manifest) {
+                PackageProgram::One(program) => Ok(RunPlan::Cargo {
+                    target: program,
+                    test: None,
+                }),
+                PackageProgram::None => Err(NoProgram::Library),
+                PackageProgram::Several(names) => Err(NoProgram::Several(names)),
+            }
         }
     }
 }

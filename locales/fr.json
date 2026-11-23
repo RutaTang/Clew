@@ -2075,6 +2075,7 @@
  "This month by feature": "Ce mois-ci, par fonction",
  "This only changes what the window shows.": "Cette action ne modifie que l’affichage de la fenêtre.",
  "This opens another folder in this window.": "Cette action ouvre un autre dossier dans cette fenêtre.",
+ "This package has several programs: {names}. Open the one you want and Run it, or name it as default-run in Cargo.toml.": "Ce paquet contient plusieurs programmes : {names}. Ouvrez celui que vous voulez et exécutez-le, ou indiquez-le comme default-run dans Cargo.toml.",
  "This program's debug information comes from Zig's built-in code generator (the default for Debug builds on x86-64), and lldb can't read variables from it. Breakpoints and stepping work, but no variables show. Build it with -fllvm (or .use_llvm = true in build.zig) to see them.": "Les informations de débogage de ce programme viennent du générateur de code intégré de Zig (utilisé par défaut pour les builds Debug sur x86-64), et lldb ne peut pas y lire les variables. Les points d’arrêt et le pas à pas fonctionnent, mais aucune variable ne s’affiche. Compilez-le avec -fllvm (ou .use_llvm = true dans build.zig) pour les voir.",
  "This project isn't tracked in git.": "Ce projet n’est pas suivi par git.",
  "This project's Hatch environment": "L’environnement Hatch de ce projet",

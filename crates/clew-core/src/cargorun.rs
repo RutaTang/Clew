@@ -331,6 +331,114 @@ pub fn target_of(file: &Path) -> Option<CargoTarget> {
     }
 }
 
+/// The program `cargo run` runs in a package: one of its binaries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PackageProgram {
+    /// Its `default-run`, or its only binary.
+    One(CargoTarget),
+    /// No binary: a library alone.
+    None,
+    /// Binaries, and no `default-run` to say which: their names.
+    Several(Vec<String>),
+}
+
+/// The program `cargo run` runs in the package of `manifest`: its
+/// `default-run`, or its only binary — `src/main.rs`, a `src/bin/` file
+/// or folder, or a `[[bin]]` — as Cargo finds them.
+pub fn package_program(manifest: &Path) -> PackageProgram {
+    let Some(value) = read_manifest(manifest) else {
+        return PackageProgram::None;
+    };
+    let Some(package) = value
+        .get("package")
+        .and_then(|p| p.get("name"))
+        .and_then(|n| n.as_str())
+    else {
+        return PackageProgram::None;
+    };
+    let dir = manifest.parent().unwrap_or(Path::new("."));
+    let names = binaries(dir, &value, package);
+    let default_run = value
+        .get("package")
+        .and_then(|p| p.get("default-run"))
+        .and_then(|d| d.as_str());
+    let chosen = match (default_run, names.as_slice()) {
+        (Some(name), _) if names.iter().any(|n| n == name) => name.to_string(),
+        (_, [one]) => one.clone(),
+        (_, []) => return PackageProgram::None,
+        _ => return PackageProgram::Several(names),
+    };
+    PackageProgram::One(CargoTarget {
+        manifest: manifest.to_path_buf(),
+        package: package.to_string(),
+        kind: TargetKind::Bin(chosen),
+        module: Vec::new(),
+    })
+}
+
+/// The names of a package's binaries, as Cargo finds them: its `[[bin]]`s,
+/// then — unless `autobins = false` — `src/main.rs` (named for the package)
+/// and each `src/bin/x.rs` and `src/bin/x/main.rs` not already one of them.
+fn binaries(dir: &Path, value: &toml::Value, package: &str) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    let mut paths: Vec<PathBuf> = Vec::new();
+    for bin in value
+        .get("bin")
+        .and_then(|b| b.as_array())
+        .into_iter()
+        .flatten()
+    {
+        let Some(name) = bin.get("name").and_then(|n| n.as_str()) else {
+            continue;
+        };
+        if let Some(path) = bin.get("path").and_then(|p| p.as_str()) {
+            paths.push(dir.join(path));
+        }
+        if !names.iter().any(|n| n == name) {
+            names.push(name.to_string());
+        }
+    }
+    let auto = value
+        .get("package")
+        .and_then(|p| p.get("autobins"))
+        .and_then(|a| a.as_bool())
+        != Some(false);
+    if !auto {
+        return names;
+    }
+    let mut found: Vec<(String, PathBuf)> = Vec::new();
+    let main = dir.join("src/main.rs");
+    if main.is_file() {
+        found.push((package.to_string(), main));
+    }
+    let mut in_bin: Vec<(String, PathBuf)> = std::fs::read_dir(dir.join("src/bin"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path.extension().is_some_and(|e| e == "rs") && path.is_file() {
+                Some((path.file_stem()?.to_str()?.to_string(), path))
+            } else if path.join("main.rs").is_file() {
+                Some((
+                    path.file_name()?.to_str()?.to_string(),
+                    path.join("main.rs"),
+                ))
+            } else {
+                None
+            }
+        })
+        .collect();
+    in_bin.sort();
+    found.extend(in_bin);
+    for (name, path) in found {
+        if !names.contains(&name) && !paths.contains(&path) {
+            names.push(name);
+        }
+    }
+    names
+}
+
 /// Whether the crate root at `root` declares the module `name` — `mod
 /// name;` or `mod name { … }`, public or not — on a line of its own.
 fn declares_mod(root: &Path, name: &str) -> bool {
@@ -458,13 +566,20 @@ pub fn build_args(target: &CargoTarget, test: bool, features: &Features) -> Vec<
 /// The executable Cargo reports, in its JSON messages `stdout`, having
 /// built for `target`: the program, or (`test`) its test binary.
 pub fn built_executable(stdout: &str, target: &CargoTarget, test: bool) -> Option<PathBuf> {
+    artifact(stdout, target, test)
+        .and_then(|message| message["executable"].as_str().map(PathBuf::from))
+}
+
+/// Cargo's `compiler-artifact` message, of its JSON messages `stdout`, for
+/// the executable it built for `target`.
+fn artifact(stdout: &str, target: &CargoTarget, test: bool) -> Option<serde_json::Value> {
     let package_dir = target.package_dir();
     stdout.lines().find_map(|line| {
         let message: serde_json::Value = serde_json::from_str(line).ok()?;
         if message["reason"] != "compiler-artifact" {
             return None;
         }
-        let executable = message["executable"].as_str()?;
+        message["executable"].as_str()?;
         if message["profile"]["test"].as_bool() != Some(test) {
             return None;
         }
@@ -490,8 +605,242 @@ pub fn built_executable(stdout: &str, target: &CargoTarget, test: bool) -> Optio
             TargetKind::Test(n) => kinds.contains(&"test") && name == n,
             TargetKind::Bench(n) => kinds.contains(&"bench") && name == n,
         };
-        matches.then(|| PathBuf::from(executable))
+        matches.then_some(message)
     })
+}
+
+/// What Cargo tells a program it runs (`cargo run`, `cargo test`), as
+/// variables to set on it, the later of two of a name the one set:
+///
+/// - `[env]` of the Cargo configuration found from the package's folder
+///   ([`config_env`]);
+/// - `CARGO`, `CARGO_MANIFEST_DIR`, `CARGO_MANIFEST_PATH`, and the
+///   package's name and version (`CARGO_PKG_NAME`, `CARGO_PKG_VERSION`
+///   and its parts) as Cargo built it, from its report `stdout`;
+/// - where the libraries it loads are found ([`library_dirs`]): run without
+///   them, a proc-macro crate's tests, or a program using a `dylib`, ended
+///   before `main` without its toolchain's `libstd`.
+pub fn program_env(
+    cargo: &Path,
+    target: &CargoTarget,
+    executable: &Path,
+    stdout: &str,
+    test: bool,
+) -> Vec<(String, String)> {
+    let package_dir = target.package_dir();
+    let home = crate::home_dir();
+    let cargo_home = std::env::var_os("CARGO_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| home.as_ref().map(|h| h.join(".cargo")));
+    let mut env = config_env(package_dir, cargo_home.as_deref(), &|name| {
+        std::env::var_os(name).is_some()
+    });
+    let lossy = |p: &Path| p.to_string_lossy().into_owned();
+    env.push(("CARGO".into(), lossy(cargo)));
+    env.push(("CARGO_MANIFEST_DIR".into(), lossy(package_dir)));
+    env.push(("CARGO_MANIFEST_PATH".into(), lossy(&target.manifest)));
+    env.push(("CARGO_PKG_NAME".into(), target.package.clone()));
+    let version = artifact(stdout, target, test)
+        .and_then(|m| m["package_id"].as_str().and_then(package_version));
+    if let Some(version) = version {
+        env.extend(version_vars(&version));
+    }
+    let sysroot = sysroot_libdir(cargo, package_dir);
+    let dirs = library_dirs(executable, stdout, sysroot.as_deref());
+    let var = dylib_path_var();
+    // The libraries' folders first, then where the program looked anyway:
+    // on Windows the `PATH` its children get.
+    let inherited = match var {
+        "PATH" => Some(crate::linerpc::child_path()),
+        _ => std::env::var_os(var),
+    };
+    let mut paths = dirs;
+    let had = inherited.as_ref().is_some_and(|v| !v.is_empty());
+    paths.extend(inherited.iter().flat_map(std::env::split_paths));
+    // macOS's own fallback, which a set variable takes the place of.
+    if var == "DYLD_FALLBACK_LIBRARY_PATH" && !had {
+        paths.extend(home.map(|h| h.join("lib")));
+        paths.extend([PathBuf::from("/usr/local/lib"), PathBuf::from("/usr/lib")]);
+    }
+    if let Ok(joined) = std::env::join_paths(paths) {
+        env.push((var.into(), joined.to_string_lossy().into_owned()));
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut out: Vec<(String, String)> = env
+        .into_iter()
+        .rev()
+        .filter(|(k, _)| seen.insert(k.clone()))
+        .collect();
+    out.reverse();
+    out
+}
+
+/// The variable the system finds a program's shared libraries by.
+fn dylib_path_var() -> &'static str {
+    if cfg!(windows) {
+        "PATH"
+    } else if cfg!(target_os = "macos") {
+        "DYLD_FALLBACK_LIBRARY_PATH"
+    } else {
+        "LD_LIBRARY_PATH"
+    }
+}
+
+/// The version of a Cargo package id: `path+file:///p/app#0.1.0`,
+/// `…#name@0.1.0`, or before Cargo 1.77 `app 0.1.0 (path+file:///p/app)`.
+fn package_version(id: &str) -> Option<String> {
+    let version = match id.rsplit_once('#') {
+        Some((_, fragment)) => fragment.rsplit_once('@').map_or(fragment, |(_, v)| v),
+        None => id.split_whitespace().nth(1)?,
+    };
+    version
+        .starts_with(|c: char| c.is_ascii_digit())
+        .then(|| version.to_string())
+}
+
+/// `CARGO_PKG_VERSION` and its parts, as Cargo sets them for `version`.
+fn version_vars(version: &str) -> Vec<(String, String)> {
+    let core = version.split('+').next().unwrap_or(version);
+    let (numbers, pre) = core.split_once('-').unwrap_or((core, ""));
+    let mut parts = numbers.split('.');
+    let mut part = || parts.next().unwrap_or("").to_string();
+    vec![
+        ("CARGO_PKG_VERSION".into(), version.to_string()),
+        ("CARGO_PKG_VERSION_MAJOR".into(), part()),
+        ("CARGO_PKG_VERSION_MINOR".into(), part()),
+        ("CARGO_PKG_VERSION_PATCH".into(), part()),
+        ("CARGO_PKG_VERSION_PRE".into(), pre.to_string()),
+    ]
+}
+
+/// Where a program Cargo built finds the shared libraries it loads, in the
+/// order Cargo gives them: the folders build scripts link from that are in
+/// the build's output (`cargo:rustc-link-search`, from the report
+/// `stdout`), the dependencies' folder, the output folder, and the
+/// toolchain's libraries (`sysroot`: its `libstd`, which a proc-macro
+/// crate's tests load).
+fn library_dirs(executable: &Path, stdout: &str, sysroot: Option<&Path>) -> Vec<PathBuf> {
+    let Some(parent) = executable.parent() else {
+        return Vec::new();
+    };
+    // `target/debug/deps/x-1a2b` (a test), `target/debug/examples/x`, or
+    // `target/debug/x`.
+    let output = match parent.file_name().and_then(|n| n.to_str()) {
+        Some("deps" | "examples") => parent.parent().unwrap_or(parent),
+        _ => parent,
+    };
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    for line in stdout.lines() {
+        let Ok(message) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if message["reason"] != "build-script-executed" {
+            continue;
+        }
+        let paths = message["linked_paths"].as_array().into_iter().flatten();
+        for path in paths.filter_map(|p| p.as_str()) {
+            let path = match path.split_once('=') {
+                Some(("native" | "crate" | "dependency" | "framework" | "all", p)) => p,
+                _ => path,
+            };
+            let path = PathBuf::from(path);
+            if path.starts_with(output) && !dirs.contains(&path) {
+                dirs.push(path);
+            }
+        }
+    }
+    dirs.push(output.join("deps"));
+    dirs.push(output.to_path_buf());
+    dirs.extend(sysroot.map(Path::to_path_buf));
+    dirs
+}
+
+/// The folder of the toolchain's libraries for the host (`rustc --print
+/// target-libdir`), asked of the `rustc` beside `cargo` (rustup's, which
+/// picks the toolchain of the package's folder as Cargo did), else the
+/// first on the path.
+fn sysroot_libdir(cargo: &Path, dir: &Path) -> Option<PathBuf> {
+    let beside = cargo.with_file_name(format!("rustc{}", std::env::consts::EXE_SUFFIX));
+    let rustc = if beside.is_file() {
+        beside
+    } else {
+        crate::lsp::store::find_in_unresolved(&crate::linerpc::child_path(), "rustc")?
+    };
+    let out = crate::spawn::command(&rustc)
+        .args(["--print", "target-libdir"])
+        .current_dir(dir)
+        .env("PATH", crate::linerpc::child_path())
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    let line = String::from_utf8(out.stdout).ok()?;
+    let line = line.trim();
+    (out.status.success() && !line.is_empty()).then(|| PathBuf::from(line))
+}
+
+/// The `[env]` of the Cargo configuration found from `dir` (each
+/// `.cargo/config.toml`, or `.cargo/config`, in it and the folders above,
+/// the nearest deciding), then of `cargo_home`'s: as Cargo sets it for a
+/// program it runs. A variable already set (`is_set`) is kept unless the
+/// entry says `force`; one marked `relative` is a path from the folder its
+/// `.cargo` is in.
+fn config_env(
+    dir: &Path,
+    cargo_home: Option<&Path>,
+    is_set: &dyn Fn(&str) -> bool,
+) -> Vec<(String, String)> {
+    let mut files: Vec<(PathBuf, PathBuf)> = dir
+        .ancestors()
+        .map(|d| (d.join(".cargo"), d.to_path_buf()))
+        .collect();
+    if let Some(home) = cargo_home
+        && !files.iter().any(|(c, _)| c == home)
+    {
+        files.push((
+            home.to_path_buf(),
+            home.parent().unwrap_or(home).to_path_buf(),
+        ));
+    }
+    let mut out: Vec<(String, String)> = Vec::new();
+    // Farthest first, so a nearer file's entry is the one kept.
+    for (config_dir, base) in files.into_iter().rev() {
+        // Cargo reads `config` where both are.
+        let text = crate::statefile::read_capped(&config_dir.join("config"), MAX_READ_BYTES)
+            .or_else(|| {
+                crate::statefile::read_capped(&config_dir.join("config.toml"), MAX_READ_BYTES)
+            });
+        let Some(value) = text.and_then(|t| toml::from_str::<toml::Value>(&t).ok()) else {
+            continue;
+        };
+        let Some(table) = value.get("env").and_then(|e| e.as_table()) else {
+            continue;
+        };
+        for (name, entry) in table {
+            let (value, force, relative) = match entry {
+                toml::Value::String(v) => (v.clone(), false, false),
+                toml::Value::Table(t) => {
+                    let Some(v) = t.get("value").and_then(|v| v.as_str()) else {
+                        continue;
+                    };
+                    let flag = |k: &str| t.get(k).and_then(|f| f.as_bool()) == Some(true);
+                    (v.to_string(), flag("force"), flag("relative"))
+                }
+                _ => continue,
+            };
+            if is_set(name) && !force {
+                continue;
+            }
+            let value = match relative {
+                true => base.join(&value).to_string_lossy().into_owned(),
+                false => value,
+            };
+            out.retain(|(k, _)| k != name);
+            out.push((name.clone(), value));
+        }
+    }
+    out
 }
 
 /// Of a test binary's `--list --format terse` lines (`a::tests::adds:
@@ -583,6 +932,14 @@ pub enum BuildError {
     NoProgram,
 }
 
+/// A program Cargo built, to run as Cargo runs it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Built {
+    pub executable: PathBuf,
+    /// The variables Cargo sets on a program it runs ([`program_env`]).
+    pub env: Vec<(String, String)>,
+}
+
 /// Build `target` with `cargo`, each line Cargo writes for the reader
 /// (`Compiling …`, an error as rustc renders it) handed to `line` as it
 /// comes; the executable it built. Blocking; given up, the build killed,
@@ -595,7 +952,7 @@ pub fn build(
     features: &Features,
     mut line: impl FnMut(&str),
     cancel: &AtomicBool,
-) -> Result<PathBuf, BuildError> {
+) -> Result<Built, BuildError> {
     let mut command = crate::spawn::command(cargo);
     command
         .args(build_args(target, test, features))
@@ -655,13 +1012,17 @@ pub fn build(
     if !status.success() {
         return Err(BuildError::Failed);
     }
-    built_executable(&out, target, test).ok_or(BuildError::NoProgram)
+    let executable = built_executable(&out, target, test).ok_or(BuildError::NoProgram)?;
+    let env = program_env(cargo, target, &executable, &out, test);
+    Ok(Built { executable, env })
 }
 
-/// The tests a test binary has, as `--list --format terse` lists them.
-pub fn list_tests(executable: &Path, cwd: &Path) -> Option<String> {
+/// The tests a test binary has, as `--list --format terse` lists them;
+/// run in `cwd` with the variables `env` ([`Built::env`]).
+pub fn list_tests(executable: &Path, cwd: &Path, env: &[(String, String)]) -> Option<String> {
     let mut child = crate::spawn::command(executable)
         .args(["--list", "--format", "terse"])
+        .envs(env.iter().map(|(k, v)| (k, v)))
         .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -692,25 +1053,66 @@ pub fn list_tests(executable: &Path, cwd: &Path) -> Option<String> {
     }
 }
 
-/// A launch body (lldb-dap's) with what Cargo tells a program it runs, that
-/// the program may read as it runs: its package's folder,
-/// `CARGO_MANIFEST_DIR` — where snapshot tests and fixtures are found by.
-/// Added to the variables the body sets, in the `VAR=VALUE` form lldb-dap
-/// takes.
-pub fn with_cargo_env(launch: &mut serde_json::Value, package_dir: &Path) {
+/// A launch body (lldb-dap's) with what Cargo tells a program it runs
+/// ([`Built::env`]) — its package's folder, `CARGO_MANIFEST_DIR`, where
+/// snapshot tests and fixtures are found by; where its libraries are —
+/// added to the variables the body sets: a list of `VAR=VALUE`, as
+/// lldb-dap takes them, or a table of them. One the body already sets
+/// keeps its value.
+pub fn with_cargo_env(launch: &mut serde_json::Value, env: &[(String, String)]) {
     let Some(body) = launch.as_object_mut() else {
         return;
     };
-    let entry = serde_json::Value::String(format!(
-        "CARGO_MANIFEST_DIR={}",
-        package_dir.to_string_lossy()
-    ));
-    match body.get_mut("env").and_then(|env| env.as_array_mut()) {
-        Some(env) => env.push(entry),
-        None => {
-            body.insert("env".into(), serde_json::Value::Array(vec![entry]));
+    match body
+        .entry("env")
+        .or_insert_with(|| serde_json::Value::Array(Vec::new()))
+    {
+        serde_json::Value::Array(list) => {
+            let named = |entry: &serde_json::Value, name: &str| {
+                entry
+                    .as_str()
+                    .and_then(|e| e.split_once('='))
+                    .is_some_and(|(k, _)| k == name)
+            };
+            for (name, value) in env {
+                if !list.iter().any(|e| named(e, name)) {
+                    list.push(serde_json::Value::String(format!("{name}={value}")));
+                }
+            }
         }
+        serde_json::Value::Object(table) => {
+            for (name, value) in env {
+                table
+                    .entry(name.clone())
+                    .or_insert_with(|| serde_json::Value::String(value.clone()));
+            }
+        }
+        _ => {}
     }
+}
+
+/// The arguments a test binary, its tests listed as `list`, runs the test
+/// the reader meant (`wanted`, as [`listed_test`] takes it) with: the one
+/// test ([`test_args`]); else, a test that is many (`#[rstest]` cases,
+/// `#[test_case]`s, listed as `adds::case_1`, below its name), all of
+/// them, one at a time, their output as it comes. `None` when the build
+/// has no such test.
+pub fn one_test_args(list: &str, wanted: &str) -> Option<Vec<String>> {
+    if let Some(found) = listed_test(list, wanted) {
+        return Some(test_args(&found));
+    }
+    let under = [wanted.to_string()];
+    let cases = listed_under(list, &under);
+    if cases.is_empty() {
+        return None;
+    }
+    let mut args = group_args(list, &under, &cases);
+    args.extend([
+        "--include-ignored".into(),
+        "--nocapture".into(),
+        "--test-threads=1".into(),
+    ]);
+    Some(args)
 }
 
 /// The arguments a test binary runs the one test `path` with: by its exact
@@ -962,6 +1364,63 @@ mod tests {
         );
     }
 
+    /// The program `cargo run` runs in a package: its only binary, wherever
+    /// Cargo finds it, or its `default-run`; none in a library; for several
+    /// with no `default-run`, their names.
+    #[test]
+    fn a_packages_program_is_the_one_cargo_run_runs() {
+        let dir = TempDir::new("cargorun-package-program");
+        let root = dir.path();
+        let only = write(root, "only/Cargo.toml", "[package]\nname = \"only\"\n");
+        write(root, "only/src/lib.rs", "");
+        write(root, "only/src/bin/tool.rs", "fn main() {}\n");
+        let kind = |p: PackageProgram| match p {
+            PackageProgram::One(t) => Ok(t.kind),
+            other => Err(other),
+        };
+        assert_eq!(
+            kind(package_program(&only)),
+            Ok(TargetKind::Bin("tool".into()))
+        );
+        let lib = write(root, "lib/Cargo.toml", "[package]\nname = \"lib\"\n");
+        write(root, "lib/src/lib.rs", "");
+        assert_eq!(kind(package_program(&lib)), Err(PackageProgram::None));
+        let many = write(
+            root,
+            "many/Cargo.toml",
+            "[package]\nname = \"many\"\n\n[[bin]]\nname = \"server\"\npath = \"src/server.rs\"\n",
+        );
+        write(root, "many/src/server.rs", "fn main() {}\n");
+        write(root, "many/src/main.rs", "fn main() {}\n");
+        write(root, "many/src/bin/cli/main.rs", "fn main() {}\n");
+        assert_eq!(
+            kind(package_program(&many)),
+            Err(PackageProgram::Several(vec![
+                "server".into(),
+                "many".into(),
+                "cli".into()
+            ]))
+        );
+        let chosen = write(
+            root,
+            "chosen/Cargo.toml",
+            "[package]\nname = \"chosen\"\ndefault-run = \"cli\"\n",
+        );
+        write(root, "chosen/src/main.rs", "fn main() {}\n");
+        write(root, "chosen/src/bin/cli.rs", "fn main() {}\n");
+        assert_eq!(
+            kind(package_program(&chosen)),
+            Ok(TargetKind::Bin("cli".into()))
+        );
+        let off = write(
+            root,
+            "off/Cargo.toml",
+            "[package]\nname = \"off\"\nautobins = false\n",
+        );
+        write(root, "off/src/main.rs", "fn main() {}\n");
+        assert_eq!(kind(package_program(&off)), Err(PackageProgram::None));
+    }
+
     /// The program Cargo built is read from its own report: the artifact of
     /// this package's target, a test build or not as asked.
     #[test]
@@ -1049,19 +1508,153 @@ mod tests {
         );
     }
 
-    /// A program Cargo built is told its package's folder, as `cargo run`
-    /// and `cargo test` tell it.
+    /// A program Cargo built is told what Cargo tells it — its package's
+    /// folder and the rest — in the form the launch body has; a variable
+    /// the body sets keeps its value.
     #[test]
-    fn a_built_program_is_told_its_package_folder() {
+    fn a_built_program_is_told_what_cargo_tells_it() {
+        let env = vec![
+            ("CARGO_MANIFEST_DIR".to_string(), "/p".to_string()),
+            ("RUST_LOG".to_string(), "warn".to_string()),
+        ];
         let mut launch = serde_json::json!({ "program": "/p/target/debug/app" });
-        with_cargo_env(&mut launch, Path::new("/p"));
-        assert_eq!(launch["env"], serde_json::json!(["CARGO_MANIFEST_DIR=/p"]));
+        with_cargo_env(&mut launch, &env);
+        assert_eq!(
+            launch["env"],
+            serde_json::json!(["CARGO_MANIFEST_DIR=/p", "RUST_LOG=warn"])
+        );
         let mut launch = serde_json::json!({ "env": ["RUST_LOG=info"] });
-        with_cargo_env(&mut launch, Path::new("/p"));
+        with_cargo_env(&mut launch, &env);
         assert_eq!(
             launch["env"],
             serde_json::json!(["RUST_LOG=info", "CARGO_MANIFEST_DIR=/p"])
         );
+        let mut launch = serde_json::json!({ "env": { "RUST_LOG": "info" } });
+        with_cargo_env(&mut launch, &env);
+        assert_eq!(
+            launch["env"],
+            serde_json::json!({ "RUST_LOG": "info", "CARGO_MANIFEST_DIR": "/p" })
+        );
+    }
+
+    /// The package's version as Cargo built it, from either form of package
+    /// id, and its parts as Cargo names them.
+    #[test]
+    fn a_program_is_told_its_packages_version() {
+        assert_eq!(
+            package_version("path+file:///p/app#0.1.0").as_deref(),
+            Some("0.1.0")
+        );
+        assert_eq!(
+            package_version("path+file:///p/crates/x#app@1.2.3-rc.1").as_deref(),
+            Some("1.2.3-rc.1")
+        );
+        assert_eq!(
+            package_version("app 0.4.0 (path+file:///p/app)").as_deref(),
+            Some("0.4.0")
+        );
+        assert_eq!(package_version("nonsense"), None);
+        let vars = version_vars("1.2.3-rc.1+build.5");
+        let get = |k: &str| vars.iter().find(|(n, _)| n == k).map(|(_, v)| v.as_str());
+        assert_eq!(get("CARGO_PKG_VERSION"), Some("1.2.3-rc.1+build.5"));
+        assert_eq!(get("CARGO_PKG_VERSION_MAJOR"), Some("1"));
+        assert_eq!(get("CARGO_PKG_VERSION_MINOR"), Some("2"));
+        assert_eq!(get("CARGO_PKG_VERSION_PATCH"), Some("3"));
+        assert_eq!(get("CARGO_PKG_VERSION_PRE"), Some("rc.1"));
+    }
+
+    /// A program finds its libraries where `cargo run` and `cargo test`
+    /// have it look: the build scripts' folders in the build's output (not
+    /// the system's), the dependencies, the output, the toolchain's.
+    #[test]
+    fn a_program_finds_its_libraries_where_cargo_has_it_look() {
+        let report = [
+            r#"{"reason":"build-script-executed","linked_paths":["native=/p/target/debug/build/z-1/out/lib","/usr/lib/x86_64-linux-gnu","/p/target/debug/build/y-2/out"]}"#,
+            r#"{"reason":"compiler-artifact","executable":null}"#,
+            "not json",
+        ]
+        .join("\n");
+        let sysroot = Path::new("/rust/lib/rustlib/x86_64-unknown-linux-gnu/lib");
+        let expected = [
+            "/p/target/debug/build/z-1/out/lib",
+            "/p/target/debug/build/y-2/out",
+            "/p/target/debug/deps",
+            "/p/target/debug",
+            "/rust/lib/rustlib/x86_64-unknown-linux-gnu/lib",
+        ]
+        .map(PathBuf::from);
+        let test = Path::new("/p/target/debug/deps/app-1a2b");
+        assert_eq!(library_dirs(test, &report, Some(sysroot)), expected);
+        let program = Path::new("/p/target/debug/app");
+        assert_eq!(library_dirs(program, &report, Some(sysroot)), expected);
+        let example = Path::new("/p/target/debug/examples/demo");
+        assert_eq!(library_dirs(example, &report, Some(sysroot)), expected);
+    }
+
+    /// `[env]` of the Cargo configuration, as Cargo sets it for a program it
+    /// runs: the nearest file's entry, Cargo's home's last; a variable
+    /// already set kept unless forced; a relative one from its folder.
+    #[test]
+    fn a_program_gets_the_env_of_cargos_configuration() {
+        let dir = TempDir::new("cargorun-config-env");
+        let root = dir.path();
+        write(
+            root,
+            ".cargo/config.toml",
+            "[env]\nSHARED = \"outer\"\nFIXTURES = { value = \"fixtures\", relative = true }\n\
+             SET = \"config\"\nFORCED = { value = \"config\", force = true }\n",
+        );
+        write(
+            root,
+            "app/.cargo/config.toml",
+            "[env]\nSHARED = \"inner\"\n",
+        );
+        // Where both are, Cargo reads `config`.
+        write(root, "app/crate/.cargo/config", "[env]\nOLD = \"old\"\n");
+        write(
+            root,
+            "app/crate/.cargo/config.toml",
+            "[env]\nNEW = \"unread\"\n",
+        );
+        write(
+            root,
+            "home/config.toml",
+            "[env]\nHOME_ONLY = \"home\"\nSHARED = \"home\"\n",
+        );
+        let is_set = |name: &str| matches!(name, "SET" | "FORCED");
+        let env = config_env(&root.join("app/crate"), Some(&root.join("home")), &is_set);
+        let get = |k: &str| env.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+        assert_eq!(get("SHARED").as_deref(), Some("inner"), "{env:?}");
+        assert_eq!(get("OLD").as_deref(), Some("old"));
+        assert_eq!(get("NEW"), None);
+        assert_eq!(get("HOME_ONLY").as_deref(), Some("home"));
+        assert_eq!(get("SET"), None, "already set");
+        assert_eq!(get("FORCED").as_deref(), Some("config"));
+        assert_eq!(
+            get("FIXTURES").map(PathBuf::from),
+            Some(root.join("fixtures"))
+        );
+    }
+
+    /// A test that is many — `#[rstest]` cases, `#[test_case]`s — runs as
+    /// all of them, one at a time; one test by its exact name.
+    #[test]
+    fn a_test_with_cases_runs_them_all() {
+        let list = "tests::adds::case_1: test\ntests::adds::case_2: test\ntests::adds_more: test\ntests::subs: test\n";
+        assert_eq!(
+            one_test_args(list, "tests::subs").unwrap(),
+            test_args("tests::subs")
+        );
+        assert_eq!(
+            one_test_args(list, "tests::adds").unwrap(),
+            [
+                "tests::adds::",
+                "--include-ignored",
+                "--nocapture",
+                "--test-threads=1"
+            ]
+        );
+        assert_eq!(one_test_args(list, "tests::muls"), None);
     }
 
     /// With Cargo on this machine: a crate's tests are built, the test
@@ -1074,19 +1667,22 @@ mod tests {
         };
         let dir = TempDir::new("cargorun-build");
         let root = dir.path();
+        // A proc-macro crate: its test binary loads the toolchain's `libstd`.
         write(
             root,
             "Cargo.toml",
-            "[package]\nname = \"probe\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n",
+            "[package]\nname = \"probe\"\nversion = \"0.3.1\"\nedition = \"2021\"\n\n\
+             [lib]\nproc-macro = true\n\n[workspace]\n",
         );
         let lib = write(
             root,
             "src/lib.rs",
-            "pub fn add(a: i32, b: i32) -> i32 { a + b }\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn adds() { assert_eq!(super::add(1, 2), 3); }\n}\n",
+            "use proc_macro::TokenStream;\n\n#[proc_macro]\npub fn same(t: TokenStream) -> TokenStream { t }\n\n\
+             #[cfg(test)]\nmod tests {\n    #[test]\n    fn adds() { assert_eq!(1 + 2, 3); }\n}\n",
         );
         let target = target_of(&lib).unwrap();
         let mut lines = Vec::new();
-        let exe = build(
+        let built = build(
             &cargo,
             &target,
             true,
@@ -1095,15 +1691,42 @@ mod tests {
             &AtomicBool::new(false),
         )
         .unwrap_or_else(|e| panic!("{e:?}: {lines:?}"));
+        let exe = &built.executable;
         assert!(exe.is_file(), "{exe:?}");
         assert!(
             lines.iter().any(|l| l.contains("Compiling probe")),
             "{lines:?}"
         );
-        let list = list_tests(&exe, root).unwrap();
+        let get = |k: &str| {
+            built
+                .env
+                .iter()
+                .find(|(n, _)| n == k)
+                .map(|(_, v)| v.as_str())
+        };
+        assert_eq!(get("CARGO_PKG_VERSION"), Some("0.3.1"), "{:?}", built.env);
+        assert_eq!(get("CARGO_PKG_NAME"), Some("probe"));
+        let list = list_tests(exe, root, &built.env).unwrap();
         assert_eq!(
             listed_test(&list, &target.test_path(&["tests".into()], "adds")).as_deref(),
             Some("tests::adds")
         );
+        // Without the folders Cargo has it look in, it cannot start (here,
+        // where `cargo test` did not give this process them already).
+        let dirs = library_dirs(exe, "", sysroot_libdir(&cargo, root).as_deref());
+        let lists = |path: Option<std::ffi::OsString>| {
+            let mut command = crate::spawn::command(exe);
+            command
+                .args(["--list", "--format", "terse"])
+                .env_remove(dylib_path_var());
+            if let Some(path) = path {
+                command.env(dylib_path_var(), path);
+            }
+            command.output().is_ok_and(|o| o.status.success())
+        };
+        if cfg!(target_os = "linux") {
+            assert!(!lists(None), "needs libstd");
+        }
+        assert!(lists(std::env::join_paths(dirs).ok()));
     }
 }

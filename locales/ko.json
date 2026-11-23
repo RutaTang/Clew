@@ -2075,6 +2075,7 @@
  "This month by feature": "이번 달 기능별",
  "This only changes what the window shows.": "창에 보이는 내용만 바뀝니다.",
  "This opens another folder in this window.": "이 창에서 다른 폴더를 엽니다.",
+ "This package has several programs: {names}. Open the one you want and Run it, or name it as default-run in Cargo.toml.": "이 패키지에는 프로그램이 여러 개 있습니다: {names}. 원하는 프로그램을 열어 실행하거나, Cargo.toml에서 default-run으로 지정하세요.",
  "This program's debug information comes from Zig's built-in code generator (the default for Debug builds on x86-64), and lldb can't read variables from it. Breakpoints and stepping work, but no variables show. Build it with -fllvm (or .use_llvm = true in build.zig) to see them.": "이 프로그램의 디버그 정보는 Zig 고유 형식(x86-64 Debug 빌드의 기본값인 Zig 내장 코드 생성기가 만든 것)이라 lldb가 변수를 읽지 못합니다. 중단점과 단계 실행은 되지만 변수는 표시되지 않습니다. 변수를 보려면 -fllvm 옵션(또는 build.zig에서 .use_llvm = true)으로 빌드하세요.",
  "This project isn't tracked in git.": "이 프로젝트는 git으로 관리되지 않습니다.",
  "This project's Hatch environment": "이 프로젝트의 Hatch 환경",

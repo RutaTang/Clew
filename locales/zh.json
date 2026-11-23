@@ -2075,6 +2075,7 @@
  "This month by feature": "本月按功能",
  "This only changes what the window shows.": "这只会改变窗口显示的内容。",
  "This opens another folder in this window.": "这会在当前窗口中打开另一个文件夹。",
+ "This package has several programs: {names}. Open the one you want and Run it, or name it as default-run in Cargo.toml.": "这个包有多个程序：{names}。请打开你要的那个并运行，或在 Cargo.toml 中把它设为 default-run。",
  "This program's debug information comes from Zig's built-in code generator (the default for Debug builds on x86-64), and lldb can't read variables from it. Breakpoints and stepping work, but no variables show. Build it with -fllvm (or .use_llvm = true in build.zig) to see them.": "此程序的调试信息来自 Zig 内置的代码生成器（这是 x86-64 上 Debug 构建的默认设置），lldb 无法从中读取变量。断点和单步执行都能正常使用，但不会显示变量。使用 -fllvm（或在 build.zig 中设置 .use_llvm = true）构建后即可看到变量。",
  "This project isn't tracked in git.": "此项目没有用 git 管理。",
  "This project's Hatch environment": "此项目的 Hatch 环境",

@@ -37879,6 +37879,34 @@ fn debug_suggests_a_launch_config_in_the_projects_language() {
     assert!(crate::app::tasks::launch_example(&root, Some("ruby")).contains("main.rb"));
 }
 
+/// Run from a library's file runs what `cargo run` would: the package's
+/// only binary, wherever Cargo finds it, or its `default-run`; with
+/// several and none named, it says which there are and how to pick.
+#[test]
+fn run_from_a_library_runs_what_cargo_run_would() {
+    let mut app = scanned_app("run-library-program");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
+    std::fs::create_dir_all(root.join("src/bin")).unwrap();
+    std::fs::write(root.join("src/bin/tool.rs"), "fn main() {}\n").unwrap();
+    open_synchronously(&mut app, "src/lib.rs", None);
+    let _ = app.update(Message::Debug(DebugMsg::Start));
+    assert_eq!(app.status, "Building tool with Cargo…");
+    std::fs::write(root.join("src/bin/serve.rs"), "fn main() {}\n").unwrap();
+    let _ = app.update(Message::Debug(DebugMsg::Start));
+    assert_eq!(
+        app.status,
+        "This package has several programs: serve and tool. Open the one you want and Run it, or name it as default-run in Cargo.toml."
+    );
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"x\"\ndefault-run = \"serve\"\n",
+    )
+    .unwrap();
+    let _ = app.update(Message::Debug(DebugMsg::Start));
+    assert_eq!(app.status, "Building serve with Cargo…");
+}
+
 /// The binary a crate builds is the one Cargo names: `src/bin/<name>.rs`
 /// is `<name>`, not the package; and a workspace's root library is not
 /// "nothing to run" — its members may well run.

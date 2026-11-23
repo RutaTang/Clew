@@ -2094,6 +2094,89 @@ mod tests {
         assert!(output.contains("answer 10"), "{output:?}");
     }
 
+    /// A Rust program under the real lldb-dap, set up as Clew sets it up:
+    /// its enums shown by Rust's summaries — `Circle(1.5)`, `Some(7)` — in
+    /// the lldb a Linux distribution ships (18), which showed a Python error
+    /// for each. Needs `lldb-dap` (or a versioned one) and `rustc`.
+    #[tokio::test]
+    #[ignore = "needs lldb-dap and rustc on the PATH; run explicitly"]
+    async fn a_rust_programs_enums_are_shown_by_variant() {
+        let dir = clew_core::testutil::TempDir::new("dap-lldb-rust");
+        let source = dir.join("shapes.rs");
+        std::fs::write(
+            &source,
+            "#[derive(Debug)]\nenum Shape { Circle(f64), Rect { w: i32, h: i32 }, Empty }\n\n\
+             fn main() {\n    let a = Shape::Circle(1.5);\n    let b = Shape::Rect { w: 2, h: 3 };\n    \
+             let c = Shape::Empty;\n    let o: Option<i32> = Some(7);\n    println!(\"{a:?} {b:?} {c:?} {o:?}\");\n}\n",
+        )
+        .unwrap();
+        let binary = dir.join("shapes");
+        let built = std::process::Command::new("rustc")
+            .args(["-g", "-o"])
+            .arg(&binary)
+            .arg(&source)
+            .current_dir(&dir)
+            .status()
+            .unwrap();
+        assert!(built.success());
+        let spec = match clew_core::debugadapter::resolve(
+            "native",
+            &binary.to_string_lossy(),
+            &[],
+            &dir,
+            &dir,
+            &Default::default(),
+            None,
+        ) {
+            Ok(clew_core::debugadapter::Resolution::Ready(spec)) => spec,
+            other => panic!("{other:?}"),
+        };
+        let (client, mut events) =
+            DapClient::start(&spec.command, &spec.args, &dir, Transport::Stdio)
+                .await
+                .expect("lldb-dap started");
+        client.initialize().await.expect("initialized");
+        let launched = client.launch(spec.launch.clone());
+        let mut shown = Vec::new();
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(60), events.recv())
+                .await
+                .expect("an event in time");
+            match event {
+                Some(DapEvent::Initialized) => {
+                    client.set_breakpoints(&source, &[(9, None)]).await.unwrap();
+                    client.configuration_done().await.unwrap();
+                }
+                Some(DapEvent::Stopped(stop)) => {
+                    let thread = stop.thread_id.unwrap_or(1);
+                    let frames = client.stack_trace(thread).await.unwrap();
+                    let scopes = client.scopes(frames[0].id).await.unwrap();
+                    shown = client
+                        .variables(scopes[0].variables_reference)
+                        .await
+                        .unwrap()
+                        .into_iter()
+                        .map(|v| (v.name, v.value))
+                        .collect();
+                    client.continue_(thread).await.unwrap();
+                }
+                Some(DapEvent::Terminated) | Some(DapEvent::Exited { .. }) | None => break,
+                Some(_) => {}
+            }
+        }
+        assert_eq!(launched.await, Ok(()));
+        let value = |name: &str| {
+            shown
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, v)| v.as_str())
+        };
+        assert_eq!(value("a"), Some("Circle(1.5)"), "{shown:?}");
+        assert_eq!(value("b"), Some("Rect{w:2, h:3}"), "{shown:?}");
+        assert_eq!(value("c"), Some("Empty"), "{shown:?}");
+        assert_eq!(value("o"), Some("Some(7)"), "{shown:?}");
+    }
+
     /// A Zig program under the real lldb-dap, as Clew debugs Zig: the `.zig`
     /// file itself launched, Clew building it in Debug through LLVM (whose
     /// debug information lldb reads, unlike that of Zig's own code

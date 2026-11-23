@@ -138,7 +138,8 @@ fn is_formatter_noise(text: &str) -> bool {
 /// Build a Cargo plan's program — `target`, or its test binary for `test`
 /// or a test target — Cargo's words sent to the run's output as they come;
 /// what the debugger is given then: the executable, its arguments (the one
-/// test, by the name its binary lists it under), and the folder it runs in.
+/// test, by the name its binary lists it under), the folder it runs in, and
+/// the variables Cargo sets on a program it runs.
 /// `None` when the run is over: stopped (`live` moved on), or the build
 /// failed, which is said ([`DebugMsg::BuildFailed`]).
 #[allow(clippy::too_many_arguments)]
@@ -151,7 +152,7 @@ async fn build_with_cargo(
     test: Option<&crate::app::runplan::CargoTest>,
     choices: &clew_protocol::LanguageChoices,
     root: &Path,
-) -> Option<(PathBuf, Vec<String>, PathBuf)> {
+) -> Option<(PathBuf, Vec<String>, PathBuf, Vec<(String, String)>)> {
     use clew_core::cargorun::{BuildError, TargetKind};
     use iced::futures::SinkExt;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -238,8 +239,8 @@ async fn build_with_cargo(
     while let Ok(line) = lines.try_recv() {
         let _ = output.send(console(format!("{line}\n"))).await;
     }
-    let executable = match built {
-        Ok(Ok(executable)) => executable,
+    let (executable, env) = match built {
+        Ok(Ok(built)) => (built.executable, built.env),
         Ok(Err(BuildError::Stopped)) => return None,
         Ok(Err(why)) => {
             let error = match why {
@@ -271,13 +272,13 @@ async fn build_with_cargo(
         // A test binary's tests run as `cargo test` runs them, in their
         // package's folder; a program as `cargo run` from the project.
         let cwd = if tests { package } else { root.to_path_buf() };
-        return Some((executable, Vec::new(), cwd));
+        return Some((executable, Vec::new(), cwd, env));
     };
     // The test by the name its binary lists it under: worked out from the
     // code, a test in a module of its own file named through it.
     let listed = tokio::task::spawn_blocking({
-        let (executable, package) = (executable.clone(), package.clone());
-        move || clew_core::cargorun::list_tests(&executable, &package)
+        let (executable, package, env) = (executable.clone(), package.clone(), env.clone());
+        move || clew_core::cargorun::list_tests(&executable, &package, &env)
     })
     .await
     .ok()
@@ -292,8 +293,9 @@ async fn build_with_cargo(
     };
     use crate::app::runplan::CargoTests;
     match &test.runs {
-        CargoTests::One(path) => match clew_core::cargorun::listed_test(&list, path) {
-            Some(found) => Some((executable, clew_core::cargorun::test_args(&found), package)),
+        // The one test; or a test of many cases (`#[rstest]`), them all.
+        CargoTests::One(path) => match clew_core::cargorun::one_test_args(&list, path) {
+            Some(args) => Some((executable, args, package, env)),
             None => {
                 let error = tr!(
                     "When built, {target} has no test named {name}. It may be behind a #[cfg] or a Cargo feature this run doesn't turn on (Settings → Language servers → Rust).",
@@ -318,7 +320,7 @@ async fn build_with_cargo(
                 return None;
             }
             let args = clew_core::cargorun::group_args(&list, under, &selected);
-            Some((executable, args, package))
+            Some((executable, args, package, env))
         }
     }
 }
@@ -898,6 +900,13 @@ impl App {
                                 self.status = library.into();
                                 return Task::none();
                             }
+                            Err(NoProgram::Several(names)) => {
+                                self.status = tr!(
+                                    "This package has several programs: {names}. Open the one you want and Run it, or name it as default-run in Cargo.toml.",
+                                    names = crate::app::remote_state::and_list(&names)
+                                );
+                                return Task::none();
+                            }
                             Err(NoProgram::NoPackage) => {}
                         }
                     }
@@ -1332,7 +1341,7 @@ impl App {
                     // A Rust program is built first, by Cargo, its words in
                     // the run's output as it builds: what runs is what the
                     // reader is reading, built as `cargo run` builds it.
-                    let (program, args, cwd, package) = match &plan {
+                    let (program, args, cwd, cargo_env) = match &plan {
                         Some(crate::app::runplan::RunPlan::Cargo { target, test }) => {
                             let built = build_with_cargo(
                                 &mut output,
@@ -1346,9 +1355,7 @@ impl App {
                             )
                             .await;
                             match built {
-                                Some((program, args, cwd)) => {
-                                    (program, args, cwd, Some(target.package_dir().to_path_buf()))
-                                }
+                                Some((program, args, cwd, env)) => (program, args, cwd, Some(env)),
                                 None => return,
                             }
                         }
@@ -1403,8 +1410,8 @@ impl App {
                             return;
                         }
                     };
-                    if let Some(package) = &package {
-                        clew_core::cargorun::with_cargo_env(&mut adapter.launch, package);
+                    if let Some(env) = &cargo_env {
+                        clew_core::cargorun::with_cargo_env(&mut adapter.launch, env);
                     }
                     if cancelled(&live) {
                         return; // stopped before anything was spawned
