@@ -2403,6 +2403,18 @@ pub struct ProjectSession {
     /// The cursor is inside the hover tooltip — keep it open (so you can move into
     /// it and scroll it) and ignore code-view hover events until it leaves.
     pub hover_pinned: bool,
+    /// The pointer has left the open peek's word for elsewhere in the code:
+    /// the peek goes once [`HoverMsg::Left`] says the grace is over, unless
+    /// the pointer is back on the word (or in the peek) by then.
+    ///
+    /// [`HoverMsg::Left`]: crate::app::message::HoverMsg::Left
+    pub hover_leaving: bool,
+    /// Bumped each time the pointer leaves the open peek's word: a
+    /// [`HoverMsg::Left`] of an earlier leaving does not cut a later one's
+    /// grace short.
+    ///
+    /// [`HoverMsg::Left`]: crate::app::message::HoverMsg::Left
+    pub hover_leave: u64,
     /// The gutter line the pointer rests on, and whether its tip is due:
     /// what a breakpoint or a bookmark there says (`ui::gutter_tip`).
     pub gutter_tip: Option<GutterTip>,
@@ -2937,6 +2949,8 @@ impl Default for ProjectSession {
             hover: Default::default(),
             hover_gen: Default::default(),
             hover_pinned: Default::default(),
+            hover_leaving: Default::default(),
+            hover_leave: Default::default(),
             gutter_tip: None,
             gutter_seq: 0,
             context_menu: Default::default(),

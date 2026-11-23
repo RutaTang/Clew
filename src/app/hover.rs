@@ -32,23 +32,55 @@ impl App {
             .and_then(Option::as_ref)
             .map_or((0.0, 0.0), |v| (v.scroll_x, v.scroll_y));
         let (x, y) = (x - sx, y - sy);
-        // Same token already shown: just reposition.
-        if let Some(h) = &mut self.proj.hover
-            && h.line == line
-            && h.col == col
-        {
-            h.x = x;
-            h.y = y;
-            return Task::none();
-        }
+        // Back on the word the open peek is of: it stays, where it is, and
+        // what the pointer crossed on its way back shows nothing.
+        let leave = match &self.proj.hover {
+            Some(h) if self.on_peeked(pane, h, line, col) => {
+                self.proj.hover_leaving = false;
+                // Its very spot asked again (the view scrolled under the
+                // pointer): moved to the pointer. Elsewhere on its word, it
+                // stays put rather than jump about.
+                if let Some(h) = &mut self.proj.hover
+                    && (h.line, h.col) == (line, col)
+                {
+                    h.x = x;
+                    h.y = y;
+                }
+                return Task::none();
+            }
+            // Off it, with nothing shown yet (the server's answer still on
+            // its way): let go at once, the answer with it.
+            Some(h) if !h.says_something() => {
+                self.proj.hover = None;
+                Task::none()
+            }
+            // Off it: the peek goes a moment later, as the pointer moves on —
+            // not only once it rests on something else, which held a stale
+            // peek over the code for as long as the pointer kept moving. The
+            // moment is the pointer's to reach the peek and keep it.
+            Some(_) if !self.proj.hover_leaving => {
+                self.proj.hover_leaving = true;
+                self.proj.hover_leave = self.proj.hover_leave.wrapping_add(1);
+                let leave = self.proj.hover_leave;
+                let stamp = self.stamp();
+                Task::perform(
+                    async move { tokio::time::sleep(HOVER_LEAVE_GRACE).await },
+                    move |_| {
+                        Message::Hover(HoverMsg::Left {
+                            stamp: stamp.clone(),
+                            leave,
+                        })
+                    },
+                )
+            }
+            _ => Task::none(),
+        };
         // New token: start a dwell so moving across code doesn't flash
         // tooltips — it shows only if the cursor rests here for a moment.
-        // The current peek stays visible until the new one is ready, so the
-        // cursor can travel down into it without it vanishing first.
         self.proj.hover_gen = self.proj.hover_gen.wrapping_add(1);
         let hover_gen = self.proj.hover_gen;
         let stamp = self.stamp();
-        Task::perform(
+        let dwell = Task::perform(
             async move { tokio::time::sleep(std::time::Duration::from_millis(300)).await },
             move |_| {
                 Message::Hover(HoverMsg::Dwell {
@@ -61,7 +93,35 @@ impl App {
                     y,
                 })
             },
-        )
+        );
+        Task::batch([leave, dwell])
+    }
+
+    /// Whether `(line, col)` of `pane` is on what the open peek `h` is of:
+    /// its word, anywhere along it — or, off a word, its very spot.
+    fn on_peeked(&self, pane: usize, h: &HoverState, line: usize, col: usize) -> bool {
+        if h.line != line {
+            return false;
+        }
+        h.col == col
+            || self
+                .proj
+                .panes
+                .get(pane)
+                .and_then(Option::as_ref)
+                .and_then(|v| analyze::word_range_at(&v.lines, line, h.col))
+                .is_some_and(|(start, end)| (start..end).contains(&col))
+    }
+
+    /// The grace after the pointer leaves the peeked word ([`HOVER_LEAVE_GRACE`])
+    /// is over: the peek goes, unless the pointer is back on the word or in
+    /// the peek — or this is an earlier leaving's.
+    fn on_hover_left(&mut self, leave: u64) -> Task<Message> {
+        if leave == self.proj.hover_leave && self.proj.hover_leaving && !self.proj.hover_pinned {
+            self.proj.hover = None;
+            self.proj.hover_leaving = false;
+        }
+        Task::none()
     }
 
     /// The pointer moved onto gutter line `line` of `pane` (or off the
@@ -121,6 +181,11 @@ impl App {
         if hover_gen != self.proj.hover_gen || self.proj.hover_pinned {
             return Task::none(); // cursor moved on, or is inside the tooltip
         }
+        // Back on the open peek's word since: this spot was only crossed.
+        if self.proj.hover.is_some() && !self.proj.hover_leaving {
+            return Task::none();
+        }
+        self.proj.hover_leaving = false;
         // Rested past the line's end, over nothing: no word is under the
         // pointer, and none is peeked at — the hit there is the line's end,
         // and the peek of its last word opened over the blank space beside
@@ -282,6 +347,7 @@ impl App {
         // But not if it's inside the tooltip (which overlaps the code).
         if !self.proj.hover_pinned {
             self.proj.hover = None;
+            self.proj.hover_leaving = false;
             self.proj.hover_gen = self.proj.hover_gen.wrapping_add(1);
         }
         Task::none()
@@ -312,6 +378,7 @@ impl App {
     pub(crate) fn invalidate_hover(&mut self) {
         self.proj.hover = None;
         self.proj.hover_pinned = false;
+        self.proj.hover_leaving = false;
         self.proj.hover_gen = self.proj.hover_gen.wrapping_add(1);
     }
 
@@ -663,6 +730,7 @@ impl App {
                 task
             }
             HoverMsg::Cleared => self.on_hover_cleared(),
+            HoverMsg::Left { leave, .. } => self.on_hover_left(leave),
             HoverMsg::Gutter { pane, line, x, y } => self.on_gutter_hover(pane, line, x, y),
             HoverMsg::GutterDue { generation, .. } => {
                 if let Some(tip) = self
@@ -680,6 +748,7 @@ impl App {
                 if !inside {
                     // Left the tooltip: dismiss it and cancel any pending dwell.
                     self.proj.hover = None;
+                    self.proj.hover_leaving = false;
                     self.proj.hover_gen = self.proj.hover_gen.wrapping_add(1);
                 }
                 Task::none()
@@ -687,6 +756,11 @@ impl App {
         }
     }
 }
+
+/// How long the open peek stays once the pointer leaves its word: time to
+/// move into it (and keep it, to read and scroll), short enough that it does
+/// not hang over the code the pointer moved on to.
+pub(crate) const HOVER_LEAVE_GRACE: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// How long the pointer rests on a gutter line before its tip shows: as
 /// long as any tooltip's.

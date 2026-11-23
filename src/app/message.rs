@@ -642,6 +642,16 @@ pub enum HoverMsg {
     },
     /// The cursor left the code — clear any open peek.
     Cleared,
+    /// The pointer left the peeked word a moment ago ([`HOVER_LEAVE_GRACE`]):
+    /// the peek goes, unless the pointer came back to the word or went into
+    /// the peek since. `leave` is the leaving it was scheduled for
+    /// (`ProjectSession::hover_leave`).
+    ///
+    /// [`HOVER_LEAVE_GRACE`]: crate::app::hover::HOVER_LEAVE_GRACE
+    Left {
+        stamp: Stamp,
+        leave: u64,
+    },
     /// The pointer rests on gutter line `line` (0-based) of `pane`, at `x`,
     /// `y` in the code's scrolled space — or has left the gutter (`None`).
     Gutter {
@@ -2725,6 +2735,7 @@ impl HoverMsg {
             HoverMsg::Dwell { stamp, .. }
             | HoverMsg::Answered { stamp, .. }
             | HoverMsg::GutterDue { stamp, .. }
+            | HoverMsg::Left { stamp, .. }
             | HoverMsg::InsightAnswered { stamp, .. } => Some(Origin::Stamped(stamp)),
             HoverMsg::Gutter { .. }
             | HoverMsg::ContextMenuOpened { .. }

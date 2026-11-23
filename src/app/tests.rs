@@ -24127,6 +24127,10 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
             stamp: s(),
             generation: app.proj.gutter_seq,
         }),
+        Message::Hover(HoverMsg::Left {
+            stamp: s(),
+            leave: app.proj.hover_leave,
+        }),
         Message::Nav(NavMsg::DefinitionResult {
             stamp: s(),
             seq: app.proj.goto_seq,
@@ -29349,8 +29353,10 @@ fn a_hover_over_a_paused_program_evaluates_only_what_is_safe() {
     let mut app = scanned_app("dap-hover");
     open_synchronously(&mut app, "src/lib.rs", None);
     let (_rt, _events, seen) = paused_session_with_fake_adapter(&mut app);
-    // `origin`, on the line `pub fn origin() -> Point {`.
+    // `origin`, on the line `pub fn origin() -> Point {`, rested on afresh:
+    // what the last rest there opened has gone with the pointer.
     let dwell = |app: &mut App| {
+        app.proj.hover = None;
         app.proj.hover_gen += 1;
         let task = app.update(Message::Hover(HoverMsg::Dwell {
             stamp: app.stamp(),
@@ -35542,6 +35548,108 @@ fn the_peek_and_the_menu_open_at_the_pointer_of_a_scrolled_pane() {
     }));
     let peek = app.proj.hover.as_ref().unwrap();
     assert_eq!((peek.x, peek.y), (140.0, 210.0));
+}
+
+/// The open peek goes a moment after the pointer leaves its word — it hung
+/// over the code for as long as the pointer kept moving, gone only once it
+/// rested on something else. Back on its word in time, or in the peek, it
+/// stays, and a dwell for what the pointer only crossed shows nothing.
+#[test]
+fn a_peek_goes_a_moment_after_the_pointer_leaves_its_word() {
+    let mut app = scanned_app("peek-leaves");
+    open_synchronously(&mut app, "src/lib.rs", None);
+    // Line 2: "pub fn origin() -> Point {", `origin` at 7..13.
+    let peek = || HoverState {
+        line: 2,
+        col: 8,
+        x: 10.0,
+        y: 10.0,
+        text: Some("fn origin()".into()),
+        prepared: Vec::new(),
+        summary: None,
+        diagnostic: None,
+    };
+    let at = |app: &mut App, col: usize| {
+        app.update(Message::Hover(HoverMsg::Requested {
+            pane: 0,
+            line: 2,
+            col,
+            x: 0.0,
+            y: 0.0,
+        }))
+    };
+    let left = |app: &mut App, leave: u64| {
+        let stamp = app.stamp();
+        let _ = app.update(Message::Hover(HoverMsg::Left { stamp, leave }));
+    };
+    app.proj.hover = Some(peek());
+    // Along its own word: it stays, put.
+    let task = at(&mut app, 11);
+    assert_eq!(task.units(), 0, "nothing to fetch or wait out");
+    assert!(!app.proj.hover_leaving);
+    assert_eq!(
+        app.proj.hover.as_ref().map(|h| (h.x, h.y)),
+        Some((10.0, 10.0))
+    );
+    // Off it: it goes once the grace is over, whatever else is under the
+    // pointer by then.
+    let task = at(&mut app, 16);
+    assert!(app.proj.hover_leaving);
+    assert_eq!(
+        task.units(),
+        2,
+        "the grace, and a dwell for where it is now"
+    );
+    let leave = app.proj.hover_leave;
+    let _ = at(&mut app, 19);
+    assert_eq!(
+        app.proj.hover_leave, leave,
+        "one grace per leaving, not per word"
+    );
+    left(&mut app, leave);
+    assert!(app.proj.hover.is_none(), "gone, before the pointer rests");
+    // Back on its word within the grace: it stays, and the dwell for the
+    // spot crossed on the way shows nothing.
+    app.proj.hover = Some(peek());
+    app.proj.hover_leaving = false;
+    let _ = at(&mut app, 16);
+    let crossed = app.proj.hover_gen;
+    let leave = app.proj.hover_leave;
+    let _ = at(&mut app, 9);
+    left(&mut app, leave);
+    assert!(app.proj.hover.is_some(), "back on it in time");
+    let _ = app.on_hover_dwell(crossed, 0, 2, 16, 0.0, 0.0);
+    assert_eq!(
+        app.proj.hover.as_ref().map(|h| h.col),
+        Some(8),
+        "still its own"
+    );
+    // Into the peek within the grace: it stays, to be read.
+    let _ = at(&mut app, 16);
+    let leave = app.proj.hover_leave;
+    let _ = app.update(Message::Hover(HoverMsg::Pin(true)));
+    left(&mut app, leave);
+    assert!(app.proj.hover.is_some(), "kept, to be read");
+    // An earlier leaving's grace does not cut a later one short.
+    let _ = app.update(Message::Hover(HoverMsg::Pin(false)));
+    app.proj.hover = Some(peek());
+    let _ = at(&mut app, 16);
+    let first = app.proj.hover_leave;
+    let _ = at(&mut app, 8);
+    let _ = at(&mut app, 16);
+    left(&mut app, first);
+    assert!(
+        app.proj.hover.is_some(),
+        "the second leaving has its own grace"
+    );
+    // Off it before anything was shown: let go at once.
+    app.proj.hover = Some(HoverState {
+        text: None,
+        ..peek()
+    });
+    app.proj.hover_leaving = false;
+    let _ = at(&mut app, 16);
+    assert!(app.proj.hover.is_none());
 }
 
 /// M4/M5: a gutter line's tip shows once the pointer has rested on it —

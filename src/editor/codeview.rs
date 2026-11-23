@@ -1976,13 +1976,35 @@ where
         _renderer: &Renderer,
     ) -> mouse::Interaction {
         let state = tree.state.downcast_ref::<State<Renderer::Paragraph>>();
-        match cursor.position_in(layout.bounds()) {
+        let Some(p) = cursor.position_in(layout.bounds()) else {
+            return mouse::Interaction::None;
+        };
+        let gutter_px = gutter_width(state.char_width, self.font_size);
+        if p.x >= gutter_px {
             // Cmd/Ctrl over the code text is "click to go to definition".
-            Some(p) if state.cmd_held && p.x > gutter_width(state.char_width, self.font_size) => {
+            return if state.cmd_held {
                 mouse::Interaction::Pointer
-            }
-            Some(_) => mouse::Interaction::Text,
-            None => mouse::Interaction::None,
+            } else {
+                mouse::Interaction::Text
+            };
+        }
+        // The gutter: what a click there does is a pointer's — a breakpoint
+        // set left of the fold arrow, a fold opened or closed on it — and
+        // the rest of it takes no text, so no text cursor.
+        let row = (p.y / self.line_height) as usize;
+        let Some(line) = self.line_at_row(row) else {
+            return mouse::Interaction::Idle;
+        };
+        let arrow_x0 = FOLD_ARROW_COL as f32 * state.char_width;
+        let clicks = if p.x < arrow_x0 {
+            self.on_breakpoint.is_some()
+        } else {
+            self.on_fold.is_some() && self.is_fold_header(line)
+        };
+        if clicks {
+            mouse::Interaction::Pointer
+        } else {
+            mouse::Interaction::Idle
         }
     }
 
@@ -4840,6 +4862,66 @@ mod font_tests {
         assert!(faint_rows(iced::mouse::Cursor::Unavailable).is_empty());
         let over_code = iced::mouse::Cursor::Available(iced::Point::new(400.0, 6.0 * lh + 5.0));
         assert!(faint_rows(over_code).is_empty(), "not over the code");
+    }
+
+    /// What a click in the gutter does shows in the pointer: a hand over a
+    /// fold arrow and over the margin a click sets a breakpoint in, an arrow
+    /// over the gutter that takes no click (a line that folds nothing), the
+    /// text cursor over the code. Over the whole gutter
+    /// it was the text cursor, and a fold arrow did not look clickable.
+    #[test]
+    fn the_pointer_says_what_a_gutter_click_does() {
+        use iced::advanced::Widget;
+        use iced::advanced::widget::Tree;
+        use iced::mouse::{Cursor, Interaction};
+        let lines = crate::highlight::plain_lines("mod tests {\n    fn a() {}\n}\n");
+        let lh = 20.0;
+        let headers: std::collections::HashSet<usize> = [0].into();
+        let collapsed = std::collections::HashSet::new();
+        let mut view = crate::codeview::CodeView::new(
+            &lines,
+            20,
+            13.0,
+            lh,
+            iced::Color::WHITE,
+            |_| (),
+            |_| (),
+            |_, _| (),
+        )
+        .folds(None, &headers, &collapsed)
+        .on_fold(|_| ())
+        .on_breakpoint(|_| ());
+        let widget: &mut dyn Widget<(), iced::Theme, Recorder> = &mut view;
+        let mut tree = Tree::new(&*widget);
+        let renderer = Recorder::default();
+        let node = widget.layout(
+            &mut tree,
+            &renderer,
+            &iced::advanced::layout::Limits::new(
+                iced::Size::ZERO,
+                iced::Size::new(800.0, f32::INFINITY),
+            ),
+        );
+        let viewport = iced::Rectangle::new(iced::Point::ORIGIN, iced::Size::new(800.0, 400.0));
+        let state = tree
+            .state
+            .downcast_ref::<super::State<<Recorder as iced::advanced::text::Renderer>::Paragraph>>(
+            );
+        let arrow_x = (super::FOLD_ARROW_COL as f32 + 0.5) * state.char_width;
+        let at = |x: f32, row: f32| {
+            widget.mouse_interaction(
+                &tree,
+                iced::advanced::Layout::new(&node),
+                Cursor::Available(iced::Point::new(x, row * lh + lh / 2.0)),
+                &viewport,
+                &renderer,
+            )
+        };
+        assert_eq!(at(arrow_x, 0.0), Interaction::Pointer, "the fold arrow");
+        assert_eq!(at(arrow_x, 1.0), Interaction::Idle, "no fold on this line");
+        assert_eq!(at(4.0, 1.0), Interaction::Pointer, "a breakpoint's margin");
+        let code_x = super::gutter_width(state.char_width, 13.0) + state.char_width;
+        assert_eq!(at(code_x, 1.0), Interaction::Text, "the code");
     }
 
     /// A folded line's blame starts past its `⋯`, with the gap a line that
