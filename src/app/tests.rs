@@ -37879,6 +37879,34 @@ fn debug_suggests_a_launch_config_in_the_projects_language() {
     assert!(crate::app::tasks::launch_example(&root, Some("ruby")).contains("main.rb"));
 }
 
+/// The first peek waits as long as a tooltip, so a pointer crossing the code
+/// opens no card over it; reading along from one, the next waits less — and
+/// after a pause, the full wait again.
+#[test]
+fn a_peek_waits_longer_the_first_time_than_reading_along() {
+    use crate::app::hover::{HOVER_DELAY, HOVER_WARM, HOVER_WARM_DELAY};
+    let mut app = scanned_app("peek-delay");
+    let now = std::time::Instant::now();
+    assert_eq!(app.peek_delay(now), HOVER_DELAY);
+    assert!(HOVER_DELAY > HOVER_WARM_DELAY);
+    app.proj.hover = Some(crate::HoverState {
+        line: 2,
+        col: 4,
+        x: 0.0,
+        y: 0.0,
+        text: Some("pub fn origin()".into()),
+        prepared: Vec::new(),
+        summary: None,
+        diagnostic: None,
+    });
+    assert_eq!(app.peek_delay(now), HOVER_WARM_DELAY, "a peek showing");
+    app.proj.hover = None;
+    let soon = now + HOVER_WARM / 2;
+    assert_eq!(app.peek_delay(soon), HOVER_WARM_DELAY, "a moment after");
+    let later = now + HOVER_WARM * 2;
+    assert_eq!(app.peek_delay(later), HOVER_DELAY, "after a pause");
+}
+
 /// Run from a library's file runs what `cargo run` would: the package's
 /// only binary, wherever Cargo finds it, or its `default-run`; with
 /// several and none named, it says which there are and how to pick.

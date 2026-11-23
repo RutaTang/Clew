@@ -2423,6 +2423,13 @@ pub struct ProjectSession {
     ///
     /// [`HoverMsg::Left`]: crate::app::message::HoverMsg::Left
     pub hover_leave: u64,
+    /// When a peek was last showing, as the pointer moved on from it: the
+    /// next peek within [`HOVER_WARM`] of it is reading along, and waits
+    /// less ([`App::peek_delay`]).
+    ///
+    /// [`HOVER_WARM`]: crate::app::hover::HOVER_WARM
+    /// [`App::peek_delay`]: crate::app::App::peek_delay
+    pub hover_seen: Option<std::time::Instant>,
     /// The gutter line the pointer rests on, and whether its tip is due:
     /// what a breakpoint or a bookmark there says (`ui::gutter_tip`).
     pub gutter_tip: Option<GutterTip>,
@@ -2959,6 +2966,7 @@ impl Default for ProjectSession {
             hover_pinned: Default::default(),
             hover_leaving: Default::default(),
             hover_leave: Default::default(),
+            hover_seen: None,
             gutter_tip: None,
             gutter_seq: 0,
             context_menu: Default::default(),

@@ -549,6 +549,140 @@ pub fn rustdoc_shown(doc: &str) -> String {
     out.join("\n")
 }
 
+/// A Rust doc's intra-doc links that nothing resolved — `[Subscriber]`,
+/// ``[`Layer`]``, `[layers](Layer)`'s kin `[text][Layer]`, `[struct@Foo]` —
+/// as rustdoc shows them: their text, the brackets (and a `kind@`) gone,
+/// where Markdown left them literal, brackets and all. A link with a target
+/// or a definition, an image, a task box (`[x]`), a footnote (`[^1]`), and
+/// anything in code stay as written.
+pub fn rustdoc_links(doc: &str) -> String {
+    // The labels the doc defines (`[Foo]: https://…`): links in their own right.
+    let defined: std::collections::HashSet<String> = doc
+        .lines()
+        .filter_map(|l| {
+            let l = l.trim_start().strip_prefix('[')?;
+            let (label, rest) = l.split_once(']')?;
+            rest.starts_with(':').then(|| label.to_ascii_lowercase())
+        })
+        .collect();
+    let mut out: Vec<String> = Vec::new();
+    let mut fence: Option<&str> = None;
+    for line in doc.lines() {
+        let t = line.trim_start();
+        let marker = ["```", "~~~"].into_iter().find(|m| t.starts_with(m));
+        match (fence, marker) {
+            (None, Some(m)) => fence = Some(m),
+            (Some(open), Some(m)) if m == open => fence = None,
+            _ => {}
+        }
+        if fence.is_some() || marker.is_some() {
+            out.push(line.to_string());
+            continue;
+        }
+        out.push(intra_links_in_line(line, &defined));
+    }
+    out.join("\n")
+}
+
+/// One line of prose with its unresolved intra-doc links shown as text
+/// ([`rustdoc_links`]); its inline code left as it is.
+fn intra_links_in_line(line: &str, defined: &std::collections::HashSet<String>) -> String {
+    let chars: Vec<char> = line.chars().collect();
+    let mut out = String::with_capacity(line.len());
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        // Inline code: copied whole, to its closing run of as many backticks.
+        if c == '`' {
+            let run = chars[i..].iter().take_while(|&&b| b == '`').count();
+            let close = (i + run..chars.len()).find(|&k| {
+                chars[k..].iter().take_while(|&&b| b == '`').count() == run
+                    && (k == 0 || chars[k - 1] != '`')
+            });
+            let end = close.map_or(chars.len(), |k| k + run);
+            out.extend(&chars[i..end]);
+            i = end;
+            continue;
+        }
+        if c == '['
+            && (i == 0 || !matches!(chars[i - 1], '\\' | '!' | ']'))
+            && let Some(len) = chars[i + 1..].iter().position(|&b| b == ']')
+        {
+            let close = i + 1 + len;
+            let inner: String = chars[i + 1..close].iter().collect();
+            let after = chars.get(close + 1).copied();
+            // `[text][ref]`: the text, when nothing defines `ref`.
+            let reference = (after == Some('['))
+                .then(|| chars[close + 2..].iter().position(|&b| b == ']'))
+                .flatten()
+                .map(|n| {
+                    let r: String = chars[close + 2..close + 2 + n].iter().collect();
+                    (r, close + 2 + n)
+                })
+                .filter(|(r, _)| !defined.contains(&r.to_ascii_lowercase()) && intra_target(r));
+            if let Some((_, end)) = reference {
+                out.push_str(&shown_link_text(&inner));
+                i = end + 1;
+                continue;
+            }
+            let bare = !matches!(after, Some('(' | '[' | ':'))
+                && !defined.contains(&inner.to_ascii_lowercase())
+                && intra_target(&inner);
+            if bare {
+                out.push_str(&shown_link_text(&inner));
+                i = close + 1;
+                continue;
+            }
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
+}
+
+/// Whether bracketed text names an item as an intra-doc link does: a path
+/// (`Foo`, `crate::a::B`, `Vec<T>`, `f()`, `m!`), maybe in backticks or
+/// with a `kind@` — not a task box, a footnote, or prose.
+fn intra_target(inner: &str) -> bool {
+    let name = inner.trim();
+    let name = name
+        .strip_prefix('`')
+        .and_then(|n| n.strip_suffix('`'))
+        .unwrap_or(name);
+    let name = name.split_once('@').map_or(name, |(_, n)| n);
+    // `[x]`, `[X]`: a list item's task box.
+    !name.is_empty()
+        && !matches!(name, "x" | "X")
+        && !name.starts_with('^')
+        && name.chars().any(|c| c.is_alphabetic())
+        && name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_alphabetic() || c == '_')
+        && name.chars().all(|c| {
+            c.is_alphanumeric()
+                || matches!(c, '_' | ':' | '<' | '>' | ',' | '&' | '(' | ')' | '!' | ' ')
+        })
+        && !name.contains("  ")
+        && name.split_whitespace().count() <= 2
+}
+
+/// A link's text as rustdoc shows it: its `kind@` gone, its backticks kept.
+fn shown_link_text(inner: &str) -> String {
+    let (tick, name) = match inner.strip_prefix('`').and_then(|n| n.strip_suffix('`')) {
+        Some(n) => (true, n),
+        None => (false, inner),
+    };
+    let name = match name.split_once('@') {
+        Some((kind, rest)) if kind.chars().all(|c| c.is_ascii_lowercase()) => rest,
+        _ => name,
+    };
+    match tick {
+        true => format!("`{name}`"),
+        false => name.to_string(),
+    }
+}
+
 /// Whether a fenced block's info string marks Rust code, as rustdoc reads
 /// it: none, `rust`, or only rustdoc's own words (`no_run`, `ignore`,
 /// `should_panic`, `edition2021`, …).
@@ -2075,6 +2209,29 @@ mod tests {
                 "```no_run\n## not hidden\n# hidden\nlet x = 1;\n```\n```sh\n# a comment\n```"
             ),
             "```no_run\n# not hidden\nlet x = 1;\n```\n```sh\n# a comment\n```"
+        );
+    }
+
+    /// Intra-doc links nothing resolved read as rustdoc shows them; real
+    /// links, task boxes, footnotes and code stay as written.
+    #[test]
+    fn unresolved_intra_doc_links_read_as_their_text() {
+        let doc = "The [Subscriber] trait and [`Layer`]s, see [struct@Registry] and [the layer][Layer].\n\
+                   A [link](https://x) and [defined]; [^1] and `[Code]`.\n\
+                   - [x] done\n\n[defined]: https://y\n```\n[Kept]\n```";
+        assert_eq!(
+            rustdoc_links(doc),
+            "The Subscriber trait and `Layer`s, see Registry and the layer.\n\
+             A [link](https://x) and [defined]; [^1] and `[Code]`.\n\
+             - [x] done\n\n[defined]: https://y\n```\n[Kept]\n```"
+        );
+        assert_eq!(
+            rustdoc_links("[crate::fmt()] and [Vec<T>]"),
+            "crate::fmt() and Vec<T>"
+        );
+        assert_eq!(
+            rustdoc_links("prose [in brackets with words]"),
+            "prose [in brackets with words]"
         );
     }
 

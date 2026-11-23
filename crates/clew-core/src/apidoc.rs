@@ -591,7 +591,60 @@ pub fn build_file(source: &str, lang_key: &str) -> Vec<DocItem> {
             refs,
         });
     }
-    roots.iter().filter_map(|&i| built[i].take()).collect()
+    let items: Vec<DocItem> = roots.iter().filter_map(|&i| built[i].take()).collect();
+    match lang {
+        Lang::Rust => nest_rust_impls(items, &crate::outline::rust_impl_blocks(source)),
+        _ => items,
+    }
+}
+
+/// A Rust file's items with each `impl` block's members (its methods,
+/// associated types and constants) under the type it implements, as rustdoc
+/// lists them — `Point`'s `new` and its `Display` `fmt` under `Point` — when
+/// that type is the file's own; listed at the top, they were nobody's: two
+/// `new`s read as one name twice. A type of another file keeps its members
+/// where they are.
+fn nest_rust_impls(items: Vec<DocItem>, blocks: &[crate::outline::ImplBlock]) -> Vec<DocItem> {
+    if blocks.is_empty() {
+        return items;
+    }
+    // The type an impl is for: `Display for Point` → `Point`, `Stack<T>` →
+    // `Stack`.
+    let type_of = |label: &str| -> String {
+        let ty = label.rsplit_once(" for ").map_or(label, |(_, ty)| ty);
+        let ty = ty.trim_start_matches(['&', '!']).trim_start_matches("mut ");
+        ty.split(['<', ' ']).next().unwrap_or(ty).to_string()
+    };
+    let types: HashMap<String, usize> = items
+        .iter()
+        .enumerate()
+        .filter(|(_, i)| {
+            matches!(
+                i.kind.as_str(),
+                "struct" | "enum" | "union" | "type" | "trait"
+            )
+        })
+        .map(|(n, i)| (i.name.clone(), n))
+        .collect();
+    let owner = |item: &DocItem| -> Option<usize> {
+        let block = blocks
+            .iter()
+            .filter(|b| b.line < item.line && item.line <= b.end_line)
+            .min_by_key(|b| b.end_line - b.line)?;
+        types.get(&type_of(&block.label)).copied()
+    };
+    let mut slots: Vec<Option<DocItem>> = items.into_iter().map(Some).collect();
+    for n in 0..slots.len() {
+        let Some(to) = slots[n].as_ref().and_then(owner).filter(|&to| to != n) else {
+            continue;
+        };
+        if let Some(member) = slots[n].take()
+            && let Some(ty) = slots[to].as_mut()
+        {
+            ty.children.push(member);
+        }
+    }
+    slots.into_iter().flatten().collect()
 }
 
 /// Most syntax nodes [`sql_references`] visits: a schema dump of tens of
@@ -2340,18 +2393,24 @@ impl Sq {
 }
 ";
         let items = build_file(src, "rust");
+        // An impl's members are its type's, as rustdoc lists them.
+        let sq = find(&items, "Sq");
+        let names: Vec<&str> = sq.children.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["describe", "helper", "new"], "{items:?}");
+        assert!(!items.iter().any(|i| i.name == "new"), "{items:?}");
         let shape = find(&items, "Shape");
         assert!(shape.public);
         assert!(find(&shape.children, "describe").public, "{items:?}");
         let hidden = find(&items, "Hidden");
         assert!(!find(&hidden.children, "secret").public, "{items:?}");
-        let impl_describe = items
+        let impl_describe = sq
+            .children
             .iter()
             .find(|i| i.name == "describe" && i.line == 9)
             .expect("the trait impl's method is an item");
         assert!(impl_describe.public, "{items:?}");
-        assert!(!find(&items, "helper").public);
-        assert!(find(&items, "new").public);
+        assert!(!find(&sq.children, "helper").public);
+        assert!(find(&sq.children, "new").public);
     }
 
     /// GNU style puts the return type (and `static`) on the line ABOVE the

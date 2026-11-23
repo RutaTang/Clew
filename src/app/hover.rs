@@ -77,24 +77,42 @@ impl App {
         };
         // New token: start a dwell so moving across code doesn't flash
         // tooltips — it shows only if the cursor rests here for a moment.
+        let delay = self.peek_delay(std::time::Instant::now());
         self.proj.hover_gen = self.proj.hover_gen.wrapping_add(1);
         let hover_gen = self.proj.hover_gen;
         let stamp = self.stamp();
-        let dwell = Task::perform(
-            async move { tokio::time::sleep(std::time::Duration::from_millis(300)).await },
-            move |_| {
-                Message::Hover(HoverMsg::Dwell {
-                    stamp: stamp.clone(),
-                    hover_gen,
-                    pane,
-                    line,
-                    col,
-                    x,
-                    y,
-                })
-            },
-        );
+        let dwell = Task::perform(async move { tokio::time::sleep(delay).await }, move |_| {
+            Message::Hover(HoverMsg::Dwell {
+                stamp: stamp.clone(),
+                hover_gen,
+                pane,
+                line,
+                col,
+                x,
+                y,
+            })
+        });
         Task::batch([leave, dwell])
+    }
+
+    /// How long the pointer rests on a word, at `now`, before its peek
+    /// shows: [`HOVER_DELAY`] — long enough that a pointer crossing the code
+    /// on its way somewhere opens no card over it — or, reading along from
+    /// a peek showing now or a moment ago ([`HOVER_WARM`]), the shorter
+    /// [`HOVER_WARM_DELAY`]. A peek showing marks the moment.
+    pub(crate) fn peek_delay(&mut self, now: std::time::Instant) -> std::time::Duration {
+        if self
+            .proj
+            .hover
+            .as_ref()
+            .is_some_and(HoverState::says_something)
+        {
+            self.proj.hover_seen = Some(now);
+        }
+        match self.proj.hover_seen {
+            Some(seen) if now.saturating_duration_since(seen) < HOVER_WARM => HOVER_WARM_DELAY,
+            _ => HOVER_DELAY,
+        }
     }
 
     /// Whether `(line, col)` of `pane` is on what the open peek `h` is of:
@@ -759,6 +777,13 @@ impl App {
                 let Some(text) = text.filter(|_| open) else {
                     return Task::none();
                 };
+                // rust-analyzer leaves an intra-doc link it could not resolve
+                // as written, `[Subscriber]`: shown as rustdoc shows it.
+                let rust = self.active_viewer().and_then(|v| v.lang_key) == Some("rust");
+                let text = match markdown && rust {
+                    true => clew_core::docs::rustdoc_links(&text),
+                    false => text,
+                };
                 let (prepared, task) = match markdown {
                     true => self.prepare_segments(&text),
                     false => (Vec::new(), Task::none()),
@@ -796,6 +821,20 @@ impl App {
         }
     }
 }
+
+/// How long the pointer rests on a word before its peek shows: as long as
+/// a tooltip's ([`crate::ui::tip::DELAY`]). At 300 ms a card the size of a
+/// crate's docs opened over the code wherever the pointer paused on its way.
+pub(crate) const HOVER_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// How long it rests, reading along from a peek, before the next shows:
+/// shorter, not at once — a code peek is a card, not a word, and one at
+/// every word crossed would flash over the code.
+pub(crate) const HOVER_WARM_DELAY: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// How long after a peek was showing the next one waits only
+/// [`HOVER_WARM_DELAY`].
+pub(crate) const HOVER_WARM: std::time::Duration = std::time::Duration::from_millis(1000);
 
 /// How long the open peek stays once the pointer leaves its word: time to
 /// move into it (and keep it, to read and scroll), short enough that it does
