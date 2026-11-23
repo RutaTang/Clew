@@ -829,10 +829,7 @@ fn chosen_python_env(root: &Path, chosen: &str) -> Option<PythonEnv> {
         Some(repo) => {
             let base = foreign_bytes(&repo, cand)?;
             let venv = cand.parent()?.parent()?;
-            Some(PythonEnv {
-                run: base,
-                extra_paths: site_paths(venv),
-            })
+            Some(reading_env(root, base, site_paths(venv)))
         }
     }
 }
@@ -1430,10 +1427,104 @@ fn find_python_env(root: &Path) -> Option<PythonEnv> {
     }
     // `<venv>/bin/python` (or `Scripts/python.exe`) -> `<venv>`.
     let venv = found.interpreter.parent()?.parent()?.to_path_buf();
-    Some(PythonEnv {
-        run: found.base,
-        extra_paths: site_paths(&venv),
-    })
+    Some(reading_env(root, found.base, site_paths(&venv)))
+}
+
+/// A venv read, not run: the server runs `base` and reads `extra_paths` —
+/// as extra search paths, or, where the project's own pyright configuration
+/// names its own (which replace the ones a client sends), through
+/// [`interpreter_shim`]'s `sys.path`.
+fn reading_env(root: &Path, base: PathBuf, extra_paths: Vec<PathBuf>) -> PythonEnv {
+    let run = match !extra_paths.is_empty() && pyright_config_sets_paths(root) {
+        true => interpreter_shim(&base, &extra_paths).unwrap_or(base),
+        false => base,
+    };
+    PythonEnv { run, extra_paths }
+}
+
+/// Most bytes of a pyright configuration read.
+const MAX_PYRIGHT_CONFIG_BYTES: u64 = 1 << 20;
+
+/// Whether the project's own pyright configuration (`pyrightconfig.json`,
+/// or `[tool.pyright]` in `pyproject.toml`) names its own search paths:
+/// `extraPaths`, or `executionEnvironments`, each with its own. pyright then
+/// takes those instead of the `python.analysis.extraPaths` a client sends,
+/// and a venv's packages handed over that way are lost.
+fn pyright_config_sets_paths(root: &Path) -> bool {
+    const KEYS: [&str; 2] = ["extraPaths", "executionEnvironments"];
+    // JSON with comments: the key, quoted, is all that is looked for.
+    if let Some(text) =
+        crate::statefile::read_capped(&root.join("pyrightconfig.json"), MAX_PYRIGHT_CONFIG_BYTES)
+        && KEYS.iter().any(|k| text.contains(&format!("\"{k}\"")))
+    {
+        return true;
+    }
+    crate::statefile::read_capped(&root.join("pyproject.toml"), MAX_PYRIGHT_CONFIG_BYTES)
+        .and_then(|text| text.parse::<toml::Table>().ok())
+        .and_then(|doc| doc.get("tool")?.get("pyright")?.as_table().cloned())
+        .is_some_and(|pyright| KEYS.iter().any(|k| pyright.contains_key(*k)))
+}
+
+/// An interpreter for pyright to run in place of `base`: `base` itself,
+/// isolated (`-I`: no `PYTHONPATH`, no user site, no script folder), with
+/// `paths` appended to `sys.path` after its own library, so the search paths
+/// pyright reads from it hold the venv's packages, and a module of theirs
+/// named like one of the library's (`json.py`) is never imported in its
+/// place. Nothing of the venv runs: no `pyvenv.cfg` is read, no `.pth`. A
+/// shell script in clew's data directory, one per interpreter and paths;
+/// `None` where there is none to write (Windows: pyright cannot run a
+/// script as its interpreter).
+fn interpreter_shim(base: &Path, paths: &[PathBuf]) -> Option<PathBuf> {
+    if !cfg!(unix) {
+        return None;
+    }
+    let script = shim_script(base, paths)?;
+    use sha2::Digest;
+    let digest = sha2::Sha256::digest(script.as_bytes());
+    let name: String = digest[..8].iter().map(|b| format!("{b:02x}")).collect();
+    let root = crate::lsp::store::data_root()?.join("python-shims");
+    let dir = root.join(name);
+    let shim = dir.join("python");
+    if std::fs::read_to_string(&shim).ok().as_deref() != Some(script.as_str()) {
+        crate::lsp::store::create_store_dir(&root).ok()?;
+        std::fs::create_dir_all(&dir).ok()?;
+        let staged = dir.join(format!(".python.{}", std::process::id()));
+        std::fs::write(&staged, &script).ok()?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755)).ok()?;
+        }
+        std::fs::rename(&staged, &shim).ok()?;
+    }
+    Some(shim)
+}
+
+/// The shim's text: `python -c <code>` (how pyright asks an interpreter for
+/// its search paths and version) runs `<code>` after the paths are added;
+/// anything else runs `base` as asked, isolated. `None` for a path that is
+/// not UTF-8, which the script cannot spell.
+fn shim_script(base: &Path, paths: &[PathBuf]) -> Option<String> {
+    let base = base.to_str()?;
+    let paths: Vec<&str> = paths.iter().map(|p| p.to_str()).collect::<Option<_>>()?;
+    // A JSON list of strings is a Python list literal.
+    let list = serde_json::to_string(&paths).ok()?;
+    let quote = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
+    let code = format!(
+        "import sys; sys.path.extend({list}); \
+         exec(compile(sys.argv.pop(1), '<string>', 'exec'))"
+    );
+    Some(format!(
+        "#!/bin/sh\n\
+         # Written by Clew: pyright's interpreter for a project whose own venv is\n\
+         # read, never run. Remove it freely; Clew writes it again.\n\
+         if [ \"$1\" = \"-c\" ] && [ \"$#\" -eq 2 ]; then\n\
+         \x20 exec {base} -I -c {code} \"$2\"\n\
+         fi\n\
+         exec {base} -I \"$@\"\n",
+        base = quote(base),
+        code = quote(&code),
+    ))
 }
 
 /// Most site-packages directories a venv is searched for.
@@ -2220,6 +2311,107 @@ mod tests {
         assert!(extra[1].ends_with("editable/src"), "{extra:?}");
         // The debugger still runs the venv: it is running the project.
         assert_eq!(project_local(&root), Some(bin.join("python")));
+    }
+
+    /// A project whose own pyright configuration names its search paths
+    /// (which replace the ones a client sends) has its venv's packages put
+    /// on the path pyright reads from the interpreter instead: the base,
+    /// through a shim in clew's data directory. Without one the extra paths
+    /// stay the way they are handed over.
+    #[test]
+    #[cfg(unix)]
+    fn a_pyright_config_with_its_own_paths_gets_the_venv_through_a_shim() {
+        let data = scratch("shim-data");
+        let _env = crate::testutil::EnvVars::new()
+            .remove("VIRTUAL_ENV")
+            .set("CLEW_DATA_DIR", &data);
+        let root = scratch("shim");
+        let base = system_python("shim-base", BASE_BYTES);
+        let bin = venv_bin(&root, ".venv");
+        std::os::unix::fs::symlink(base.join("python3.12"), bin.join("python")).unwrap();
+        std::fs::write(
+            root.join(".venv/pyvenv.cfg"),
+            format!("home = {}\n", base.display()),
+        )
+        .unwrap();
+        let site = root.join(".venv/lib/python3.12/site-packages");
+        std::fs::create_dir_all(&site).unwrap();
+        let run = |root: &Path| {
+            let opts = detect("python", "pyright", root).unwrap();
+            PathBuf::from(opts["python"]["pythonPath"].as_str().unwrap())
+        };
+        // No configuration of its own: the base, as before.
+        assert_eq!(run(&root), base.join("python3.12"));
+        std::fs::write(
+            root.join("pyproject.toml"),
+            "[tool.pyright]\nextraPaths = [\"src\"]\n",
+        )
+        .unwrap();
+        let shim = run(&root);
+        assert!(shim.starts_with(&data), "{}", shim.display());
+        let text = std::fs::read_to_string(&shim).unwrap();
+        assert!(
+            text.contains(&format!("'{}' -I", base.join("python3.12").display())),
+            "{text}"
+        );
+        assert!(text.contains(site.to_str().unwrap()), "{text}");
+        // The same shim the next time: written once.
+        assert_eq!(run(&root), shim);
+        std::fs::remove_file(root.join("pyproject.toml")).unwrap();
+        std::fs::write(
+            root.join("pyrightconfig.json"),
+            "{\n  // ours\n  \"executionEnvironments\": [{\"root\": \"src\"}]\n}\n",
+        )
+        .unwrap();
+        assert_eq!(run(&root), shim);
+        std::fs::write(
+            root.join("pyrightconfig.json"),
+            "{\"typeCheckingMode\": \"strict\"}",
+        )
+        .unwrap();
+        assert_eq!(run(&root), base.join("python3.12"));
+    }
+
+    /// The shim runs the real base isolated, the venv's packages after its
+    /// own library: what pyright reads holds them, and a venv module named
+    /// like the library's (`json.py`) is never what is imported.
+    #[test]
+    #[cfg(unix)]
+    fn the_shim_adds_the_venvs_packages_after_the_library() {
+        let Some(python) = crate::lsp::store::find_on_path_unresolved("python3") else {
+            return;
+        };
+        let dir = scratch("shim-run");
+        let site = dir.join("it's site-packages");
+        std::fs::create_dir_all(&site).unwrap();
+        let planted = dir.join("planted");
+        std::fs::write(
+            site.join("json.py"),
+            format!("open({:?}, 'w').close()\n", planted.to_str().unwrap()),
+        )
+        .unwrap();
+        let shim = dir.join("python");
+        std::fs::write(
+            &shim,
+            shim_script(&python, std::slice::from_ref(&site)).unwrap(),
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let out = std::process::Command::new(&shim)
+            .args(["-c", "import sys, json; json.dump(sys.path, sys.stdout)"])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let path: Vec<String> = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(path.last().map(String::as_str), site.to_str());
+        assert!(!planted.exists(), "the venv's json.py ran");
     }
 
     /// typescript-language-server runs the project's own TypeScript when it
