@@ -2056,8 +2056,9 @@ pub enum DebugMsg {
     /// install itself is reported whatever the project).
     AdapterInstalled {
         stamp: Stamp,
-        /// It was pytest, which runs tests: no debug adapter.
-        test_runner: bool,
+        /// What was installed: a debug adapter, pytest (which runs tests),
+        /// or a script's own packages — each said as what it is.
+        install: crate::dap::AdapterInstall,
         result: Result<(), String>,
     },
 }

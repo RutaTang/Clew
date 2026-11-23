@@ -2733,6 +2733,101 @@ mod tests {
         assert!(printed.contains("module hello"), "{printed:?}");
     }
 
+    /// A script listing its packages (PEP 723) asks for them first (uv's
+    /// `sync --script`, shown before it runs), then runs in the environment
+    /// uv keeps for it, its import of them working. Needs `python3`, `uv`,
+    /// debugpy and the package index.
+    #[tokio::test]
+    #[ignore = "needs python3, uv, debugpy and PyPI; run explicitly"]
+    async fn a_script_listing_its_packages_runs_with_them() {
+        let dir = clew_core::testutil::TempDir::new("dap-pep723-live");
+        let script = dir.join("tool.py");
+        // A name of this run's own: uv keeps one environment per script.
+        std::fs::write(
+            &script,
+            format!(
+                "# /// script\n# dependencies = [\"six\"]\n# ///\n# {:?}\nimport six\nprint('six', six.__version__)\n",
+                std::time::SystemTime::now()
+            ),
+        )
+        .unwrap();
+        let resolve = || {
+            clew_core::debugadapter::resolve(
+                "python",
+                &script.to_string_lossy(),
+                &[],
+                &dir,
+                &dir,
+                &Default::default(),
+                None,
+            )
+        };
+        match resolve() {
+            Ok(clew_core::debugadapter::Resolution::NeedsInstall(install)) => {
+                assert!(install.is_script_packages(), "{install:?}");
+                assert!(install.describe().contains("sync --script"));
+                install
+                    .install_cancellable(&std::sync::atomic::AtomicBool::new(false))
+                    .expect("uv installed the packages");
+            }
+            other => panic!("asked for the packages first: {other:?}"),
+        }
+        // Clew's own debugpy, when this data folder has none yet: asked for
+        // next, as it would be of anyone.
+        let spec = match resolve() {
+            Ok(clew_core::debugadapter::Resolution::Ready(spec)) => spec,
+            Ok(clew_core::debugadapter::Resolution::NeedsInstall(install))
+                if install == clew_core::debugadapter::AdapterInstall::Debugpy =>
+            {
+                install
+                    .install_cancellable(&std::sync::atomic::AtomicBool::new(false))
+                    .expect("debugpy downloaded");
+                match resolve() {
+                    Ok(clew_core::debugadapter::Resolution::Ready(spec)) => spec,
+                    other => panic!("{other:?}"),
+                }
+            }
+            other => panic!("{other:?}"),
+        };
+        assert!(
+            spec.command.to_string_lossy().contains("environments-v"),
+            "run in the script's environment: {}",
+            spec.command.display()
+        );
+        let (client, mut events) =
+            DapClient::start(&spec.command, &spec.args, &dir, Transport::Stdio)
+                .await
+                .expect("debugpy started");
+        client.initialize().await.expect("initialized");
+        let launched = client.launch(spec.launch.clone());
+        tokio::pin!(launched);
+        let mut printed = String::new();
+        let (mut configured, mut launch_answered) = (false, false);
+        loop {
+            let event = tokio::select! {
+                event = events.recv() => event,
+                answer = &mut launched, if !launch_answered => {
+                    launch_answered = true;
+                    assert_eq!(answer, Ok(()));
+                    continue;
+                }
+                _ = tokio::time::sleep(Duration::from_secs(60)) => panic!("no event in time: {printed:?}"),
+            };
+            match event {
+                Some(DapEvent::Initialized) if !configured => {
+                    configured = true;
+                    client.configuration_done().await.unwrap();
+                }
+                Some(DapEvent::Output(o)) if o.category == "stdout" || o.category == "stderr" => {
+                    printed.push_str(&o.text);
+                }
+                Some(DapEvent::Terminated) | None => break,
+                Some(_) => {}
+            }
+        }
+        assert!(printed.contains("six 1."), "{printed:?}");
+    }
+
     /// F9: a TCP adapter is reached at the port it announced — not at one
     /// guessed in advance — and the session is wired over that socket.
     #[tokio::test]

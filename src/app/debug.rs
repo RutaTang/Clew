@@ -704,11 +704,24 @@ impl App {
         // program, config, and adapter binary all live on that host, so
         // nothing here may read or probe the local filesystem).
         let remote = self.connection.is_remote();
-        // A test is run by this computer's own toolchain: a remote
-        // project's program and tests are those its launch file names.
-        if remote && plan.is_some() {
+        // A Rust test is built by this computer's Cargo, and a Lean file
+        // run by its Lean: a remote project's are those its launch file
+        // names. A Python test is run on the remote host, by its pytest.
+        let remote_test = match (&plan, remote) {
+            (Some(crate::app::runplan::RunPlan::Pytest { file, node, .. }), true) => Some(
+                serde_json::json!({
+                    "type": "python",
+                    "program": file.to_string_lossy(),
+                    "args": [node],
+                    "cwd": root.to_string_lossy(),
+                })
+                .to_string(),
+            ),
+            _ => None,
+        };
+        if remote && plan.is_some() && remote_test.is_none() {
             self.status = tr!(
-                "Run Test works on projects on this computer. In a remote project, run tests through a program named in .clew/launch.json."
+                "Rust tests run on projects on this computer. In a remote project, run them through a program named in .clew/launch.json."
             )
             .into();
             return Task::none();
@@ -929,6 +942,10 @@ impl App {
             None if matches!(plan, Some(RunPlan::Lean { .. })) => {
                 tr!("Running {file} with Lean…", file = program_name)
             }
+            None if matches!(plan, Some(RunPlan::Pytest { .. })) => tr!(
+                "Running {test} on the remote host…",
+                test = plan.as_ref().map(RunPlan::label).unwrap_or_default()
+            ),
             None if no_debug => tr!("Starting the program on the remote host…").into(),
             None => tr!("Starting debugger on the remote host…").into(),
         };
@@ -1000,14 +1017,23 @@ impl App {
                             .await;
                         return;
                     };
-                    // The launch config lives in the REMOTE .clew.
-                    let text = match ai
-                        .request(clew_protocol::Request::ReadState {
+                    // The launch config lives in the REMOTE .clew — or, for
+                    // one test, is the test's own.
+                    let read = match &remote_test {
+                        Some(test) => Ok(clew_protocol::Event::StateContent {
                             root: root.to_string_lossy().into_owned(),
                             rel: "launch.json".into(),
-                        })
-                        .await
-                    {
+                            text: Some(test.clone()),
+                        }),
+                        None => {
+                            ai.request(clew_protocol::Request::ReadState {
+                                root: root.to_string_lossy().into_owned(),
+                                rel: "launch.json".into(),
+                            })
+                            .await
+                        }
+                    };
+                    let text = match read {
                         Ok(clew_protocol::Event::StateContent { text: Some(t), .. }) => t,
                         Ok(clew_protocol::Event::StateContent { text: None, .. }) => {
                             let error = tr!(
@@ -1522,16 +1548,20 @@ impl App {
         if self.proj.project.is_none() {
             return Task::none();
         }
-        // pytest is not a debugger: a test, run or debugged, needs it.
-        self.status = match install.is_test_runner() {
-            true => tr!(
+        // pytest is not a debugger: a test, run or debugged, needs it; nor
+        // are a script's own packages.
+        self.status = if install.is_script_packages() {
+            tr!("This script needs the packages it lists. Waiting for your approval.").into()
+        } else if install.is_test_runner() {
+            tr!(
                 "Running tests needs {runner}. Waiting for your approval.",
                 runner = install.name()
-            ),
-            false => tr!(
+            )
+        } else {
+            tr!(
                 "Debugging needs {adapter}. Waiting for your approval.",
                 adapter = install.name()
-            ),
+            )
         };
         self.proj.pending_lsp_consent.offer(LspConsent {
             on_path: None,
@@ -1553,26 +1583,29 @@ impl App {
         install: dap::AdapterInstall,
         stamp: Stamp,
     ) -> Task<Message> {
-        let test_runner = install.is_test_runner();
-        self.status = tr!(
-            "Installing {name} {version}…",
-            name = install.name(),
-            version = install.version()
-        );
+        self.status = match install.is_script_packages() {
+            true => tr!("Installing the packages the script lists…").into(),
+            false => tr!(
+                "Installing {name} {version}…",
+                name = install.name(),
+                version = install.version()
+            ),
+        };
+        let installing = install.clone();
         // Raised when the project it was consented in is left (the session
         // is dropped whole): the install stops between chunks, or its `pip`
         // is killed, instead of running on for a session that cannot start.
         let cancel = self.proj.adapter_install_cancel.flag();
         Task::perform(
             async move {
-                tokio::task::spawn_blocking(move || install.install_cancellable(&cancel))
+                tokio::task::spawn_blocking(move || installing.install_cancellable(&cancel))
                     .await
                     .unwrap_or_else(|e| Err(e.to_string()))
             },
             move |result| {
                 Message::Debug(DebugMsg::AdapterInstalled {
                     stamp: stamp.clone(),
-                    test_runner,
+                    install: install.clone(),
                     result,
                 })
             },
@@ -1587,7 +1620,7 @@ impl App {
     pub(crate) fn on_debug_adapter_installed(
         &mut self,
         stamp: Stamp,
-        test_runner: bool,
+        install: dap::AdapterInstall,
         result: Result<(), String>,
     ) -> Task<Message> {
         match result {
@@ -1600,8 +1633,13 @@ impl App {
                 );
                 Task::none()
             }
-            // pytest is no debug adapter: what failed is named as it is.
-            Err(e) if test_runner => {
+            // pytest is no debug adapter: what failed is named as it is;
+            // a script's packages say so themselves.
+            Err(e) if install.is_script_packages() => {
+                self.status = crate::i18n::message(&e);
+                Task::none()
+            }
+            Err(e) if install.is_test_runner() => {
                 self.status = tr!("pytest install failed: {error}", error = e);
                 Task::none()
             }
@@ -1615,9 +1653,12 @@ impl App {
                 self.start_session(self.debug.no_debug, self.debug.plan.clone())
             }
             Ok(()) => {
-                self.status = match test_runner {
-                    true => tr!("pytest installed").into(),
-                    false => tr!("Debug adapter installed").into(),
+                self.status = if install.is_script_packages() {
+                    tr!("The script's packages are installed").into()
+                } else if install.is_test_runner() {
+                    tr!("pytest installed").into()
+                } else {
+                    tr!("Debug adapter installed").into()
                 };
                 Task::none()
             }
@@ -3508,9 +3549,9 @@ impl App {
             }
             DebugMsg::AdapterInstalled {
                 stamp,
-                test_runner,
+                install,
                 result,
-            } => self.on_debug_adapter_installed(stamp, test_runner, result),
+            } => self.on_debug_adapter_installed(stamp, install, result),
             DebugMsg::ToggleBreakpointFromMenu => self.on_toggle_breakpoint_from_menu(),
             DebugMsg::ConditionalBreakpointFromMenu => self.on_conditional_breakpoint_from_menu(),
             DebugMsg::BpConditionInput(s) => {

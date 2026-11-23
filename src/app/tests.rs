@@ -23466,7 +23466,7 @@ fn a_debug_adapter_install_is_consented_and_restarts_only_the_same_project() {
         app.status
     );
     let _ = app.update(Message::Debug(DebugMsg::AdapterInstalled {
-        test_runner: false,
+        install: crate::dap::AdapterInstall::JsDebug,
         stamp: Stamp {
             root: Some(root.clone()),
             epoch: app.project_epoch,
@@ -23493,7 +23493,7 @@ fn a_debug_adapter_install_is_consented_and_restarts_only_the_same_project() {
     scan_synchronously(&mut app, root.clone());
     assert_ne!(app.project_epoch, asked_in);
     let _ = app.update(Message::Debug(DebugMsg::AdapterInstalled {
-        test_runner: false,
+        install: crate::dap::AdapterInstall::JsDebug,
         stamp: Stamp {
             root: Some(root.clone()),
             epoch: asked_in,
@@ -23509,7 +23509,7 @@ fn a_debug_adapter_install_is_consented_and_restarts_only_the_same_project() {
 
     // A failed install says so and starts nothing.
     let _ = app.update(Message::Debug(DebugMsg::AdapterInstalled {
-        test_runner: false,
+        install: crate::dap::AdapterInstall::JsDebug,
         stamp: Stamp {
             root: Some(root),
             epoch: app.project_epoch,
@@ -44309,4 +44309,62 @@ fn a_launch_files_fields_go_into_the_python_launch() {
     assert_eq!(launch["env"]["PYTHONDONTWRITEBYTECODE"], "1");
     assert_eq!(launch["env"]["PYTHONPATH"], "/x", "the file's over Clew's");
     assert_eq!(launch["env"]["MODE"], "dev");
+}
+
+/// Run Test on a Python test of a remote project runs it there: no launch
+/// file is read, and the server is asked for Python's adapter on the test's
+/// file with its pytest node id — which it runs under pytest, on the host.
+/// Remote projects used to be told to write a launch file instead.
+#[test]
+fn a_remote_python_test_runs_on_its_host() {
+    use clew_protocol::Request;
+    use std::time::{Duration, Instant};
+    let (mut app, root, mut rx) = remote_app("remote-run-test");
+    let file = root.join("tests/test_sum.py");
+    let node = format!("{}::test_sum", file.display());
+    let plan = crate::app::runplan::RunPlan::Pytest {
+        file: file.clone(),
+        node: node.clone(),
+        name: "test_sum".into(),
+    };
+    let start = app.start_session(true, Some(plan));
+    assert!(
+        app.status.contains("test_sum") && app.status.contains("remote"),
+        "{}",
+        app.status
+    );
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let run = rt.spawn(async move {
+        use iced::futures::StreamExt;
+        if let Some(actions) = iced_test::runtime::task::into_stream(start) {
+            actions.for_each(|_| std::future::ready(())).await;
+        }
+    });
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let asked = loop {
+        assert!(Instant::now() < deadline, "nothing was asked of the server");
+        match rx.try_recv() {
+            Ok(msg) => match msg.request {
+                Request::ReadState { rel, .. } if rel == "launch.json" => {
+                    panic!("a test needs no launch file")
+                }
+                Request::SpawnAdapter {
+                    lang,
+                    program,
+                    args,
+                    ..
+                } => break (lang, program, args),
+                _ => {}
+            },
+            Err(_) => std::thread::sleep(Duration::from_millis(5)),
+        }
+    };
+    assert_eq!(asked.0, "python");
+    assert_eq!(asked.1, file.to_string_lossy());
+    assert_eq!(asked.2, [node]);
+    run.abort();
 }

@@ -53,6 +53,9 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!(
         "This call was not run because at most {MAX_CALLS_PER_STEP} tool calls run per step. Request it again in your next step if you still need it."
     ),
+    tr_noop!(
+        "This script lists the packages it needs (# /// script), and uv isn't installed to install them, so it runs with the project's Python. Install uv to run it with its own packages."
+    ),
     tr_noop!("TypeScript {v} (installed in {place})"),
     tr_noop!("WAV format {tag} at {bits} bits is not supported"),
     tr_noop!("Xdebug closed the connection"),
@@ -508,6 +511,9 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("the node did not connect: {e}"),
     tr_noop!("the node is gone"),
     tr_noop!("the node is gone: {e}"),
+    tr_noop!(
+        "the packages {arg1} lists are not installed on the remote host. Install them there: uv sync --script {arg2}"
+    ),
     tr_noop!("the program did not compile. See the output"),
     tr_noop!("the program ended before Xdebug connected. See its output"),
     tr_noop!("the program ended before Xdebug read the command"),
@@ -536,6 +542,7 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("the response has a line longer than {kib} KiB"),
     tr_noop!("the response headers exceed {arg1} KiB"),
     tr_noop!("the response is not valid HTTP: {e}"),
+    tr_noop!("the script's packages could not be installed: {last}"),
     tr_noop!(
         "the semantic index has {dims}-dimensional vectors, but the query embedding has {arg1}. The embedding endpoint changed its output, so rebuild the index"
     ),
@@ -660,6 +667,7 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("unsupported remote platform {platform}"),
     tr_noop!("unusable proxy setting {arg1}: {why}"),
     tr_noop!("update check failed: {e}"),
+    tr_noop!("uv installed the script's packages, but its environment wasn't found afterwards"),
     tr_noop!(
         "version {arg1} is not a plain version. It can use only ASCII letters, digits and . - _ +, must start with a letter or digit, and can be at most {arg2} characters long"
     ),

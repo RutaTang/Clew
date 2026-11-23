@@ -124,6 +124,10 @@ pub enum AdapterInstall {
     /// Download the pinned vscode-js-debug, verify its SHA-256, and unpack it
     /// into clew's data directory.
     JsDebug,
+    /// Install the packages a script lists in its inline metadata (PEP 723,
+    /// `# /// script`) into the environment `uv` keeps for it
+    /// (`uv sync --script`): what `uv run` would run it in.
+    ScriptEnv { uv: PathBuf, script: PathBuf },
 }
 
 /// What installs a package into a Python environment.
@@ -144,6 +148,7 @@ impl AdapterInstall {
             AdapterInstall::Debugpy => "debugpy",
             AdapterInstall::Pytest { .. } => "pytest",
             AdapterInstall::JsDebug => "vscode-js-debug",
+            AdapterInstall::ScriptEnv { .. } => "uv",
         }
     }
 
@@ -152,7 +157,15 @@ impl AdapterInstall {
             AdapterInstall::Debugpy => DEBUGPY_VERSION,
             AdapterInstall::Pytest { .. } => PYTEST_VERSION,
             AdapterInstall::JsDebug => JS_DEBUG_VERSION,
+            // Whatever the script asks for.
+            AdapterInstall::ScriptEnv { .. } => "",
         }
+    }
+
+    /// Whether this installs the packages a script lists (PEP 723): what
+    /// the consent prompt and the status line then say.
+    pub fn is_script_packages(&self) -> bool {
+        matches!(self, AdapterInstall::ScriptEnv { .. })
     }
 
     /// Whether this installs what runs tests rather than a debugger: what
@@ -184,6 +197,9 @@ impl AdapterInstall {
                 "download {} (SHA-256 {}) into Clew's data directory",
                 JS_DEBUG.url, JS_DEBUG.sha256
             ),
+            AdapterInstall::ScriptEnv { uv, script } => {
+                format!("{} sync --script {}", uv.display(), script.display())
+            }
         }
     }
 
@@ -203,6 +219,7 @@ impl AdapterInstall {
             AdapterInstall::Debugpy => install_debugpy(cancel).map(|_| ()),
             AdapterInstall::Pytest { python, via } => install_pytest(python, via, cancel),
             AdapterInstall::JsDebug => install_js_debug(cancel).map(|_| ()),
+            AdapterInstall::ScriptEnv { uv, script } => install_script_env(uv, script, cancel),
         }
     }
 }
@@ -261,13 +278,45 @@ pub fn resolve(
             Ok(Resolution::Ready(spec))
         }
         "python" => {
-            let python = python_for(
-                root,
-                choices.python.as_deref(),
-                crate::linerpc::spawn_path().as_deref(),
-            )
-            .ok_or("python not found on PATH")?;
-            python_with(&python, program, args, cwd)
+            // A script that lists the packages it needs (PEP 723) runs in
+            // the environment uv keeps for it, as `uv run` runs it: run in
+            // the project's, its imports failed.
+            let script = in_dir(cwd, program);
+            let path = crate::linerpc::spawn_path();
+            let mut notice = None;
+            let own_env = match lists_its_packages(&script) {
+                false => None,
+                true => match path
+                    .as_deref()
+                    .and_then(|path| store::find_in_unresolved(path, "uv"))
+                {
+                    Some(uv) => match script_env(&uv, &script) {
+                        Some(env) => Some(env),
+                        None => {
+                            return Ok(Resolution::NeedsInstall(AdapterInstall::ScriptEnv {
+                                uv,
+                                script,
+                            }));
+                        }
+                    },
+                    None => {
+                        let msg = "This script lists the packages it needs (# /// script), and uv isn't installed to install them, so it runs with the project's Python. Install uv to run it with its own packages."
+                            .to_string();
+                        notice = Some(msg);
+                        None
+                    }
+                },
+            };
+            let python = match own_env {
+                Some(env) => env,
+                None => python_for(root, choices.python.as_deref(), path.as_deref())
+                    .ok_or("python not found on PATH")?,
+            };
+            let mut resolved = python_with(&python, program, args, cwd)?;
+            if let (Some(notice), Resolution::Ready(spec)) = (notice, &mut resolved) {
+                spec.launch[NOTICE] = json!(notice);
+            }
+            Ok(resolved)
         }
         "dart" => {
             let command = match chosen_sdk(choices, "dart") {
@@ -394,6 +443,77 @@ pub fn resolve(
             )))
         }
         other => Err(format!("no debug adapter for {other}")),
+    }
+}
+
+/// Most bytes of a script read for its inline metadata.
+const MAX_SCRIPT_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Whether `script` lists the packages it needs in its inline metadata
+/// (PEP 723): a `# /// script` line, closed by a `# ///` line.
+pub fn lists_its_packages(script: &Path) -> bool {
+    if script.extension().is_none_or(|e| e != "py") {
+        return false;
+    }
+    let Some(text) = crate::statefile::read_capped(script, MAX_SCRIPT_BYTES) else {
+        return false;
+    };
+    let mut lines = text.lines().map(str::trim_end);
+    lines.any(|l| l == "# /// script") && lines.any(|l| l == "# ///")
+}
+
+/// The interpreter of the environment `uv` keeps for `script` (PEP 723),
+/// once it has made one (`uv sync --script`): `uv python find --script`
+/// names it — or, before then, only a base Python, which is no answer.
+fn script_env(uv: &Path, script: &Path) -> Option<PathBuf> {
+    let mut cmd = crate::spawn::command(uv);
+    cmd.args(["python", "find", "--script"]).arg(script);
+    neutral(&mut cmd);
+    let out = store::run_bounded(cmd, PROBE_TIMEOUT).ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let found = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+    is_script_env(&found).then_some(found)
+}
+
+/// Whether `python` is in an environment uv keeps for a script — under its
+/// cache's `environments-v…` folder — and not a base Python.
+fn is_script_env(python: &Path) -> bool {
+    python.is_absolute()
+        && python.ancestors().any(|dir| {
+            dir.file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with("environments-v"))
+        })
+}
+
+/// Install the packages `script` lists into the environment uv keeps for
+/// it, then confirm it is found.
+fn install_script_env(uv: &Path, script: &Path, cancel: &AtomicBool) -> Result<(), String> {
+    let mut cmd = crate::spawn::command(uv);
+    cmd.args(["sync", "--script"]).arg(script);
+    neutral(&mut cmd);
+    let out = store::run_bounded_cancellable(cmd, PIP_TIMEOUT, cancel)?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let last = stderr
+            .lines()
+            .rev()
+            .map(str::trim)
+            .find(|l| !l.is_empty() && !l.starts_with("hint:") && !l.starts_with("warning:"))
+            .unwrap_or("uv failed");
+        return Err(format!(
+            "the script's packages could not be installed: {last}"
+        ));
+    }
+    match script_env(uv, script) {
+        Some(_) => Ok(()),
+        None => {
+            let msg =
+                "uv installed the script's packages, but its environment wasn't found afterwards"
+                    .to_string();
+            Err(msg)
+        }
     }
 }
 
@@ -982,7 +1102,7 @@ fn python_with_adapter(
     // the package sits in goes on the import path. One that imports its
     // siblings relatively (`from .models import …`) has no package at all
     // as a script, so it runs as Python runs a package's module: `-m`.
-    let package = python_package(&in_dir(cwd, program));
+    let package = python_package(&in_dir(cwd, program), cwd);
     let mut path: Vec<PathBuf> = package.iter().map(|p| p.root.clone()).collect();
     // A `src/` layout not installed (`src/library/…`, the tests beside it):
     // its tests and programs import the package by name, and pytest run
@@ -1026,10 +1146,13 @@ fn python_with_adapter(
             // of pytest's machinery.
             launch.insert("justMyCode".into(), json!(true));
             launch.insert(EXCEPTIONS.into(), json!(["userUnhandled"]));
-            let mut test_args = match one_test {
-                true => Vec::new(),
-                false => vec![json!(program)],
-            };
+            // pytest's cache (`.pytest_cache`) is not written into the
+            // project: a run to read the code by leaves no trace in it, as
+            // its bytecode is not written either.
+            let mut test_args = vec![json!("-p"), json!("no:cacheprovider")];
+            if !one_test {
+                test_args.push(json!(program));
+            }
             test_args.extend(args.iter().map(|a| json!(a)));
             launch.insert("args".into(), json!(test_args));
         } else if one_test || !runs_its_own_tests(&in_dir(cwd, program)) {
@@ -1109,7 +1232,8 @@ pub fn is_python_test(file: &Path) -> bool {
 /// The package a Python file is a module of: the folder the outermost
 /// package sits in (what goes on the import path), the module's dotted
 /// name, and whether it imports relatively. `None` for a file outside any
-/// package (no `__init__.py` beside it), or a package's own `__init__.py`.
+/// package (no `__init__.py` beside it, and no relative import making a
+/// namespace package's module of it), or a package's own `__init__.py`.
 #[derive(Debug, PartialEq)]
 struct PythonPackage {
     root: PathBuf,
@@ -1117,24 +1241,10 @@ struct PythonPackage {
     relative_imports: bool,
 }
 
-fn python_package(file: &Path) -> Option<PythonPackage> {
+fn python_package(file: &Path, cwd: &Path) -> Option<PythonPackage> {
     let stem = file.file_stem()?.to_str()?;
     if stem == "__init__" || file.extension()? != "py" {
         return None;
-    }
-    let mut dir = file.parent()?;
-    let mut parts = Vec::new();
-    while dir.join("__init__.py").is_file() {
-        parts.push(dir.file_name()?.to_str()?.to_string());
-        dir = dir.parent()?;
-    }
-    if parts.is_empty() {
-        return None;
-    }
-    parts.reverse();
-    // `python -m pkg` runs `pkg/__main__.py`.
-    if stem != "__main__" {
-        parts.push(stem.to_string());
     }
     let source = std::fs::read_to_string(file).unwrap_or_default();
     let relative_imports = source.lines().any(|line| {
@@ -1143,10 +1253,64 @@ fn python_package(file: &Path) -> Option<PythonPackage> {
             rest.trim_start().starts_with('.') && rest.starts_with(char::is_whitespace)
         })
     });
+    let mut dir = file.parent()?;
+    let mut parts = Vec::new();
+    while dir.join("__init__.py").is_file() {
+        parts.push(dir.file_name()?.to_str()?.to_string());
+        dir = dir.parent()?;
+    }
+    if parts.is_empty() {
+        // A namespace package's module (PEP 420: no `__init__.py`) that
+        // imports its siblings relatively is a package's all the same:
+        // named from the folder it is imported from — the project's `src`
+        // when it is in one, else the folder it runs in.
+        return relative_imports
+            .then(|| namespace_module(file, cwd))
+            .flatten();
+    }
+    parts.reverse();
+    // `python -m pkg` runs `pkg/__main__.py`.
+    if stem != "__main__" {
+        parts.push(stem.to_string());
+    }
     Some(PythonPackage {
         root: dir.to_path_buf(),
         module: parts.join("."),
         relative_imports,
+    })
+}
+
+/// [`python_package`] of a namespace package's `file`: its module named
+/// from the project's `src`, else `cwd` — every folder on the way a name
+/// Python can import — or none outside them.
+fn namespace_module(file: &Path, cwd: &Path) -> Option<PythonPackage> {
+    let src = cwd.join("src");
+    let root = [src, cwd.to_path_buf()]
+        .into_iter()
+        .find(|root| file.starts_with(root))?;
+    let rel = file.strip_prefix(&root).ok()?.with_extension("");
+    let parts: Vec<String> = rel
+        .components()
+        .map(|c| c.as_os_str().to_str().map(str::to_string))
+        .collect::<Option<_>>()?;
+    let importable = |p: &String| {
+        p.chars()
+            .next()
+            .is_some_and(|c| c.is_alphabetic() || c == '_')
+            && p.chars().all(|c| c.is_alphanumeric() || c == '_')
+    };
+    // A module of no package at all is no package's.
+    if parts.len() < 2 || !parts.iter().all(importable) {
+        return None;
+    }
+    let mut parts = parts;
+    if parts.last().is_some_and(|p| p == "__main__") {
+        parts.pop();
+    }
+    Some(PythonPackage {
+        root,
+        module: parts.join("."),
+        relative_imports: true,
     })
 }
 
@@ -1553,6 +1717,11 @@ pub fn resolve_stdio(
              (python3 -m pip install debugpy, or uv pip install debugpy)"
                 .into(),
         ),
+        Resolution::NeedsInstall(AdapterInstall::ScriptEnv { script, .. }) => Err(format!(
+            "the packages {} lists are not installed on the remote host. Install them there: uv sync --script {}",
+            script.display(),
+            script.display()
+        )),
         Resolution::NeedsInstall(install) => Err(format!(
             "{} is not installed on the remote host. Install it there: {}",
             install.name(),
@@ -1600,6 +1769,78 @@ mod tests {
     #[cfg(unix)]
     use crate::testutil::EnvVars;
     use crate::testutil::TempDir;
+
+    /// A script that lists the packages it needs (PEP 723) is told apart by
+    /// its `# /// script` block, closed; the environment uv keeps for it is
+    /// told apart from a base Python; and its install is what is shown.
+    #[test]
+    fn a_script_that_lists_its_packages_runs_in_its_own_environment() {
+        let dir = TempDir::new("dap-pep723");
+        let script = dir.path().join("tool.py");
+        std::fs::write(
+            &script,
+            "# /// script\n# dependencies = [\"six\"]\n# ///\nimport six\n",
+        )
+        .unwrap();
+        assert!(lists_its_packages(&script));
+        let open = dir.path().join("open.py");
+        std::fs::write(&open, "# /// script\n# dependencies = []\nimport os\n").unwrap();
+        assert!(!lists_its_packages(&open), "never closed");
+        let plain = dir.path().join("plain.py");
+        std::fs::write(&plain, "import os\n").unwrap();
+        assert!(!lists_its_packages(&plain));
+        assert!(is_script_env(Path::new(
+            "/home/u/.cache/uv/environments-v2/tool-6e053ea93277214d/bin/python3"
+        )));
+        assert!(!is_script_env(Path::new("/usr/bin/python3")));
+        assert!(!is_script_env(Path::new("environments-v2/x/bin/python3")));
+        let install = AdapterInstall::ScriptEnv {
+            uv: PathBuf::from("/u/bin/uv"),
+            script: script.clone(),
+        };
+        assert!(install.is_script_packages());
+        assert!(!install.is_test_runner() && !install.is_download());
+        assert_eq!(
+            install.describe(),
+            format!("/u/bin/uv sync --script {}", script.display())
+        );
+    }
+
+    /// A namespace package's module (no `__init__.py`) that imports its
+    /// siblings relatively runs as `python -m`, named from the project's
+    /// `src`, else its folder: as a script it had no package at all. One at
+    /// the top, or under a folder Python cannot import, does not.
+    #[test]
+    fn a_namespace_packages_module_runs_as_a_module() {
+        let dir = TempDir::new("dap-namespace-pkg");
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("shop/orders")).unwrap();
+        let module = root.join("shop/orders/totals.py");
+        std::fs::write(&module, "from .prices import PRICES\n").unwrap();
+        let found = python_package(&module, root).expect("a package's module");
+        assert_eq!(found.module, "shop.orders.totals");
+        assert_eq!(found.root, root);
+        assert!(found.relative_imports);
+        std::fs::create_dir_all(root.join("src/lib")).unwrap();
+        let in_src = root.join("src/lib/core.py");
+        std::fs::write(&in_src, "from . import util\n").unwrap();
+        let found = python_package(&in_src, root).unwrap();
+        assert_eq!(
+            (found.module.as_str(), found.root),
+            ("lib.core", root.join("src"))
+        );
+        // Imports only absolutely: run as the script it is.
+        let absolute = root.join("shop/cli.py");
+        std::fs::write(&absolute, "import shop.orders\n").unwrap();
+        assert_eq!(python_package(&absolute, root), None);
+        let top = root.join("main.py");
+        std::fs::write(&top, "from . import x\n").unwrap();
+        assert_eq!(python_package(&top, root), None);
+        std::fs::create_dir_all(root.join("my-tools")).unwrap();
+        let dashed = root.join("my-tools/run.py");
+        std::fs::write(&dashed, "from . import x\n").unwrap();
+        assert_eq!(python_package(&dashed, root), None);
+    }
 
     /// A Rust program is debugged as rust-lldb sets lldb up for it: the
     /// toolchain's type summaries read silently from its sysroot, and a stop
@@ -2177,7 +2418,11 @@ mod tests {
         // through the project's code.
         assert_eq!(test[EXCEPTIONS], json!(["userUnhandled"]));
         assert_eq!(test["justMyCode"], true);
-        assert_eq!(test["args"], json!(["/p/tests/test_pricing.py", "-q"]));
+        // pytest's cache folder is not written into the project.
+        assert_eq!(
+            test["args"],
+            json!(["-p", "no:cacheprovider", "/p/tests/test_pricing.py", "-q"])
+        );
         let script = launch(&with_pytest, "/p/main.py");
         assert_eq!(script["program"], "/p/main.py");
         assert!(script.get("module").is_none());
@@ -2199,11 +2444,18 @@ mod tests {
         assert_eq!(test["module"], "pytest");
         assert_eq!(
             test["args"],
-            json!(["/p/tests/test_pricing.py::TestTotal::test_adds"])
+            json!([
+                "-p",
+                "no:cacheprovider",
+                "/p/tests/test_pricing.py::TestTotal::test_adds"
+            ])
         );
         let test = one("/p/checks.py", "/p/checks.py::test_ok");
         assert_eq!(test["module"], "pytest");
-        assert_eq!(test["args"], json!(["/p/checks.py::test_ok"]));
+        assert_eq!(
+            test["args"],
+            json!(["-p", "no:cacheprovider", "/p/checks.py::test_ok"])
+        );
         assert!(!names_a_test_of("/p/checks.py::", "/p/checks.py"));
         assert!(!names_a_test_of("/p/other.py::test_ok", "/p/checks.py"));
         let dir = TempDir::new("dap-py-no-pytest");
@@ -2347,7 +2599,10 @@ mod tests {
         for launch in [&absolute, &relative, &lone] {
             assert_eq!(launch["env"]["PYTHONDONTWRITEBYTECODE"], "1", "{launch}");
         }
-        assert_eq!(python_package(&root.join("teashop/__init__.py")), None);
+        assert_eq!(
+            python_package(&root.join("teashop/__init__.py"), &root),
+            None
+        );
     }
 
     /// A `src` layout's tests and programs import its package by name: run
