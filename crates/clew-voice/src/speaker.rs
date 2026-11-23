@@ -266,25 +266,7 @@ impl Speakers {
         part: &mut dyn FnMut(Vec<f32>, u32) -> bool,
     ) -> Result<(), SayError> {
         let mut running = self.running.lock().unwrap_or_else(|e| e.into_inner());
-        let reuse = running
-            .as_mut()
-            .is_some_and(|r| r.model == model.id && !r.speaker.ended());
-        if !reuse {
-            // Removed while this waited for its turn (it is removed with
-            // this held: `stop_while`): this sentence is passed over, and
-            // what follows is said with a voice that is here.
-            if !crate::speech::present(dir, model) {
-                return Err(SayError::Sentence("the voice is not downloaded".into()));
-            }
-            // The one before ends before this one loads: one model in
-            // memory at a time.
-            *running = None;
-            *running = Some(Running {
-                model: model.id,
-                speaker: Speaker::start(&self.program, model, dir).map_err(SayError::Voice)?,
-                used: Instant::now(),
-            });
-        }
+        self.load(&mut running, model, dir)?;
         let Some(r) = running.as_mut() else {
             return Err(SayError::Voice("the voice is not running".into()));
         };
@@ -297,6 +279,49 @@ impl Speakers {
             *running = None;
         }
         result
+    }
+
+    /// `model` (its files in `dir`) loaded, as [`Speakers::say`] has it,
+    /// with nothing said: an answer to be read aloud has begun, and its
+    /// first sentence need not wait seconds for the model to load once it
+    /// is written. A model loaded already is kept, as if used now.
+    pub fn warm(&self, model: &'static VoiceModel, dir: &Path) -> Result<(), SayError> {
+        let mut running = self.running.lock().unwrap_or_else(|e| e.into_inner());
+        self.load(&mut running, model, dir)?;
+        if let Some(r) = running.as_mut() {
+            r.used = Instant::now();
+        }
+        Ok(())
+    }
+
+    /// `model` running in `running`: the one there if it is this model and
+    /// has not ended, else started — the one before ending first: one model
+    /// in memory at a time.
+    fn load(
+        &self,
+        running: &mut Option<Running>,
+        model: &'static VoiceModel,
+        dir: &Path,
+    ) -> Result<(), SayError> {
+        if running
+            .as_mut()
+            .is_some_and(|r| r.model == model.id && !r.speaker.ended())
+        {
+            return Ok(());
+        }
+        // Removed while this waited for its turn (it is removed with this
+        // held: `stop_while`): this sentence is passed over, and what
+        // follows is said with a voice that is here.
+        if !crate::speech::present(dir, model) {
+            return Err(SayError::Sentence("the voice is not downloaded".into()));
+        }
+        *running = None;
+        *running = Some(Running {
+            model: model.id,
+            speaker: Speaker::start(&self.program, model, dir).map_err(SayError::Voice)?,
+            used: Instant::now(),
+        });
+        Ok(())
     }
 
     /// Let the model go: what is running ends — and with it its hold on
@@ -395,6 +420,14 @@ mod tests {
         ));
     }
 
+    /// Held by a test while it writes a program and starts it: a program
+    /// started while another test's is still open for writing — its file
+    /// handle inherited between fork and exec — fails as "text file busy".
+    fn writing_programs() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: Mutex<()> = Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// A folder holding `model`'s files (empty: nothing reads them here).
     fn model_dir(name: &str, model: &VoiceModel) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("clew-speaker-{name}-{}", std::process::id()));
@@ -433,6 +466,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let model = &crate::speech::VOICE_MODELS[0];
         let dir = model_dir("stream", model);
+        let _writing = writing_programs();
         let program = dir.join("clew-speak");
         // Two parts of one sample each (0.5, then -0.5), then the end; then
         // a part that is not base64.
@@ -469,6 +503,50 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// Warmed as an answer begins, the voice is loaded once, before its
+    /// first sentence, and that sentence is said by it — not loaded again
+    /// on it, which was seconds of silence; warmed again, it stays.
+    #[cfg(unix)]
+    #[test]
+    fn a_warmed_voice_says_the_first_sentence_without_loading_again() {
+        use std::os::unix::fs::PermissionsExt;
+        let model = &crate::speech::VOICE_MODELS[0];
+        let dir = model_dir("warm", model);
+        let _writing = writing_programs();
+        let program = dir.join("clew-speak");
+        // Each start is counted in a file beside it.
+        std::fs::write(
+            &program,
+            format!(
+                "#!/bin/sh
+                 echo started >> '{}'
+                 echo '{{\"ready\":{{\"rate\":24000,\"voices\":8}}}}'
+                 while read -r line; do
+                   echo '{{\"audio\":{{\"id\":1,\"pcm\":\"AEA=\"}}}}'
+                 done
+",
+                dir.join("starts").display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let speakers = Speakers::new(program);
+        speakers.warm(model, &dir).unwrap();
+        assert!(speakers.loaded(), "loaded before anything is said");
+        speakers.warm(model, &dir).unwrap();
+        let (samples, rate) = said(&speakers, model, &dir, "Hello.", "en", 0, 1.0).unwrap();
+        assert_eq!((samples, rate), (vec![0.5], 24_000));
+        let starts = std::fs::read_to_string(dir.join("starts")).unwrap();
+        assert_eq!(starts.lines().count(), 1, "started once");
+        // A voice not downloaded is not warmed.
+        let gone = model_dir("warm-gone", model);
+        std::fs::remove_dir_all(&gone).unwrap();
+        let fresh = Speakers::new(gone.join("clew-speak"));
+        assert!(fresh.warm(model, &gone).is_err());
+        assert!(!fresh.loaded());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     /// A sentence stopped part way (`part` answers `false`): the voice is
     /// told to stop making it, nothing more of it is given, and the next
     /// sentence is said — its own, not the rest of the stopped one.
@@ -478,6 +556,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let model = &crate::speech::VOICE_MODELS[0];
         let dir = model_dir("cancel", model);
+        let _writing = writing_programs();
         let program = dir.join("clew-speak");
         let heard = dir.join("heard");
         // Each request written down; the first sentence's three parts, the

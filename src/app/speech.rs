@@ -187,6 +187,10 @@ pub(crate) trait Synthesizer: Send + Sync {
     /// with nothing said meanwhile: what would be is said once `work` is
     /// done.
     fn stop_while(&self, model: &'static VoiceModel, work: &mut dyn FnMut());
+    /// Have `model` (its files in `dir`) loaded, nothing said: an answer to
+    /// be read aloud has begun. Blocking; what fails is said when a
+    /// sentence is.
+    fn warm(&self, _model: &'static VoiceModel, _dir: &Path) {}
 }
 
 /// `clew-speak`, found beside Clew — or not there.
@@ -216,6 +220,11 @@ impl Synthesizer for System {
         match &self.speakers {
             Some(speakers) => speakers.stop_while(model, work),
             None => work(),
+        }
+    }
+    fn warm(&self, model: &'static VoiceModel, dir: &Path) {
+        if let Some(speakers) = &self.speakers {
+            let _ = speakers.warm(model, dir);
         }
     }
 }
@@ -1131,6 +1140,14 @@ impl App {
             .language
             .clone()
             .unwrap_or_else(|| crate::i18n::current().code().to_string());
+        // The voice the answer's language is said in, here: what loads as
+        // its reading begins.
+        let warm = self.voice.store.as_ref().and_then(|store| {
+            let model = clew_voice::say::known_language(&usual).and_then(|lang| {
+                speech::for_language_among(lang, |m: &VoiceModel| usable(store, m))
+            })?;
+            Some((model, speech::dir(store, model)))
+        });
         let speech = &mut self.voice.speech;
         if speech.reading.as_ref().is_none_or(|(s, _)| *s != stream) {
             // Another answer: what was being said of the last one — or a
@@ -1141,6 +1158,16 @@ impl App {
                 speech.hush();
             }
             speech.reading = Some((stream, Reader::new(Some(&usual))));
+            // The voice its first sentence will likely be said in loads
+            // now, while that sentence is still being written: loaded on
+            // it, a first answer (or the first after a quiet spell) was
+            // silent for the seconds a model takes to load.
+            if let Some((model, dir)) = warm {
+                let synthesizer = speech.synthesizer.clone();
+                let _ = std::thread::Builder::new()
+                    .name("clew-voice-warm".into())
+                    .spawn(move || synthesizer.warm(model, &dir));
+            }
             if speech.unsaid.as_ref().is_some_and(|(s, _)| *s != stream) {
                 speech.unsaid = None;
             }
