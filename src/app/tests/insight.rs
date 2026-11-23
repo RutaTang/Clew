@@ -550,10 +550,15 @@ async fn restart_file_has_lean_check_the_file_afresh() {
     let root = app.proj.project.as_ref().unwrap().root.clone();
     std::fs::write(root.join("Proof.lean"), "theorem t : 1 = 1 := by\n  rfl\n").unwrap();
     scan_synchronously(&mut app, root.clone());
-    open_synchronously(&mut app, "Proof.lean", None);
-    // No server yet: it says how to get one, and sends nothing.
-    let _ = app.update(Message::Proof(crate::ProofMsg::RestartFile));
-    assert!(app.status.contains("isn't running"), "{}", app.status);
+    {
+        // No Lean to be found — elan's folder, where Clew looks for one off
+        // PATH, empty too — so none starts.
+        let _no_lean = clew_core::testutil::EnvVars::new().set("ELAN_HOME", root.join("no-elan"));
+        open_synchronously(&mut app, "Proof.lean", None);
+        // No server yet: it says how to get one, and sends nothing.
+        let _ = app.update(Message::Proof(crate::ProofMsg::RestartFile));
+        assert!(app.status.contains("isn't running"), "{}", app.status);
+    }
 
     let (client, wire) = scripted_lsp_client(&root).await;
     app.proj

@@ -483,15 +483,17 @@ pub fn find_program(program: &str) -> Result<PathBuf, String> {
     }
 }
 
-/// The first directory on `PATH` containing an executable named `binary`,
-/// canonicalized to the real absolute file. Relative `PATH` entries (`.`,
+/// The first directory on the search path ([`crate::linerpc::search_path`]:
+/// `PATH`, the login shell's where the app was opened from the Finder, and
+/// the folders toolchain installers put a user's programs in) containing an
+/// executable named `binary`, canonicalized to the real absolute file. Relative `PATH` entries (`.`,
 /// `tools`) are skipped outright: they resolve against the process's cwd
 /// *now*, while the spawn later runs with the project root as cwd — a
 /// relative hit would mean approving one file and executing whatever the
 /// repo places at that name. Canonicalizing pins the approved inode the
 /// same way, independent of any later cwd.
 pub fn find_on_path(binary: &str) -> Option<PathBuf> {
-    find_in(&std::env::var_os("PATH")?, binary, true)
+    find_in(&crate::linerpc::search_path()?, binary, true)
 }
 
 /// Like [`find_on_path`] (relative entries skipped, executables only), but
@@ -505,7 +507,7 @@ pub fn find_on_path(binary: &str) -> Option<PathBuf> {
 /// multiplexer that dispatches on the name it was run under: resolved, `cargo
 /// install …` becomes `rustup install …`.
 pub fn find_on_path_unresolved(binary: &str) -> Option<PathBuf> {
-    find_in(&std::env::var_os("PATH")?, binary, false)
+    find_in(&crate::linerpc::search_path()?, binary, false)
 }
 
 /// [`find_on_path_unresolved`] over an explicit search path.
@@ -632,12 +634,12 @@ pub fn toolchain_install_cancellable(
     dest_dir: &Path,
     cancel: &AtomicBool,
 ) -> Result<PathBuf, String> {
-    let tool = toolchain_tool(install.tool, std::env::var_os("PATH").as_deref())?;
+    let tool = toolchain_tool(install.tool, crate::linerpc::search_path().as_deref())?;
     toolchain_install_with(install, version, dest_dir, &tool, cancel)
 }
 
-/// The toolchain binary an install runs, looked up on `path` (the inherited
-/// `PATH`) by absolute entries only. A bare name would be resolved by the OS
+/// The toolchain binary an install runs, looked up on `path` (the search
+/// path, [`crate::linerpc::search_path`]) by absolute entries only. A bare name would be resolved by the OS
 /// against every entry — `.` or another relative one included — so launching
 /// clew from a repository could run that repository's own `cargo`/`npm`/`go`
 /// the moment the user consents to an install.
@@ -724,6 +726,10 @@ pub(crate) fn install_command(install: &Install, tool: &Path, dir: &Path) -> std
     // ancestors (`.cargo/config.toml`, `.npmrc`), so inheriting a project's
     // cwd would let the project redirect the registry or inject build flags.
     cmd.current_dir(dir);
+    // The PATH the tool was found on: npm is a `#!/usr/bin/env node`
+    // script, and the `node` beside it is not on an app's own PATH when the
+    // Finder opened it.
+    cmd.env("PATH", crate::linerpc::child_path());
     cmd.args(install.args());
     match &install.kind {
         Installer::Go { .. } => {
@@ -1559,6 +1565,28 @@ mod tests {
 
         let err = toolchain_tool("cargo", None).unwrap_err();
         assert!(err.contains("not found on PATH"), "{err}");
+    }
+
+    /// A program where its installer puts it (rustup's `~/.cargo/bin`) is
+    /// found though the app's own PATH lacks that folder, as an app opened
+    /// from the Finder's does: "'cargo' is required to install this server
+    /// but was not found on PATH", while the shell ran `cargo`. One on PATH
+    /// still comes first.
+    #[test]
+    #[cfg(unix)]
+    fn a_program_in_its_installers_folder_is_found_off_path() {
+        let dir = crate::testutil::TempDir::new("store-tool-dirs");
+        let installed = super::testing::script(&dir.join("cargo-home/bin/cargo"), "");
+        let bare = dir.join("bare");
+        std::fs::create_dir_all(&bare).unwrap();
+        let _env = crate::testutil::EnvVars::new()
+            .set("PATH", &bare)
+            .set("CARGO_HOME", dir.join("cargo-home"));
+        assert_eq!(find_on_path_unresolved("cargo"), Some(installed.clone()));
+        let search = crate::linerpc::search_path().unwrap();
+        assert_eq!(toolchain_tool("cargo", Some(&search)), Ok(installed));
+        let first = super::testing::script(&bare.join("cargo"), "");
+        assert_eq!(find_on_path_unresolved("cargo"), Some(first));
     }
 
     /// What a server that cannot be had says to do is plain words: no
