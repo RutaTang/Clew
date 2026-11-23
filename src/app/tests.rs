@@ -16162,6 +16162,43 @@ fn the_files_view_learns_what_the_working_tree_changes() {
     assert!(app.sync_git_status().is_some(), "read as it shows");
 }
 
+/// The row the tree's keys rest on is ringed only once keys are used
+/// there, as a focus ring shows only where keys moved it: a click gives
+/// the tree the keys without a ring (it ringed the folder just clicked,
+/// beside the open file's own mark), the first arrow rings its row, and
+/// a click takes the ring away again. Brought in by the keys — F6, Tab,
+/// ↓ from the filter — the ring is there at once.
+#[test]
+fn the_files_tree_rings_its_row_for_the_keyboard_only() {
+    use crate::app::message::TreeKey;
+    let mut app = scanned_app("tree-ring");
+    app.show_left_sidebar = true;
+    app.sidebar = SidebarTab::Files;
+    app.proj.expanded.clear();
+    let at = |app: &App| app.tree_cursor_rel();
+    let send = |app: &mut App, m: WindowMsg| {
+        let task = app.update(Message::Window(m));
+        for m in run_task(task) {
+            let _ = app.update(m);
+        }
+    };
+    // Clicked: the keys, no ring.
+    send(&mut app, WindowMsg::TreeFocused(true));
+    send(&mut app, WindowMsg::TreePointed);
+    assert!(app.tree_focused, "the keys are the tree's");
+    assert_eq!(at(&app), None, "a click rings nothing");
+    // A key: its row is ringed.
+    send(&mut app, WindowMsg::TreeKey(TreeKey::Down));
+    assert!(at(&app).is_some(), "the arrow's row is ringed");
+    // Clicked again: gone.
+    send(&mut app, WindowMsg::TreePointed);
+    assert_eq!(at(&app), None);
+    // Left, then brought back by the keys: ringed at once.
+    send(&mut app, WindowMsg::TreeFocused(false));
+    send(&mut app, WindowMsg::TreeFocused(true));
+    assert!(at(&app).is_some(), "keyed in, the row is ringed");
+}
+
 /// The Files view's tree walked by the keyboard: ↑ ↓ from row to row, →
 /// opening a folder and stepping into it, ← closing it and stepping out,
 /// Home and End, Space showing a file with the keyboard still in the tree,

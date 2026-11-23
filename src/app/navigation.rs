@@ -1343,7 +1343,7 @@ impl App {
     /// the keyboard: the one it was put on, while it shows; else the file
     /// being read; else the first.
     pub(crate) fn tree_cursor_rel(&self) -> Option<String> {
-        if !self.tree_focused {
+        if !self.tree_focused || !self.tree_ring {
             return None;
         }
         let rows = ui::tree_rows(self);

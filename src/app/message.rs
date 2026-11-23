@@ -2485,6 +2485,10 @@ pub enum WindowMsg {
     TreeKey(TreeKey),
     /// The Files view's tree has the keyboard now, or no longer.
     TreeFocused(bool),
+    /// A press on the Files view's tree: the keys are its, but the row they
+    /// rest on is not ringed — the ring is for the keyboard, as a focus
+    /// ring is only where keys moved it (`:focus-visible`).
+    TreePointed,
     /// The Files view's tree scrolled: where it is, and how much of it
     /// shows.
     FilesTreeScrolled {
@@ -3470,6 +3474,7 @@ impl WindowMsg {
             | WindowMsg::RingMoved(..)
             | WindowMsg::TreeKey(..)
             | WindowMsg::TreeFocused(..)
+            | WindowMsg::TreePointed
             | WindowMsg::ToggleMaximize
             | WindowMsg::MarginTabPicked(..)
             | WindowMsg::FilesTreeScrolled { .. }

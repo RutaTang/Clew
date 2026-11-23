@@ -1702,6 +1702,11 @@ pub struct App {
     pub file_filter: String,
     /// Whether the Files view's tree has the keyboard (`ui::tree_keys`).
     pub tree_focused: bool,
+    /// Whether the row the tree's keys rest on is ringed: once keys moved
+    /// there or brought the keyboard in (an arrow, Tab, F6, ↓ from the
+    /// filter), not after a click — a ring round the folder just clicked,
+    /// beside the open file's own mark, was a second "here" for nothing.
+    pub tree_ring: bool,
     /// The customizable command keymap (loaded from the global config).
     pub keymap: keymap::Keymap,
     /// The action currently awaiting a new chord (capture mode), if any.

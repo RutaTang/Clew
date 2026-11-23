@@ -139,6 +139,7 @@ impl App {
             picker: None,
             file_filter: String::new(),
             tree_focused: false,
+            tree_ring: false,
             keymap: keymap::Keymap::load(),
             rebinding: None,
             keymap_notice: None,
@@ -1060,6 +1061,10 @@ impl App {
             }
             WindowMsg::TreeFocused(focused) => {
                 self.tree_focused = focused;
+                // Brought in by the keys (F6, Tab, ↓ from the filter), the
+                // row they rest on is ringed; a click says so after this
+                // (`TreePointed`) and takes the ring away.
+                self.tree_ring = focused;
                 if focused {
                     // The keys are the tree's now, not the code's.
                     self.code_focused = false;
@@ -1067,7 +1072,15 @@ impl App {
                 }
                 Task::none()
             }
-            WindowMsg::TreeKey(key) => self.on_tree_key(key),
+            WindowMsg::TreePointed => {
+                self.tree_ring = false;
+                Task::none()
+            }
+            WindowMsg::TreeKey(key) => {
+                // A key moved in the tree: its row is ringed from now on.
+                self.tree_ring = true;
+                self.on_tree_key(key)
+            }
             WindowMsg::TabPressed { forward, field } => self.on_tab(forward, field),
             WindowMsg::RingEnd => {
                 let _ = self.end_ring(false);
