@@ -453,6 +453,15 @@ fn lldb_dap_names() -> Vec<String> {
 /// of the body before sending it.
 pub const NOTICE: &str = "__clewNotice";
 
+/// A key of a `launch` body that is Clew's, not the adapter's: the
+/// exception filters the session stops at instead of the adapter's
+/// defaults (those of them it offers), taken out before the body is sent.
+/// A test run stops where its test fails: debugpy's `userUnhandled`, an
+/// exception leaving the project's code for pytest's, which catches every
+/// one. Its default (`uncaught`) stopped instead at the `SystemExit` pytest
+/// ends with, in pytest's own `__main__`.
+pub const EXCEPTIONS: &str = "__clewExceptions";
+
 /// DWARF's language code for Rust (`DW_LANG_Rust`), which rustc puts on
 /// its compile units.
 const DW_LANG_RUST: u16 = 0x1c;
@@ -1012,6 +1021,11 @@ fn python_with_adapter(
         if probe.has_pytest {
             launch.remove("program");
             launch.insert("module".into(), json!("pytest"));
+            // Only the project's code is "the user's": an exception leaving
+            // it for pytest's is the failing test, and stepping stays out
+            // of pytest's machinery.
+            launch.insert("justMyCode".into(), json!(true));
+            launch.insert(EXCEPTIONS.into(), json!(["userUnhandled"]));
             let mut test_args = match one_test {
                 true => Vec::new(),
                 false => vec![json!(program)],
@@ -2160,10 +2174,15 @@ mod tests {
         let test = launch(&with_pytest, "/p/tests/test_pricing.py");
         assert_eq!(test["module"], "pytest");
         assert!(test.get("program").is_none(), "{test}");
+        // It stops where a test fails, not at pytest's exit, and steps only
+        // through the project's code.
+        assert_eq!(test[EXCEPTIONS], json!(["userUnhandled"]));
+        assert_eq!(test["justMyCode"], true);
         assert_eq!(test["args"], json!(["/p/tests/test_pricing.py", "-q"]));
         let script = launch(&with_pytest, "/p/main.py");
         assert_eq!(script["program"], "/p/main.py");
         assert!(script.get("module").is_none());
+        assert!(script.get(EXCEPTIONS).is_none(), "{script}");
         // One test, by its node id: alone, the file not given again — in a
         // file named as tests are or not.
         let one = |program: &str, node: &str| {

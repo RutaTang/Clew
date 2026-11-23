@@ -76,6 +76,23 @@ fn take_notice(mut launch: serde_json::Value) -> (serde_json::Value, Option<Stri
     (launch, notice)
 }
 
+/// A `launch` body without the exception filters Clew asks for in it (see
+/// `clew_core::debugadapter::EXCEPTIONS`), and those filters.
+fn take_exceptions(mut launch: serde_json::Value) -> (serde_json::Value, Vec<String>) {
+    let wanted = launch
+        .as_object_mut()
+        .and_then(|body| body.remove(clew_core::debugadapter::EXCEPTIONS))
+        .and_then(|filters| {
+            filters.as_array().map(|all| {
+                all.iter()
+                    .filter_map(|f| f.as_str().map(str::to_string))
+                    .collect()
+            })
+        })
+        .unwrap_or_default();
+    (launch, wanted)
+}
+
 /// A `launch` body for a run without the debugger: DAP's `noDebug`, which
 /// every adapter that knows it takes as "run it, stop at nothing" — and no
 /// stop at the entry either, for one that does not. The breakpoints are
@@ -1320,7 +1337,9 @@ impl App {
                 // What the adapter's resolution has to say (a Zig binary
                 // whose variables lldb cannot read): to the debug console,
                 // and out of the body the adapter gets.
-                let (mut launch, notice) = take_notice(launch);
+                let (launch, notice) = take_notice(launch);
+                let (mut launch, exceptions) = take_exceptions(launch);
+                client.prefer_exception_filters(&exceptions);
                 if no_debug {
                     without_debugger(&mut launch);
                 }
@@ -3763,6 +3782,22 @@ mod tests {
         assert_eq!(launch, serde_json::json!({ "program": "/p/app" }));
         let plain = serde_json::json!({ "program": "/p/app" });
         assert_eq!(take_notice(plain.clone()), (plain, None));
+    }
+
+    /// The exception filters a launch asks for come out of the body: the
+    /// adapter is asked to stop at them instead of its defaults, and never
+    /// sees the key.
+    #[test]
+    fn a_launchs_exception_filters_are_taken_out() {
+        let launch = serde_json::json!({
+            "module": "pytest",
+            clew_core::debugadapter::EXCEPTIONS: ["userUnhandled"],
+        });
+        let (launch, filters) = take_exceptions(launch);
+        assert_eq!(filters, ["userUnhandled"]);
+        assert_eq!(launch, serde_json::json!({ "module": "pytest" }));
+        let plain = serde_json::json!({ "program": "/p/app" });
+        assert_eq!(take_exceptions(plain.clone()), (plain, Vec::new()));
     }
 
     /// A run's launch body tells the adapter `noDebug`, and not to stop at

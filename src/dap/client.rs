@@ -101,6 +101,17 @@ pub struct DapClient {
     /// it is not told of, and a program died of an exception with the
     /// debugger never pausing where it was raised.
     exception_filters: Arc<std::sync::Mutex<Vec<String>>>,
+    /// Every exception filter the adapter offers, on by default or not: what
+    /// a launch may ask for instead ([`Self::prefer_exception_filters`]).
+    offered_filters: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+/// A local pytest's assertion rewriting adds to a test (`@py_assert1`,
+/// `@py_format4`): no name the test's code has, never one a reader looks
+/// for, and between the test's own variables when it stops at a failure.
+/// No Python name starts with `@`.
+fn is_pytest_temporary(name: &str) -> bool {
+    name.starts_with("@py_")
 }
 
 impl DapClient {
@@ -305,6 +316,7 @@ impl DapClient {
             timeout: REQUEST_TIMEOUT,
             disconnect: Default::default(),
             exception_filters: Default::default(),
+            offered_filters: Default::default(),
         };
         (client, events)
     }
@@ -361,7 +373,29 @@ impl DapClient {
         if let Ok(mut filters) = self.exception_filters.lock() {
             *filters = super::proto::default_exception_filters(&capabilities);
         }
+        if let Ok(mut offered) = self.offered_filters.lock() {
+            *offered = super::proto::offered_exception_filters(&capabilities);
+        }
         Ok(capabilities)
+    }
+
+    /// Stop at `wanted` instead of the adapter's defaults: those of them it
+    /// offers, after [`Self::initialize`]. None offered leaves the defaults.
+    pub fn prefer_exception_filters(&self, wanted: &[String]) {
+        let Ok(offered) = self.offered_filters.lock() else {
+            return;
+        };
+        let chosen: Vec<String> = wanted
+            .iter()
+            .filter(|w| offered.contains(w))
+            .cloned()
+            .collect();
+        if chosen.is_empty() {
+            return;
+        }
+        if let Ok(mut filters) = self.exception_filters.lock() {
+            *filters = chosen;
+        }
     }
 
     /// Have the adapter stop at the exceptions it stops at by default
@@ -562,7 +596,12 @@ impl DapClient {
         Ok(body
             .get("variables")
             .and_then(Value::as_array)
-            .map(|a| a.iter().filter_map(Variable::from_value).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(Variable::from_value)
+                    .filter(|v| !is_pytest_temporary(&v.name))
+                    .collect()
+            })
             .unwrap_or_default())
     }
 
@@ -1045,6 +1084,14 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pytests_assertion_temporaries_are_not_variables() {
+        assert!(is_pytest_temporary("@py_assert1"));
+        assert!(is_pytest_temporary("@py_format4"));
+        assert!(!is_pytest_temporary("result"));
+        assert!(!is_pytest_temporary("py_assert"));
+    }
     use crate::i18n::Lang;
     use clew_core::dapwire::parse_listening;
     use clew_core::framing::{read_message, write_frame};
@@ -2189,6 +2236,98 @@ mod tests {
             }
         }
         assert!(output.contains("answer 42"), "{output:?}");
+    }
+
+    /// A failing test, debugged, stops at its failing line, with the
+    /// test's variables and none of pytest's rewriting temporaries; not at
+    /// the `SystemExit` pytest ends with, in pytest's own `__main__`. Needs
+    /// `python3` with pytest, and debugpy (its own or Clew's).
+    #[tokio::test]
+    #[ignore = "needs python3 with pytest and debugpy; run explicitly"]
+    async fn a_failing_python_test_stops_at_its_failing_line() {
+        let dir = clew_core::testutil::TempDir::new("dap-pytest-fail");
+        std::fs::create_dir_all(dir.join("tests")).unwrap();
+        let test = dir.join("tests/test_sum.py");
+        std::fs::write(
+            &test,
+            "def test_sum():\n    total = 2 + 2\n    assert total == 5\n",
+        )
+        .unwrap();
+        let node = format!("{}::test_sum", test.display());
+        let spec = match clew_core::debugadapter::resolve(
+            "python",
+            &test.to_string_lossy(),
+            &[node],
+            &dir,
+            &dir,
+            &Default::default(),
+            None,
+        ) {
+            Ok(clew_core::debugadapter::Resolution::Ready(spec)) => spec,
+            other => panic!("{other:?}"),
+        };
+        let mut launch = spec.launch.clone();
+        let wanted: Vec<String> = launch
+            .as_object_mut()
+            .and_then(|b| b.remove(clew_core::debugadapter::EXCEPTIONS))
+            .and_then(|f| serde_json::from_value(f).ok())
+            .expect("a test asks for its own exception filters");
+        let (client, mut events) =
+            DapClient::start(&spec.command, &spec.args, &dir, Transport::Stdio)
+                .await
+                .expect("debugpy started");
+        client.initialize().await.expect("initialized");
+        client.prefer_exception_filters(&wanted);
+        let launched = client.launch(launch);
+        tokio::pin!(launched);
+        let mut stops = Vec::new();
+        let mut configured = false;
+        let mut launch_answered = false;
+        loop {
+            let event = tokio::select! {
+                event = events.recv() => event,
+                answer = &mut launched, if !launch_answered => {
+                    launch_answered = true;
+                    assert_eq!(answer, Ok(()));
+                    continue;
+                }
+                _ = tokio::time::sleep(Duration::from_secs(60)) => panic!("no event in time"),
+            };
+            match event {
+                Some(DapEvent::Initialized) if !configured => {
+                    configured = true;
+                    client.set_default_exception_breakpoints().await.unwrap();
+                    client.configuration_done().await.unwrap();
+                }
+                Some(DapEvent::Stopped(stop)) => {
+                    let thread = stop.thread_id.unwrap_or(1);
+                    let frames = client.stack_trace(thread).await.unwrap();
+                    let top = frames.first().expect("a frame");
+                    let scopes = client.scopes(top.id).await.unwrap();
+                    let names: Vec<String> = match scopes.first() {
+                        Some(scope) => client
+                            .variables(scope.variables_reference)
+                            .await
+                            .unwrap()
+                            .into_iter()
+                            .map(|v| v.name)
+                            .collect(),
+                        None => Vec::new(),
+                    };
+                    stops.push((stop.reason.clone(), top.path.clone(), top.line, names));
+                    client.continue_(thread).await.unwrap();
+                }
+                Some(DapEvent::Terminated) | None => break,
+                Some(_) => {}
+            }
+        }
+        assert_eq!(stops.len(), 1, "{stops:?}");
+        let (reason, path, line, names) = &stops[0];
+        assert_eq!(reason, "exception");
+        assert_eq!(path.as_deref(), Some(test.as_path()));
+        assert_eq!(*line, 3);
+        assert!(names.iter().any(|n| n == "total"), "{names:?}");
+        assert!(!names.iter().any(|n| n.starts_with("@py_")), "{names:?}");
     }
 
     /// F9: a TCP adapter is reached at the port it announced — not at one
