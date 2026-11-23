@@ -126,7 +126,7 @@ impl App {
     pub(crate) fn sync_lsp_log(&mut self) {
         let lang = self
             .active_viewer()
-            .and_then(|v| v.lang_key)
+            .and_then(|v| v.lsp_lang())
             .filter(|_| self.server_panel);
         let client = match lang.and_then(|l| self.proj.link.lsp.get(l)) {
             Some(LspSlot::Ready(client)) => client,
@@ -965,16 +965,25 @@ impl App {
     ) -> Task<Message> {
         let base = base_language(language);
         let beside = is_beside(language);
-        let docs: Vec<(PathBuf, Arc<String>)> = self
+        // A notebook is sent as its script, by the script's own path (see
+        // `Viewer::lsp_path`), with what is no code commented out.
+        let docs: Vec<(PathBuf, Arc<String>, bool)> = self
             .proj
             .panes
             .iter()
             .flatten()
-            .filter(|v| v.lang_key == Some(base))
-            .map(|v| (v.abs.clone(), v.source.clone()))
+            .filter(|v| v.lsp_lang() == Some(base))
+            .map(|v| match v.notebook {
+                Some(_) => (
+                    v.lsp_path(),
+                    Arc::new(clew_core::notebook::script_for_server(&v.source)),
+                    true,
+                ),
+                None => (v.abs.clone(), v.source.clone(), false),
+            })
             .collect();
         let mut tasks = Vec::new();
-        for (path, source) in docs {
+        for (path, source, notebook) in docs {
             let opened = match beside {
                 true => &mut self.proj.link.lsp_opened_also,
                 false => &mut self.proj.link.lsp_opened,
@@ -982,8 +991,9 @@ impl App {
             if opened.insert(path.clone()) {
                 client.did_open(&path, base, 1, &source);
             }
-            // Inlay hints are the main server's to give.
-            if !beside {
+            // Inlay hints are the main server's to give, in a file's code
+            // view; a notebook's script shows none.
+            if !beside && !notebook {
                 tasks.push(self.inlay_request(&path, client));
             }
         }

@@ -276,7 +276,7 @@ impl App {
             .panes
             .get(pane)
             .and_then(Option::as_ref)
-            .and_then(|v| v.lang_key)
+            .and_then(|v| v.lsp_lang())
             .is_some_and(|lang| matches!(self.proj.link.lsp.get(lang), Some(LspSlot::Ready(_))));
         // The peek is Markdown — a Python docstring's sections, a Rust doc
         // comment's code — and set as the server's answer is: shown as plain
@@ -305,10 +305,10 @@ impl App {
             .get(pane)
             .and_then(Option::as_ref)
             .and_then(|v| {
-                v.lang_key.map(|l| {
+                v.lsp_lang().map(|l| {
                     (
                         l,
-                        v.abs.clone(),
+                        v.lsp_path(),
                         v.source_line(line).unwrap_or("").to_string(),
                     )
                 })
@@ -492,9 +492,9 @@ impl App {
     /// the same char→display-column mapping as the underline rendering.
     pub(crate) fn diagnostic_at(&self, pane: usize, line: usize, col: usize) -> Option<String> {
         let v = self.proj.panes.get(pane)?.as_ref()?;
-        let lang = v.lang_key?;
+        let lang = v.lsp_lang()?;
         // The language's server and the one run beside it alike.
-        self.file_diagnostics(lang, &v.abs)?
+        self.file_diagnostics(lang, &v.lsp_path())?
             .into_iter()
             .filter(|(d, _)| d.line == line)
             .filter(|(d, encoding)| {
@@ -639,7 +639,7 @@ impl App {
             .panes
             .get(pane)
             .and_then(Option::as_ref)
-            .and_then(|v| v.lang_key)
+            .and_then(|v| v.lsp_lang())
             .is_some_and(|lang| matches!(self.proj.link.lsp.get(lang), Some(LspSlot::Ready(_))))
     }
 }

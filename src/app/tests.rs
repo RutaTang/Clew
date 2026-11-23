@@ -2433,6 +2433,88 @@ fn a_changed_notebook_is_re_parsed_instead_of_reloaded_as_raw_json() {
     );
 }
 
+/// A notebook reads as its cells or as one script: its code, read in the
+/// code view, is its language server's — by its script's own path beside
+/// it (`analysis.ipynb.py`, never written), with what is no Python
+/// commented out — so hover, go to definition and the server's warnings
+/// reach its cells. A definition the server finds in the script is the
+/// notebook's, and the view switches where it was read.
+#[test]
+fn a_notebook_reads_as_a_script_its_language_server_knows() {
+    let mut app = scanned_app("nb-as-script");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let abs = root.join("analysis.ipynb");
+    std::fs::write(&abs, "{}").unwrap();
+    let cell = |source: &str, proj_line| clew_protocol::NotebookCell {
+        kind: "code".into(),
+        source: source.to_string(),
+        lines: Vec::new(),
+        proj_line,
+        outputs: Vec::new(),
+        execution_count: None,
+    };
+    let projection =
+        "# %%\n%matplotlib inline\nfrom helpers import scale\n\n# %%\nvalue = scale(3)\n";
+    let _ = app.apply_notebook_content(
+        &[0],
+        None,
+        "analysis.ipynb".into(),
+        "python".into(),
+        vec![
+            cell("%matplotlib inline\nfrom helpers import scale", 2),
+            cell("value = scale(3)", 6),
+        ],
+        Vec::new(),
+        projection.into(),
+        false,
+    );
+    let v = app.proj.panes[0].as_ref().unwrap();
+    assert_eq!(v.lang_key, None, "a notebook is no program to run");
+    assert_eq!(v.lsp_lang(), Some("python"));
+    assert_eq!(v.lsp_path(), root.join("analysis.ipynb.py"));
+    assert!(v.shows_cells().is_some(), "cells first");
+    assert_eq!(
+        clew_core::notebook::script_for_server(&v.source),
+        "# %%\n#matplotlib inline\nfrom helpers import scale\n\n# %%\nvalue = scale(3)\n"
+    );
+    // Read as its script, in the code view; and back.
+    let _ = app.update(Message::Editor(EditorMsg::ToggleMarkdownSource(0)));
+    let v = app.proj.panes[0].as_ref().unwrap();
+    assert!(v.show_source && v.shows_cells().is_none());
+    let _ = app.update(Message::Editor(EditorMsg::ToggleMarkdownSource(0)));
+    assert!(app.proj.panes[0].as_ref().unwrap().shows_cells().is_some());
+    // A definition in the script lands in the notebook, at its line.
+    let _ = app.update(Message::Editor(EditorMsg::ToggleMarkdownSource(0)));
+    let _ = app.on_definition_result(Ok(vec![lsp::client::Target {
+        path: root.join("analysis.ipynb.py"),
+        line: 5,
+        character: 0,
+    }]));
+    let v = app.proj.panes[0].as_ref().unwrap();
+    assert_eq!(v.abs, abs);
+    assert_eq!(v.caret.map(|(line, _)| line), Some(5));
+    // A reload keeps it read as a script.
+    let _ = app.apply_notebook_content(
+        &[0],
+        None,
+        "analysis.ipynb".into(),
+        "python".into(),
+        vec![
+            cell("from helpers import scale", 2),
+            cell("value = scale(4)", 5),
+        ],
+        Vec::new(),
+        "# %%\nfrom helpers import scale\n\n# %%\nvalue = scale(4)\n".into(),
+        true,
+    );
+    assert!(app.proj.panes[0].as_ref().unwrap().show_source);
+    // Any other path a server answers with is as it is.
+    assert_eq!(
+        crate::viewer::from_server_path(root.join("helpers.py")),
+        root.join("helpers.py")
+    );
+}
+
 /// A notebook pane's outline entries are lines of the `# %%` script
 /// projection, but `git log -L` resolves its range against the raw .ipynb JSON
 /// on disk. Handing it a projection range yields a confident, entirely

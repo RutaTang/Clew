@@ -487,8 +487,8 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
         // Diagnostic counts for this file, from the same snapshots: its
         // language's server and the one run beside it.
         let diags = v
-            .lang_key
-            .and_then(|k| app.file_diagnostics(k, &v.abs))
+            .lsp_lang()
+            .and_then(|k| app.file_diagnostics(k, &v.lsp_path()))
             .map(|ds| {
                 let errs = ds.iter().filter(|(d, _)| d.severity == 1).count();
                 let warns = ds.iter().filter(|(d, _)| d.severity == 2).count();

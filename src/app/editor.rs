@@ -348,7 +348,7 @@ impl App {
             }
             // Notebook cells have variable height, so their goto scrolls to an
             // estimated cell offset (the target ring points precisely).
-            let y = match (&v.notebook, line) {
+            let y = match (v.shows_cells(), line) {
                 (Some(doc), Some(l)) => {
                     Self::estimate_notebook_offset(doc, &v.nb_expanded, l, line_height)
                 }
@@ -1071,7 +1071,10 @@ impl App {
         });
 
         let source = Arc::new(projection);
-        let lines = highlight::plain_lines(&source);
+        // Its code's language, as its script is read: highlighted as that
+        // language in the script view, and by its language server.
+        let script_lang = highlight::static_key(&doc.language);
+        let lines = highlight::highlight_lines(&source, script_lang);
         if !refresh {
             self.status.clear();
         }
@@ -1094,6 +1097,8 @@ impl App {
                     v.viewport_measured,
                     v.scroll_y,
                     v.nb_expanded.clone(),
+                    // Read as its script: kept for the same notebook only.
+                    v.show_source && v.abs == abs,
                 )
             });
             let mut v = Viewer::new(
@@ -1106,12 +1111,14 @@ impl App {
             v.symbols = symbols.clone();
             v.highlighted = true;
             v.notebook = Some(doc.clone());
-            if let Some((h, measured, old_scroll, old_expanded)) = old {
+            v.script_lang = script_lang;
+            if let Some((h, measured, old_scroll, old_expanded, as_script)) = old {
                 v.viewport_h = h;
                 v.viewport_measured = measured;
                 if refresh {
                     v.nb_expanded = old_expanded;
                     v.scroll_y = old_scroll;
+                    v.show_source = as_script;
                 }
             }
             v.target_line = target;
@@ -1146,10 +1153,18 @@ impl App {
         if self.local_project_state() {
             self.proj
                 .registry
-                .set(abs, incremental::content_hash(source.as_bytes()));
+                .set(abs.clone(), incremental::content_hash(source.as_bytes()));
         }
         if active_mounted {
             self.refresh_import_tree();
+        }
+        // Its script, sent to its language server again as the notebook
+        // changes, once it was opened there (read as its script).
+        if script_lang.is_some() && refresh {
+            self.resync_open_doc(
+                &viewer::notebook_script_path(&abs),
+                &clew_core::notebook::script_for_server(&source),
+            );
         }
         Task::batch(tasks)
     }
@@ -1899,7 +1914,7 @@ impl App {
         // nothing (`za` off a fold, `zR` with none closed) snapped the view
         // to a row.
         let by_rows = !in_time_travel
-            && v.notebook.is_none()
+            && v.shows_cells().is_none()
             && (v.md.is_none() || v.show_source)
             && v.content_rows() != rows;
         if !by_rows {
@@ -2076,7 +2091,7 @@ impl App {
             return Task::none();
         };
         v.caret = Some((line, col));
-        if let Some(doc) = v.notebook.clone() {
+        if let Some(doc) = v.shows_cells().cloned() {
             // Notebook: the view can't paint per-match highlights, so point at
             // the owning cell instead — estimated scroll plus the target ring.
             v.target_line = Some(line + 1);
@@ -2109,8 +2124,8 @@ impl App {
         // Diagnostic underlines (always shown, from the language's servers),
         // read from this update's snapshots rather than a locked copy per
         // view.
-        if let Some(lang) = v.lang_key
-            && let Some(diagnostics) = self.file_diagnostics(lang, &v.abs)
+        if let Some(lang) = v.lsp_lang()
+            && let Some(diagnostics) = self.file_diagnostics(lang, &v.lsp_path())
         {
             for (d, encoding) in diagnostics {
                 let (c0, c1) = v.lsp_span(d.line, d.char_start, d.char_end, encoding);
@@ -2448,10 +2463,55 @@ impl App {
                 Task::none()
             }
             EditorMsg::ToggleMarkdownSource(pane) => {
+                let line_height = self.line_height();
                 let Some(v) = self.proj.panes.get_mut(pane).and_then(Option::as_mut) else {
                     return Task::none();
                 };
                 v.show_source = !v.show_source;
+                // A notebook's cells and its script are one text: the other
+                // view opens where this one was read — the cell at the top
+                // of the cells is the script's top line, and back.
+                if let Some(doc) = v.notebook.clone() {
+                    let y = if v.show_source {
+                        let mut top = 0.0;
+                        let cell = doc
+                            .cells
+                            .iter()
+                            .enumerate()
+                            .find(|(i, c)| {
+                                top += Self::estimate_nb_cell_height(
+                                    c,
+                                    v.nb_expanded.contains(i),
+                                    line_height,
+                                );
+                                top > v.scroll_y
+                            })
+                            .map(|(_, c)| c)
+                            .or_else(|| doc.cells.last());
+                        // The cell's `# %%` line, above its first.
+                        let line = cell.map_or(1, |c| c.proj_line.saturating_sub(1).max(1));
+                        (v.row_of(line - 1) as f32 * line_height).min(v.most_scroll(line_height))
+                    } else {
+                        let line = (v.scroll_y / line_height) as usize + 1;
+                        Self::estimate_notebook_offset(&doc, &v.nb_expanded, line, line_height)
+                    };
+                    v.scroll_x = 0.0;
+                    v.scroll_y = y;
+                    // Read as its script, its code is its language
+                    // server's: started (or sent the script) now, not for
+                    // a notebook only looked at as cells.
+                    let lsp = match (v.show_source, v.script_lang) {
+                        (true, Some(lang)) => self.ensure_lsp(lang),
+                        _ => Task::none(),
+                    };
+                    return Task::batch([
+                        operation::scroll_to(
+                            ui::code_scroll_id(pane),
+                            AbsoluteOffset { x: 0.0, y },
+                        ),
+                        lsp,
+                    ]);
+                }
                 // Back to the source: its code view is built anew in the
                 // rendered document's place, so it is put back where it was.
                 if v.show_source {

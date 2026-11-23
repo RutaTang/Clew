@@ -578,12 +578,15 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
             ts::BODY,
         ));
     }
-    // A markdown file reads rendered or as its source.
-    if v.md.is_some() {
-        let (glyph, label) = if v.show_source {
-            (Glyph::OpenBook, tr!("Rendered"))
-        } else {
-            (Glyph::Note, tr!("Source"))
+    // A markdown file reads rendered or as its source; a notebook as its
+    // cells or as one script, its code read as any file's is (hover, go to
+    // definition, its server's warnings).
+    if v.md.is_some() || v.notebook.is_some() {
+        let (glyph, label) = match (v.notebook.is_some(), v.show_source) {
+            (false, true) => (Glyph::OpenBook, tr!("Rendered")),
+            (false, false) => (Glyph::Note, tr!("Source")),
+            (true, true) => (Glyph::OpenBook, tr!("Cells")),
+            (true, false) => (Glyph::Braces, tr!("Script")),
         };
         title = title.push(file_tool(
             glyph,

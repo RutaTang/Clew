@@ -3078,6 +3078,57 @@ mod tests {
         assert!(targets[0].path.ends_with("src/main.rs"));
     }
 
+    /// A notebook's script, opened by its own path beside the notebook
+    /// (never written) with its magics commented out, as Clew opens it:
+    /// real pyright hovers its names and finds their definitions in the
+    /// project. Ignored by default: it runs the developer's pyright.
+    #[tokio::test]
+    #[ignore = "spawns pyright-langserver from PATH; run explicitly"]
+    async fn live_notebook_script_against_pyright() {
+        let exe = crate::linerpc::spawn_path()
+            .and_then(|path| {
+                std::env::split_paths(&path)
+                    .map(|dir| dir.join("pyright-langserver"))
+                    .find(|exe| exe.is_file())
+            })
+            .expect("needs pyright-langserver on PATH");
+        let root = crate::testutil::TempDir::new("nb-pyright-live");
+        std::fs::write(
+            root.join("helpers.py"),
+            "def scale(x: int) -> int:\n    \"\"\"Doubles x.\"\"\"\n    return x * 2\n",
+        )
+        .unwrap();
+        let projection =
+            "# %%\n%matplotlib inline\nfrom helpers import scale\n\n# %%\nvalue = scale(3)\n";
+        let script = root.join("analysis.ipynb.py");
+        let client = LspClient::start(&exe, &["--stdio".to_string()], &root, None)
+            .await
+            .unwrap();
+        client.did_open(
+            &script,
+            "python",
+            1,
+            &crate::notebook::script_for_server(projection),
+        );
+        let mut hover = None;
+        for _ in 0..40 {
+            hover = client.hover(&script, 5, 9).await.ok().flatten();
+            if hover.is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+        let hover = hover.expect("a hover on `scale`");
+        assert!(hover.contains("Doubles x."), "{hover}");
+        let targets = client.definition(&script, 5, 9).await.unwrap();
+        assert!(
+            targets
+                .first()
+                .is_some_and(|t| t.path.ends_with("helpers.py") && t.line == 0),
+            "{targets:?}"
+        );
+    }
+
     /// `rust-analyzer/expandMacro` against a real rust-analyzer: a
     /// `macro_rules!` call expands to its body, and a position on no macro
     /// answers `None`. Ignored by default, like the round trip above.
