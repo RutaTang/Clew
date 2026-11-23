@@ -252,6 +252,9 @@ pub(crate) fn kind_badge(kind: &str) -> &str {
         "impl" => "impl",
         "property" | "prop" => "prop",
         "field" => "field",
+        "static" => "static",
+        "variant" => "variant",
+        clew_core::rustapi::REEXPORT => "use",
         _ => kind,
     }
 }

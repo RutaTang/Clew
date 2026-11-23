@@ -442,8 +442,9 @@ impl RustFacts {
         for r in imports {
             if r.is_mod_decl {
                 // Only the file's own children; `a::b` is inside inline `a`.
-                if !r.module.contains("::") {
-                    facts.mods.insert(rust_identifier(&r.module).to_string());
+                let (name, _) = clew_core::rustscope::mod_decl_parts(&r.module);
+                if !name.contains("::") {
+                    facts.mods.insert(rust_identifier(name).to_string());
                 }
             } else {
                 let u = RustUse::parse(&r.module);
@@ -618,6 +619,7 @@ fn is_importable_rust_item(kind: &str) -> bool {
             | "module"
             | "macro"
             | "constant"
+            | "static"
     )
 }
 
@@ -1471,7 +1473,25 @@ impl Resolver {
             // `clew_core::rustscope::scope_rust_imports`): its file lives one
             // directory further down, `a/b.rs`.
             let dir = self.rust_mod_dir(from);
-            let segs = rust_path_segments(&raw.module);
+            let (name, path) = clew_core::rustscope::mod_decl_parts(&raw.module);
+            let segs = rust_path_segments(name);
+            // `#[path = "…"]` names the file: from the declaring file's
+            // folder — or, inside inline modules, from the module's own
+            // folder and theirs below it, as rustc finds it.
+            if let Some(path) = path {
+                let base = match segs.split_last() {
+                    Some((_, inline)) if !inline.is_empty() => {
+                        inline.iter().fold(dir.clone(), |d, s| d.join(s))
+                    }
+                    _ => from.parent().unwrap_or(&self.root).to_path_buf(),
+                };
+                let file = normalize(&base.join(path));
+                let target = match self.has_file(&file) {
+                    true => Target::Internal(file),
+                    false => Target::Unresolved(raw.module.clone()),
+                };
+                return (target, false);
+            }
             let target = self
                 .rust_child_module_file(from, &dir, &segs)
                 .map(Target::Internal)
@@ -4931,6 +4951,46 @@ mod tests {
             Target::Internal(root.join("lib/typed/__init__.pyi"))
         );
         assert_eq!(at("requests"), Target::External("requests".into()));
+    }
+
+    /// `#[path = "…"] mod x;` is the file it names: from the declaring
+    /// file's folder, or inside an inline module from that module's folder.
+    #[test]
+    fn a_rust_module_with_a_path_attribute_is_the_file_it_names() {
+        let root = Path::new("/proj");
+        let r = resolver(
+            root,
+            &[
+                "src/lib.rs",
+                "src/sys/windows.rs",
+                "src/net.rs",
+                "src/net/inner/x.rs",
+                "src/imp.rs",
+            ],
+        );
+        let decl = |module: &str| RawImport {
+            module: module.into(),
+            line: 1,
+            is_mod_decl: true,
+        };
+        let at = |module: &str, from: &str| r.resolve(&decl(module), &root.join(from), "rust");
+        assert_eq!(
+            at("os=sys/windows.rs", "src/lib.rs"),
+            Target::Internal(root.join("src/sys/windows.rs"))
+        );
+        // From a module file too, its own folder: `src/`, not `src/net/`.
+        assert_eq!(
+            at("imp=imp.rs", "src/net.rs"),
+            Target::Internal(root.join("src/imp.rs"))
+        );
+        assert_eq!(
+            at("inner::x=x.rs", "src/net.rs"),
+            Target::Internal(root.join("src/net/inner/x.rs"))
+        );
+        assert_eq!(
+            at("gone=nowhere.rs", "src/lib.rs"),
+            Target::Unresolved("gone=nowhere.rs".into())
+        );
     }
 
     #[test]

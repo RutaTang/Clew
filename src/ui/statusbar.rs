@@ -16,6 +16,8 @@ pub(crate) fn short_kind(kind: &str) -> &'static str {
         "module" => "mod",
         "macro" => "macro",
         "constant" => "const",
+        "static" => "static",
+        "variant" => "variant",
         "variable" => "var",
         "field" => "field",
         "type" => "type",

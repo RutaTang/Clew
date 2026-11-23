@@ -703,6 +703,15 @@ fn declaration_bytes(def: Node, lang: Lang, source: &str) -> ((usize, usize), us
                     ))
         })
         .map_or(declaration.end_byte(), |b| b.start_byte());
+    // A `macro_rules!` has no body field: its rules are its signature's
+    // tail, and the signature was the whole macro on one line (3,000
+    // characters for serde's helpers). It is `macro_rules! name`.
+    let signature_end = match (lang, def.kind()) {
+        (Lang::Rust, "macro_definition") => def
+            .child_by_field_name("name")
+            .map_or(signature_end, |n| n.end_byte()),
+        _ => signature_end,
+    };
     let mut top = template_wrapper(declaration);
     if let Some(export) = top.parent().filter(|p| p.kind() == "export_statement") {
         top = export;
@@ -1199,15 +1208,20 @@ fn template_wrapper(node: Node) -> Node {
     top
 }
 
-/// The container of a Rust method or associated type (see [`Container`]):
-/// a `type Item = …;` inside an `impl` is the impl's, not a type of the
-/// module — the docs index names it an associated type for that reason.
+/// The container of a Rust method, associated type or associated constant
+/// (see [`Container`]): a `type Item = …;` inside an `impl` is the impl's,
+/// not a type of the module — the docs index names it an associated type for
+/// that reason — and a trait's `const MAX: u32;` is as public as the trait.
 fn container_of(def: Node, lang: Lang) -> Option<Container> {
     match lang {
         Lang::Rust => {
             if !matches!(
                 def.kind(),
-                "function_item" | "function_signature_item" | "type_item" | "associated_type"
+                "function_item"
+                    | "function_signature_item"
+                    | "type_item"
+                    | "associated_type"
+                    | "const_item"
             ) {
                 return None;
             }
@@ -4469,7 +4483,8 @@ def stub_only(x: str) -> str: ...
         assert_eq!(abs.symbol.kind, "function", "{items:?}");
         assert_eq!(abs.container, None);
         assert!(abs.is_bodyless_callable(), "{items:?}");
-        assert_eq!(find(&items, "ERRNO").symbol.kind, "constant");
+        // A `static` is a static, as rustdoc lists it — not a constant.
+        assert_eq!(find(&items, "ERRNO").symbol.kind, "static");
     }
 
     /// One parse yields all three facts, identical to the separate extractors.

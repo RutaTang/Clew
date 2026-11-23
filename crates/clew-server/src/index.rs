@@ -294,37 +294,51 @@ pub(crate) fn build_docs(root: &Path, files: &[FileEntry]) -> Vec<clew_protocol:
     let threads = std::thread::available_parallelism().map_or(4, |p| p.get());
     let next = AtomicUsize::new(0);
     let root = &root;
-    let mut out: Vec<clew_protocol::DocFile> = std::thread::scope(|scope| {
-        let handles: Vec<_> = (0..threads)
-            .map(|_| {
-                let next = &next;
-                scope.spawn(move || {
-                    let mut local = Vec::new();
-                    loop {
-                        let i = next.fetch_add(1, Ordering::Relaxed);
-                        let Some(f) = files.get(i) else { break };
-                        if let Some(doc) = build_doc_one(root, f) {
-                            local.push(doc);
+    let mut out: Vec<(clew_protocol::DocFile, Option<clew_core::rustapi::Facts>)> =
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..threads)
+                .map(|_| {
+                    let next = &next;
+                    scope.spawn(move || {
+                        let mut local = Vec::new();
+                        loop {
+                            let i = next.fetch_add(1, Ordering::Relaxed);
+                            let Some(f) = files.get(i) else { break };
+                            if let Some(doc) = build_doc_one(root, f) {
+                                local.push(doc);
+                            }
                         }
-                    }
-                    local
+                        local
+                    })
                 })
-            })
-            .collect();
-        handles
-            .into_iter()
-            .flat_map(|h| h.join().unwrap_or_default())
-            .collect()
-    });
+                .collect();
+            handles
+                .into_iter()
+                .flat_map(|h| h.join().unwrap_or_default())
+                .collect()
+        });
     // Threads finish in nondeterministic order; sort so the DOCS list is stable.
-    out.sort_by(|a, b| a.rel.cmp(&b.rel));
-    out
+    out.sort_by(|a, b| a.0.rel.cmp(&b.0.rel));
+    // Rust files read together, as the crates they make up: what a module
+    // re-exports, which modules the root reaches, what a trait's
+    // implementations take from it.
+    let facts: std::collections::HashMap<String, clew_core::rustapi::Facts> = out
+        .iter_mut()
+        .filter_map(|(doc, facts)| Some((doc.rel.clone(), facts.take()?)))
+        .collect();
+    let mut docs: Vec<clew_protocol::DocFile> = out.into_iter().map(|(doc, _)| doc).collect();
+    clew_core::rustapi::link_crates(&mut docs, &facts);
+    docs
 }
 
 /// The public-API doc items for one file, or `None` if it has no recognized
-/// language, is too large, unreadable, or has no documented API. See
-/// [`build_docs`].
-pub(crate) fn build_doc_one(root: &Path, f: &FileEntry) -> Option<clew_protocol::DocFile> {
+/// language, is too large, unreadable, or has no documented API — with, for
+/// a Rust file, what reading it with the rest of its crate needs
+/// ([`clew_core::rustapi::link_crates`]). See [`build_docs`].
+pub(crate) fn build_doc_one(
+    root: &Path,
+    f: &FileEntry,
+) -> Option<(clew_protocol::DocFile, Option<clew_core::rustapi::Facts>)> {
     // Skip very large files. A generated / bundled / macro-heavy source (napi's
     // `async_runtime.rs` is ~1 MB) makes the tree-sitter parse + API-surface
     // extraction crawl. The shared indexer cap, which the semantic index's
@@ -352,10 +366,14 @@ pub(crate) fn build_doc_one(root: &Path, f: &FileEntry) -> Option<clew_protocol:
         clew_core::fs_scan::read_confined_capped(root, &dir.join(path), MAX_INDEX_FILE_BYTES)
     };
     let doc = clew_core::apidoc::module_doc_with(&source, lang, &include);
-    (!items.is_empty() || !doc.is_empty()).then(|| clew_protocol::DocFile {
-        rel: f.rel.clone(),
-        items,
-        doc,
+    let facts = (lang == "rust").then(|| clew_core::rustapi::facts(&source));
+    (!items.is_empty() || !doc.is_empty()).then(|| {
+        let file = clew_protocol::DocFile {
+            rel: f.rel.clone(),
+            items,
+            doc,
+        };
+        (file, facts)
     })
 }
 
@@ -394,6 +412,50 @@ mod tests {
         assert_eq!(entry_of("boot"), None);
     }
 
+    /// The docs are read as crates: the root lists what it re-exports from
+    /// a private module, with its doc; the private module's own listing is
+    /// no API; an implementation's method takes its trait's doc.
+    #[test]
+    fn a_crates_docs_are_read_as_one_crate() {
+        let root = crate::test_support::Scratch::new("server-crate-docs");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        let files = [
+            (
+                "src/lib.rs",
+                "mod shapes;\npub mod named;\npub use shapes::Circle;\n",
+            ),
+            (
+                "src/shapes.rs",
+                "/// A circle.\npub struct Circle;\nimpl crate::named::Named for Circle {\n    fn name(&self) -> String { todo!() }\n}\n",
+            ),
+            (
+                "src/named.rs",
+                "pub trait Named {\n    /// What it is called.\n    fn name(&self) -> String;\n}\n",
+            ),
+        ];
+        let entries: Vec<FileEntry> = files
+            .iter()
+            .map(|(rel, src)| {
+                std::fs::write(root.join(rel), src).unwrap();
+                FileEntry {
+                    abs: root.join(rel),
+                    rel: (*rel).into(),
+                }
+            })
+            .collect();
+        let docs = super::build_docs(&root, &entries);
+        let file = |rel: &str| docs.iter().find(|d| d.rel == rel).expect(rel);
+        let circle = file("src/lib.rs")
+            .items
+            .iter()
+            .find(|i| i.name == "Circle")
+            .expect("re-exported");
+        assert_eq!((circle.doc.as_str(), circle.public), ("A circle.", true));
+        let own = &file("src/shapes.rs").items[0];
+        assert_eq!((own.name.as_str(), own.public), ("Circle", false));
+        assert_eq!(own.children[0].doc, "What it is called.");
+    }
+
     /// A crate whose doc is its README (`#![doc = include_str!(…)]`) has
     /// that for its doc; one outside the project is not read.
     #[test]
@@ -411,14 +473,14 @@ mod tests {
             abs: lib.clone(),
             rel: "shop/src/lib.rs".into(),
         };
-        let doc = super::build_doc_one(&root, &entry).expect("a doc");
+        let (doc, _) = super::build_doc_one(&root, &entry).expect("a doc");
         assert_eq!(doc.doc, "# Shop\n\nSells things.");
         std::fs::write(
             &lib,
             "#![doc = include_str!(\"../../../../../../../../etc/hostname\")]\npub mod a;\n",
         )
         .unwrap();
-        assert!(super::build_doc_one(&root, &entry).is_none_or(|d| d.doc.is_empty()));
+        assert!(super::build_doc_one(&root, &entry).is_none_or(|(d, _)| d.doc.is_empty()));
     }
 
     /// The server's full builds parse each indexable file ONCE: the symbol

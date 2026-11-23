@@ -57,9 +57,14 @@ pub fn read(
         options("c").or_else(|| options("cpp")).as_ref(),
     );
     BuildFacts {
+        // The target chosen, else the one the project's Cargo configuration
+        // builds for (`build.target`), as rust-analyzer checks it.
         rust_target: rust
             .target
             .clone()
+            .or_else(|| {
+                crate::cargorun::config_build_target(root, crate::cargorun::cargo_home().as_deref())
+            })
             .filter(|t| crate::lsp::langenv::is_target_triple(t)),
         crates: cargo_features(root, crates, &rust),
         goos,
@@ -671,6 +676,31 @@ util = { workspace = true, features = ["fmt"], optional = true }
 
     /// Where the user chose nothing, the project's lsp.toml decides — its
     /// Rust features, its Go tags, its C fallback flags.
+    /// With no target chosen, the one the project's Cargo configuration
+    /// builds for; a chosen one wins.
+    #[test]
+    fn rust_files_are_read_for_cargos_build_target() {
+        let dir = TempDir::new("buildfacts-build-target");
+        let root = dir.path();
+        write(&root.join("Cargo.toml"), "[package]\nname = \"app\"\n");
+        write(
+            &root.join(".cargo/config.toml"),
+            "[build]\ntarget = \"thumbv7em-none-eabihf\"\n",
+        );
+        let crates = crate_dirs(["Cargo.toml"]);
+        let facts = read(root, &crates, &LanguageChoices::default(), None);
+        assert_eq!(facts.rust_target.as_deref(), Some("thumbv7em-none-eabihf"));
+        let chosen = LanguageChoices {
+            rust: Some(RustChoices {
+                target: Some("x86_64-pc-windows-msvc".into()),
+                ..RustChoices::default()
+            }),
+            ..LanguageChoices::default()
+        };
+        let facts = read(root, &crates, &chosen, None);
+        assert_eq!(facts.rust_target.as_deref(), Some("x86_64-pc-windows-msvc"));
+    }
+
     #[test]
     fn the_projects_lsp_toml_decides_where_nothing_was_chosen() {
         let dir = TempDir::new("buildfacts-lsptoml");

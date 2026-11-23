@@ -113,6 +113,7 @@ pub mod outline;
 pub mod procgroup;
 pub mod projectcalls;
 pub mod runnables;
+pub mod rustapi;
 pub mod rustscope;
 pub mod search;
 pub mod server_dist;

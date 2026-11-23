@@ -396,8 +396,18 @@ pub fn build_file(source: &str, lang_key: &str) -> Vec<DocItem> {
         Some(tree) => crate::outline::located_in(tree, source, lang),
         None => crate::outline::extract_located(source, lang.key()),
     };
+    // A Rust module's `pub use`s are its API too: a crate root of nothing
+    // but re-exports lists them ([`crate::rustapi::link_crates`] fills in
+    // what they name).
+    let reexports: Vec<DocItem> = match lang {
+        Lang::Rust => crate::rustapi::reexports(source)
+            .iter()
+            .map(crate::rustapi::reexport_item)
+            .collect(),
+        _ => Vec::new(),
+    };
     if located.is_empty() {
-        return Vec::new();
+        return reexports;
     }
     // Outline rows are ordered by line/name; Docs need source order even
     // within a line, with an enclosing declaration before its members.
@@ -535,11 +545,31 @@ pub fn build_file(source: &str, lang_key: &str) -> Vec<DocItem> {
             (Lang::Python, _) if parent[i].is_none() && python_all.is_some() => python_all
                 .as_ref()
                 .is_some_and(|all| all.contains(raws[i].name.as_str())),
+            // An enum's variants, and the fields of a variant, carry no
+            // `pub`: they are as public as the enum.
+            (Lang::Rust, _)
+                if raws[i].kind == "variant"
+                    || (raws[i].kind == "field"
+                        && parent[i].is_some_and(|p| raws[p].kind == "variant")) =>
+            {
+                parent[i].is_none_or(|p| public[p])
+            }
             _ => {
                 is_public(&raws[i].signature, &raws[i].name, lang, member_of.is_some())
                     || (parent[i].is_none() && exported.contains(raws[i].name.as_str()))
             }
         };
+        // What rustdoc reads off an item's attributes: `#[doc(hidden)]`
+        // leaves it out however `pub` it is; `#[macro_export]` exports a
+        // `macro_rules!`, which has no `pub` to say so.
+        if lang == Lang::Rust {
+            let attrs = crate::rustapi::attrs_above(&lines, raws[i].line);
+            if attrs.hidden {
+                public[i] = false;
+            } else if attrs.macro_export && raws[i].kind == "macro" {
+                public[i] = true;
+            }
+        }
     }
 
     // Assemble bottom-up rather than recursively: the nesting depth is the
@@ -593,7 +623,14 @@ pub fn build_file(source: &str, lang_key: &str) -> Vec<DocItem> {
     }
     let items: Vec<DocItem> = roots.iter().filter_map(|&i| built[i].take()).collect();
     match lang {
-        Lang::Rust => nest_rust_impls(items, &crate::outline::rust_impl_blocks(source)),
+        Lang::Rust => {
+            let mut items = nest_rust_impls(items, &crate::outline::rust_impl_blocks(source));
+            // In source order with the rest (stable: an item before a
+            // re-export written on its line).
+            items.extend(reexports);
+            items.sort_by_key(|i| i.line);
+            items
+        }
         _ => items,
     }
 }
@@ -1501,19 +1538,13 @@ fn is_plain_ident(s: &str) -> bool {
 fn is_public(decl: &str, name: &str, lang: Lang, is_member: bool) -> bool {
     let d = decl.trim_start();
     match lang {
-        // Any `pub` (including pub(crate)/pub(super)) counts for the surface
-        // — but `pub(self)`, which is private by another name.
-        Lang::Rust => {
-            d.strip_prefix("pub")
-                .is_some_and(|rest| match rest.trim_start().strip_prefix('(') {
-                    Some(scope) => {
-                        let scope = scope.split(')').next().unwrap_or_default();
-                        let scope: Vec<&str> = scope.split_whitespace().collect();
-                        !matches!(scope.as_slice(), ["self"] | ["in", "self"])
-                    }
-                    None => rest.starts_with(char::is_whitespace) || rest.is_empty(),
-                })
-        }
+        // `pub` alone: `pub(crate)`, `pub(super)` and `pub(in path)` are
+        // the crate's own, which rustdoc leaves out of its API, and
+        // `pub(self)` is private by another name.
+        Lang::Rust => d.strip_prefix("pub").is_some_and(|rest| {
+            !rest.trim_start().starts_with('(')
+                && (rest.starts_with(char::is_whitespace) || rest.is_empty())
+        }),
         Lang::TypeScript | Lang::Tsx | Lang::JavaScript => {
             if is_member {
                 // Class members are public unless they say otherwise — before
@@ -1957,9 +1988,10 @@ export class Cart {
         assert!(find(&cart.children, "format").public, "{items:?}");
     }
 
-    /// `pub(self)` is private by another name; any other `pub` counts.
+    /// Only `pub` is API: `pub(self)` is private by another name, and
+    /// `pub(crate)`, `pub(super)` are the crate's own, as rustdoc has them.
     #[test]
-    fn rust_pub_self_is_private() {
+    fn rust_only_a_plain_pub_is_public() {
         let src = "pub(self) fn a() {}\npub(in self) fn b() {}\npub(crate) fn c() {}\npub fn d() {}\nfn e() {}\npub ( super ) fn f() {}\n";
         let items = build_file(src, "rust");
         let public: Vec<(&str, bool)> = items.iter().map(|i| (i.name.as_str(), i.public)).collect();
@@ -1968,12 +2000,59 @@ export class Cart {
             [
                 ("a", false),
                 ("b", false),
-                ("c", true),
+                ("c", false),
                 ("d", true),
                 ("e", false),
-                ("f", true)
+                ("f", false)
             ]
         );
+    }
+
+    /// A struct's fields and an enum's variants are its members, with their
+    /// docs, as public as Rust has them: a field by its own `pub`, a variant
+    /// (and a variant's fields) as its enum. A trait's constants are as
+    /// public as the trait; a `static` is listed as one; `#[doc(hidden)]`
+    /// is no API; a macro's signature is its name, not its rules.
+    #[test]
+    fn rust_members_and_attributes_are_read_as_rustdoc_reads_them() {
+        let src = "/// A point.\npub struct Point {\n    /// Across.\n    pub x: f64,\n    y: f64,\n    #[doc(hidden)]\n    pub z: f64,\n}\n/// A shape.\npub enum Shape {\n    /// Round.\n    Circle { r: f64 },\n    Square(f64),\n}\nenum Private { A }\npub trait Limit {\n    /// The most.\n    const MAX: u32;\n}\n/// Errors seen.\npub static SEEN: u32 = 0;\n#[doc(hidden)]\npub fn internal() {}\n#[macro_export]\nmacro_rules! shout {\n    ($x:expr) => { $x };\n}\nmacro_rules! quiet { () => {} }\n";
+        let items = build_file(src, "rust");
+        let point = find(&items, "Point");
+        let fields: Vec<(&str, &str, &str, bool)> = point
+            .children
+            .iter()
+            .map(|c| (c.name.as_str(), c.kind.as_str(), c.doc.as_str(), c.public))
+            .collect();
+        assert_eq!(
+            fields,
+            [
+                ("x", "field", "Across.", true),
+                ("y", "field", "", false),
+                ("z", "field", "", false)
+            ]
+        );
+        assert_eq!(find(&point.children, "x").signature, "pub x: f64");
+        let shape = find(&items, "Shape");
+        let circle = find(&shape.children, "Circle");
+        assert_eq!(
+            (circle.kind.as_str(), circle.doc.as_str()),
+            ("variant", "Round.")
+        );
+        assert_eq!(circle.signature, "Circle");
+        assert!(circle.public && find(&circle.children, "r").public);
+        assert_eq!(find(&shape.children, "Square").signature, "Square(f64)");
+        assert!(!find(&find(&items, "Private").children, "A").public);
+        assert!(find(&find(&items, "Limit").children, "MAX").public);
+        let seen = find(&items, "SEEN");
+        assert_eq!(
+            (seen.kind.as_str(), seen.doc.as_str()),
+            ("static", "Errors seen.")
+        );
+        assert!(!find(&items, "internal").public);
+        let shout = find(&items, "shout");
+        assert_eq!(shout.signature, "macro_rules! shout");
+        assert!(shout.public);
+        assert!(!find(&items, "quiet").public);
     }
 
     /// A function's nested helpers are its locals, whatever their names.

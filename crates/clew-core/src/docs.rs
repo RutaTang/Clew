@@ -901,6 +901,13 @@ fn language_glue(lang: Lang, line: &str, continued: &mut bool) -> Option<bool> {
             }
             None
         }
+        // A doc comment is an attribute of the next item, whatever stands
+        // between: a blank line or a plain `// comment` does not part them,
+        // as rustdoc reads it (`////` is a plain comment too).
+        Lang::Rust => {
+            let doc = (t.starts_with("///") && !t.starts_with("////")) || t.starts_with("//!");
+            (t.is_empty() || (t.starts_with("//") && !doc)).then_some(true)
+        }
         _ => None,
     }
 }
@@ -2235,6 +2242,20 @@ mod tests {
         );
     }
 
+    /// A Rust doc stays its item's across a blank line or a plain comment,
+    /// as rustdoc reads it — never across another item, and never a `//!`.
+    #[test]
+    fn a_rust_doc_reaches_its_item_past_blank_lines_and_comments() {
+        let src = "//! The module.\n\nfn first() {}\n/// Spaced.\n\nfn spaced() {}\n/// Over a note.\n// TODO: tidy\n//// banner\n#[inline]\n\nfn noted() {}\n/// For a.\nfn a() {}\n\nfn b() {}\n";
+        let docs = docs_of(src, "rust");
+        let doc = |line: usize| docs.get(&line).map(String::as_str);
+        assert_eq!(doc(3), None, "{docs:?}");
+        assert_eq!(doc(6), Some("Spaced."));
+        assert_eq!(doc(12), Some("Over a note."));
+        assert_eq!(doc(14), Some("For a."));
+        assert_eq!(doc(16), None);
+    }
+
     #[test]
     fn rust_line_docs_above_attributes() {
         let src = "/// Adds two numbers.\n/// Returns the sum.\n#[inline]\npub fn add(a: i32, b: i32) -> i32 { a + b }\n";
@@ -2281,8 +2302,10 @@ mod tests {
         // Never closed: the lines below it glue only up to the bound, so a
         // function far below borrows nothing. (A parser reads the rest of the
         // file into the attribute, so the function is named by hand.)
+        // (Its arguments, not blank lines: those part no Rust doc from its
+        // item.)
         let mut src = String::from("/// Of nothing.\n#[cfg(\n");
-        src.push_str(&"\n".repeat(MAX_ATTRIBUTE_LINES + 1));
+        src.push_str(&"    a,\n".repeat(MAX_ATTRIBUTE_LINES + 1));
         src.push_str("pub fn far() {}\n");
         let line = src.lines().count();
         let far = |line| Symbol {

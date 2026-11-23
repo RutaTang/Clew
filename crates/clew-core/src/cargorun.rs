@@ -628,11 +628,7 @@ pub fn program_env(
     test: bool,
 ) -> Vec<(String, String)> {
     let package_dir = target.package_dir();
-    let home = crate::home_dir();
-    let cargo_home = std::env::var_os("CARGO_HOME")
-        .map(PathBuf::from)
-        .filter(|p| p.is_absolute())
-        .or_else(|| home.as_ref().map(|h| h.join(".cargo")));
+    let cargo_home = cargo_home();
     let mut env = config_env(package_dir, cargo_home.as_deref(), &|name| {
         std::env::var_os(name).is_some()
     });
@@ -660,7 +656,7 @@ pub fn program_env(
     paths.extend(inherited.iter().flat_map(std::env::split_paths));
     // macOS's own fallback, which a set variable takes the place of.
     if var == "DYLD_FALLBACK_LIBRARY_PATH" && !had {
-        paths.extend(home.map(|h| h.join("lib")));
+        paths.extend(crate::home_dir().map(|h| h.join("lib")));
         paths.extend([PathBuf::from("/usr/local/lib"), PathBuf::from("/usr/lib")]);
     }
     if let Ok(joined) = std::env::join_paths(paths) {
@@ -791,27 +787,10 @@ fn config_env(
     cargo_home: Option<&Path>,
     is_set: &dyn Fn(&str) -> bool,
 ) -> Vec<(String, String)> {
-    let mut files: Vec<(PathBuf, PathBuf)> = dir
-        .ancestors()
-        .map(|d| (d.join(".cargo"), d.to_path_buf()))
-        .collect();
-    if let Some(home) = cargo_home
-        && !files.iter().any(|(c, _)| c == home)
-    {
-        files.push((
-            home.to_path_buf(),
-            home.parent().unwrap_or(home).to_path_buf(),
-        ));
-    }
     let mut out: Vec<(String, String)> = Vec::new();
     // Farthest first, so a nearer file's entry is the one kept.
-    for (config_dir, base) in files.into_iter().rev() {
-        // Cargo reads `config` where both are.
-        let text = crate::statefile::read_capped(&config_dir.join("config"), MAX_READ_BYTES)
-            .or_else(|| {
-                crate::statefile::read_capped(&config_dir.join("config.toml"), MAX_READ_BYTES)
-            });
-        let Some(value) = text.and_then(|t| toml::from_str::<toml::Value>(&t).ok()) else {
+    for (config_dir, base) in config_dirs(dir, cargo_home).into_iter().rev() {
+        let Some(value) = read_config(&config_dir) else {
             continue;
         };
         let Some(table) = value.get("env").and_then(|e| e.as_table()) else {
@@ -841,6 +820,63 @@ fn config_env(
         }
     }
     out
+}
+
+/// Cargo's home: `CARGO_HOME` (when absolute), else `~/.cargo`.
+pub fn cargo_home() -> Option<PathBuf> {
+    std::env::var_os("CARGO_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| crate::home_dir().map(|h| h.join(".cargo")))
+}
+
+/// The `.cargo` folders whose configuration applies in `dir`, the nearest
+/// first — one in `dir` and in each folder above it, then `cargo_home` —
+/// each with the folder it is in.
+fn config_dirs(dir: &Path, cargo_home: Option<&Path>) -> Vec<(PathBuf, PathBuf)> {
+    let mut dirs: Vec<(PathBuf, PathBuf)> = dir
+        .ancestors()
+        .map(|d| (d.join(".cargo"), d.to_path_buf()))
+        .collect();
+    if let Some(home) = cargo_home
+        && !dirs.iter().any(|(c, _)| c == home)
+    {
+        dirs.push((
+            home.to_path_buf(),
+            home.parent().unwrap_or(home).to_path_buf(),
+        ));
+    }
+    dirs
+}
+
+/// The configuration in the `.cargo` folder `config_dir`: its `config`,
+/// which Cargo reads where both are, else its `config.toml`.
+fn read_config(config_dir: &Path) -> Option<toml::Value> {
+    let text = crate::statefile::read_capped(&config_dir.join("config"), MAX_READ_BYTES).or_else(
+        || crate::statefile::read_capped(&config_dir.join("config.toml"), MAX_READ_BYTES),
+    )?;
+    toml::from_str(&text).ok()
+}
+
+/// The target `cargo build` builds for in `dir` when none is named: the
+/// `build.target` of the nearest Cargo configuration that sets one, as
+/// rust-analyzer reads it. `None` for none, or for several
+/// (`target = ["a", "b"]`), which no one reading is.
+pub fn config_build_target(dir: &Path, cargo_home: Option<&Path>) -> Option<String> {
+    // The nearest that sets one decides, whatever it sets.
+    let target = config_dirs(dir, cargo_home)
+        .into_iter()
+        .find_map(|(config_dir, _)| {
+            read_config(&config_dir)?
+                .get("build")?
+                .get("target")
+                .cloned()
+        })?;
+    match target {
+        toml::Value::String(t) => Some(t),
+        toml::Value::Array(list) if list.len() == 1 => list[0].as_str().map(str::to_string),
+        _ => None,
+    }
 }
 
 /// Of a test binary's `--list --format terse` lines (`a::tests::adds:
@@ -1594,6 +1630,32 @@ mod tests {
     /// `[env]` of the Cargo configuration, as Cargo sets it for a program it
     /// runs: the nearest file's entry, Cargo's home's last; a variable
     /// already set kept unless forced; a relative one from its folder.
+    #[test]
+    fn the_build_target_is_the_nearest_configurations() {
+        let dir = TempDir::new("cargorun-build-target");
+        let root = dir.path();
+        write(
+            root,
+            ".cargo/config.toml",
+            "[build]\ntarget = \"wasm32-unknown-unknown\"\n",
+        );
+        write(root, "a/.cargo/config.toml", "[build]\njobs = 2\n");
+        write(
+            root,
+            "b/.cargo/config.toml",
+            "[build]\ntarget = [\"x86_64-pc-windows-msvc\"]\n",
+        );
+        write(
+            root,
+            "c/.cargo/config.toml",
+            "[build]\ntarget = [\"a\", \"b\"]\n",
+        );
+        let target = |d: &str| config_build_target(&root.join(d), None);
+        assert_eq!(target("a").as_deref(), Some("wasm32-unknown-unknown"));
+        assert_eq!(target("b").as_deref(), Some("x86_64-pc-windows-msvc"));
+        assert_eq!(target("c"), None, "several: none is the one");
+    }
+
     #[test]
     fn a_program_gets_the_env_of_cargos_configuration() {
         let dir = TempDir::new("cargorun-config-env");

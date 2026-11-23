@@ -365,6 +365,9 @@ fn walk(root: Node, src: &[u8], host: &Cfg, out: &mut Vec<(usize, usize)>) {
 /// finds by walking down from the root, so `next_named_sibling` cost the
 /// node's depth per call.
 fn walk_node(node: Node, src: &[u8], host: &Cfg, out: &mut Vec<(usize, usize)>) {
+    if node.kind() == "macro_invocation" && is_cfg_if(node, src) {
+        cfg_if_branches(node, src, host, out);
+    }
     let mut cursor = node.walk();
     let children: Vec<Node> = node.named_children(&mut cursor).collect();
     // For each child, the first later one that is not an attribute or a
@@ -409,6 +412,188 @@ fn walk_node(node: Node, src: &[u8], host: &Cfg, out: &mut Vec<(usize, usize)>) 
             out.push((child.start_position().row, gated.end_position().row));
         }
     }
+}
+
+/// Whether `node`, a macro invocation, is `cfg_if!` (or `cfg_if::cfg_if!`).
+fn is_cfg_if(node: Node, src: &[u8]) -> bool {
+    node.child_by_field_name("macro")
+        .and_then(|m| m.utf8_text(src).ok())
+        .is_some_and(|name| name == "cfg_if" || name.ends_with("::cfg_if"))
+}
+
+/// The branches of a `cfg_if!` the build leaves out, as the macro expands:
+/// in `if #[cfg(a)] { … } else if #[cfg(b)] { … } else { … }` the first
+/// branch whose `cfg` holds is built and every other is not. A `cfg` that
+/// cannot be decided leaves it and every branch after it undimmed — any of
+/// them may be the one — while those before it, known off, are still dimmed.
+/// A branch's lines inside its braces are what is dimmed: the lines that
+/// open and close it are shared with its neighbours.
+fn cfg_if_branches(node: Node, src: &[u8], host: &Cfg, out: &mut Vec<(usize, usize)>) {
+    let mut cursor = node.walk();
+    let Some(body) = node
+        .children(&mut cursor)
+        .find(|c| c.kind() == "token_tree")
+    else {
+        return;
+    };
+    let mut cursor = body.walk();
+    let tokens: Vec<Node> = body.children(&mut cursor).collect();
+    let text = |n: Node| n.utf8_text(src).unwrap_or_default();
+    let braced = |n: Node| n.kind() == "token_tree" && text(n).starts_with('{');
+    // Whether an earlier branch of the chain is built: known yes, known no,
+    // or not known.
+    let mut taken = Some(false);
+    let mut i = 1; // past the macro's own opening brace
+    while i + 1 < tokens.len() {
+        let (pred, branch, next) = match text(tokens[i]) {
+            "else" if tokens.get(i + 1).is_some_and(|t| text(*t) == "if") => {
+                i += 1;
+                continue;
+            }
+            "else" => match tokens.get(i + 1) {
+                Some(&b) if braced(b) => (None, b, i + 2),
+                _ => return,
+            },
+            "if" => {
+                // A new chain, unless it follows an `else`.
+                if i == 1 || text(tokens[i - 1]) != "else" {
+                    taken = Some(false);
+                }
+                match (tokens.get(i + 1), tokens.get(i + 2), tokens.get(i + 3)) {
+                    (Some(&hash), Some(&attr), Some(&b)) if text(hash) == "#" && braced(b) => {
+                        (Some(attr), b, i + 4)
+                    }
+                    _ => return,
+                }
+            }
+            _ => return,
+        };
+        let on = match pred {
+            None => Some(true),
+            Some(attr) => {
+                cfg_predicate(&format!("#{}", text(attr))).and_then(|p| eval_cfg_at(p, host, 0))
+            }
+        };
+        let off = match taken {
+            Some(true) => true,
+            None => false,
+            Some(false) => {
+                match on {
+                    Some(true) => taken = Some(true),
+                    None => taken = None,
+                    Some(false) => {}
+                }
+                on == Some(false)
+            }
+        };
+        let (first, last) = (branch.start_position().row, branch.end_position().row);
+        if off && last > first + 1 {
+            out.push((first + 1, last - 1));
+        }
+        i = next;
+    }
+}
+
+/// Whether the Rust file `rel` is left out of the build whole, for
+/// `target` with what `facts` say: its module is declared under a `cfg`
+/// that is off — `#[cfg(windows)] mod windows;` in its parent — or an
+/// enclosing module's is. `read` reads a project file by its path (`None`
+/// when it cannot); the declaring module is found where Cargo looks for it
+/// (`a/b.rs` is declared in `a.rs` or `a/mod.rs`; `src/a.rs` in
+/// `src/lib.rs` or `src/main.rs`).
+pub fn rust_file_gated_off(
+    rel: &str,
+    read: &dyn Fn(&str) -> Option<String>,
+    target: &Target,
+    facts: &BuildFacts,
+) -> bool {
+    let target = match &facts.rust_target {
+        Some(triple) => Target::from_triple(triple),
+        None => target.clone(),
+    };
+    let mut rel = rel.replace('\\', "/");
+    // A module tree deeper than this is not one anyone reads.
+    for _ in 0..16 {
+        let Some((name, candidates)) = declaring_candidates(&rel) else {
+            return false;
+        };
+        let Some((parent, source)) = candidates
+            .into_iter()
+            .find_map(|c| read(&c).map(|s| (c, s)))
+        else {
+            return false;
+        };
+        let cfg = Cfg {
+            target: &target,
+            features: crate_of(facts, &parent),
+        };
+        match module_declared(&source, &name, &cfg) {
+            Some(false) => return true,
+            Some(true) => rel = parent,
+            None => return false,
+        }
+    }
+    false
+}
+
+/// The module the Rust file `rel` is (its name) and the files that may
+/// declare it, by Cargo's layout. `None` for a crate's root.
+fn declaring_candidates(rel: &str) -> Option<(String, Vec<String>)> {
+    let (dir, file) = rel.rsplit_once('/').unwrap_or(("", rel));
+    let stem = file.strip_suffix(".rs")?;
+    if matches!(stem, "lib" | "main" | "build") || dir == "src/bin" || dir.ends_with("/src/bin") {
+        return None;
+    }
+    let (name, parent_dir) = match stem {
+        "mod" => {
+            let (up, name) = dir.rsplit_once('/').unwrap_or(("", dir));
+            (name.to_string(), up)
+        }
+        _ => (stem.to_string(), dir),
+    };
+    if name.is_empty() {
+        return None;
+    }
+    let join = |d: &str, f: &str| match d {
+        "" => f.to_string(),
+        d => format!("{d}/{f}"),
+    };
+    let is_src = parent_dir == "src" || parent_dir.ends_with("/src");
+    let candidates = match is_src {
+        true => vec![join(parent_dir, "lib.rs"), join(parent_dir, "main.rs")],
+        false if parent_dir.is_empty() => return None,
+        false => vec![format!("{parent_dir}.rs"), join(parent_dir, "mod.rs")],
+    };
+    Some((name, candidates))
+}
+
+/// How Rust `source` declares module `name` (`mod name;`, at its top level):
+/// `Some(false)` under a `cfg` that is off, `Some(true)` declared and not
+/// known off, `None` not declared here.
+fn module_declared(source: &str, name: &str, cfg: &Cfg) -> Option<bool> {
+    let tree = crate::highlight::parse(source, crate::highlight::Lang::Rust)?;
+    let src = source.as_bytes();
+    let root = tree.root_node();
+    let mut cursor = root.walk();
+    let items: Vec<Node> = root.named_children(&mut cursor).collect();
+    let at = items.iter().position(|n| {
+        n.kind() == "mod_item"
+            && n.child_by_field_name("body").is_none()
+            && n.child_by_field_name("name")
+                .and_then(|x| x.utf8_text(src).ok())
+                == Some(name)
+    })?;
+    let off = items[..at]
+        .iter()
+        .rev()
+        .take_while(|n| {
+            matches!(
+                n.kind(),
+                "attribute_item" | "line_comment" | "block_comment"
+            )
+        })
+        .any(|n| n.kind() == "attribute_item" && cfg_of(*n, src, cfg) == Some(false));
+    Some(!off)
 }
 
 /// Evaluate the `cfg` on an `attribute_item`, or `None` if it isn't a
@@ -2561,6 +2746,43 @@ mod depth_tests {
 
     fn linux() -> Target {
         Target::new("Linux", "linux", "x86_64", "unix")
+    }
+
+    /// A `cfg_if!` builds its first branch whose `cfg` holds: the others are
+    /// dimmed inside their braces. A `cfg` that cannot be decided leaves it
+    /// and every later branch alone.
+    #[test]
+    fn cfg_if_dims_the_branches_not_built() {
+        let src = "cfg_if::cfg_if! {\n    if #[cfg(windows)] {\n        mod windows;\n    } else if #[cfg(unix)] {\n        mod unix;\n    } else {\n        mod other;\n    }\n}\ncfg_if! {\n    if #[cfg(feature = \"fast\")] {\n        fn a() {}\n    } else if #[cfg(windows)] {\n        fn b() {}\n    }\n}\n";
+        assert_eq!(lines(inactive_lines(src, "rust", &linux())), [2, 6]);
+        let windows = Target::from_triple("x86_64-pc-windows-msvc");
+        assert_eq!(lines(inactive_lines(src, "rust", &windows)), [4, 6]);
+    }
+
+    /// A module its parent declares under a `cfg` that is off is left out
+    /// whole — and so is every module below it; a module declared plainly,
+    /// or not found, is not.
+    #[test]
+    fn a_module_gated_by_its_parent_is_left_out_whole() {
+        let files: HashMap<&str, &str> = [
+            ("mio/src/lib.rs", "mod sys;\n"),
+            (
+                "mio/src/sys/mod.rs",
+                "#[cfg(windows)]\n// The Windows backend.\nmod windows;\n#[cfg(unix)]\nmod unix;\n",
+            ),
+            ("mio/src/sys/windows/mod.rs", "mod afd;\n"),
+            ("a/src/main.rs", "#[cfg(target_os = \"macos\")]\nmod mac;\n"),
+        ]
+        .into();
+        let read = |rel: &str| files.get(rel).map(|s| s.to_string());
+        let off = |rel: &str| rust_file_gated_off(rel, &read, &linux(), &BuildFacts::default());
+        assert!(off("mio/src/sys/windows/mod.rs"));
+        assert!(off("mio/src/sys/windows/afd.rs"));
+        assert!(!off("mio/src/sys/unix.rs"));
+        assert!(!off("mio/src/sys/mod.rs"));
+        assert!(!off("mio/src/lib.rs"));
+        assert!(off("a/src/mac.rs"));
+        assert!(!off("loose/thing.rs"));
     }
 
     fn lines(set: HashSet<usize>) -> Vec<usize> {

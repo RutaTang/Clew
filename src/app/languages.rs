@@ -565,7 +565,9 @@ impl App {
 }
 
 /// The lines of `source` (the file `abs` of the project at `root`, in
-/// `lang`) the build leaves out for `target`, with what `facts` say.
+/// `lang`) the build leaves out for `target`, with what `facts` say — all of
+/// them for a Rust module its parent declares under a `cfg` that is off
+/// (`#[cfg(windows)] mod windows;`), read from the project's folder.
 pub(crate) fn inactive_of(
     source: &str,
     lang: &str,
@@ -577,6 +579,20 @@ pub(crate) fn inactive_of(
     let rel = root
         .and_then(|root| abs.strip_prefix(root).ok())
         .map(|rel| rel.to_string_lossy().replace('\\', "/"));
+    if lang == "rust"
+        && let (Some(root), Some(rel)) = (root, rel.as_deref())
+    {
+        let read = |rel: &str| {
+            clew_core::fs_scan::read_confined_capped(
+                root,
+                &root.join(rel),
+                clew_core::fs_scan::MAX_INDEX_FILE_BYTES,
+            )
+        };
+        if inactive::rust_file_gated_off(rel, &read, target, facts) {
+            return (0..source.lines().count()).collect();
+        }
+    }
     inactive::inactive_lines_in(source, lang, target, facts, rel.as_deref())
 }
 

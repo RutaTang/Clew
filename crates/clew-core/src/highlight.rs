@@ -822,7 +822,10 @@ const RUST_TAGS: &str = r#"
 (mod_item name: (identifier) @name) @definition.module
 (macro_definition name: (identifier) @name) @definition.macro
 (const_item name: (identifier) @name) @definition.constant
-(static_item name: (identifier) @name) @definition.constant
+(static_item name: (identifier) @name) @definition.static
+(field_declaration_list
+    (field_declaration name: (field_identifier) @name) @definition.field)
+(enum_variant_list (enum_variant name: (identifier) @name) @definition.variant)
 "#;
 
 /// Whether C-family `source` uses syntax that only C++ has.

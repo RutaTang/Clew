@@ -349,7 +349,10 @@ pub fn remove(list: &mut Vec<Note>, rel: &str, symbol: &str) {
 /// read at a glance — each had a circle, and a file of models counted its
 /// fields as most of what was left to understand.
 pub fn is_read_through(kind: &str) -> bool {
-    !matches!(kind, "field" | "constant" | "variable")
+    !matches!(
+        kind,
+        "field" | "constant" | "static" | "variant" | "variable"
+    )
 }
 
 /// `(understood, total)` symbol counts for one file, given its live symbol

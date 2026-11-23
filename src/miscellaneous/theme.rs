@@ -1538,7 +1538,7 @@ fn kind_ink(t: &TokenColors, kind: &str) -> Option<u32> {
         | "view" | "inductive" => Some(t.type_),
         "module" | "implementation" => Some(t.keyword),
         "field" => Some(t.property),
-        "constant" | "theorem" | "example" | "axiom" => Some(t.number),
+        "constant" | "static" | "variant" | "theorem" | "example" | "axiom" => Some(t.number),
         _ => None,
     }
 }

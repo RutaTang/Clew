@@ -242,67 +242,127 @@ fn public_api(corpus: &Corpus) -> Option<ProjectMap> {
         "Public API",
         "each module and an arrow to each item it makes pub (not pub(crate)), and to what it re-exports with pub use",
     );
-    for source in corpus.in_langs(&[Lang::Rust]) {
-        if source.rel.contains("tests/")
-            || source.rel.contains("examples/")
-            || source.rel.contains("benches/")
-        {
-            continue;
-        }
+    let sources: Vec<&super::Source> = corpus
+        .in_langs(&[Lang::Rust])
+        .filter(|s| {
+            !(s.rel.contains("tests/") || s.rel.contains("examples/") || s.rel.contains("benches/"))
+        })
+        .collect();
+    // A module the crate's root does not reach (`mod internal;`, not
+    // `pub mod`) is no API, however `pub` its items: its files are left out.
+    let declared: Vec<Vec<(String, bool)>> = sources.iter().map(|s| module_decls(s)).collect();
+    let rels: Vec<&str> = sources.iter().map(|s| s.rel.as_str()).collect();
+    let hidden = crate::rustapi::unreachable(&rels, |fi, name| {
+        declared[fi]
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|&(_, public)| public)
+    });
+    for (fi, source) in sources.iter().enumerate() {
         let Some(tree) = source.tree() else {
             continue;
         };
         let src = source.text.as_str();
-        let root = tree.root_node();
-        let module = source
+        let lines: Vec<&str> = src.lines().collect();
+        let reachable = hidden.binary_search(&fi).is_err();
+        let file_module = source
             .rel
             .trim_end_matches(".rs")
             .trim_end_matches("/mod")
             .to_string();
-        let mut cursor = root.walk();
-        for item in root.named_children(&mut cursor) {
-            let Some(vis) = all_of(item, "visibility_modifier")
-                .into_iter()
-                .find(|v| v.parent() == Some(item))
-            else {
-                continue;
-            };
-            if text(vis, src) != "pub" {
-                continue;
+        // The file's items, and those of each inline `pub mod` in it, under
+        // that module.
+        let mut scopes: Vec<(Node, String)> = vec![(tree.root_node(), file_module)];
+        while let Some((scope, module)) = scopes.pop() {
+            let mut cursor = scope.walk();
+            for item in scope.named_children(&mut cursor) {
+                let attrs = crate::rustapi::attrs_above(&lines, line(item));
+                // `#[macro_export]` exports a macro at the crate's root,
+                // from any module, reached or not.
+                let exported_macro = item.kind() == "macro_definition" && attrs.macro_export;
+                if attrs.hidden || !(exported_macro || (reachable && plain_pub(item, src))) {
+                    continue;
+                }
+                let m = map.node("module", &module, &module);
+                map.place(m, &source.rel, 1);
+                if item.kind() == "use_declaration" {
+                    let path = text(item, src)
+                        .trim_start_matches("pub")
+                        .trim()
+                        .trim_start_matches("use")
+                        .trim()
+                        .trim_end_matches(';')
+                        .to_string();
+                    let to = map.node("re-export", &format!("{module}:{path}"), &path);
+                    map.place(to, &source.rel, line(item));
+                    map.edge(m, to, "pub use");
+                    continue;
+                }
+                let Some(name) = item.child_by_field_name("name") else {
+                    continue;
+                };
+                let kind = match item.kind() {
+                    "macro_definition" => "macro".to_string(),
+                    k => k.trim_end_matches("_item").replace('_', " "),
+                };
+                let label = text(name, src).to_string();
+                let at = map.node(&kind, &format!("{module}::{label}"), &label);
+                map.place(at, &source.rel, line(item));
+                let signature = match item.kind() {
+                    "macro_definition" => format!("macro_rules! {label}"),
+                    _ => text(item, src)
+                        .split(['{', ';'])
+                        .next()
+                        .unwrap_or("")
+                        .trim()
+                        .to_string(),
+                };
+                map.detail(at, signature);
+                map.edge(
+                    m,
+                    at,
+                    if exported_macro {
+                        "#[macro_export]"
+                    } else {
+                        "pub"
+                    },
+                );
+                if item.kind() == "mod_item"
+                    && let Some(body) = item.child_by_field_name("body")
+                {
+                    scopes.push((body, format!("{module}::{label}")));
+                }
             }
-            let m = map.node("module", &module, &module);
-            map.place(m, &source.rel, 1);
-            if item.kind() == "use_declaration" {
-                let path = text(item, src)
-                    .trim_start_matches("pub")
-                    .trim()
-                    .trim_start_matches("use")
-                    .trim()
-                    .trim_end_matches(';')
-                    .to_string();
-                let to = map.node("re-export", &format!("{module}:{path}"), &path);
-                map.place(to, &source.rel, line(item));
-                map.edge(m, to, "pub use");
-                continue;
-            }
-            let Some(name) = item.child_by_field_name("name") else {
-                continue;
-            };
-            let kind = item.kind().trim_end_matches("_item").replace('_', " ");
-            let label = text(name, src).to_string();
-            let at = map.node(&kind, &format!("{module}::{label}"), &label);
-            map.place(at, &source.rel, line(item));
-            let signature = text(item, src)
-                .split(['{', ';'])
-                .next()
-                .unwrap_or("")
-                .trim()
-                .to_string();
-            map.detail(at, signature);
-            map.edge(m, at, "pub");
         }
     }
     map.finish()
+}
+
+/// Whether `item` is declared plain `pub`: not `pub(crate)` and the like,
+/// the crate's own.
+fn plain_pub(item: Node<'_>, src: &str) -> bool {
+    all_of(item, "visibility_modifier")
+        .into_iter()
+        .find(|v| v.parent() == Some(item))
+        .is_some_and(|v| text(v, src) == "pub")
+}
+
+/// The modules `source` declares at its top level, each with whether it is
+/// `pub mod`.
+fn module_decls(source: &super::Source) -> Vec<(String, bool)> {
+    let Some(tree) = source.tree() else {
+        return Vec::new();
+    };
+    let src = source.text.as_str();
+    let root = tree.root_node();
+    let mut cursor = root.walk();
+    root.named_children(&mut cursor)
+        .filter(|n| n.kind() == "mod_item")
+        .filter_map(|n| {
+            let name = text(n.child_by_field_name("name")?, src).to_string();
+            Some((name, plain_pub(n, src)))
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -384,6 +444,35 @@ mod tests {
             "{kinds:?}"
         );
         assert!(kinds.contains(&("unsafe fn", "raw_area")), "{kinds:?}");
+    }
+
+    /// A private module's items are no API; an inline `pub mod`'s are, and
+    /// so is a `#[macro_export]` macro wherever it is declared; a
+    /// `#[doc(hidden)]` item is not.
+    #[test]
+    fn the_public_api_is_what_the_crate_root_reaches() {
+        let maps = maps(&Corpus::of(&[
+            (
+                "src/lib.rs",
+                "mod internal;\npub mod api {\n    pub fn call() {}\n    fn own() {}\n}\n#[doc(hidden)]\npub fn __private() {}\n",
+            ),
+            (
+                "src/internal.rs",
+                "pub fn helper() {}\n#[macro_export]\nmacro_rules! shout { () => {} }\n",
+            ),
+        ]));
+        let api = maps.iter().find(|m| m.id == "rust.api").unwrap();
+        let got = edges(api);
+        for want in [
+            e("src/lib", "api", "pub"),
+            e("src/lib::api", "call", "pub"),
+            e("src/internal", "shout", "#[macro_export]"),
+        ] {
+            assert!(got.contains(&want), "{want:?} in {got:?}");
+        }
+        for gone in ["own", "helper", "__private"] {
+            assert!(!got.iter().any(|(_, b, _)| b == gone), "{gone} in {got:?}");
+        }
     }
 
     #[test]
