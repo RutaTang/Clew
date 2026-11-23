@@ -672,12 +672,34 @@ fn find_vetted_on(root: &Path, host: &PythonHost) -> Option<Vetted> {
             managed: None,
         })
     };
+    // uv's environment for the project, where `UV_PROJECT_ENVIRONMENT`
+    // moves it: one the user set outside the project is theirs, as an
+    // activated one is.
+    if let Some(env) = uv_project_env(root, host) {
+        let theirs = !env.starts_with(root);
+        for exe in EXES {
+            if let Some(found) = vet(env.join(exe), theirs) {
+                return Some(found);
+            }
+        }
+    }
     // Project-local virtualenvs, most-conventional first.
     for dir in DIRS {
         for exe in EXES {
             if let Some(found) = vet(root.join(dir).join(exe), false) {
                 return Some(found);
             }
+        }
+    }
+    // The interpreter PDM records for the project: one of the project's
+    // own is read as any venv in it is; one outside it is the user's.
+    if let Some(cand) = pdm_python(root) {
+        let outside = std::fs::canonicalize(&cand).is_ok_and(|real| !real.starts_with(&repo));
+        if let Some(mut found) = vet(cand, outside) {
+            if outside {
+                found.managed = Some(PythonEnvKind::Pdm);
+            }
+            return Some(found);
         }
     }
     // An already-activated virtualenv in the environment, or conda
@@ -704,6 +726,17 @@ fn find_vetted_on(root: &Path, host: &PythonHost) -> Option<Vetted> {
     // against whatever `python3` came first, and every import of its
     // packages was unresolved.
     let Some((interpreter, kind)) = find_managed(root, host) else {
+        // A monorepo whose one Python project keeps its venv a folder down
+        // (`backend/.venv`): that one. Two or more is a choice to make in
+        // Settings, never a guess.
+        let mut below = sorted_dirs(root)
+            .into_iter()
+            .filter(|child| !dir_name(child).starts_with('.'))
+            .flat_map(|child| [child.join(".venv"), child.join("venv")])
+            .filter_map(|venv| EXES.iter().find_map(|exe| vet(venv.join(exe), false)));
+        if let (Some(only), None) = (below.next(), below.next()) {
+            return Some(only);
+        }
         return host
             .conda_is_base()
             .then(|| activated("CONDA_PREFIX"))
@@ -770,9 +803,7 @@ fn find_managed(root: &Path, host: &PythonHost) -> Option<(PathBuf, PythonEnvKin
     }
     let pipfile = real_root.join("Pipfile");
     if pipfile.is_file()
-        && let Some(dir) = host
-            .dir("WORKON_HOME")
-            .or_else(|| host.home().map(|h| h.join(".local/share/virtualenvs")))
+        && let Some(dir) = pipenv_dir(host)
     {
         let folder = real_root
             .file_name()
@@ -787,13 +818,47 @@ fn find_managed(root: &Path, host: &PythonHost) -> Option<(PathBuf, PythonEnvKin
             return Some((found, PythonEnvKind::Pipenv));
         }
     }
-    let pinned = crate::statefile::read_capped(&root.join(".python-version"), 4096)
-        .and_then(|t| t.split_whitespace().next().map(str::to_string))
-        .filter(|v| !v.contains(['/', '\\']) && v != "." && v != "..")?;
-    let pyenv = host
-        .dir("PYENV_ROOT")
-        .or_else(|| host.home().map(|h| h.join(".pyenv")))?;
-    interpreter_in(&pyenv.join("versions").join(pinned)).map(|found| (found, PythonEnvKind::Pyenv))
+    if let Some(found) = hatch_envs(host, &project_name(root))
+        .iter()
+        .find_map(|env| interpreter_in(env))
+    {
+        return Some((found, PythonEnvKind::Hatch));
+    }
+    if let Some(found) = conda_env_named(root, host).and_then(|env| interpreter_in(&env)) {
+        return Some((found, PythonEnvKind::Conda));
+    }
+    // The Python `.python-version` pins: pyenv's, else one uv installed
+    // (`cpython-3.12.4-linux-x86_64-gnu`). `3.12` pins the newest 3.12.
+    let pins = pinned_versions(root);
+    if pins.is_empty() {
+        return None;
+    }
+    let pyenv = pyenv_versions(host);
+    if let Some(found) = pinned_dir(&pyenv, &pins, |name| Some(name.to_string()))
+        .and_then(|dir| interpreter_in(&dir))
+    {
+        return Some((found, PythonEnvKind::Pyenv));
+    }
+    let uv = uv_pythons(host);
+    pinned_dir(&uv, &pins, |name| {
+        name.split('-').nth(1).map(str::to_string)
+    })
+    .and_then(|dir| interpreter_in(&dir))
+    .map(|found| (found, PythonEnvKind::Uv))
+}
+
+/// The Pythons uv installed on `host`.
+fn uv_pythons(host: &PythonHost) -> Vec<PathBuf> {
+    host.dir("UV_PYTHON_INSTALL_DIR")
+        .or_else(|| match () {
+            _ if host.windows => host.dir("APPDATA").map(|d| d.join("uv/python")),
+            _ => host
+                .dir("XDG_DATA_HOME")
+                .or_else(|| host.home().map(|h| h.join(".local/share")))
+                .map(|d| d.join("uv/python")),
+        })
+        .map(|dir| sorted_dirs(&dir))
+        .unwrap_or_default()
 }
 
 /// The first eight characters of the URL-safe base64 of `bytes`' SHA-256,
@@ -938,6 +1003,9 @@ pub struct PythonHost {
     pub vars: Vec<(&'static str, OsString)>,
     /// Whether this is a Mac, where caches live under `~/Library/Caches`.
     pub macos: bool,
+    /// Whether this is Windows, where tools keep their environments under
+    /// `%LOCALAPPDATA%` and `%APPDATA%`, and pyenv is pyenv-win.
+    pub windows: bool,
 }
 
 /// The environment variables [`PythonHost`] reads.
@@ -951,6 +1019,13 @@ const PYTHON_HOST_VARS: &[&str] = &[
     "UV_PYTHON_INSTALL_DIR",
     "XDG_CACHE_HOME",
     "XDG_DATA_HOME",
+    "XDG_CONFIG_HOME",
+    "UV_PROJECT_ENVIRONMENT",
+    "HATCH_DATA_DIR",
+    "POETRY_CACHE_DIR",
+    "POETRY_CONFIG_DIR",
+    "LOCALAPPDATA",
+    "APPDATA",
 ];
 
 impl PythonHost {
@@ -964,7 +1039,13 @@ impl PythonHost {
                 .filter_map(|&name| Some((name, std::env::var_os(name)?)))
                 .collect(),
             macos: cfg!(target_os = "macos"),
+            windows: cfg!(windows),
         }
+    }
+
+    /// The raw value of variable `name`, as set.
+    fn var(&self, name: &str) -> Option<&OsString> {
+        self.vars.iter().find(|(n, _)| *n == name).map(|(_, v)| v)
     }
 
     /// The directory variable `name` names, when it names an absolute one.
@@ -1099,10 +1180,30 @@ pub fn python_candidates(root: &Path, host: &PythonHost) -> Vec<PythonCandidate>
             }
         }
     }
-    if let Some(dir) = host
-        .dir("WORKON_HOME")
-        .or_else(|| host.home().map(|h| h.join(".local/share/virtualenvs")))
+    for env in hatch_envs(host, &project) {
+        if let Some(interpreter) = interpreter_in(&env) {
+            add(
+                &mut out,
+                interpreter,
+                PythonEnvKind::Hatch,
+                dir_name(&env),
+                pyvenv_version(&env),
+            );
+        }
+    }
+    if let Some(cand) = pdm_python(root).filter(|p| p.is_file())
+        && std::fs::canonicalize(&cand).is_ok_and(|real| {
+            std::fs::canonicalize(root).is_ok_and(|root| !real.starts_with(repository_top(&root)))
+        })
     {
+        let name = cand
+            .parent()
+            .and_then(|bin| bin.parent())
+            .map(dir_name)
+            .unwrap_or_default();
+        add(&mut out, cand, PythonEnvKind::Pdm, name, None);
+    }
+    if let Some(dir) = pipenv_dir(host) {
         let folder = root
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -1134,15 +1235,11 @@ pub fn python_candidates(root: &Path, host: &PythonHost) -> Vec<PythonCandidate>
             );
         }
     }
-    if let Some(dir) = host
-        .dir("PYENV_ROOT")
-        .or_else(|| host.home().map(|h| h.join(".pyenv")))
     {
-        // The version the project pins (`.python-version`) first.
-        let pinned = crate::statefile::read_capped(&root.join(".python-version"), 4096)
-            .and_then(|t| t.split_whitespace().next().map(str::to_string));
-        let mut versions = sorted_dirs(&dir.join("versions"));
-        versions.sort_by_key(|v| Some(dir_name(v)) != pinned);
+        // The versions the project pins (`.python-version`) first.
+        let pins = pinned_versions(root);
+        let mut versions = pyenv_versions(host);
+        versions.sort_by_key(|v| !pins.iter().any(|pin| version_pinned(&dir_name(v), pin)));
         for env in versions {
             let name = dir_name(&env);
             if let Some(interpreter) = interpreter_in(&env) {
@@ -1153,12 +1250,8 @@ pub fn python_candidates(root: &Path, host: &PythonHost) -> Vec<PythonCandidate>
             }
         }
     }
-    if let Some(dir) = host.dir("UV_PYTHON_INSTALL_DIR").or_else(|| {
-        host.dir("XDG_DATA_HOME")
-            .or_else(|| host.home().map(|h| h.join(".local/share")))
-            .map(|d| d.join("uv/python"))
-    }) {
-        for env in sorted_dirs(&dir) {
+    {
+        for env in uv_pythons(host) {
             let name = dir_name(&env);
             if let Some(interpreter) = interpreter_in(&env) {
                 // `cpython-3.12.4-macos-aarch64-none`.
@@ -1336,18 +1429,224 @@ fn pipenv_sanitized(name: &str) -> String {
         .collect()
 }
 
-/// Where Poetry keeps its environments on `host`.
+/// Where Poetry keeps its environments on `host`: `POETRY_VIRTUALENVS_PATH`,
+/// else `virtualenvs.path` of its `config.toml` (`{cache-dir}` in it
+/// spelled out), else `virtualenvs` in its cache: the cache `cache-dir`
+/// names, else the platform's (`%LOCALAPPDATA%\pypoetry\Cache` on Windows,
+/// `~/Library/Caches/pypoetry` on a Mac, `$XDG_CACHE_HOME/pypoetry`).
 fn poetry_dir(host: &PythonHost) -> Option<PathBuf> {
     if let Some(dir) = host.dir("POETRY_VIRTUALENVS_PATH") {
         return Some(dir);
     }
-    let cache = match host.macos {
-        true => host.home()?.join("Library/Caches"),
-        false => host
-            .dir("XDG_CACHE_HOME")
-            .or_else(|| host.home().map(|h| h.join(".cache")))?,
+    let config_dir = host.dir("POETRY_CONFIG_DIR").or_else(|| {
+        if host.windows {
+            host.dir("APPDATA").map(|d| d.join("pypoetry"))
+        } else if host.macos {
+            host.home()
+                .map(|h| h.join("Library/Application Support/pypoetry"))
+        } else {
+            host.dir("XDG_CONFIG_HOME")
+                .or_else(|| host.home().map(|h| h.join(".config")))
+                .map(|d| d.join("pypoetry"))
+        }
+    });
+    let config = config_dir
+        .and_then(|d| crate::statefile::read_capped(&d.join("config.toml"), MAX_PYPROJECT_BYTES))
+        .and_then(|text| text.parse::<toml::Table>().ok());
+    let setting = |path: &[&str]| -> Option<PathBuf> {
+        let mut at: &toml::Value = config.as_ref()?.get(path[0])?;
+        for key in &path[1..] {
+            at = at.get(key)?;
+        }
+        Some(PathBuf::from(at.as_str()?))
     };
-    Some(cache.join("pypoetry/virtualenvs"))
+    let cache = host
+        .dir("POETRY_CACHE_DIR")
+        .or_else(|| setting(&["cache-dir"]).filter(|p| p.is_absolute()))
+        .or_else(|| {
+            if host.windows {
+                host.dir("LOCALAPPDATA").map(|d| d.join("pypoetry/Cache"))
+            } else if host.macos {
+                host.home().map(|h| h.join("Library/Caches/pypoetry"))
+            } else {
+                host.dir("XDG_CACHE_HOME")
+                    .or_else(|| host.home().map(|h| h.join(".cache")))
+                    .map(|d| d.join("pypoetry"))
+            }
+        })?;
+    if let Some(path) = setting(&["virtualenvs", "path"]) {
+        let spelled = path
+            .to_string_lossy()
+            .replace("{cache-dir}", &cache.to_string_lossy());
+        let path = PathBuf::from(spelled);
+        if path.is_absolute() {
+            return Some(path);
+        }
+    }
+    Some(cache.join("virtualenvs"))
+}
+
+/// Where Pipenv keeps its environments on `host`: `WORKON_HOME`, else
+/// `~/.virtualenvs` on Windows, else `$XDG_DATA_HOME/virtualenvs`, else
+/// `~/.local/share/virtualenvs`.
+fn pipenv_dir(host: &PythonHost) -> Option<PathBuf> {
+    host.dir("WORKON_HOME").or_else(|| {
+        if host.windows {
+            host.home().map(|h| h.join(".virtualenvs"))
+        } else {
+            host.dir("XDG_DATA_HOME")
+                .or_else(|| host.home().map(|h| h.join(".local/share")))
+                .map(|d| d.join("virtualenvs"))
+        }
+    })
+}
+
+/// Hatch's environments of the project `name` on `host`
+/// (`<data>/env/virtual/<name>/<id>/<env>`), the default one first.
+fn hatch_envs(host: &PythonHost, name: &str) -> Vec<PathBuf> {
+    let data = host.dir("HATCH_DATA_DIR").or_else(|| {
+        if host.windows {
+            host.dir("LOCALAPPDATA").map(|d| d.join("hatch"))
+        } else if host.macos {
+            host.home()
+                .map(|h| h.join("Library/Application Support/hatch"))
+        } else {
+            host.dir("XDG_DATA_HOME")
+                .or_else(|| host.home().map(|h| h.join(".local/share")))
+                .map(|d| d.join("hatch"))
+        }
+    });
+    let Some(data) = data else {
+        return Vec::new();
+    };
+    let wanted = poetry_sanitized(name);
+    let mut envs: Vec<PathBuf> = Vec::new();
+    for project in sorted_dirs(&data.join("env/virtual")) {
+        if poetry_sanitized(&dir_name(&project)) != wanted {
+            continue;
+        }
+        for id in sorted_dirs(&project) {
+            envs.extend(sorted_dirs(&id));
+        }
+    }
+    // The default environment is named for the project, or `default`.
+    envs.sort_by_key(|env| {
+        let n = poetry_sanitized(&dir_name(env));
+        !(n == wanted || n == "default")
+    });
+    envs
+}
+
+/// The project's uv environment as `UV_PROJECT_ENVIRONMENT` names it: a
+/// folder of the project's, or one of the user's anywhere.
+fn uv_project_env(root: &Path, host: &PythonHost) -> Option<PathBuf> {
+    let named = PathBuf::from(host.var("UV_PROJECT_ENVIRONMENT")?);
+    Some(match named.is_absolute() {
+        true => named,
+        false => root.join(named),
+    })
+}
+
+/// The interpreter `.pdm-python` records PDM using for the project, when
+/// it is one: an absolute path to a `python…` program. Read, not trusted:
+/// what runs it is held to the same check as any other.
+fn pdm_python(root: &Path) -> Option<PathBuf> {
+    let text = crate::statefile::read_capped(&root.join(".pdm-python"), 4096)?;
+    let path = PathBuf::from(text.trim());
+    let named = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.starts_with("python"));
+    (path.is_absolute() && named).then_some(path)
+}
+
+/// The conda environment the project's `environment.yml` names
+/// (`name: ml`), on `host`.
+fn conda_env_named(root: &Path, host: &PythonHost) -> Option<PathBuf> {
+    let text = ["environment.yml", "environment.yaml"]
+        .iter()
+        .find_map(|f| crate::statefile::read_capped(&root.join(f), MAX_PYPROJECT_BYTES))?;
+    let name = text.lines().find_map(|line| {
+        let value = line.strip_prefix("name:")?.trim();
+        let value = value.trim_matches(['"', '\'']);
+        (!value.is_empty() && !value.contains(['/', '\\'])).then(|| value.to_string())
+    })?;
+    conda_envs(host)
+        .into_iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, env)| env)
+}
+
+/// Where pyenv keeps its Pythons on `host`: `PYENV_ROOT`'s, else
+/// `~/.pyenv`'s; pyenv-win's under `pyenv-win` in it.
+fn pyenv_versions(host: &PythonHost) -> Vec<PathBuf> {
+    let Some(root) = host
+        .dir("PYENV_ROOT")
+        .or_else(|| host.home().map(|h| h.join(".pyenv")))
+    else {
+        return Vec::new();
+    };
+    let mut dirs = sorted_dirs(&root.join("versions"));
+    dirs.extend(sorted_dirs(&root.join("pyenv-win/versions")));
+    dirs
+}
+
+/// Most folders above the project looked in for its `.python-version`.
+const MAX_PIN_DEPTH: usize = 32;
+
+/// The versions the project's `.python-version` pins (the one in its
+/// folder or the nearest above it, as pyenv and uv read it), in order. A
+/// path is no version.
+fn pinned_versions(root: &Path) -> Vec<String> {
+    let Some(text) = root
+        .ancestors()
+        .take(MAX_PIN_DEPTH)
+        .find_map(|dir| crate::statefile::read_capped(&dir.join(".python-version"), 4096))
+    else {
+        return Vec::new();
+    };
+    text.lines()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .flat_map(str::split_whitespace)
+        .filter(|v| !v.contains(['/', '\\']) && *v != "." && *v != ".." && *v != "system")
+        .map(str::to_string)
+        .collect()
+}
+
+/// A version's numbers, for ordering: `3.12.4` is [3, 12, 4]; a part not a
+/// number ends them.
+fn version_numbers(version: &str) -> Vec<u32> {
+    version
+        .split('.')
+        .map_while(|part| part.parse().ok())
+        .collect()
+}
+
+/// Whether `version` is what `pin` asks for: the same, or a release of it
+/// (`3.12` asks for `3.12.4`; `3.1` does not ask for `3.12.0`).
+fn version_pinned(version: &str, pin: &str) -> bool {
+    version == pin
+        || version
+            .strip_prefix(pin)
+            .is_some_and(|rest| rest.starts_with('.'))
+}
+
+/// The newest of `dirs` whose version (`version_of` its folder's name) is
+/// what `pins` ask for, the first pin first.
+fn pinned_dir(
+    dirs: &[PathBuf],
+    pins: &[String],
+    version_of: impl Fn(&str) -> Option<String>,
+) -> Option<PathBuf> {
+    pins.iter().find_map(|pin| {
+        dirs.iter()
+            .filter_map(|dir| {
+                let version = version_of(&dir_name(dir))?;
+                version_pinned(&version, pin).then(|| (version_numbers(&version), dir))
+            })
+            .max_by(|a, b| a.0.cmp(&b.0))
+            .map(|(_, dir)| dir.clone())
+    })
 }
 
 /// Conda's environments on `host`, by name: those it lists in
@@ -1510,10 +1809,12 @@ fn shim_script(base: &Path, paths: &[PathBuf]) -> Option<String> {
     // A JSON list of strings is a Python list literal.
     let list = serde_json::to_string(&paths).ok()?;
     let quote = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
-    let code = format!(
-        "import sys; sys.path.extend({list}); \
-         exec(compile(sys.argv.pop(1), '<string>', 'exec'))"
-    );
+    let code = [
+        "import sys; sys.path.extend(",
+        &list,
+        "); exec(compile(sys.argv.pop(1), '<string>', 'exec'))",
+    ]
+    .concat();
     Some(format!(
         "#!/bin/sh\n\
          # Written by Clew: pyright's interpreter for a project whose own venv is\n\
@@ -2717,6 +3018,7 @@ mod tests {
                 ("UV_PYTHON_INSTALL_DIR", uv.clone().into_os_string()),
             ],
             macos: false,
+            windows: false,
         };
         let found: Vec<(PythonEnvKind, String, Option<String>)> = python_candidates(&root, &host)
             .into_iter()
@@ -2799,6 +3101,7 @@ mod tests {
             path: None,
             vars,
             macos: false,
+            windows: false,
         };
         let cached = || vec![("XDG_CACHE_HOME", cache.clone().into_os_string())];
         let found = |host: &PythonHost| {
@@ -2891,6 +3194,171 @@ mod tests {
         assert_eq!(found(&base).map(|f| f.0), python(&conda));
     }
 
+    /// Where the tools keep a project's Python beyond the root's own venv:
+    /// `.python-version` pins by release (`3.12` the newest 3.12) in its
+    /// folder or one above, through pyenv (and pyenv-win's layout) or uv;
+    /// Hatch's environment; the conda environment `environment.yml` names;
+    /// PDM's `.pdm-python`; `UV_PROJECT_ENVIRONMENT`; one venv a folder
+    /// down in a monorepo (two is no guess); Poetry's `config.toml` path
+    /// and the Windows places of Poetry and Pipenv.
+    #[test]
+    #[cfg(unix)]
+    fn every_tools_environment_for_the_project_is_found() {
+        let python_at = |dir: &Path| {
+            std::fs::create_dir_all(dir.join("bin")).unwrap();
+            std::fs::write(dir.join("bin/python"), "").unwrap();
+            dir.join("bin/python")
+        };
+        let home = scratch("tools-home");
+        let parent = scratch("tools-parent");
+        let root = parent.join("svc");
+        std::fs::create_dir_all(&root).unwrap();
+        let host = |vars: Vec<(&'static str, OsString)>| PythonHost {
+            home: Some(home.clone()),
+            path: None,
+            vars,
+            macos: false,
+            windows: false,
+        };
+        let found =
+            |host: &PythonHost| find_vetted_on(&root, host).map(|v| (v.interpreter, v.managed));
+        // `.python-version` one folder up, pinning a release series.
+        std::fs::write(parent.join(".python-version"), "# pinned\n3.12\n").unwrap();
+        let pyenv = home.join("pyenv");
+        python_at(&pyenv.join("versions/3.11.9"));
+        python_at(&pyenv.join("versions/3.12.4"));
+        let newest = python_at(&pyenv.join("versions/3.12.10"));
+        python_at(&pyenv.join("versions/3.1.0"));
+        let pyenv_host = || host(vec![("PYENV_ROOT", pyenv.clone().into_os_string())]);
+        assert_eq!(
+            found(&pyenv_host()),
+            Some((newest, Some(PythonEnvKind::Pyenv)))
+        );
+        // pyenv-win keeps them a folder further down.
+        std::fs::remove_dir_all(pyenv.join("versions")).unwrap();
+        let win = python_at(&pyenv.join("pyenv-win/versions/3.12.1"));
+        assert_eq!(
+            found(&pyenv_host()),
+            Some((win, Some(PythonEnvKind::Pyenv)))
+        );
+        // No pyenv: a Python uv installed.
+        let uv = home.join("uvpy");
+        let uv_python = python_at(&uv.join("cpython-3.12.7-linux-x86_64-gnu"));
+        python_at(&uv.join("cpython-3.13.0-linux-x86_64-gnu"));
+        assert_eq!(
+            found(&host(vec![(
+                "UV_PYTHON_INSTALL_DIR",
+                uv.clone().into_os_string()
+            )])),
+            Some((uv_python, Some(PythonEnvKind::Uv)))
+        );
+        std::fs::remove_file(parent.join(".python-version")).unwrap();
+        // Hatch: by the project's name, its default environment first.
+        std::fs::write(
+            root.join("pyproject.toml"),
+            "[project]\nname = \"tea-shop\"\n",
+        )
+        .unwrap();
+        let hatch = home.join("hatch");
+        python_at(&hatch.join("env/virtual/tea-shop/AbCd1234/test"));
+        let hatch_default = python_at(&hatch.join("env/virtual/tea-shop/AbCd1234/tea-shop"));
+        python_at(&hatch.join("env/virtual/other/Zz/other"));
+        assert_eq!(
+            found(&host(vec![(
+                "HATCH_DATA_DIR",
+                hatch.clone().into_os_string()
+            )])),
+            Some((hatch_default, Some(PythonEnvKind::Hatch)))
+        );
+        // conda: the environment `environment.yml` names.
+        std::fs::write(
+            root.join("environment.yml"),
+            "name: shop-ml\ndependencies:\n  - python\n",
+        )
+        .unwrap();
+        let conda = home.join("miniconda3");
+        python_at(&conda);
+        let named = python_at(&conda.join("envs/shop-ml"));
+        assert_eq!(
+            found(&host(Vec::new())),
+            Some((named, Some(PythonEnvKind::Conda)))
+        );
+        std::fs::remove_file(root.join("environment.yml")).unwrap();
+        // PDM's interpreter for the project, kept outside it.
+        let pdm_venv = home.join("pdm/venvs/tea-shop-x1");
+        let pdm = python_at(&pdm_venv);
+        std::fs::write(root.join(".pdm-python"), format!("{}\n", pdm.display())).unwrap();
+        assert_eq!(
+            found(&host(Vec::new())),
+            Some((pdm.clone(), Some(PythonEnvKind::Pdm)))
+        );
+        let listed = python_candidates(&root, &host(Vec::new()));
+        assert!(
+            listed
+                .iter()
+                .any(|c| c.kind == PythonEnvKind::Pdm && c.name == "tea-shop-x1"),
+            "{listed:?}"
+        );
+        // Not a Python by its name: not taken.
+        std::fs::write(root.join(".pdm-python"), "/bin/sh\n").unwrap();
+        assert_eq!(found(&host(Vec::new())), None);
+        std::fs::remove_file(root.join(".pdm-python")).unwrap();
+        // `UV_PROJECT_ENVIRONMENT` set by the user to one outside.
+        let uv_env = home.join("uv-envs/shop");
+        let uv_env_python = python_at(&uv_env);
+        assert_eq!(
+            found(&host(vec![(
+                "UV_PROJECT_ENVIRONMENT",
+                uv_env.clone().into_os_string()
+            )])),
+            Some((uv_env_python, None))
+        );
+        // A monorepo's one venv a folder down; two is no guess.
+        let base = system_python("tools-base", BASE_BYTES);
+        let backend = venv_bin(&root, "backend/.venv");
+        std::os::unix::fs::symlink(base.join("python3.12"), backend.join("python")).unwrap();
+        assert_eq!(
+            found(&host(Vec::new())).map(|f| f.0),
+            Some(backend.join("python"))
+        );
+        let worker = venv_bin(&root, "worker/venv");
+        std::os::unix::fs::symlink(base.join("python3.12"), worker.join("python")).unwrap();
+        assert_eq!(found(&host(Vec::new())), None);
+        // Poetry: the path its config.toml names, `{cache-dir}` spelled out.
+        let config = home.join("config/pypoetry");
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::write(
+            config.join("config.toml"),
+            "cache-dir = \"/opt/poetry-cache\"\n[virtualenvs]\npath = \"{cache-dir}/envs\"\n",
+        )
+        .unwrap();
+        let poetry_host = host(vec![(
+            "XDG_CONFIG_HOME",
+            home.join("config").into_os_string(),
+        )]);
+        assert_eq!(
+            poetry_dir(&poetry_host),
+            Some(PathBuf::from("/opt/poetry-cache/envs"))
+        );
+        // On Windows: Poetry under %LOCALAPPDATA%, Pipenv under ~/.virtualenvs.
+        let windows = PythonHost {
+            home: Some(home.clone()),
+            path: None,
+            vars: vec![
+                ("LOCALAPPDATA", home.join("Local").into_os_string()),
+                ("APPDATA", home.join("Roaming").into_os_string()),
+            ],
+            macos: false,
+            windows: true,
+        };
+        assert_eq!(
+            poetry_dir(&windows),
+            Some(home.join("Local/pypoetry/Cache/virtualenvs"))
+        );
+        assert_eq!(pipenv_dir(&windows), Some(home.join(".virtualenvs")));
+        assert!(version_pinned("3.12.4", "3.12") && !version_pinned("3.120.1", "3.12"));
+    }
+
     /// The same python3 by two folders of the search path, one a link to
     /// the other (/bin and /usr/bin on a merged-/usr system), is one system
     /// interpreter, not two.
@@ -2908,6 +3376,7 @@ mod tests {
             path: Some(std::env::join_paths([&bin, &usr_bin]).unwrap()),
             vars: Vec::new(),
             macos: false,
+            windows: false,
         };
         let system: Vec<String> = python_candidates(&home, &host)
             .into_iter()

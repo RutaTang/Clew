@@ -152,7 +152,10 @@ pub use payload::*;
 /// ([`CargoTargets`]) and each `pyproject.toml`'s Python source roots: a
 /// workspace's crates resolve one another's `use`s, and Python imports
 /// resolve under the roots a project declares.
-pub const PROTOCOL_VERSION: u32 = 29;
+///
+/// v30: [`PythonEnvKind::Hatch`] and [`PythonEnvKind::Pdm`]: a project's
+/// Hatch environment, and the interpreter PDM records for it.
+pub const PROTOCOL_VERSION: u32 = 30;
 
 /// A hash of this crate's source as a token stream — comments and whitespace
 /// removed — computed at build time (see `build.rs`). Carried in `Hello` /
@@ -1771,6 +1774,10 @@ pub enum PythonEnvKind {
     Pyenv,
     /// A uv-installed Python.
     Uv,
+    /// A Hatch environment of this project.
+    Hatch,
+    /// The interpreter PDM records for this project (`.pdm-python`).
+    Pdm,
     /// A Python on `PATH`, or where the system keeps one.
     System,
 }
@@ -1806,7 +1813,9 @@ pub enum PythonSource {
     /// the conda environment (`CONDA_PREFIX`).
     Activated,
     /// This project's own environment, kept by its tool outside the project:
-    /// its Poetry or Pipenv environment, or the pyenv Python it pins.
+    /// its Poetry, Pipenv or Hatch environment, the conda environment its
+    /// `environment.yml` names, PDM's interpreter for it, or the pyenv or uv
+    /// Python its `.python-version` pins.
     Managed(PythonEnvKind),
 }
 

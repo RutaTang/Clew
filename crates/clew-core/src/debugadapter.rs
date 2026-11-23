@@ -1375,15 +1375,14 @@ fn install_pytest(python: &Path, via: &PyInstaller, cancel: &AtomicBool) -> Resu
 /// hint ("See PEP 668 for the detailed specification.") that names nothing.
 fn install_failure(stderr: &str) -> String {
     if stderr.contains("externally-managed-environment") {
-        return "this Python is managed by the system and won't take packages \
-                (PEP 668). Create a virtual environment for the project \
-                (python3 -m venv .venv): Clew uses it from then on"
-            .into();
+        let msg = "this Python is managed by the system and won't take packages (PEP 668). Create a virtual environment for the project (python3 -m venv .venv): Clew uses it from then on".to_string();
+        return msg;
     }
     if stderr.contains("No module named pip") {
-        return "this Python has no pip. Install pytest into it another way \
-                (uv add --dev pytest)"
-            .into();
+        let msg =
+            "this Python has no pip. Install pytest into it another way (uv add --dev pytest)"
+                .to_string();
+        return msg;
     }
     let last = stderr
         .lines()

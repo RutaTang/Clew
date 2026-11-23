@@ -274,6 +274,8 @@ fn python_env_kind_index(k: &PythonEnvKind) -> usize {
         PythonEnvKind::Pyenv => 5,
         PythonEnvKind::Uv => 6,
         PythonEnvKind::System => 7,
+        PythonEnvKind::Hatch => 8,
+        PythonEnvKind::Pdm => 9,
     }
 }
 
@@ -392,6 +394,8 @@ fn python_environments() -> Vec<PythonEnvironments> {
         PythonEnvKind::Pyenv,
         PythonEnvKind::Uv,
         PythonEnvKind::System,
+        PythonEnvKind::Hatch,
+        PythonEnvKind::Pdm,
     ];
     let candidates: Vec<PythonCandidate> = kinds
         .iter()

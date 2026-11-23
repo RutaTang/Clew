@@ -1016,6 +1016,18 @@ fn python_block<'a>(
             PythonSource::Managed(PythonEnvKind::Pyenv) => {
                 tr!("The pyenv Python this project pins")
             }
+            PythonSource::Managed(PythonEnvKind::Uv) => {
+                tr!("The uv Python this project pins")
+            }
+            PythonSource::Managed(PythonEnvKind::Hatch) => {
+                tr!("This project's Hatch environment")
+            }
+            PythonSource::Managed(PythonEnvKind::Conda) => {
+                tr!("The conda environment this project names")
+            }
+            PythonSource::Managed(PythonEnvKind::Pdm) => {
+                tr!("The Python PDM uses for this project")
+            }
             PythonSource::Managed(_) => tr!("Found for this project"),
             // Nobody named one: the server looks for its own. "None" read
             // as though Python went without an interpreter.
@@ -1052,6 +1064,8 @@ fn python_block<'a>(
                 PythonEnvKind::Conda => "conda",
                 PythonEnvKind::Pyenv => "pyenv",
                 PythonEnvKind::Uv => "uv",
+                PythonEnvKind::Hatch => "Hatch",
+                PythonEnvKind::Pdm => "PDM",
                 PythonEnvKind::System => tr!("System"),
             };
             let label = match (&candidate.kind, &candidate.version) {
