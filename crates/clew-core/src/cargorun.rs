@@ -109,13 +109,45 @@ impl Features {
         }
     }
 
-    fn args(&self) -> Vec<String> {
+    /// Cargo's flags for building `target` with these features and the
+    /// ones it requires (`required-features`): of the features named, its
+    /// package's own — `pkg/feature` of its package, a bare one it declares.
+    /// One chosen for another member of the workspace, passed to every
+    /// member's build, failed them all ("the package does not contain this
+    /// feature").
+    fn args(&self, target: &CargoTarget) -> Vec<String> {
+        let manifest = read_manifest(&target.manifest);
+        let declared = manifest.as_ref().map(declared_features);
+        let mut list: Vec<String> = Vec::new();
+        for feature in &self.list {
+            let own = match feature.split_once('/') {
+                Some((package, name)) if package == target.package => Some(name.to_string()),
+                Some(_) => None,
+                None if declared
+                    .as_ref()
+                    .is_none_or(|d| d.contains(feature.as_str())) =>
+                {
+                    Some(feature.clone())
+                }
+                None => None,
+            };
+            if let Some(own) = own.filter(|f| !list.contains(f)) {
+                list.push(own);
+            }
+        }
+        if let Some(manifest) = &manifest {
+            for feature in required_features(manifest, target) {
+                if !list.contains(&feature) {
+                    list.push(feature);
+                }
+            }
+        }
         let mut out = Vec::new();
         if self.all {
             out.push("--all-features".into());
-        } else if !self.list.is_empty() {
+        } else if !list.is_empty() {
             out.push("--features".into());
-            out.push(self.list.join(","));
+            out.push(list.join(","));
         }
         if self.no_default {
             out.push("--no-default-features".into());
@@ -324,20 +356,71 @@ fn declares_mod(root: &Path, name: &str) -> bool {
 }
 
 /// The default binary's name: the `[[bin]]` at `src/main.rs`'s, else the
-/// package's.
+/// package's. A `[[bin]]` with no `path` is at `src/main.rs` only when it is
+/// named for the package: Cargo finds any other at `src/bin/<name>.rs`, and
+/// taking that one for `src/main.rs` ran the wrong program.
 fn default_bin(value: &toml::Value, package: &str) -> String {
     value
         .get("bin")
         .and_then(|b| b.as_array())
         .and_then(|bins| {
             bins.iter().find_map(|b| {
+                let name = b.get("name")?.as_str()?;
                 let path = b.get("path").and_then(|p| p.as_str());
-                (path.is_none() || path == Some("src/main.rs"))
-                    .then(|| b.get("name")?.as_str().map(str::to_string))
-                    .flatten()
+                (path == Some("src/main.rs") || (path.is_none() && name == package))
+                    .then(|| name.to_string())
             })
         })
         .unwrap_or_else(|| package.to_string())
+}
+
+/// A package's manifest, read (bounded) and parsed.
+fn read_manifest(manifest: &Path) -> Option<toml::Value> {
+    let text = crate::statefile::read_capped(manifest, MAX_READ_BYTES)?;
+    toml::from_str::<toml::Value>(&text).ok()
+}
+
+/// The features a package declares: its `[features]`, and its optional
+/// dependencies, each a feature of its name.
+fn declared_features(manifest: &toml::Value) -> std::collections::HashSet<String> {
+    let mut out: std::collections::HashSet<String> = manifest
+        .get("features")
+        .and_then(|f| f.as_table())
+        .map(|t| t.keys().cloned().collect())
+        .unwrap_or_default();
+    for table in ["dependencies", "dev-dependencies", "build-dependencies"] {
+        if let Some(deps) = manifest.get(table).and_then(|d| d.as_table()) {
+            out.extend(
+                deps.iter()
+                    .filter(|(_, d)| d.get("optional").and_then(|o| o.as_bool()) == Some(true))
+                    .map(|(name, _)| name.clone()),
+            );
+        }
+    }
+    out
+}
+
+/// The features `target` cannot be built without (`required-features` of
+/// its `[[bin]]`, `[[example]]`, `[[test]]` or `[[bench]]`): Cargo skips
+/// it, unbuilt, without them.
+fn required_features(manifest: &toml::Value, target: &CargoTarget) -> Vec<String> {
+    let (table, name) = match &target.kind {
+        TargetKind::Bin(n) => ("bin", n),
+        TargetKind::Example(n) => ("example", n),
+        TargetKind::Test(n) => ("test", n),
+        TargetKind::Bench(n) => ("bench", n),
+        TargetKind::Lib => return Vec::new(),
+    };
+    manifest
+        .get(table)
+        .and_then(|t| t.as_array())
+        .into_iter()
+        .flatten()
+        .filter(|t| t.get("name").and_then(|n| n.as_str()) == Some(name.as_str()))
+        .filter_map(|t| t.get("required-features")?.as_array())
+        .flatten()
+        .filter_map(|f| f.as_str().map(str::to_string))
+        .collect()
 }
 
 fn stem(file: &Path) -> String {
@@ -368,7 +451,7 @@ pub fn build_args(target: &CargoTarget, test: bool, features: &Features) -> Vec<
         "never".into(),
     ]);
     args.extend(target.select());
-    args.extend(features.args());
+    args.extend(features.args(target));
     args
 }
 
@@ -815,7 +898,7 @@ mod tests {
                 "--test",
                 "api",
                 "--features",
-                "fast,demo/serde",
+                "fast,serde",
                 "--no-default-features",
             ]
         );
@@ -828,8 +911,54 @@ mod tests {
                 all_features: true,
                 ..Default::default()
             }))
-            .args(),
+            .args(&target),
             ["--all-features"]
+        );
+    }
+
+    /// In a workspace, a member is built with its own features only — one
+    /// chosen for another member (`core/fast`), or a bare one it does not
+    /// declare, failed its build — and with the features its target
+    /// requires; a `[[bin]]` with no path is `src/main.rs` only when it is
+    /// named for the package.
+    #[test]
+    fn a_member_is_built_with_its_own_and_its_required_features() {
+        let dir = TempDir::new("cargorun-member-features");
+        let root = dir.path();
+        write(
+            root,
+            "app/Cargo.toml",
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n\
+             [features]\nextra = []\n\n\
+             [dependencies]\nlog = { version = \"0.4\", optional = true }\n\n\
+             [[bin]]\nname = \"alpha\"\nrequired-features = [\"extra\"]\n\n\
+             [[test]]\nname = \"gated\"\nrequired-features = [\"extra\"]\n",
+        );
+        write(root, "app/src/main.rs", "fn main() {}\n");
+        write(root, "app/src/bin/alpha.rs", "fn main() {}\n");
+        write(root, "app/tests/gated.rs", "");
+        let features = Features {
+            all: false,
+            list: vec![
+                "core/fast".into(),
+                "app/extra".into(),
+                "fast".into(),
+                "log".into(),
+            ],
+            no_default: false,
+        };
+        let main = target_of(&root.join("app/src/main.rs")).unwrap();
+        assert_eq!(
+            main.kind,
+            TargetKind::Bin("app".into()),
+            "main.rs is app, not alpha"
+        );
+        assert_eq!(features.args(&main), ["--features", "extra,log"]);
+        let gated = target_of(&root.join("app/tests/gated.rs")).unwrap();
+        assert_eq!(
+            Features::default().args(&gated),
+            ["--features", "extra"],
+            "what the test requires"
         );
     }
 

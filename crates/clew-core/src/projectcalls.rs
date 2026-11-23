@@ -462,6 +462,8 @@ impl ProjectCallGraph {
             .iter()
             .map(|n| owner_at.get(&(n.file.as_path(), n.line)).copied())
             .collect();
+        // The project's own types (and traits): what defines a method here.
+        let project_types: HashSet<&str> = owner.iter().flatten().copied().collect();
 
         // Python runs a class's `__init__` when the class is called:
         // `Inventory(...)`, `raise OutOfStock(...)`. By the class's name.
@@ -519,7 +521,7 @@ impl ProjectCallGraph {
                     Some(Receiver::Type(ty)) => Some(ty.as_str()),
                     None => None,
                 };
-                let narrowed: Vec<usize> = wanted
+                let mut narrowed: Vec<usize> = wanted
                     .map(|ty| {
                         callees
                             .iter()
@@ -528,7 +530,31 @@ impl ProjectCallGraph {
                             .collect()
                     })
                     .unwrap_or_default();
-                let targets: &[usize] = if narrowed.is_empty() {
+                // A Rust type's function is its own wherever it is defined:
+                // `Builder::new()` in a file with other `new`s, `Builder`'s
+                // defined in another — the name's nearest were not it.
+                if narrowed.is_empty()
+                    && fc.lang == Lang::Rust
+                    && let Some(ty) = wanted.filter(|ty| project_types.contains(ty))
+                {
+                    narrowed = (0..nodes.len())
+                        .filter(|&c| {
+                            owner[c] == Some(ty)
+                                && logical_name(&nodes[c].name, Some(Lang::Rust))
+                                    == logical_name(&cs.callee, Some(Lang::Rust))
+                        })
+                        .collect();
+                }
+                // A Rust receiver of a type the project defines nothing of —
+                // `Vec`, `str`, a type parameter — calls none of its
+                // functions: `haystack.len()` on a `&str` drew an edge to
+                // every `len` there was. (A language with inheritance keeps
+                // them: the method may be a base class's.)
+                let foreign = fc.lang == Lang::Rust
+                    && matches!(&cs.receiver, Some(Receiver::Type(ty)) if !project_types.contains(ty.as_str()));
+                let targets: &[usize] = if foreign {
+                    &[]
+                } else if narrowed.is_empty() {
                     callees
                 } else {
                     &narrowed
@@ -1117,6 +1143,7 @@ fn walk(
                     };
                     receiver_of(node, &callee, &scope, src, lang, &mut bindings)
                 }
+                _ if lang == Lang::Rust => rust_path_receiver(node, src),
                 _ => None,
             };
             out.push(CallSite {
@@ -1278,6 +1305,35 @@ fn dart_sig_name(sig: Node, src: &str) -> Option<String> {
         c.child_by_field_name("name")
             .map(|n| node_text(n, src).to_string())
     })
+}
+
+/// The type a Rust path call names its function through: `Self::make()`
+/// the impl's own, `Builder::new()` and `Vec::<u8>::new()` the type's. A
+/// module's path (`fs::read`, `crate::x::f`) names none: its function is
+/// found by the imports.
+fn rust_path_receiver(call: Node, src: &str) -> Option<Receiver> {
+    let mut function = call.child_by_field_name("function")?;
+    if function.kind() == "generic_function" {
+        function = function.child_by_field_name("function")?;
+    }
+    if function.kind() != "scoped_identifier" {
+        return None;
+    }
+    let path = function.child_by_field_name("path")?;
+    let path = match path.kind() {
+        "generic_type" => path.child_by_field_name("type")?,
+        _ => path,
+    };
+    let last = match path.kind() {
+        "scoped_identifier" | "scoped_type_identifier" => path.child_by_field_name("name")?,
+        _ => path,
+    };
+    let name = node_text(last, src);
+    match name {
+        "Self" => Some(Receiver::Own),
+        _ if name.starts_with(|c: char| c.is_uppercase()) => Some(Receiver::Type(name.to_string())),
+        _ => None,
+    }
 }
 
 /// Descend through wrappers that end in a name — a turbofish or template
@@ -4667,6 +4723,42 @@ pub fn main() void {
             calls.iter().any(|c| c.callee == "helper" && !c.method),
             "{calls:?}"
         );
+    }
+
+    /// A Rust path call is its type's function: `Self::make()` the impl's
+    /// own, `B::make()` B's — even where B's is in another file and this one
+    /// has a `make` of its own — not every `make` there is. A call on a
+    /// type the project defines nothing of (`Vec::new()`, `v.len()` on a
+    /// `Vec`) is none of the project's functions.
+    #[test]
+    fn rust_path_calls_go_to_their_types_function() {
+        let lib = "\
+struct A;
+struct Order;
+impl A {
+    fn make() -> A { A }
+    fn build() -> A { Self::make() }
+    fn other() { let _ = b::B::make(); }
+    fn len(&self) -> usize { 0 }
+}
+impl Order {
+    fn len(&self) -> usize { 1 }
+}
+fn count() -> usize { let v: Vec<u8> = Vec::new(); v.len() }
+fn fresh() -> Vec<u8> { Vec::new() }
+fn new() {}
+";
+        let b = "pub struct B;\nimpl B {\n    pub fn make() -> B { B }\n}\n";
+        let g = graph(&[("/p/lib.rs", lib), ("/p/b.rs", b)]);
+        assert_eq!(callers_named(&g, "/p/lib.rs", "make", 0), ["build@5"]);
+        assert_eq!(callers_named(&g, "/p/b.rs", "make", 0), ["other@6"]);
+        for (name, ordinal) in [("len", 0), ("len", 1), ("new", 0)] {
+            assert!(
+                callers_named(&g, "/p/lib.rs", name, ordinal).is_empty(),
+                "{name}#{ordinal}: {:?}",
+                edges(&g)
+            );
+        }
     }
 
     /// Macro arguments are token trees, not expressions; the calls in them
