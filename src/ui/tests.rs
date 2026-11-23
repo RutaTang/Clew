@@ -5758,6 +5758,62 @@ fn every_tool_on_the_strip_has_a_shortcut() {
     }
 }
 
+/// The tour goes over the strip once, from its top down — the overview,
+/// the graphs, running, the glossary in the ⋯ menu, Ask at its foot — and
+/// the sidebar in at most two runs: it pointed at the strip, went to the
+/// sidebar and the code, and came back to the strip, and again.
+#[test]
+fn the_tour_goes_down_the_strip_once_and_round_the_window_in_order() {
+    use crate::app::tutorial::{Anchor, steps};
+    use crate::ui::StripTool;
+    let mut app = reader_app();
+    let _ = app.update(Message::Tutorial(TutorialMsg::Begin));
+    let all = steps(&app);
+    let pos = |t: StripTool| {
+        super::STRIP_TOP
+            .iter()
+            .position(|x| *x == t)
+            .unwrap_or_else(|| panic!("{t:?} on the strip"))
+    };
+    let on_strip: Vec<(usize, usize)> = all
+        .iter()
+        .enumerate()
+        .filter_map(|(i, s)| {
+            let at = match s.anchor {
+                Anchor::Strip(t) => pos(t),
+                Anchor::RunTools => pos(StripTool::Run),
+                Anchor::ToolbarMenu { .. } => pos(StripTool::More),
+                Anchor::AskCorner => super::STRIP_TOP.len(),
+                _ => return None,
+            };
+            Some((i, at))
+        })
+        .collect();
+    let titles = |is: &[(usize, usize)]| -> Vec<String> {
+        is.iter().map(|(i, _)| all[*i].title.clone()).collect()
+    };
+    assert!(on_strip.len() >= 5, "{:?}", titles(&on_strip));
+    let first = on_strip[0].0;
+    assert!(
+        on_strip
+            .iter()
+            .enumerate()
+            .all(|(k, (i, _))| *i == first + k),
+        "away from the strip and back: {:?}",
+        titles(&on_strip)
+    );
+    assert!(
+        on_strip.windows(2).all(|w| w[0].1 <= w[1].1),
+        "up the strip again: {:?}",
+        titles(&on_strip)
+    );
+    let sidebar_runs = all
+        .windows(2)
+        .filter(|w| w[0].anchor != Anchor::Sidebar && w[1].anchor == Anchor::Sidebar)
+        .count();
+    assert!(sidebar_runs <= 2, "the sidebar {sidebar_runs} times over");
+}
+
 /// Every tool on the strip for reading a project has its one tutorial
 /// step, and none has two; and no text field holds the keyboard while the
 /// tour shows its tab — the SEARCH box did, and took the → and Enter that

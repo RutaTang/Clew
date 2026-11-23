@@ -230,8 +230,10 @@ fn the_tour_shows_the_ask_card() {
         .iter()
         .position(|s| s.title == "Run and debug")
         .expect("a Run and debug step");
-    while app.tutorial.is_some_and(|s| s < debug_step) {
-        let _ = app.update(Message::Tutorial(TutorialMsg::Step(1)));
+    // Before Ask on the strip: stepped back to, the card goes again.
+    assert!(debug_step < ask_step, "the strip from its top down");
+    while app.tutorial.is_some_and(|s| s > debug_step) {
+        let _ = app.update(Message::Tutorial(TutorialMsg::Step(-1)));
     }
     assert_eq!(app.ask_view, AskView::Hidden);
     assert!(app.show_bottom, "the Debug step shows the debugger's panel");

@@ -1386,6 +1386,7 @@
  "Open this folder as the project": "이 폴더를 프로젝트로 열기",
  "Open to the Side": "옆에 열기",
  "Open without setup": "설정 없이 열기",
+ "Open your own project from File › Open Folder… in the menu bar. Tea Shop stays in this window to try things on, and the tour is in Help whenever you want it again.": "메뉴 막대의 파일 › 폴더 열기…에서 내 프로젝트를 여세요. Tea Shop은 이 창에 남아 있어 이것저것 해 볼 수 있고, 튜토리얼은 언제든 도움말에서 다시 볼 수 있습니다.",
  "Open your own project from the ☰ menu. Tea Shop stays in this window to try things on, and the tour is in Help whenever you want it again.": "☰ 메뉴에서 내 프로젝트를 여세요. Tea Shop은 이 창에 남아 있어 이것저것 해 볼 수 있고, 튜토리얼은 언제든 도움말에서 다시 볼 수 있습니다.",
  "Open {file} to trace `{symbol}` again": "`{symbol}` 값을 다시 추적하려면 {file} 파일을 여세요",
  "Open {name}": "{name} 열기",

@@ -1386,6 +1386,7 @@
  "Open this folder as the project": "将此文件夹作为项目打开",
  "Open to the Side": "在侧边打开",
  "Open without setup": "不设置直接打开",
+ "Open your own project from File › Open Folder… in the menu bar. Tea Shop stays in this window to try things on, and the tour is in Help whenever you want it again.": "在菜单栏的“文件 › 打开文件夹…”中打开你自己的项目。Tea Shop 会留在这个窗口里供你练手；想再看教程时，可以在“帮助”里找到。",
  "Open your own project from the ☰ menu. Tea Shop stays in this window to try things on, and the tour is in Help whenever you want it again.": "从 ☰ 菜单打开你自己的项目。Tea Shop 会留在这个窗口里供你练手；想再看教程时，可以在“帮助”里找到。",
  "Open {file} to trace `{symbol}` again": "打开 {file} 以重新追踪 `{symbol}`",
  "Open {name}": "打开 {name}",

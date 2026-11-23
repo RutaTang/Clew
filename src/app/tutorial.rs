@@ -75,22 +75,23 @@ pub enum Anchor {
     RightTop,
 }
 
-/// A chapter of the tour: the steps under one heading, in the order a
-/// reader comes to know a project — the whole of it first, then finding a
-/// way round it, reading it, following its code, asking about it, its
-/// history, keeping one's place in it, and running it.
+/// A chapter of the tour: the steps under one heading, each chapter in
+/// one region of the window, in the order a reader comes to know a
+/// project — on the strip, the whole of it, running it and asking about
+/// it; then, on the left, finding a way round it, following its code,
+/// reading one file, its history, and keeping one's place in it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Chapter {
     /// The welcome, before the first chapter.
     Welcome,
     BigPicture,
-    FindYourWay,
-    Read,
-    Follow,
+    Run,
     Ask,
+    FindYourWay,
+    Follow,
+    Read,
     History,
     KeepYourPlace,
-    Run,
     /// The last card, after the last chapter.
     Done,
 }
@@ -183,6 +184,12 @@ pub(crate) fn steps(app: &App) -> Vec<TutStep> {
     let tab = |t: SidebarTab| Message::Window(WindowMsg::SidebarTabPicked(t));
     let history = app.tour_sample.as_ref().is_none_or(|s| s.history);
 
+    // The window once round, region by region, each visited in one go:
+    // the strip from its top down (the whole project, running it, what
+    // Clew can tell of it), then across to the left and in — finding a
+    // way round, following the code, reading one file, one line's
+    // history — and last, keeping one's place. It went to the strip, away
+    // and back to it again.
     let mut v = vec![
         TutStep::new(
             C::Welcome,
@@ -200,16 +207,50 @@ pub(crate) fn steps(app: &App) -> Vec<TutStep> {
         .demo(Message::Overview(OverviewMsg::Show)),
         TutStep::new(
             C::BigPicture,
+            tr!("The call graph"),
+            tr!("Every function's calls across the project, as one graph you can move around."),
+            Anchor::Strip(StripTool::CallGraph),
+        ),
+        TutStep::new(
+            C::BigPicture,
+            tr!("What imports what"),
+            tr!("How the files depend on each other, with any cycle marked."),
+            Anchor::Strip(StripTool::ImportGraph),
+        ),
+        TutStep::new(
+            C::BigPicture,
+            tr!("Types and their kinds"),
+            tr!("The Type Graph shows Discount and the two discounts built on it, MemberDiscount and BulkDiscount."),
+            Anchor::Strip(StripTool::TypeMap),
+        ),
+        TutStep::new(
+            C::BigPicture,
             tr!("Its data and its API"),
             tr!("Project Graphs reads the tables in schema.sql and the routes in api.py from the code, and draws them."),
             Anchor::Strip(StripTool::ProjectMaps),
         ),
+        // -- Run it ---------------------------------------------------------
         TutStep::new(
-            C::BigPicture,
+            C::Run,
+            tr!("Run and debug"),
+            tr!("Run main.py to the end, or Debug it to stop at a breakpoint in checkout() and see its variables and stack. Fake Run and Fake Debug, below Run and Debug, let the AI work out what a function does with the inputs you give, without running anything."),
+            Anchor::RunTools,
+        )
+        .demo(Message::Window(WindowMsg::ShowDebugPanel)),
+        // -- Ask ------------------------------------------------------------
+        TutStep::new(
+            C::Ask,
             tr!("Its own words"),
             tr!("The glossary explains the project's own terms, such as SKU, member and tin, from how its code uses them."),
             menu_rows(ToolsRow::Glossary, ToolsRow::Glossary),
         ),
+        TutStep::new(
+            C::Ask,
+            tr!("Ask Clew"),
+            tr!("Ask about the project, such as \"why is tax worked out after discounts?\", and Clew answers from its code and shows where. You can also tell it what to do. It asks before running anything."),
+            Anchor::AskCorner,
+        )
+        .demo(Message::Ask(AskMsg::Open)),
         // -- Find your way --------------------------------------------------
         TutStep::new(
             C::FindYourWay,
@@ -233,6 +274,37 @@ pub(crate) fn steps(app: &App) -> Vec<TutStep> {
             Anchor::Sidebar,
         )
         .demo(tab(SidebarTab::Semantic)),
+        TutStep::new(
+            C::FindYourWay,
+            tr!("Walk through a topic"),
+            tr!("Name a topic, such as \"checkout\", and Clew walks you through the code that does it, in order."),
+            Anchor::Sidebar,
+        )
+        .demo(tab(SidebarTab::Walk)),
+        TutStep::new(
+            C::FindYourWay,
+            tr!("Its outline, and your notes"),
+            tr!("Every function and class in the file. Mark the ones you've understood, or write a note on one."),
+            Anchor::Sidebar,
+        )
+        .demo(tab(SidebarTab::Notes)),
+        // -- Follow the code ------------------------------------------------
+        TutStep::new(
+            C::Follow,
+            tr!("Who calls what"),
+            tr!("Who calls total(), and who calls them, up to the API's place_order(). g c shows this for the name at the cursor."),
+            Anchor::Sidebar,
+        )
+        .demo(tab(SidebarTab::Calls))
+        .at(PRICING, "def total(", "total")
+        .then(Message::Calls(CallsMsg::Requested)),
+        TutStep::new(
+            C::Follow,
+            tr!("Definitions and uses"),
+            tr!("With the cursor on a name, g d goes to where it is defined and g r lists everywhere it is used. ⌘-click works too."),
+            Anchor::Main,
+        )
+        .at(PRICING, "def total(", "total"),
         // -- Read -----------------------------------------------------------
         TutStep::new(
             C::Read,
@@ -255,63 +327,6 @@ pub(crate) fn steps(app: &App) -> Vec<TutStep> {
             Anchor::ViewMenu,
         )
         .at(PRICING, "def total(", "total"),
-        TutStep::new(
-            C::Read,
-            tr!("Its outline, and your notes"),
-            tr!("Every function and class in the file. Mark the ones you've understood, or write a note on one."),
-            Anchor::Sidebar,
-        )
-        .demo(tab(SidebarTab::Notes)),
-        // -- Follow the code ------------------------------------------------
-        TutStep::new(
-            C::Follow,
-            tr!("Definitions and uses"),
-            tr!("With the cursor on a name, g d goes to where it is defined and g r lists everywhere it is used. ⌘-click works too."),
-            Anchor::Main,
-        )
-        .at(PRICING, "def total(", "total"),
-        TutStep::new(
-            C::Follow,
-            tr!("Who calls what"),
-            tr!("Who calls total(), and who calls them, up to the API's place_order(). g c shows this for the name at the cursor."),
-            Anchor::Sidebar,
-        )
-        .demo(tab(SidebarTab::Calls))
-        .at(PRICING, "def total(", "total")
-        .then(Message::Calls(CallsMsg::Requested)),
-        TutStep::new(
-            C::Follow,
-            tr!("The call graph"),
-            tr!("Every function's calls across the project, as one graph you can move around."),
-            Anchor::Strip(StripTool::CallGraph),
-        ),
-        TutStep::new(
-            C::Follow,
-            tr!("Types and their kinds"),
-            tr!("The Type Graph shows Discount and the two discounts built on it, MemberDiscount and BulkDiscount."),
-            Anchor::Strip(StripTool::TypeMap),
-        ),
-        TutStep::new(
-            C::Follow,
-            tr!("What imports what"),
-            tr!("How the files depend on each other, with any cycle marked."),
-            Anchor::Strip(StripTool::ImportGraph),
-        ),
-        // -- Ask ------------------------------------------------------------
-        TutStep::new(
-            C::Ask,
-            tr!("Ask Clew"),
-            tr!("Ask about the project, such as \"why is tax worked out after discounts?\", and Clew answers from its code and shows where. You can also tell it what to do. It asks before running anything."),
-            Anchor::AskCorner,
-        )
-        .demo(Message::Ask(AskMsg::Open)),
-        TutStep::new(
-            C::Ask,
-            tr!("Walk through a topic"),
-            tr!("Name a topic, such as \"checkout\", and Clew walks you through the code that does it, in order."),
-            Anchor::Sidebar,
-        )
-        .demo(tab(SidebarTab::Walk)),
     ];
     if history {
         v.extend([
@@ -353,18 +368,16 @@ pub(crate) fn steps(app: &App) -> Vec<TutStep> {
             Anchor::Sidebar,
         )
         .demo(tab(SidebarTab::Marks)),
-        // -- Run it ---------------------------------------------------------
-        TutStep::new(
-            C::Run,
-            tr!("Run and debug"),
-            tr!("Run main.py to the end, or Debug it to stop at a breakpoint in checkout() and see its variables and stack. Fake Run and Fake Debug, below Run and Debug, let the AI work out what a function does with the inputs you give, without running anything."),
-            Anchor::RunTools,
-        )
-        .demo(Message::Window(WindowMsg::ShowDebugPanel)),
+        // Where a project is opened: the menu bar's File menu on macOS,
+        // which has no ☰ — that is Windows' and Linux's app menu.
         TutStep::new(
             C::Done,
             tr!("Your turn"),
-            tr!("Open your own project from the ☰ menu. Tea Shop stays in this window to try things on, and the tour is in Help whenever you want it again."),
+            if crate::ui::MAC_CHROME {
+                tr!("Open your own project from File › Open Folder… in the menu bar. Tea Shop stays in this window to try things on, and the tour is in Help whenever you want it again.")
+            } else {
+                tr!("Open your own project from the ☰ menu. Tea Shop stays in this window to try things on, and the tour is in Help whenever you want it again.")
+            },
             Anchor::Center,
         ),
     ]);
