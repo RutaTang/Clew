@@ -277,7 +277,7 @@ fn body(g: Glyph) -> &'static str {
         // writes in the corner it leaves free: in the strip's column, the
         // play lines up with Run's above it.
         FakeRun => {
-            "<path d='M8.5 5.5 L18 12 L8.5 18.5 Z'/>\
+            "<path d='M7 3.5 L20 12 L7 20.5 Z'/>\
              <path d='M20 0.6C20.39 3.03 20.97 3.61 23.4 4C20.97 4.39 20.39 4.97 20 7.4C19.61 4.97 19.03 4.39 16.6 4C19.03 3.61 19.61 3.03 20 0.6Z' fill='STROKE' stroke-width='1'/>"
         }
         // Debug's own bug, where Debug draws it and as large, the spark in
@@ -358,12 +358,16 @@ fn body(g: Glyph) -> &'static str {
             "<path d='M12 3.8 L19.5 8 V16 L12 20.2 L4.5 16 V8 Z'/>\
              <path d='M4.5 8 L12 12.2 L19.5 8'/><path d='M12 12.2 V20.2'/>"
         }
+        // As tall as the strip's other glyphs (17 of 24, the graphs' and
+        // the bug's): at 13 tall, Run and Fake Run read a size smaller
+        // than the tools above and below them. The play's point set right
+        // of the middle, so its weight is where the eye centres it.
         Pause => {
-            "<rect x='7.5' y='6' width='3' height='12' rx='1'/>\
-             <rect x='13.5' y='6' width='3' height='12' rx='1'/>"
+            "<rect x='6.75' y='3.5' width='3.5' height='17' rx='1'/>\
+             <rect x='13.75' y='3.5' width='3.5' height='17' rx='1'/>"
         }
-        Play => "<path d='M8.5 5.5 L18 12 L8.5 18.5 Z'/>",
-        Continue => "<path d='M6 5.5 V18.5'/><path d='M10.5 5.5 L19.5 12 L10.5 18.5 Z'/>",
+        Play => "<path d='M7 3.5 L20 12 L7 20.5 Z'/>",
+        Continue => "<path d='M5.5 4 V20'/><path d='M9.5 4 L20.5 12 L9.5 20 Z'/>",
         StepOver => {
             "<path d='M4.5 13.5 A7 7 0 0 1 18.5 13.5'/><path d='M15.5 10.5 L18.5 13.5 L21.5 10.5'/>\
              <circle cx='11.5' cy='19' r='2' fill='STROKE' stroke='none'/>"
