@@ -391,14 +391,40 @@ pub fn sticky_headers(folds: &[(usize, usize)], first_visible: usize, max: usize
 /// lines `header+1 ..= end`. A line is a fold header when the block of lines
 /// after it is indented deeper (blank lines inside the block are tolerated).
 /// Ranges nest naturally: an `impl` and a `fn` inside it each get their own.
-/// Language-agnostic — it reads indentation, not syntax.
+/// Language-agnostic — it reads indentation, not syntax — but a line that
+/// starts inside a string or comment (a multi-line literal's next line, at
+/// whatever column its text has) stands at the indent of the line it
+/// continues, and opens no fold: written at the left edge, it ended the
+/// function around it there, and the rest of its body showed as folded out.
 pub fn fold_ranges(lines: &[HlLine]) -> Vec<(usize, usize)> {
-    let ind: Vec<Option<usize>> = (0..lines.len())
-        .map(|i| indent(&line_chars(lines, i)))
-        .collect();
+    let mut ind: Vec<Option<usize>> = Vec::with_capacity(lines.len());
+    let mut continues: Vec<bool> = Vec::with_capacity(lines.len());
+    let mut last = None;
+    for (i, line) in lines.iter().enumerate() {
+        let own = indent(&line_chars(lines, i));
+        let in_literal = own.is_some()
+            && line
+                .spans
+                .iter()
+                .find(|(t, _)| !t.is_empty())
+                .and_then(|(_, style)| *style)
+                .is_some_and(clew_core::highlight::style_is_literal);
+        continues.push(in_literal && last.is_some());
+        match own {
+            Some(_) if in_literal => ind.push(last.or(own)),
+            Some(d) => {
+                last = Some(d);
+                ind.push(Some(d));
+            }
+            None => ind.push(None),
+        }
+    }
     let mut out = Vec::new();
     for (i, di) in ind.iter().enumerate() {
         let Some(di) = *di else { continue };
+        if continues[i] {
+            continue;
+        }
         // Extend the block while following lines are blank or deeper-indented;
         // `end` tracks the last non-blank deeper line so trailing blanks are
         // excluded from the fold.
@@ -791,6 +817,26 @@ mod tests {
         // A single-line body with no deeper following line is not foldable.
         let flat = plain_lines("a\nb\nc\n");
         assert_eq!(fold_ranges(&flat), Vec::<(usize, usize)>::new());
+    }
+
+    /// A multi-line string or comment whose lines start at the left edge
+    /// stays inside the block it is written in: the function folds whole.
+    #[test]
+    fn a_multi_line_string_does_not_end_its_block() {
+        let src = "fn usage() {\n    let text = r#\"\nUsage: app [OPTIONS]\n\n  -h  help\n\"#;\n    /* note\nmore */\n    print(text);\n}\nfn next() {}\n";
+        let lines = clew_core::highlight::highlight_lines(src, Some("rust"));
+        let folds = fold_ranges(&lines);
+        assert!(folds.contains(&(0, 8)), "{folds:?}");
+        // Nothing inside opens a fold: the string's lines stand where it began.
+        assert!(
+            !folds.iter().any(|&(h, _)| (1..=8).contains(&h)),
+            "{folds:?}"
+        );
+        // Plain text, all of it at the left edge, folds as before.
+        assert_eq!(
+            fold_ranges(&plain_lines("a\nb\n")),
+            Vec::<(usize, usize)>::new()
+        );
     }
 
     /// A block whose opening line only continues a signature — rustfmt's

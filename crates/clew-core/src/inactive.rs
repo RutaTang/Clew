@@ -44,6 +44,9 @@ pub struct Target {
     pub os: String,
     pub arch: String,
     pub family: String,
+    /// Its `target_env` (`gnu`, `msvc`, `musl`; "" for none); `None` when
+    /// not known, which leaves `target_env` undecided.
+    pub env: Option<String>,
 }
 
 impl std::fmt::Display for Target {
@@ -54,10 +57,17 @@ impl std::fmt::Display for Target {
 
 impl Target {
     fn new(label: &str, os: &str, arch: &str, family: &str) -> Target {
+        // A preset's toolchain is its platform's usual one.
+        let env = match os {
+            "linux" => "gnu",
+            "windows" => "msvc",
+            _ => "",
+        };
         Target {
             label: label.into(),
             os: os.into(),
             arch: arch.into(),
+            env: Some(env.into()),
             family: family.into(),
         }
     }
@@ -65,11 +75,21 @@ impl Target {
     /// The machine clew runs on.
     pub fn host() -> Target {
         let os = std::env::consts::OS;
+        let env = if cfg!(target_env = "gnu") {
+            "gnu"
+        } else if cfg!(target_env = "msvc") {
+            "msvc"
+        } else if cfg!(target_env = "musl") {
+            "musl"
+        } else {
+            ""
+        };
         Target {
             label: format!("Host ({os})"),
             os: os.to_string(),
             arch: std::env::consts::ARCH.to_string(),
             family: std::env::consts::FAMILY.to_string(),
+            env: Some(env.to_string()),
         }
     }
 
@@ -144,11 +164,55 @@ impl Target {
             ("none" | "unknown", _) => "",
             _ => "unix",
         };
+        // The triple's last part names its environment: `gnu`,
+        // `gnueabihf`, `musl`, `msvc`.
+        let env = match parts.last().copied().unwrap_or_default() {
+            e if parts.len() < 4 && !matches!(e, "gnu" | "musl" | "msvc") => "",
+            e if e.starts_with("musl") => "musl",
+            e if e.starts_with("gnu") => "gnu",
+            "msvc" => "msvc",
+            _ => "",
+        };
         Target {
             label: triple.to_string(),
             os: os.into(),
             arch: arch.into(),
             family: family.into(),
+            env: Some(env.into()),
+        }
+    }
+
+    /// Its `target_pointer_width`, from its architecture; `None` for one
+    /// this does not know.
+    fn pointer_width(&self) -> Option<&'static str> {
+        match self.arch.as_str() {
+            "x86_64" | "aarch64" | "riscv64" | "powerpc64" | "s390x" | "mips64" | "loongarch64"
+            | "sparc64" | "wasm64" => Some("64"),
+            "x86" | "arm" | "riscv32" | "wasm32" | "mips" | "powerpc" => Some("32"),
+            _ => None,
+        }
+    }
+
+    /// Its `target_endian`, from its architecture; `None` for one this does
+    /// not know (`powerpc64` is either).
+    fn endian(&self) -> Option<&'static str> {
+        match self.arch.as_str() {
+            "x86_64" | "x86" | "aarch64" | "arm" | "riscv64" | "riscv32" | "wasm32" | "wasm64"
+            | "loongarch64" => Some("little"),
+            "s390x" | "sparc64" => Some("big"),
+            _ => None,
+        }
+    }
+
+    /// Its `target_vendor`, from its system; `None` for one this does not
+    /// know.
+    fn vendor(&self) -> Option<&'static str> {
+        match self.os.as_str() {
+            "macos" | "ios" | "tvos" | "watchos" | "visionos" => Some("apple"),
+            "windows" => Some("pc"),
+            "linux" | "android" | "freebsd" | "netbsd" | "openbsd" => Some("unknown"),
+            "unknown" if self.family == "wasm" => Some("unknown"),
+            _ => None,
         }
     }
 
@@ -181,6 +245,7 @@ impl From<clew_protocol::TargetSpec> for Target {
             os: spec.os,
             arch: spec.arch,
             family: spec.family,
+            env: spec.env,
         }
     }
 }
@@ -462,6 +527,10 @@ fn eval_cfg_at(pred: &str, cfg: &Cfg, depth: usize) -> Option<bool> {
             "target_os" => Some(host.os == val),
             "target_arch" => Some(host.arch == val),
             "target_family" => Some(host.family == val),
+            "target_pointer_width" => host.pointer_width().map(|w| w == val),
+            "target_endian" => host.endian().map(|e| e == val),
+            "target_vendor" => host.vendor().map(|v| v == val),
+            "target_env" => host.env.as_ref().map(|e| *e == val),
             // On, off, or — another package may turn it on, or it is no
             // feature the package declares — undecided.
             "feature" => {
@@ -474,7 +543,7 @@ fn eval_cfg_at(pred: &str, cfg: &Cfg, depth: usize) -> Option<bool> {
                     Some(false)
                 }
             }
-            _ => None, // target_env, … — leave active
+            _ => None, // target_has_atomic, … — leave active
         };
     }
     match pred {
@@ -2217,6 +2286,7 @@ mod tests {
             os: "macos".into(),
             arch: "aarch64".into(),
             family: "unix".into(),
+            env: None,
         }
     }
 
@@ -2580,6 +2650,30 @@ fn slow() {}
             (t.os.as_str(), t.arch.as_str(), t.family.as_str()),
             ("none", "arm", "")
         );
+        // Its toolchain, and what its architecture and system say.
+        let env = |triple: &str| Target::from_triple(triple).env.unwrap_or_default();
+        assert_eq!(env("x86_64-unknown-linux-gnu"), "gnu");
+        assert_eq!(env("armv7-unknown-linux-gnueabihf"), "gnu");
+        assert_eq!(env("x86_64-unknown-linux-musl"), "musl");
+        assert_eq!(env("x86_64-pc-windows-msvc"), "msvc");
+        assert_eq!(env("aarch64-apple-darwin"), "");
+        let wasm = Target::from_triple("wasm32-unknown-unknown");
+        assert_eq!(eval_cfg("target_pointer_width = \"32\"", &wasm), Some(true));
+        assert_eq!(
+            eval_cfg("target_pointer_width = \"64\"", &wasm),
+            Some(false)
+        );
+        let mac = Target::from_triple("aarch64-apple-darwin");
+        assert_eq!(eval_cfg("target_vendor = \"apple\"", &mac), Some(true));
+        assert_eq!(eval_cfg("target_endian = \"big\"", &mac), Some(false));
+        assert_eq!(eval_cfg("target_env = \"msvc\"", &mac), Some(false));
+        let musl = Target::from_triple("x86_64-unknown-linux-musl");
+        assert_eq!(eval_cfg("target_env = \"musl\"", &musl), Some(true));
+        assert_eq!(eval_cfg("target_env = \"gnu\"", &musl), Some(false));
+        // What it cannot know is left live.
+        let odd = Target::from_triple("powerpc64-unknown-linux-gnu");
+        assert_eq!(eval_cfg("target_endian = \"big\"", &odd), None);
+        assert_eq!(eval_cfg("target_has_atomic = \"64\"", &mac), None);
     }
 
     /// A Go file is left out whole when its name or its build constraint

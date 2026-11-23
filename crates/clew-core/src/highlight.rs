@@ -799,12 +799,18 @@ const JAVA_EXTRA_TAGS: &str = r#"
 /// an `extern` block's — made the functions of a module methods. A trait's
 /// required methods (`fn area(&self) -> f64;`) are its items too, declared
 /// without a body as an interface's are: a trait's outline listed only the
-/// methods it provides.
+/// methods it provides. Its associated types (`type Item;`) are its items as
+/// well; and an `extern` block's functions (`fn abs(x: i32) -> i32;`) are the
+/// module's, foreign, without a body.
 const RUST_TAGS: &str = r#"
 (struct_item name: (type_identifier) @name) @definition.struct
 (enum_item name: (type_identifier) @name) @definition.enum
 (union_item name: (type_identifier) @name) @definition.union
 (type_item name: (type_identifier) @name) @definition.type
+(trait_item body: (declaration_list
+    (associated_type name: (type_identifier) @name) @definition.type))
+(foreign_mod_item body: (declaration_list
+    (function_signature_item name: (identifier) @name) @definition.function))
 (impl_item body: (declaration_list
     (function_item name: (identifier) @name) @definition.method))
 (trait_item body: (declaration_list

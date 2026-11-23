@@ -24117,7 +24117,7 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
             symbols: Vec::new(),
             docs: HashMap::new(),
             inactive: HashSet::new(),
-            target: inactive::Target::host(),
+            target: std::sync::Arc::new(inactive::Target::host()),
             facts: Default::default(),
         }),
         Message::Watch(WatchMsg::StructureBuilt {

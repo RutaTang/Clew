@@ -1207,7 +1207,7 @@ fn container_of(def: Node, lang: Lang) -> Option<Container> {
         Lang::Rust => {
             if !matches!(
                 def.kind(),
-                "function_item" | "function_signature_item" | "type_item"
+                "function_item" | "function_signature_item" | "type_item" | "associated_type"
             ) {
                 return None;
             }
@@ -4457,6 +4457,19 @@ def stub_only(x: str) -> str: ...
         assert_eq!(find(&items, "Item").container, Some(Container::TraitImpl));
         assert_eq!(find(&items, "Own").container, Some(Container::Impl));
         assert_eq!(find(&items, "Free").container, None);
+
+        // A trait's associated type is its item; an `extern` block's
+        // functions are the module's, declared without a body.
+        let src = "trait Shape {\n  type Unit: Copy;\n  fn area(&self) -> f64;\n}\nextern \"C\" {\n  fn abs(x: i32) -> i32;\n  static ERRNO: i32;\n}\n";
+        let items = extract_located(src, "rust");
+        let unit = find(&items, "Unit");
+        assert_eq!(unit.symbol.kind, "type", "{items:?}");
+        assert_eq!(unit.container, Some(Container::Trait));
+        let abs = find(&items, "abs");
+        assert_eq!(abs.symbol.kind, "function", "{items:?}");
+        assert_eq!(abs.container, None);
+        assert!(abs.is_bodyless_callable(), "{items:?}");
+        assert_eq!(find(&items, "ERRNO").symbol.kind, "constant");
     }
 
     /// One parse yields all three facts, identical to the separate extractors.

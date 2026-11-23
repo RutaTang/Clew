@@ -375,6 +375,10 @@ pub struct TargetSpec {
     pub os: String,
     pub arch: String,
     pub family: String,
+    /// Its `target_env` (`gnu`, `msvc`, `musl`, "" for none); `None` from a
+    /// client that does not say, which leaves `target_env` undecided.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub env: Option<String>,
 }
 
 /// One line's git blame. Shared with clew-core (git produces it, the gutter
@@ -1988,6 +1992,7 @@ mod tests {
             os: "macos".into(),
             arch: "aarch64".into(),
             family: "unix".into(),
+            env: None,
         };
         let msg = ClientMessage {
             id: 7,

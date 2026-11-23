@@ -599,6 +599,7 @@ fn target() -> TargetSpec {
         os: "macos".into(),
         arch: "aarch64".into(),
         family: "unix".into(),
+        env: None,
     }
 }
 

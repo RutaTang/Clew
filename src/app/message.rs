@@ -484,7 +484,7 @@ pub enum EditorMsg {
         /// rest of the bundle it does not follow from the bytes, so the hash
         /// cannot vouch for it: the user may have picked another target while
         /// this pass ran, and the same source then has a different answer.
-        target: inactive::Target,
+        target: Arc<inactive::Target>,
         /// The build facts `inactive` was evaluated against, for the same
         /// reason (`ProjectSession::build_facts`).
         facts: Arc<clew_protocol::BuildFacts>,

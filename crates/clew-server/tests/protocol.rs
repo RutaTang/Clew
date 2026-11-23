@@ -86,6 +86,7 @@ fn host_target() -> TargetSpec {
         os: "linux".into(),
         arch: "x86_64".into(),
         family: "unix".into(),
+        env: None,
     }
 }
 
@@ -960,6 +961,7 @@ async fn macros_expand_where_the_headers_are() {
         os: "linux".into(),
         arch: "x86_64".into(),
         family: "unix".into(),
+        env: None,
     };
     let ask = Request::ExpandMacro {
         rel: "main.c".into(),

@@ -638,7 +638,7 @@ impl App {
         let inactive_abs = abs.clone();
         let hl_source = source.clone();
         let target = self.proj.reading_target.clone();
-        let hl_target = target.clone();
+        let hl_target = Arc::new(target.clone());
         let facts = self.proj.build_facts.clone();
         let hl_facts = facts.clone();
         let root = self.proj.project.as_ref().map(|p| p.root.clone());
@@ -803,7 +803,7 @@ impl App {
         symbols: Vec<Symbol>,
         docs: HashMap<usize, String>,
         inactive: HashSet<usize>,
-        target: inactive::Target,
+        target: Arc<inactive::Target>,
         facts: Arc<clew_protocol::BuildFacts>,
     ) -> Task<Message> {
         let lines = Arc::new(lines);
@@ -815,7 +815,7 @@ impl App {
         // `on_target_selected` recomputed it for every open pane at the moment
         // of the change, so it is current by construction.
         let dimming_is_current =
-            target == self.proj.reading_target && Arc::ptr_eq(&facts, &self.proj.build_facts);
+            *target == self.proj.reading_target && Arc::ptr_eq(&facts, &self.proj.build_facts);
         for slot in &mut self.proj.panes {
             // Applied only to a pane still showing the exact bytes this pass
             // ran over. Two passes for one file can be in flight and finish

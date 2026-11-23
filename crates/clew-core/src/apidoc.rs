@@ -39,38 +39,189 @@ pub const ASSOCIATED_TYPE: &str = "associated type";
 /// must not drift apart.
 pub const MAX_DOC_DEPTH: usize = 32;
 
+/// [`module_doc`], a Rust file's `#![doc = include_str!("…")]` read by
+/// `include`, given the path as written (from the file's folder): a crate
+/// whose doc is its README.
+pub fn module_doc_with(
+    source: &str,
+    lang_key: &str,
+    include: &dyn Fn(&str) -> Option<String>,
+) -> String {
+    match lang_key {
+        "rust" => rust_crate_doc(source, include),
+        _ => module_doc(source, lang_key),
+    }
+}
+
+/// A Rust file's own doc, as rustdoc reads it: the inner docs before its
+/// first item, in order — `//!` lines, `/*! … */` blocks, `#![doc = "…"]`
+/// and `#![doc = include_str!("…")]` (read by `include`) — past licence
+/// comments and other inner attributes (`#![deny(…)]`).
+fn rust_crate_doc(source: &str, include: &dyn Fn(&str) -> Option<String>) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    let mut rest = source.trim_start_matches('\u{feff}');
+    // `#!/usr/bin/env …`, not an attribute.
+    if rest.starts_with("#!") && !rest.starts_with("#![") {
+        rest = rest.split_once('\n').map_or("", |(_, r)| r);
+    }
+    let line_of = |r: &str| -> (String, usize) {
+        let end = r.find('\n').map_or(r.len(), |i| i + 1);
+        (r[..end].trim_end().to_string(), end)
+    };
+    loop {
+        rest = rest.trim_start();
+        if let Some(r) = rest.strip_prefix("//!") {
+            let (line, end) = line_of(r);
+            parts.push(line.strip_prefix(' ').unwrap_or(&line).to_string());
+            rest = &r[end.min(r.len())..];
+        } else if rest.starts_with("///") {
+            break; // an item's doc
+        } else if rest.starts_with("//") {
+            rest = &rest[line_of(rest).1..];
+        } else if let Some(r) = rest.strip_prefix("/*!") {
+            let Some(close) = r.find("*/") else { break };
+            parts.push(block_doc(&r[..close]));
+            rest = &r[close + 2..];
+        } else if rest.starts_with("/**") && !rest.starts_with("/**/") {
+            break; // an item's doc
+        } else if let Some(r) = rest.strip_prefix("/*") {
+            let Some(close) = r.find("*/") else { break };
+            rest = &r[close + 2..];
+        } else if let Some(r) = rest.strip_prefix("#![") {
+            let Some(close) = attribute_end(r) else { break };
+            if let Some(doc) = doc_attribute(&r[..close], include) {
+                parts.push(doc);
+            }
+            rest = &r[close + 1..];
+        } else {
+            break;
+        }
+    }
+    parts.join("\n").trim().to_string()
+}
+
+/// Where an attribute's text, after its `#![`, ends: its closing `]`,
+/// brackets and string literals skipped.
+fn attribute_end(text: &str) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (i, c) in text.char_indices() {
+        if in_string {
+            match c {
+                _ if escaped => escaped = false,
+                '\\' => escaped = true,
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match c {
+            '"' => in_string = true,
+            '[' | '(' | '{' => depth += 1,
+            ']' if depth == 0 => return Some(i),
+            ']' | ')' | '}' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The doc an inner attribute gives: `doc = "…"`, or `doc =
+/// include_str!("…")` read by `include` — on its own or in a `cfg_attr`
+/// (`#![cfg_attr(docsrs, doc = include_str!("../README.md"))]`).
+fn doc_attribute(attr: &str, include: &dyn Fn(&str) -> Option<String>) -> Option<String> {
+    let at = attr.match_indices("doc").map(|(i, _)| i).find(|&i| {
+        let before = attr[..i].chars().next_back();
+        !before.is_some_and(|c| c.is_alphanumeric() || c == '_')
+            && attr[i + 3..].trim_start().starts_with('=')
+    })?;
+    let value = attr[at + 3..].trim_start().strip_prefix('=')?.trim_start();
+    if let Some(call) = value.strip_prefix("include_str!") {
+        let path = string_literal(call.trim_start().strip_prefix('(')?.trim_start())?;
+        return include(&path);
+    }
+    string_literal(value)
+}
+
+/// The string literal `text` starts with, its escapes read.
+fn string_literal(text: &str) -> Option<String> {
+    let body = text.strip_prefix('"')?;
+    let mut out = String::new();
+    let mut chars = body.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => return Some(out),
+            '\\' => match chars.next()? {
+                'n' => out.push('\n'),
+                't' => out.push('\t'),
+                '\n' => {
+                    // A line continuation: the next line's indent goes too.
+                    let rest: String = chars.clone().collect();
+                    let skipped = rest.len() - rest.trim_start().len();
+                    for _ in 0..rest[..skipped].chars().count() {
+                        chars.next();
+                    }
+                }
+                other => out.push(other),
+            },
+            _ => out.push(c),
+        }
+    }
+    None
+}
+
+/// A `/*! … */` or `/** … */` block's text as rustdoc reads it: a column of
+/// leading `*`s taken off, then the common indent, blank lines at the ends
+/// dropped.
+fn block_doc(inner: &str) -> String {
+    let lines: Vec<&str> = inner.lines().map(|l| l.trim_end()).collect();
+    let starred = lines
+        .iter()
+        .skip(1)
+        .filter(|l| !l.trim().is_empty())
+        .all(|l| l.trim_start().starts_with('*'));
+    let lines: Vec<String> = lines
+        .iter()
+        .enumerate()
+        .map(|(i, l)| match (i, starred) {
+            (0, _) => l.trim_start().to_string(),
+            (_, true) => {
+                let t = l.trim_start();
+                let t = t.strip_prefix('*').unwrap_or(t);
+                t.strip_prefix(' ').unwrap_or(t).to_string()
+            }
+            _ => l.to_string(),
+        })
+        .collect();
+    let indent = lines
+        .iter()
+        .skip(1)
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.len() - l.trim_start().len())
+        .min()
+        .unwrap_or(0);
+    let lines: Vec<&str> = lines
+        .iter()
+        .enumerate()
+        .map(|(i, l)| match i {
+            0 => l.as_str(),
+            _ => l.get(indent..).unwrap_or(l.trim_start()),
+        })
+        .collect();
+    lines.join("\n").trim().to_string()
+}
+
 /// A file's own doc comment, its comment markers stripped: Rust's leading
-/// `//!` lines, a Python module's docstring, Go's package comment (the
-/// comment block right above `package`), Lean's `/-! … -/` module doc. Empty
-/// for the other languages, whose file-top comments are licence headers as
-/// often as docs, and for a file without one.
+/// inner docs (`//!`, `/*! */`, `#![doc = "…"]`), a Python module's
+/// docstring, Go's package comment (the comment block right above
+/// `package`), Lean's `/-! … -/` module doc. Empty for the other languages,
+/// whose file-top comments are licence headers as often as docs, and for a
+/// file without one.
 pub fn module_doc(source: &str, lang_key: &str) -> String {
     let lines = source.lines().map(|l| l.trim_end_matches('\r'));
     match lang_key {
-        "rust" => {
-            let mut doc: Vec<&str> = Vec::new();
-            // Inside a plain `/* … */` comment above the docs.
-            let mut in_comment = false;
-            for line in lines {
-                let t = line.trim_start();
-                if in_comment {
-                    in_comment = !t.contains("*/");
-                } else if let Some(rest) = t.strip_prefix("//!") {
-                    doc.push(rest.strip_prefix(' ').unwrap_or(rest));
-                } else if !doc.is_empty() {
-                    break;
-                } else if t.starts_with("/*") && !t.starts_with("/**") && !t.starts_with("/*!") {
-                    // A licence header, as often as not, above the docs.
-                    in_comment = !t[2..].contains("*/");
-                } else if !(t.is_empty()
-                    || t.starts_with("#!")
-                    || t.starts_with("//") && !t.starts_with("///"))
-                {
-                    break;
-                }
-            }
-            doc.join("\n").trim().to_string()
-        }
+        "rust" => rust_crate_doc(source, &|_| None),
         "python" => {
             // The first statement, when it is a string literal.
             let body: Vec<&str> = lines
@@ -2388,6 +2539,44 @@ module.exports = {
                 "rust"
             ),
             "Prices."
+        );
+        // A block doc, a doc attribute, a README the crate includes, past
+        // other attributes — in order, as rustdoc joins them.
+        assert_eq!(
+            module_doc(
+                "/*!\n * Prices.\n *\n *     let p = 1;\n */\n#![deny(missing_docs)]\n#![doc = \"More.\"]\nuse x;\n",
+                "rust"
+            ),
+            "Prices.\n\n    let p = 1;\nMore."
+        );
+        let readme = |path: &str| (path == "../README.md").then(|| "# Shop\n\nSells.".to_string());
+        assert_eq!(
+            module_doc_with(
+                "#![doc = include_str!(\"../README.md\")]\n#![cfg_attr(docsrs, feature(doc_cfg))]\npub mod a;\n",
+                "rust",
+                &readme
+            ),
+            "# Shop\n\nSells."
+        );
+        assert_eq!(
+            module_doc_with(
+                "#![cfg_attr(\n    docsrs,\n    doc = include_str!(\"../README.md\")\n)]\nuse x;\n",
+                "rust",
+                &readme
+            ),
+            "# Shop\n\nSells."
+        );
+        // Not read where nothing reads it, and not mistaken for a doc.
+        assert_eq!(
+            module_doc("#![doc = include_str!(\"../README.md\")]\n", "rust"),
+            ""
+        );
+        assert_eq!(
+            module_doc(
+                "#![doc(html_root_url = \"https://x\")]\n#![no_std]\n",
+                "rust"
+            ),
+            ""
         );
         // Code, or an item's doc, still ends the search.
         assert_eq!(module_doc("// Copyright.\nuse x;\n//! Late.\n", "rust"), "");

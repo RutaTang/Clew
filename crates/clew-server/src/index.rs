@@ -345,7 +345,13 @@ pub(crate) fn build_doc_one(root: &Path, f: &FileEntry) -> Option<clew_protocol:
     let items = clew_core::apidoc::build_file(&source, lang);
     // A file of no API but with its own doc (a `mod.rs` of `pub mod` lines,
     // a package's `__init__.py`) still defines its module in the glossary.
-    let doc = clew_core::apidoc::module_doc(&source, lang);
+    // A crate's doc may be its README (`#![doc = include_str!("../README.md")]`):
+    // read from the file's folder, inside the project, as the file was.
+    let include = |path: &str| {
+        let dir = f.abs.parent()?;
+        clew_core::fs_scan::read_confined_capped(root, &dir.join(path), MAX_INDEX_FILE_BYTES)
+    };
+    let doc = clew_core::apidoc::module_doc_with(&source, lang, &include);
     (!items.is_empty() || !doc.is_empty()).then(|| clew_protocol::DocFile {
         rel: f.rel.clone(),
         items,
@@ -386,6 +392,33 @@ mod tests {
         };
         assert_eq!(entry_of("main").as_deref(), Some("main"));
         assert_eq!(entry_of("boot"), None);
+    }
+
+    /// A crate whose doc is its README (`#![doc = include_str!(…)]`) has
+    /// that for its doc; one outside the project is not read.
+    #[test]
+    fn a_crates_doc_may_be_its_readme() {
+        let root = crate::test_support::Scratch::new("server-readme-doc");
+        std::fs::create_dir_all(root.join("shop/src")).unwrap();
+        std::fs::write(root.join("shop/README.md"), "# Shop\n\nSells things.\n").unwrap();
+        let lib = root.join("shop/src/lib.rs");
+        std::fs::write(
+            &lib,
+            "#![doc = include_str!(\"../README.md\")]\npub mod a;\n",
+        )
+        .unwrap();
+        let entry = FileEntry {
+            abs: lib.clone(),
+            rel: "shop/src/lib.rs".into(),
+        };
+        let doc = super::build_doc_one(&root, &entry).expect("a doc");
+        assert_eq!(doc.doc, "# Shop\n\nSells things.");
+        std::fs::write(
+            &lib,
+            "#![doc = include_str!(\"../../../../../../../../etc/hostname\")]\npub mod a;\n",
+        )
+        .unwrap();
+        assert!(super::build_doc_one(&root, &entry).is_none_or(|d| d.doc.is_empty()));
     }
 
     /// The server's full builds parse each indexable file ONCE: the symbol
