@@ -836,6 +836,7 @@ impl LspClient {
 
         // On failure `client` — the only handle — drops here, which ends the
         // session and takes the child down with it.
+        let pushed = pushed_settings(init_options.as_ref());
         let params = initialize_params(root, init_options, process_id, locale());
         let result = client.call("initialize", params).await?;
         let caps = result.get("capabilities");
@@ -867,6 +868,14 @@ impl LspClient {
             s.started = Some(Instant::now());
         }
         client.notify("initialized", json!({}));
+        // A Python server that reads its settings only as they are pushed
+        // (pylsp asks for none): the interpreter and search paths, at once.
+        if let Some(settings) = pushed {
+            client.notify(
+                "workspace/didChangeConfiguration",
+                json!({ "settings": settings }),
+            );
+        }
         Ok(Self {
             encoding,
             call_hierarchy,
@@ -1332,6 +1341,16 @@ fn locale() -> Option<String> {
 /// we spawned, `None` (sent as `null`) for one whose parent is someone else —
 /// see [`LspClient::connect`]. `locale`, the reader's language, if not
 /// English.
+/// The settings sent once the server is initialized, for one that reads
+/// them only as they are pushed: Python's (pylsp pulls nothing, and pyright,
+/// which pulls, takes the push as word to pull again). Other servers pull
+/// what they need when they need it.
+fn pushed_settings(settings: Option<&Value>) -> Option<Value> {
+    settings
+        .filter(|s| s.get("python").is_some() && s.get("pylsp").is_some())
+        .cloned()
+}
+
 fn initialize_params(
     root: &Path,
     init_options: Option<Value>,
@@ -2472,6 +2491,17 @@ fn percent_decode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Python's settings are pushed once the server is up (pylsp pulls
+    /// none); another language's are left for the server to pull.
+    #[test]
+    fn only_pythons_settings_are_pushed() {
+        let python = json!({ "python": { "pythonPath": "/p" }, "pylsp": {} });
+        assert_eq!(pushed_settings(Some(&python)), Some(python.clone()));
+        assert_eq!(pushed_settings(Some(&json!({ "rust-analyzer": {} }))), None);
+        assert_eq!(pushed_settings(Some(&json!({ "python": {} }))), None);
+        assert_eq!(pushed_settings(None), None);
+    }
 
     #[test]
     fn uri_roundtrip() {

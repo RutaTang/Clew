@@ -393,11 +393,35 @@ pub fn locate(server: &EffectiveServer) -> Located {
     if let Some(path) = installed_program(&dest_dir, binary) {
         return Located::Ready(path);
     }
+    // One the user installed already (`pip install pyright`, `npm i -g`, or
+    // basedpyright, which speaks the same): theirs, run as found, rather
+    // than an install that needs Node. Not where the project pins a version:
+    // that one is installed.
+    if server.version == spec.version
+        && let Some(path) = already_installed(spec.name)
+    {
+        return Located::Ready(path);
+    }
     match provision {
         Provision::Download(download) => Located::NeedsDownload { download, dest_dir },
         Provision::Install(install) => Located::NeedsInstall { install, dest_dir },
         Provision::Toolchain { .. } => unreachable!("returned above"),
     }
+}
+
+/// A server the user installed themselves, on the search path children get
+/// ([`crate::linerpc::spawn_path`]), for one whose own install Clew would
+/// otherwise make: only where the program found serves as Clew's does.
+fn already_installed(server: &str) -> Option<PathBuf> {
+    already_installed_on(server, &crate::linerpc::spawn_path()?)
+}
+
+fn already_installed_on(server: &str, path: &OsStr) -> Option<PathBuf> {
+    let names: &[&str] = match server {
+        "pyright" => &["pyright-langserver", "basedpyright-langserver"],
+        _ => return None,
+    };
+    names.iter().find_map(|name| find_in(path, name, false))
 }
 
 /// How to get the toolchain program `binary`, for the message saying it is
@@ -1070,6 +1094,29 @@ pub(crate) mod testing {
 mod tests {
     use super::testing::with_store;
     use super::*;
+
+    /// pyright the user installed (or basedpyright, which serves the same)
+    /// is run as found instead of an install of Clew's; no other server is
+    /// looked for so, as their settings are Clew's own copy's.
+    #[test]
+    #[cfg(unix)]
+    fn a_pyright_on_the_path_is_used_as_found() {
+        let dir = crate::testutil::TempDir::new("pyright-on-path");
+        let bin = dir.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let path = bin.clone().into_os_string();
+        assert_eq!(already_installed_on("pyright", &path), None);
+        let script = crate::lsp::store::testing::script;
+        let based = script(&bin.join("basedpyright-langserver"), "exit 0");
+        assert_eq!(already_installed_on("pyright", &path), Some(based));
+        let pyright = script(&bin.join("pyright-langserver"), "exit 0");
+        assert_eq!(already_installed_on("pyright", &path), Some(pyright));
+        script(&bin.join("typescript-language-server"), "exit 0");
+        assert_eq!(
+            already_installed_on("typescript-language-server", &path),
+            None
+        );
+    }
     use crate::lsp::registry::Archive;
     use std::io::Write;
 

@@ -493,12 +493,28 @@ fn python_settings(env: &PythonEnv) -> Value {
         "pythonPath": path(&env.run),
         "defaultInterpreterPath": path(&env.run),
     });
-    if !env.extra_paths.is_empty() {
-        python["analysis"] = json!({
-            "extraPaths": env.extra_paths.iter().map(|p| path(p)).collect::<Vec<_>>(),
-        });
+    let extra: Vec<String> = env.extra_paths.iter().map(|p| path(p)).collect();
+    if !extra.is_empty() {
+        python["analysis"] = json!({ "extraPaths": extra });
     }
-    json!({ "python": python })
+    // The same for the other Python servers, each where it reads it:
+    // basedpyright its own `analysis`, pylsp (pushed, it pulls nothing) its
+    // Jedi plugin's, jedi-language-server its initialization options.
+    let mut settings = json!({
+        "python": python,
+        "pylsp": { "plugins": { "jedi": {
+            "environment": path(&env.run),
+            "extra_paths": extra,
+        } } },
+        "workspace": {
+            "environmentPath": path(&env.run),
+            "extraPaths": extra,
+        },
+    });
+    if !extra.is_empty() {
+        settings["basedpyright"] = json!({ "analysis": { "extraPaths": extra } });
+    }
+    settings
 }
 
 /// Merge auto-detected settings under the explicit `lsp.toml` `init_options`,
