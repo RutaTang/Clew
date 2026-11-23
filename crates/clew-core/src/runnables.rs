@@ -25,7 +25,7 @@ pub enum RunnableKind {
     /// file).
     Tests,
     /// The program's start: Rust's `fn main`, Python's
-    /// `if __name__ == "__main__":` block.
+    /// `if __name__ == "__main__":` block, Lean's `def main`.
     Main,
     /// A Rust doc comment's example, run by rustdoc as a test of its own
     /// (`cargo test --doc`): named for the item it documents (empty for a
@@ -55,11 +55,24 @@ pub struct Runnable {
 const MAX_SCOPES: usize = 32;
 
 /// The runnables of `source`, in language `lang` (a key), in order.
-/// Rust and Python have them; other languages none yet.
+/// Rust and Python have them, and Lean its `main`; other languages none
+/// yet.
 pub fn runnables(lang: &str, source: &str) -> Vec<Runnable> {
     let language = match lang {
         "rust" => Lang::Rust,
         "python" => Lang::Python,
+        "lean" => {
+            return crate::lean::main_lines(source)
+                .map(|(line, span)| Runnable {
+                    kind: RunnableKind::Main,
+                    name: "main".to_string(),
+                    line,
+                    span,
+                    scopes: Vec::new(),
+                })
+                .into_iter()
+                .collect();
+        }
         _ => return Vec::new(),
     };
     let Some(tree) = parse(source, language) else {
@@ -584,6 +597,27 @@ pub struct Point<T>;
             !found.iter().any(|r| r.kind == RunnableKind::Tests),
             "{found:?}"
         );
+    }
+
+    /// A Lean file's `main` is its program's start, its ▶ on its name.
+    #[test]
+    fn a_lean_main_is_the_programs_start() {
+        let found = runnables(
+            "lean",
+            "def greet := \"hi\"\n\ndef main : IO Unit :=\n  IO.println greet\n",
+        );
+        assert_eq!(
+            found,
+            [Runnable {
+                kind: RunnableKind::Main,
+                name: "main".into(),
+                line: 3,
+                span: (3, 4),
+                scopes: Vec::new(),
+            }]
+        );
+        assert_eq!(runnable_at(&found, 4).map(|r| r.line), Some(3));
+        assert!(runnables("lean", "theorem t : 1 = 1 := rfl\n").is_empty());
     }
 
     /// proptest's tests, written in its macro, and quickcheck's, are tests.

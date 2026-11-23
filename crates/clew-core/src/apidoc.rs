@@ -516,6 +516,10 @@ pub fn build_file(source: &str, lang_key: &str) -> Vec<DocItem> {
     // word for its own names: the listed ones, and only those.
     let python_all = (lang == Lang::Python).then(|| python_all(source)).flatten();
 
+    let lean_publics = match lang {
+        Lang::Lean => crate::lean::module_publics(source),
+        _ => None,
+    };
     // In index order, so a parent's verdict exists before its members'.
     let mut public: Vec<bool> = vec![false; n];
     for i in 0..n {
@@ -559,6 +563,17 @@ pub fn build_file(source: &str, lang_key: &str) -> Vec<DocItem> {
                     || (parent[i].is_none() && exported.contains(raws[i].name.as_str()))
             }
         };
+        // Lean's module system: in a file that is a `module`, a declaration
+        // is public only marked so or in a `public section`.
+        if let Some(publics) = &lean_publics
+            && public[i]
+        {
+            let marked = before_name(&raws[i].signature, &raws[i].name)
+                .split_whitespace()
+                .any(|w| w == "public");
+            let at = located[i].declaration.0;
+            public[i] = marked || publics.iter().any(|r| r.contains(&at));
+        }
         // What rustdoc reads off an item's attributes: `#[doc(hidden)]`
         // leaves it out however `pub` it is; `#[macro_export]` exports a
         // `macro_rules!`, which has no `pub` to say so.
@@ -2053,6 +2068,26 @@ export class Cart {
         assert_eq!(shout.signature, "macro_rules! shout");
         assert!(shout.public);
         assert!(!find(&items, "quiet").public);
+    }
+
+    /// A Lean `module`: a declaration is public only marked `public` or in
+    /// a `public section`; a file of no module, unless `private`.
+    #[test]
+    fn a_lean_modules_declarations_are_private_unless_made_public() {
+        let src = "module\n\npublic import Std\n\ndef hidden : Nat := 1\npublic def shown : Nat := 2\n\n@[expose] public section\n\ndef inside : Nat := 3\nprivate def secret : Nat := 4\n\nend\n\ndef after : Nat := 5\n";
+        let items = build_file(src, "lean");
+        let public = |name: &str| find(&items, name).public;
+        assert!(!public("hidden"), "{items:#?}");
+        assert!(public("shown"));
+        assert!(public("inside"));
+        assert!(!public("secret"));
+        assert!(!public("after"));
+        let plain = build_file(
+            "def open_ : Nat := 1\nprivate def closed : Nat := 2\n",
+            "lean",
+        );
+        assert!(find(&plain, "open_").public);
+        assert!(!find(&plain, "closed").public);
     }
 
     /// A function's nested helpers are its locals, whatever their names.

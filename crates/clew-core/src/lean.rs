@@ -33,20 +33,56 @@ const CONTINUATIONS: &[&str] = &[
 /// starts at the start of a line, where a command can (see [`starts_command`])
 /// — outside a block comment, and not right below a line of attributes alone
 /// (`@[simp]`), which belongs to the declaration under it.
+///
+/// Inside a `mutual … end` block, each declaration at the block's own
+/// indent starts a command too: written indented (as Lean's own sources
+/// and Theorem Proving in Lean write them), the block had no command start
+/// but its `end`, and neither its declarations nor the block were read.
 pub(crate) fn commands(source: &str) -> Vec<Range<usize>> {
     let mut starts = vec![0];
     // Open `/- … -/` comments (they nest) at the start of the line.
     let mut depth = 0usize;
     // Whether the last line with anything on it held attributes alone.
     let mut attributes_above = false;
+    // In a `mutual` block: its declarations' indent, once its first says.
+    let mut mutual: Option<Option<usize>> = None;
+    // A string literal left open at the end of the line above: the next
+    // line is its text, whatever its first column holds.
+    let mut in_string = false;
     let mut offset = 0;
     for line in source.split_inclusive('\n') {
         let text = line.trim_end_matches(['\n', '\r']);
-        if offset > 0 && depth == 0 && !attributes_above && starts_command(text) {
+        let indent = text.len() - text.trim_start().len();
+        let inner = text.trim_start();
+        if depth == 0
+            && !in_string
+            && indent > 0
+            && !inner.is_empty()
+            && !inner.starts_with("--")
+            && let Some(block) = mutual.as_mut()
+        {
+            let at = *block.get_or_insert(indent);
+            if at == indent
+                && offset > 0
+                && !attributes_above
+                && starts_command(inner)
+                && starts.last() != Some(&offset)
+            {
+                starts.push(offset);
+            }
+        }
+        if offset > 0 && depth == 0 && !in_string && !attributes_above && starts_command(text) {
             starts.push(offset);
+            mutual = match text.split_whitespace().next() {
+                Some("mutual") => Some(None),
+                Some("end") => None,
+                _ => mutual,
+            };
+        } else if offset == 0 && text.split_whitespace().next() == Some("mutual") {
+            mutual = Some(None);
         }
         let opened = depth == 0;
-        depth = comment_depth_after(text, depth);
+        (depth, in_string) = scan_line(text, depth, in_string);
         if !text.trim().is_empty() {
             attributes_above = opened && depth == 0 && only_attributes(text);
         }
@@ -58,6 +94,159 @@ pub(crate) fn commands(source: &str) -> Vec<Range<usize>> {
         .filter(|w| w[0] < w[1])
         .map(|w| w[0]..w[1])
         .collect()
+}
+
+/// What a command does to the scopes of a Lean file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Scoping {
+    /// `namespace A.B`: names in it are `A.B.…`.
+    Namespace(String),
+    /// `section`, `noncomputable section`, `public section`, a `mutual`
+    /// block: closed by an `end` of its own, and naming nothing.
+    Block,
+    /// `end`, `end A.B`: the innermost open one closed.
+    End,
+    /// Anything else.
+    Other,
+}
+
+fn scoping(command: &str) -> Scoping {
+    let mut rest = command.trim_start();
+    while let Some(inside) = rest.strip_prefix("@[") {
+        let Some(close) = closing_bracket(inside) else {
+            return Scoping::Other;
+        };
+        rest = inside[close + 1..].trim_start();
+    }
+    let mut words = rest.split_whitespace();
+    let mut word = words.next();
+    while matches!(word, Some("noncomputable" | "public" | "private" | "meta")) {
+        word = words.next();
+    }
+    match word {
+        Some("namespace") => match words.next() {
+            Some(name) => Scoping::Namespace(name.to_string()),
+            None => Scoping::Other,
+        },
+        Some("section" | "mutual") => Scoping::Block,
+        Some("end") => Scoping::End,
+        _ => Scoping::Other,
+    }
+}
+
+/// The scopes of a Lean file read through its `commands`: for each command,
+/// the namespace it is in (`Clew.Extracted`, empty at the top); and for each
+/// `namespace` command, by its index, the index of the command that ends it
+/// — its `end`, or `None` where the file ends first.
+pub(crate) fn scopes(
+    source: &str,
+    commands: &[Range<usize>],
+) -> (Vec<String>, std::collections::HashMap<usize, Option<usize>>) {
+    let mut open: Vec<(usize, Option<String>)> = Vec::new();
+    let mut paths = Vec::with_capacity(commands.len());
+    let mut ends = std::collections::HashMap::new();
+    let path = |open: &[(usize, Option<String>)]| -> String {
+        open.iter()
+            .filter_map(|(_, n)| n.as_deref())
+            .collect::<Vec<_>>()
+            .join(".")
+    };
+    for (i, range) in commands.iter().enumerate() {
+        paths.push(path(&open));
+        match scoping(&source[range.clone()]) {
+            Scoping::Namespace(name) => {
+                ends.insert(i, None);
+                open.push((i, Some(name)));
+            }
+            Scoping::Block => open.push((i, None)),
+            Scoping::End => {
+                if let Some((at, Some(_))) = open.pop() {
+                    ends.insert(at, Some(i));
+                }
+            }
+            Scoping::Other => {}
+        }
+    }
+    (paths, ends)
+}
+
+/// For a Lean file written for the module system — its first command
+/// `module` — the byte ranges of its public sections (`public section`,
+/// `@[expose] public section`, to their `end`): there, a declaration is
+/// public; elsewhere only one marked `public` is. `None` for a file of no
+/// module, whose declarations are public unless `private`.
+pub(crate) fn module_publics(source: &str) -> Option<Vec<Range<usize>>> {
+    let commands = commands(source);
+    let first = commands.iter().find_map(|r| {
+        let code: String = source[r.clone()]
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("--"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let code = code.trim();
+        (!code.is_empty() && !code.starts_with("/-")).then(|| code.to_string())
+    })?;
+    if first.split_whitespace().next() != Some("module") {
+        return None;
+    }
+    let mut open: Vec<(usize, bool)> = Vec::new();
+    let mut publics = Vec::new();
+    for range in &commands {
+        let text = &source[range.clone()];
+        match scoping(text) {
+            Scoping::Namespace(_) => open.push((range.start, false)),
+            Scoping::Block => {
+                let head: Vec<&str> = text
+                    .split_whitespace()
+                    .take_while(|w| *w != "section")
+                    .collect();
+                let public =
+                    text.split_whitespace().any(|w| w == "section") && head.contains(&"public");
+                open.push((range.start, public));
+            }
+            Scoping::End => {
+                if let Some((start, true)) = open.pop() {
+                    publics.push(start..range.end);
+                }
+            }
+            Scoping::Other => {}
+        }
+    }
+    // A public section the file ends inside runs to its end.
+    publics.extend(
+        open.into_iter()
+            .filter(|(_, public)| *public)
+            .map(|(start, _)| start..source.len()),
+    );
+    Some(publics)
+}
+
+/// The blocks of a Lean file a reader folds — each `namespace`, `section`
+/// and `mutual` block — as 0-based `(first, last)` lines: from its opening
+/// line through the line before its `end`, which stays in view, as a
+/// closing brace does. Their bodies are not indented, so the folds by
+/// indent never had them.
+pub fn blocks(source: &str) -> Vec<(usize, usize)> {
+    let mut open: Vec<usize> = Vec::new();
+    let mut out = Vec::new();
+    let (mut line, mut counted_to) = (0, 0);
+    for range in commands(source) {
+        line += source[counted_to..range.start].matches('\n').count();
+        counted_to = range.start;
+        match scoping(&source[range]) {
+            Scoping::Namespace(_) | Scoping::Block => open.push(line),
+            Scoping::End => {
+                if let Some(first) = open.pop()
+                    && line > first + 1
+                {
+                    out.push((first, line - 1));
+                }
+            }
+            Scoping::Other => {}
+        }
+    }
+    out.sort_unstable();
+    out
 }
 
 /// Whether a line (its newline cut) can start a command: it starts at its
@@ -77,11 +266,12 @@ fn starts_command(line: &str) -> bool {
 }
 
 /// How many `/- … -/` comments are open after `line`, `depth` being open
-/// before it. Block comments nest; a `--` outside one ends the line's code;
-/// a `/-` in a string literal opens nothing.
-fn comment_depth_after(line: &str, mut depth: usize) -> usize {
+/// before it, and whether a string literal is still open at its end (a
+/// string runs on over lines), the line starting inside one (`in_string`)
+/// or not. Block comments nest; a `--` outside one ends the line's code; a
+/// `/-` in a string literal opens nothing.
+fn scan_line(line: &str, mut depth: usize, mut in_string: bool) -> (usize, bool) {
     let b = line.as_bytes();
-    let mut in_string = false;
     let mut i = 0;
     while i < b.len() {
         let pair = |a: u8, c: u8| b[i] == a && b.get(i + 1) == Some(&c);
@@ -109,6 +299,11 @@ fn comment_depth_after(line: &str, mut depth: usize) -> usize {
         if pair(b'-', b'-') {
             break;
         }
+        // A character literal: `'"'` opens no string.
+        if b[i] == b'\'' && b.get(i + 2) == Some(&b'\'') {
+            i += 3;
+            continue;
+        }
         if pair(b'/', b'-') {
             depth += 1;
             i += 2;
@@ -119,7 +314,7 @@ fn comment_depth_after(line: &str, mut depth: usize) -> usize {
         }
         i += 1;
     }
-    depth
+    (depth, in_string)
 }
 
 /// `command` as the grammar can read its declaration: the arguments of its
@@ -283,6 +478,19 @@ pub(crate) fn head(command: &str) -> Option<Head> {
         "axiom" => "axiom",
         "constant" => "constant",
         "example" => "example",
+        // Notation, macros and syntax: named by what they write.
+        "notation" | "infix" | "infixl" | "infixr" | "prefix" | "postfix" | "macro" | "syntax"
+        | "elab" | "declare_syntax_cat" => return syntax_head(command, keyword, word),
+        w if w.starts_with("notation")
+            || w.starts_with("infix")
+            || w.starts_with("prefix:")
+            || w.starts_with("postfix:")
+            || w.starts_with("macro:")
+            || w.starts_with("syntax:")
+            || w.starts_with("elab:") =>
+        {
+            return syntax_head(command, keyword, w);
+        }
         _ => return None,
     };
     if word == "example" {
@@ -318,6 +526,45 @@ pub(crate) fn head(command: &str) -> Option<Head> {
     })
 }
 
+/// The head of a notation, macro or syntax declaration, keyword `word` at
+/// `keyword`: named by its `(name := …)` where it gives one, else by what it
+/// writes — its first string literal (`"+++"`); a syntax category by its
+/// name (`declare_syntax_cat tactic_seq`).
+fn syntax_head(command: &str, keyword: usize, word: &str) -> Option<Head> {
+    let after = keyword + word.len();
+    let end = command.len();
+    let rest = &command[after..];
+    let name = if word == "declare_syntax_cat" {
+        let skipped = rest.len() - rest.trim_start().len();
+        let len = name_length(&rest[skipped..]);
+        (len > 0).then(|| after + skipped..after + skipped + len)?
+    } else if let Some(at) = rest.find("(name :=") {
+        let from = after + at + "(name :=".len();
+        let skipped = command[from..].len() - command[from..].trim_start().len();
+        let named = &command[from + skipped..];
+        let len = name_length(named).min(named.find(')').unwrap_or(named.len()));
+        (len > 0).then(|| from + skipped..from + skipped + len)?
+    } else {
+        let open = rest.find('"')?;
+        let close = rest[open + 1..].find('"')?;
+        let inner = &rest[open + 1..open + 1 + close];
+        let lead = inner.len() - inner.trim_start().len();
+        let from = after + open + 1 + lead;
+        (!inner.trim().is_empty()).then(|| from..from + inner.trim().len())?
+    };
+    // Its statement: up to what it stands for (`=>`), on its first line.
+    let line_end = command[keyword..].find('\n').map_or(end, |n| keyword + n);
+    let signature_end = command[keyword..line_end]
+        .find("=>")
+        .map_or(line_end, |n| keyword + n);
+    Some(Head {
+        kind: "macro",
+        name,
+        keyword,
+        signature_end,
+    })
+}
+
 /// The head of an instance with no name, whose binders or `:` start at
 /// `at`: named by its class, the statement after its `:` up to `:=` or
 /// `where`, on that first line.
@@ -347,6 +594,12 @@ fn unnamed_instance(command: &str, at: usize, keyword: usize) -> Option<Head> {
 
 /// The length of the Lean name `text` starts with (`Group.toMonoid`,
 /// `«sum ≤»`, `foo'`), or 0.
+/// How long the name `text` starts with is, in bytes (`Foo.bar`,
+/// `«a b»`): none where it starts with no name.
+pub(crate) fn name_len(text: &str) -> usize {
+    name_length(text)
+}
+
 fn name_length(text: &str) -> usize {
     let mut len = 0;
     let mut quoted = false;
@@ -494,44 +747,67 @@ fn closing_bracket(text: &str) -> Option<usize> {
 /// `lakefile.toml`) — where Lean's server must run for the file's imports
 /// of its own project to resolve, in a repository whose Lean is in a
 /// folder of its own. `root` for a file in no Lake project under it.
-pub fn lake_root(root: &Path, file: &Path) -> PathBuf {
+///
+/// A dependency's file — Lake's checkout of it, in `.lake/packages/` (or
+/// `lake-packages/` before Lake 5), where go to definition takes the
+/// reader — is the project's that holds the checkout: its server has the
+/// dependency on its path. Read as the dependency's own project, opening
+/// one of Mathlib's files restarted Lean in Mathlib's checkout. `None` for
+/// a file outside `root` (the toolchain's own sources): no project of the
+/// opened folder's, and whatever server runs serves it.
+pub fn lake_root(root: &Path, file: &Path) -> Option<PathBuf> {
+    let rel = file.strip_prefix(root).ok()?;
+    let parts: Vec<_> = rel.components().collect();
+    let from = match parts
+        .iter()
+        .position(|c| matches!(c.as_os_str().to_str(), Some(".lake" | "lake-packages")))
+    {
+        Some(at) => parts[..at]
+            .iter()
+            .fold(root.to_path_buf(), |p, c| p.join(c)),
+        None => file.parent()?.to_path_buf(),
+    };
     let lakefile = |dir: &Path| {
         ["lakefile.lean", "lakefile.toml"]
             .iter()
             .any(|name| dir.join(name).is_file())
     };
-    file.ancestors()
-        .skip(1)
-        .take_while(|dir| dir.starts_with(root))
-        .find(|dir| lakefile(dir))
-        .map_or_else(|| root.to_path_buf(), Path::to_path_buf)
+    Some(
+        from.ancestors()
+            .take_while(|dir| dir.starts_with(root))
+            .find(|dir| lakefile(dir))
+            .map_or_else(|| root.to_path_buf(), Path::to_path_buf),
+    )
 }
 
 /// Whether a Lean file has a program to run: a `def main` of its own, at
-/// its top level (`partial def main`, `unsafe def main` too), as
-/// `lean --run` needs one.
+/// its top level and in no namespace (`partial def main`, `unsafe def
+/// main` too), as `lean --run` needs one.
 pub fn has_main(source: &str) -> bool {
-    source.lines().any(|line| {
-        if line.starts_with(char::is_whitespace) {
-            return false;
+    main_lines(source).is_some()
+}
+
+/// Where a Lean file's program starts, as 1-based lines: its `def main`'s
+/// name's, and the first and last of its command. Only the root `main`
+/// runs (`lean --run`): one in a namespace is `Foo.main`, and one in a
+/// comment is none — each was offered to run, and Lean said "no main".
+pub fn main_lines(source: &str) -> Option<(usize, (usize, usize))> {
+    let commands = commands(source);
+    let (paths, _) = scopes(source, &commands);
+    let line_of = |at: usize| source[..at].matches('\n').count() + 1;
+    commands.iter().zip(&paths).find_map(|(range, path)| {
+        if !path.is_empty() {
+            return None;
         }
-        let mut words = line.split_whitespace().peekable();
-        while words
-            .next_if(|w| {
-                matches!(
-                    *w,
-                    "private" | "protected" | "public" | "noncomputable" | "partial" | "unsafe"
-                )
-            })
-            .is_some()
-        {}
-        words.next() == Some("def")
-            && words.next().is_some_and(|name| {
-                name == "main"
-                    || name
-                        .strip_prefix("main")
-                        .is_some_and(|r| r.starts_with([':', '(']))
-            })
+        let command = &source[range.clone()];
+        let head = head(command)?;
+        (head.kind == "function" && &command[head.name.clone()] == "main").then(|| {
+            let last = range.start + command.trim_end().len().max(1) - 1;
+            (
+                line_of(range.start + head.name.start),
+                (line_of(range.start + head.keyword), line_of(last)),
+            )
+        })
     })
 }
 
@@ -566,6 +842,14 @@ pub fn run_main(
 /// all of Mathlib itself the first time a file importing it is checked,
 /// which takes hours; `lake exe cache get` downloads it in minutes.
 pub fn mathlib_build_missing(root: &Path) -> Option<PathBuf> {
+    mathlib_build(root)
+        .filter(|(_, built)| !built)
+        .map(|(build, _)| build)
+}
+
+/// Mathlib's build for the Lake project at `root`: where it belongs, and
+/// whether it is in place; `None` for a project without Mathlib.
+pub fn mathlib_build(root: &Path) -> Option<(PathBuf, bool)> {
     use serde_json::Value;
     // Capped, and never blocked on: a repository's manifest that is a FIFO,
     // or a link to `/dev/zero`, hung or filled the app reading it.
@@ -591,11 +875,21 @@ pub fn mathlib_build_missing(root: &Path) -> Option<PathBuf> {
     let built = ["lib/lean/Mathlib.olean", "lib/Mathlib.olean"]
         .iter()
         .any(|olean| build.join(olean).is_file());
-    (!built).then_some(build)
+    Some((build, built))
 }
 
 #[cfg(test)]
 mod tests {
+
+    /// A namespace, a section and a `mutual` block each fold from their
+    /// opening line to the line before their `end`; one too short to hide
+    /// a line does not.
+    #[test]
+    fn lean_blocks_fold_to_their_end() {
+        let src = "namespace A\n\ndef f := 1\n\nsection\ndef g := 2\nend\n\nmutual\n  def h : Nat := 1\nend\nend A\nsection\nend\n";
+        assert_eq!(blocks(src), [(0, 10), (4, 5), (8, 9)]);
+    }
+
     use super::*;
 
     /// A file runs when it has a `main` of its own, at its top level.
@@ -612,6 +906,20 @@ mod tests {
             "namespace X\n  def main : IO Unit := pure ()\nend X\n"
         ));
         assert!(!has_main("-- def main\n"));
+        // In a namespace, even written at column 0, it is `X.main`; in a
+        // block comment, none; in a section, the root's.
+        assert!(!has_main(
+            "namespace X\ndef main : IO Unit := pure ()\nend X\n"
+        ));
+        assert!(!has_main("/-\ndef main : IO Unit := pure ()\n-/\n"));
+        assert!(has_main(
+            "section\n/-- Greets. -/\n@[inline] def main : IO Unit := pure ()\nend\n"
+        ));
+        // Where its ▶ goes: its name's line, the command its span.
+        assert_eq!(
+            main_lines("import Lean\n\ndef main : IO Unit := do\n  IO.println 1\n"),
+            Some((3, (3, 4)))
+        );
     }
 
     /// A Lean file's `main` runs through `lake env lean --run`, in its
@@ -872,17 +1180,34 @@ mod tests {
         let proof = at("verification/Proofs/Trust.lean");
         let extracted = at("verification/extracted/Gen/Funs.lean");
         let loose = at("scratch/Try.lean");
-        assert_eq!(lake_root(&root, &proof), root.join("verification"));
+        assert_eq!(lake_root(&root, &proof), Some(root.join("verification")));
         assert_eq!(
             lake_root(&root, &extracted),
-            root.join("verification/extracted")
+            Some(root.join("verification/extracted"))
         );
-        assert_eq!(lake_root(&root, &loose), root);
-        // Not past the opened folder, even where a lakefile is above it.
+        assert_eq!(lake_root(&root, &loose), Some(root.clone()));
+        // A dependency's file is the project's that holds its checkout, not
+        // the dependency's own; Lake 4's folder too.
+        at("verification/.lake/packages/mathlib/lakefile.lean");
+        let dependency = at("verification/.lake/packages/mathlib/Mathlib/Logic/Basic.lean");
+        assert_eq!(
+            lake_root(&root, &dependency),
+            Some(root.join("verification"))
+        );
+        at("verification/lake-packages/std/lakefile.lean");
+        let old = at("verification/lake-packages/std/Std/Data.lean");
+        assert_eq!(lake_root(&root, &old), Some(root.join("verification")));
+        // Opened itself, a dependency's checkout is its own project.
+        let mathlib = root.join("verification/.lake/packages/mathlib");
+        assert_eq!(lake_root(&mathlib, &dependency), Some(mathlib.clone()));
+        // A file outside the opened folder (the toolchain's sources): none.
+        assert_eq!(lake_root(&root.join("verification"), &loose), None);
+        // Not past the opened folder, even where a lakefile is above it: its
+        // lakefile is code Lake runs, of a folder not opened.
         let inner = root.join("scratch");
         at("lakefile.lean");
-        assert_eq!(lake_root(&inner, &loose), inner);
-        assert_eq!(lake_root(&root, &loose), root);
+        assert_eq!(lake_root(&inner, &loose), Some(inner));
+        assert_eq!(lake_root(&root, &loose), Some(root));
     }
 
     #[test]

@@ -129,18 +129,22 @@ pub(crate) fn gutter_words(app: &App, pane: usize, line: usize) -> Option<String
                     false => tr!("Run this example of {item}", item = r.name),
                 },
                 // Named without reading the package (this is drawn each
-                // frame): Rust's `main`, a Python block's file.
-                RunnableKind::Main => tr!(
-                    "Run or debug {program}",
-                    program = match v.lang_key {
-                        Some("python") => v
+                // frame): Rust's `main`, a Python block's file, a Lean
+                // file's — which runs, but has no debugger.
+                RunnableKind::Main => {
+                    let program = match v.lang_key {
+                        Some("python" | "lean") => v
                             .abs
                             .file_name()
                             .map(|n| n.to_string_lossy().into_owned())
                             .unwrap_or_else(|| r.name.clone()),
                         _ => r.name.clone(),
+                    };
+                    match v.lang_key {
+                        Some("lean") => tr!("Run {program}", program = program),
+                        _ => tr!("Run or debug {program}", program = program),
                     }
-                ),
+                }
             });
         }
     }
@@ -402,7 +406,9 @@ pub(crate) fn context_menu<'a>(app: &App, menu: &'a crate::ContextMenu) -> Eleme
             // a file's tests. Rust's through Cargo, Python's by pytest.
             let mut debugging = Vec::new();
             // A gutter ▶ on a program's start: it, run or debugged.
-            if let Some(main) = menu.gutter.as_ref().and_then(|g| g.main.as_ref()) {
+            if let Some(gutter) = menu.gutter.as_ref()
+                && let Some(main) = gutter.main.as_ref()
+            {
                 let line = menu.line + 1;
                 debugging.push(Row {
                     label: tr!("Run {program}", program = main).into(),
@@ -414,6 +420,11 @@ pub(crate) fn context_menu<'a>(app: &App, menu: &'a crate::ContextMenu) -> Eleme
                     able: true,
                     ai: false,
                 });
+            }
+            if let Some(gutter) = menu.gutter.as_ref().filter(|g| g.debug)
+                && let Some(main) = gutter.main.as_ref()
+            {
+                let line = menu.line + 1;
                 debugging.push(Row {
                     label: tr!("Debug {program}", program = main).into(),
                     msg: Message::Debug(DebugMsg::RunMain {

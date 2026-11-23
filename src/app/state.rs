@@ -2682,7 +2682,7 @@ pub struct ProjectSession {
     pub mathlib_root: Option<PathBuf>,
     /// The Lake project of the Lean file last asked about: worked out once
     /// per file, not with a look at the disk on every message.
-    pub lean_lake: Option<(PathBuf, PathBuf)>,
+    pub lean_lake: Option<(PathBuf, Option<PathBuf>)>,
     /// Restart File was asked for this file at this diagnostics version:
     /// until Lean says more of it, the Goals tab says it is checking the
     /// imports again, and offers no second restart.

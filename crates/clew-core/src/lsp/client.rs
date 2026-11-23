@@ -41,6 +41,13 @@ const MAX_LOG_TOTAL_BYTES: usize = 1024 * 1024;
 /// caller (a "Searching…" status forever) nor keep the pending entry.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// How long a server has to answer `initialize`. Longer than a request:
+/// `lake serve` sets its project up before Lean's server answers — the
+/// toolchain `lean-toolchain` names, through elan, and the dependencies
+/// the manifest pins (Mathlib's clone among them) — minutes, the first
+/// time. Failed at 30 seconds, a fresh Mathlib project's Lean never started.
+const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+
 /// How long a stopping session waits for the server to answer `shutdown`
 /// before sending `exit` anyway.
 const SHUTDOWN_REPLY_WAIT: Duration = if cfg!(test) {
@@ -151,10 +158,20 @@ impl Diag {
 /// diagnostic.
 pub type DiagMap = Arc<HashMap<PathBuf, Arc<[Diag]>>>;
 
-/// The files a server is still checking, each with the first 0-based line
-/// it has yet to finish (Lean's `$/lean/fileProgress`), shared as
-/// [`DiagMap`] is.
-pub type CheckingMap = Arc<HashMap<PathBuf, usize>>;
+/// The files a server is still checking, each with how far it has got
+/// (Lean's `$/lean/fileProgress`), shared as [`DiagMap`] is.
+pub type CheckingMap = Arc<HashMap<PathBuf, FileCheck>>;
+
+/// How far Lean has got with a file it has not finished.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileCheck {
+    /// The first 0-based line it has yet to finish.
+    pub line: usize,
+    /// It stopped there (a fatal error: its worker died — out of memory, or
+    /// a crash): it checks nothing more of the file until the file is
+    /// restarted. Said as checking, it read "checking line 3" for good.
+    pub stopped: bool,
+}
 
 /// Observable server state shared with the UI: logs, progress, diagnostics.
 #[derive(Default)]
@@ -292,14 +309,38 @@ impl Snapshot {
 
     /// The first 0-based line of `path` the server is still checking, as
     /// it last said (Lean's `$/lean/fileProgress`); `None` once it is done,
-    /// or from a server that does not say.
+    /// once it stopped ([`Self::stopped`]), or from a server that does not
+    /// say.
     pub fn checking(&self, path: &Path) -> Option<usize> {
-        self.checking.get(path).copied()
+        self.checking
+            .get(path)
+            .filter(|c| !c.stopped)
+            .map(|c| c.line)
+    }
+
+    /// The first 0-based line of `path` Lean stopped checking at, for good
+    /// until the file is restarted: its worker died there.
+    pub fn stopped(&self, path: &Path) -> Option<usize> {
+        self.checking
+            .get(path)
+            .filter(|c| c.stopped)
+            .map(|c| c.line)
+    }
+
+    /// The files Lean stopped checking ([`Self::stopped`]).
+    pub fn stopped_files(&self) -> impl Iterator<Item = &Path> {
+        self.checking
+            .iter()
+            .filter(|(_, c)| c.stopped)
+            .map(|(path, _)| path.as_path())
     }
 
     /// The files the server is still checking.
     pub fn checking_files(&self) -> impl Iterator<Item = &Path> {
-        self.checking.keys().map(PathBuf::as_path)
+        self.checking
+            .iter()
+            .filter(|(_, c)| !c.stopped)
+            .map(|(path, _)| path.as_path())
     }
 }
 
@@ -838,7 +879,9 @@ impl LspClient {
         // session and takes the child down with it.
         let pushed = pushed_settings(init_options.as_ref());
         let params = initialize_params(root, init_options, process_id, locale());
-        let result = client.call("initialize", params).await?;
+        let result = client
+            .call_within("initialize", params, INITIALIZE_TIMEOUT)
+            .await?;
         let caps = result.get("capabilities");
         let encoding = match caps
             .and_then(|c| c.get("positionEncoding"))
@@ -1077,14 +1120,14 @@ impl LspClient {
             "position": { "line": line, "character": character }
         });
         let tactic = self.call("$/lean/plainGoal", params.clone()).await?;
-        if let Some(goals) = parse_plain_goal(&tactic) {
-            return Ok(Some(LeanGoal::Tactic(goals)));
-        }
+        // Asked in a tactic proof too, as Lean's own view shows both: the
+        // term the cursor is on there has a type to meet.
         let term = self.call("$/lean/plainTermGoal", params).await?;
-        Ok(term
-            .get("goal")
-            .and_then(Value::as_str)
-            .map(|g| LeanGoal::Term(g.to_string())))
+        let term = term.get("goal").and_then(Value::as_str).map(str::to_string);
+        Ok(match parse_plain_goal(&tactic) {
+            Some(goals) => Some(LeanGoal::Tactic(goals, term)),
+            None => term.map(LeanGoal::Term),
+        })
     }
 
     /// Request inlay hints for the 0-based line range `[start_line, end_line)`.
@@ -1184,8 +1227,18 @@ impl LspClient {
         // hang its caller (a "Searching…" status forever) nor leave the
         // pending entry behind — the actor is told to release it.
         // Call-hierarchy requests take a tighter box (see `query`).
+        self.call_within(method, params, REQUEST_TIMEOUT).await
+    }
+
+    /// [`Self::call`], answered within `timeout`.
+    async fn call_within(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+    ) -> Result<Value, String> {
         self.rpc
-            .call(method, params, REQUEST_TIMEOUT)
+            .call(method, params, timeout)
             .await
             .map_err(|e| match e {
                 CallError::NotRunning => "server is not running".to_string(),
@@ -1809,21 +1862,39 @@ fn handle_notification(method: &str, value: &Value, state: &Arc<Mutex<ServerStat
             else {
                 return;
             };
-            let first = params
+            // Each range is still being checked (kind 1), or where checking
+            // stopped (kind 2: a fatal error).
+            let ranges: Vec<(usize, bool)> = params
                 .and_then(|p| p.get("processing"))
                 .and_then(Value::as_array)
-                .and_then(|ranges| {
+                .map(|ranges| {
                     ranges
                         .iter()
-                        .filter_map(|r| lsp_uint(r.get("range")?.get("start")?.get("line")))
-                        .min()
+                        .filter_map(|r| {
+                            let line = lsp_uint(r.get("range")?.get("start")?.get("line"))?;
+                            Some((line, r.get("kind").and_then(Value::as_u64) == Some(2)))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let first = |stopped: bool| ranges.iter().filter(|r| r.1 == stopped).map(|r| r.0).min();
+            let now = first(false)
+                .map(|line| FileCheck {
+                    line,
+                    stopped: false,
+                })
+                .or_else(|| {
+                    first(true).map(|line| FileCheck {
+                        line,
+                        stopped: true,
+                    })
                 });
-            match first {
-                Some(line) => {
-                    if s.checking.get(&path) != Some(&line)
+            match now {
+                Some(check) => {
+                    if s.checking.get(&path) != Some(&check)
                         && (s.checking.contains_key(&path) || s.checking.len() < MAX_DIAG_FILES)
                     {
-                        Arc::make_mut(&mut s.checking).insert(path, line);
+                        Arc::make_mut(&mut s.checking).insert(path, check);
                     }
                 }
                 None => {
@@ -1953,6 +2024,13 @@ fn parse_diag(v: &Value) -> Option<Diag> {
     let char_start = lsp_uint(start.get("character"))?;
     let one_past_start = char_start.saturating_add(1);
     let end_line = lsp_uint(end.get("line")).unwrap_or(line);
+    // Lean's `range` is cut at its first line; `fullRange` is what the
+    // message is about — "unsolved goals" of a whole `by` block — and the
+    // lines it is said on.
+    let full_end = v
+        .get("fullRange")
+        .and_then(|r| lsp_uint(r.get("end")?.get("line")))
+        .unwrap_or(end_line);
     let char_end = if end_line == line {
         lsp_uint(end.get("character")).unwrap_or(one_past_start)
     } else {
@@ -1970,7 +2048,7 @@ fn parse_diag(v: &Value) -> Option<Diag> {
                 .to_string(),
             MAX_DIAG_MESSAGE,
         ),
-        end_line: end_line.max(line),
+        end_line: end_line.max(full_end).max(line),
         source: short_field(v.get("source")),
         // A string or a number, as the protocol allows either.
         code: short_field(v.get("code")),
@@ -2119,8 +2197,9 @@ fn parse_related_tests(result: &Value) -> Vec<RelatedTest> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LeanGoal {
     /// Inside a tactic proof: the goals left, each with its hypotheses —
-    /// none when the proof is done there.
-    Tactic(Vec<String>),
+    /// none when the proof is done there — and the type expected of the
+    /// term there, when the position is in one (`exact foo _`).
+    Tactic(Vec<String>, Option<String>),
     /// In a term: the type expected of it, with the context.
     Term(String),
 }
@@ -2745,6 +2824,19 @@ mod tests {
             &state,
         );
         assert_eq!(snapshot_of(&state).unwrap().checking_files().count(), 0);
+        // Stopped (kind 2): not checking, and said where it stopped.
+        let stopped = json!([{ "range": {
+            "start": { "line": 7, "character": 0 },
+            "end": { "line": 40, "character": 0 } }, "kind": 2 }]);
+        handle_notification("$/lean/fileProgress", &progress(stopped), &state);
+        let after = snapshot_of(&state).unwrap();
+        assert_eq!(after.checking(file), None);
+        assert_eq!(after.stopped(file), Some(7));
+        assert_eq!(after.checking_files().count(), 0);
+        // Restarted, it checks again.
+        handle_notification("$/lean/fileProgress", &progress(json!([range(2)])), &state);
+        let again = snapshot_of(&state).unwrap();
+        assert_eq!((again.checking(file), again.stopped(file)), (Some(2), None));
     }
 
     /// An inlay label is one line, however the server spelled it, and short.
@@ -2904,6 +2996,14 @@ mod tests {
         .unwrap();
         assert_eq!((d.line, d.end_line), (4, 6));
         assert_eq!(d.origin().as_deref(), Some("rustc(E0308)"));
+        // Lean's full range: the lines it is about, its underline the first.
+        let d = parse_diag(&json!({
+            "range": {"start": {"line": 2, "character": 4}, "end": {"line": 2, "character": 9}},
+            "fullRange": {"start": {"line": 2, "character": 4}, "end": {"line": 8, "character": 2}},
+            "message": "unsolved goals"
+        }))
+        .unwrap();
+        assert_eq!((d.line, d.char_start, d.char_end, d.end_line), (2, 4, 9, 8));
         let d = parse_diag(&json!({
             "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}},
             "message": "m",
@@ -3197,14 +3297,17 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         }
         eprintln!("before simp: {goal:?}");
-        assert_eq!(
-            goal,
-            Some(LeanGoal::Tactic(vec!["n : Nat\n⊢ n + 0 = n".into()]))
+        assert!(
+            matches!(&goal, Some(LeanGoal::Tactic(goals, _)) if *goals == ["n : Nat\n⊢ n + 0 = n"]),
+            "{goal:?}"
         );
         // After `simp`: the proof is done there.
         let done = client.lean_goal(&file, 1, 6).await.unwrap();
         eprintln!("after simp: {done:?}");
-        assert_eq!(done, Some(LeanGoal::Tactic(Vec::new())));
+        assert!(
+            matches!(&done, Some(LeanGoal::Tactic(goals, _)) if goals.is_empty()),
+            "{done:?}"
+        );
         // In `n + n`, a term: no tactic goal, so the type expected of it.
         let term = client.lean_goal(&file, 3, 30).await.unwrap();
         eprintln!("in the term: {term:?}");
@@ -4033,7 +4136,8 @@ mod session_tests {
     #[tokio::test]
     async fn lean_goal_falls_back_to_the_term_goal() {
         let (client, mut peer, _) = connected().await;
-        // In a tactic block: its goals.
+        // In a tactic block: its goals, and the type the term there is to
+        // have.
         let asked = tokio::spawn({
             let client = client.clone();
             async move { client.lean_goal(Path::new("/proj/A.lean"), 4, 2).await }
@@ -4046,9 +4150,31 @@ mod session_tests {
         );
         peer.send(json!({"jsonrpc": "2.0", "id": request["id"], "result": {"rendered": "```lean\nn : Nat\n⊢ n + 0 = n\n```", "goals": ["n : Nat\n⊢ n + 0 = n"]}}))
             .await;
+        let request = peer.next().await;
+        assert_eq!(request["method"], "$/lean/plainTermGoal");
+        peer.send(json!({"jsonrpc": "2.0", "id": request["id"], "result": {"goal": "n : Nat\n⊢ n + 0 = n", "range": {}}}))
+            .await;
         assert_eq!(
             asked.await.unwrap(),
-            Ok(Some(LeanGoal::Tactic(vec!["n : Nat\n⊢ n + 0 = n".into()])))
+            Ok(Some(LeanGoal::Tactic(
+                vec!["n : Nat\n⊢ n + 0 = n".into()],
+                Some("n : Nat\n⊢ n + 0 = n".into())
+            )))
+        );
+        // On a tactic itself, no term: the goals alone.
+        let asked = tokio::spawn({
+            let client = client.clone();
+            async move { client.lean_goal(Path::new("/proj/A.lean"), 4, 0).await }
+        });
+        let request = peer.next().await;
+        peer.send(json!({"jsonrpc": "2.0", "id": request["id"], "result": {"goals": ["⊢ p"]}}))
+            .await;
+        let request = peer.next().await;
+        peer.send(json!({"jsonrpc": "2.0", "id": request["id"], "result": null}))
+            .await;
+        assert_eq!(
+            asked.await.unwrap(),
+            Ok(Some(LeanGoal::Tactic(vec!["⊢ p".into()], None)))
         );
         // Outside one: plainGoal says null, so the term's expected type.
         let asked = tokio::spawn({

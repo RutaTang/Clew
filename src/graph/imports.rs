@@ -153,6 +153,10 @@ pub struct Resolver {
     /// directory it is imported from (its package's source root) is not
     /// written down anywhere clew reads. See [`Resolver::resolve_lean`].
     lean_modules: Arc<HashMap<String, Vec<PathBuf>>>,
+    /// The folders a Lean module may be found under, as the project's
+    /// lakefiles say: each Lake package's own and the `srcDir`s it names.
+    /// `None` for a project with no lakefile, where any folder may be.
+    lean_roots: Option<Vec<PathBuf>>,
     /// The project's conventional Java source roots, sorted: every
     /// `src/main/java` and `src/test/java`, one pair per module of a
     /// multi-module build. See [`Resolver::resolve_java`].
@@ -821,6 +825,25 @@ impl Resolver {
             }
         }
         self.python_roots = python_roots;
+        let mut lean_roots: Vec<PathBuf> = Vec::new();
+        for (rel, dirs) in &manifests.lean {
+            let Some(package) = self.root.join(rel).parent().map(normalize) else {
+                continue;
+            };
+            if !package.starts_with(&self.root) {
+                continue;
+            }
+            for dir in dirs {
+                let dir = normalize(&package.join(dir));
+                if dir.starts_with(&package) && !lean_roots.contains(&dir) {
+                    lean_roots.push(dir);
+                }
+            }
+            if !lean_roots.contains(&package) {
+                lean_roots.push(package);
+            }
+        }
+        self.lean_roots = (!lean_roots.is_empty()).then_some(lean_roots);
         self
     }
 
@@ -949,6 +972,7 @@ impl Resolver {
             ts_configs: Arc::default(),
             packages: Arc::new(packages),
             lean_modules: Arc::new(lean_modules),
+            lean_roots: None,
             java_roots,
             php_psr4: Vec::new(),
             haskell_roots,
@@ -1410,16 +1434,46 @@ impl Resolver {
             }
             root
         };
-        files
+        // Where the project's lakefiles say modules are found: a file found
+        // under another folder is no module of that name (`MyLib/Lean/Meta`
+        // is `MyLib.Lean.Meta`, never core's `Lean.Meta`).
+        let candidates: Vec<(PathBuf, &PathBuf)> = files
             .iter()
             .filter(|f| f.as_path() != from)
             .map(|f| (source_root(f), f))
+            .filter(|(root, _)| {
+                self.lean_roots
+                    .as_ref()
+                    .is_none_or(|roots| roots.contains(root))
+            })
+            .collect();
+        if candidates.is_empty() && self.lean_roots.is_some() {
+            let package = module.split('.').next().unwrap_or(module);
+            return Target::External(package.to_string());
+        }
+        // Under a root holding the importer, the deepest; else — with
+        // lakefiles to say so — under one of the importer's own package (a
+        // `srcDir` library a root `Main.lean` imports), else the one of
+        // another package of the project (`require foo from "../foo"`).
+        let holding = candidates
+            .iter()
             .filter(|(root, _)| from.starts_with(root))
-            .max_by_key(|(root, _)| root.components().count())
-            .map_or_else(
-                || Target::Unresolved(module.to_string()),
-                |(_, f)| Target::Internal(f.clone()),
-            )
+            .max_by_key(|(root, _)| root.components().count());
+        let found = holding.or_else(|| {
+            let roots = self.lean_roots.as_ref()?;
+            let package = roots
+                .iter()
+                .filter(|r| from.starts_with(r))
+                .max_by_key(|r| r.components().count())?;
+            candidates
+                .iter()
+                .find(|(root, _)| root.starts_with(package))
+                .or_else(|| (candidates.len() == 1).then(|| &candidates[0]))
+        });
+        found.map_or_else(
+            || Target::Unresolved(module.to_string()),
+            |(_, f)| Target::Internal((*f).clone()),
+        )
     }
 
     // --- Dart ---
@@ -5129,6 +5183,52 @@ mod tests {
             Target::External("Mathlib".into())
         );
         assert_eq!(at("Init", "main.lean"), Target::External("Init".into()));
+    }
+
+    /// With lakefiles, a Lean module is found under a Lake package's folder
+    /// or a `srcDir` it names: a library in `lib/` imported from the root's
+    /// `Main.lean`, a sibling package; never a project folder that only
+    /// looks like the toolchain's module (`MyLib/Lean/Meta.lean` is no
+    /// `Lean.Meta`).
+    #[test]
+    fn a_lean_import_resolves_where_the_lakefiles_say() {
+        let root = Path::new("/p");
+        let r = resolver(
+            root,
+            &[
+                "lakefile.lean",
+                "Main.lean",
+                "lib/Extra/Thing.lean",
+                "MyLib/Foo.lean",
+                "MyLib/Lean/Meta.lean",
+                "sib/lakefile.lean",
+                "sib/Sib/Core.lean",
+            ],
+        )
+        .with_manifests(&clew_protocol::SourceManifests {
+            lean: vec![
+                ("lakefile.lean".into(), vec!["lib".into()]),
+                ("sib/lakefile.lean".into(), Vec::new()),
+            ],
+            ..Default::default()
+        });
+        let at = |module: &str, from: &str| r.resolve(&ri(module), &root.join(from), "lean");
+        assert_eq!(
+            at("Extra.Thing", "Main.lean"),
+            Target::Internal(root.join("lib/Extra/Thing.lean"))
+        );
+        assert_eq!(
+            at("MyLib.Lean.Meta", "MyLib/Foo.lean"),
+            Target::Internal(root.join("MyLib/Lean/Meta.lean"))
+        );
+        assert_eq!(
+            at("Lean.Meta", "MyLib/Foo.lean"),
+            Target::External("Lean".into())
+        );
+        assert_eq!(
+            at("Sib.Core", "Main.lean"),
+            Target::Internal(root.join("sib/Sib/Core.lean"))
+        );
     }
 
     /// PHP names resolve by the PSR-4 map composer.json gives (`autoload` and

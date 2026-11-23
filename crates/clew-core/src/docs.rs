@@ -901,6 +901,23 @@ fn language_glue(lang: Lang, line: &str, continued: &mut bool) -> Option<bool> {
             }
             None
         }
+        // `set_option maxHeartbeats 400000 in`, `open Function in`: a
+        // command that scopes the declaration under it stands between the
+        // declaration and its doc, as it does for Lean.
+        Lang::Lean => {
+            let scopes_next = t.ends_with(" in")
+                && [
+                    "set_option ",
+                    "open ",
+                    "variable ",
+                    "omit ",
+                    "include ",
+                    "attribute ",
+                ]
+                .iter()
+                .any(|w| t.starts_with(w));
+            scopes_next.then_some(true)
+        }
         // A doc comment is an attribute of the next item, whatever stands
         // between: a blank line or a plain `// comment` does not part them,
         // as rustdoc reads it (`////` is a plain comment too).
@@ -994,8 +1011,14 @@ fn collect_block(
     }
     work::add(end - start + 1);
     let mut buf: Vec<String> = Vec::new();
-    for line in &lines[start..=end] {
-        let mut s = line.trim();
+    for (i, line) in lines[start..=end].iter().enumerate() {
+        // A block with no `*` gutter (Lean's `/-- … -/`) keeps each line's
+        // indent past the block's own: an example in it, a list nested in
+        // a list, read as written — trimmed, `  decide` lost its place.
+        let mut s = match (syntax.gutter, i) {
+            (false, 1..) => line.trim_end(),
+            _ => line.trim(),
+        };
         if let Some(p) = s.find(syntax.doc) {
             s = s[p + syntax.doc.len()..].trim_start();
         } else if let Some(p) = s.find(syntax.open) {
@@ -1009,6 +1032,18 @@ fn collect_block(
             false => s,
         };
         buf.push(s.to_string());
+    }
+    if !syntax.gutter && buf.len() > 1 {
+        let indent = buf[1..]
+            .iter()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| l.len() - l.trim_start().len())
+            .min()
+            .unwrap_or(0);
+        for l in &mut buf[1..] {
+            let cut = indent.min(l.len() - l.trim_start().len());
+            *l = l[cut..].to_string();
+        }
     }
     let doc = buf.join("\n").trim().to_string();
     (!doc.is_empty()).then_some(doc)
@@ -3004,6 +3039,32 @@ mod markup_tests {
         assert_eq!(
             docs.get(&10).map(String::as_str),
             Some("One line."),
+            "{docs:?}"
+        );
+    }
+
+    /// A Lean doc keeps its lines' indent past its own — an example in it,
+    /// a nested list — and reaches its declaration past a command that
+    /// scopes it (`set_option … in`, `open … in`).
+    #[test]
+    fn a_lean_doc_keeps_its_indent_and_reaches_past_scoping_commands() {
+        let src = "/-- Steps:\n  * first\n    * nested\n\n```lean\nexample : True := by\n  decide\n```\n-/\ntheorem a : True := trivial\n\
+                   /-- Heavy. -/\nset_option maxHeartbeats 400000 in\ntheorem heavy : True := trivial\n\
+                   /-- Opened. -/\nopen Function in\ntheorem opened : True := trivial\n";
+        let docs = located_docs_of(src, "lean");
+        assert_eq!(
+            docs.get(&10).map(String::as_str),
+            Some("Steps:\n  * first\n    * nested\n\n```lean\nexample : True := by\n  decide\n```"),
+            "{docs:?}"
+        );
+        assert_eq!(
+            docs.get(&13).map(String::as_str),
+            Some("Heavy."),
+            "{docs:?}"
+        );
+        assert_eq!(
+            docs.get(&16).map(String::as_str),
+            Some("Opened."),
             "{docs:?}"
         );
     }

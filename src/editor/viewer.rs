@@ -271,6 +271,21 @@ fn parse_markdown(
     })
 }
 
+/// The folds of a file: its indented blocks, and — Lean's bodies are not
+/// indented — its `namespace`, `section` and `mutual` blocks too.
+fn folds_of(lang_key: Option<&str>, source: &str, lines: &[HlLine]) -> Vec<(usize, usize)> {
+    let mut folds = analyze::fold_ranges(lines);
+    if lang_key == Some("lean") && source.lines().count() == lines.len() {
+        for block in clew_core::lean_blocks(source) {
+            if !folds.iter().any(|&(h, _)| h == block.0) {
+                folds.push(block);
+            }
+        }
+        folds.sort_unstable();
+    }
+    folds
+}
+
 impl Viewer {
     /// The language its language server reads it in: its own, or for a
     /// notebook, its script's.
@@ -301,7 +316,7 @@ impl Viewer {
         lines: Vec<HlLine>,
     ) -> Self {
         let max_cols = max_cols_of(&lines);
-        let folds = analyze::fold_ranges(&lines);
+        let folds = folds_of(lang_key, &source, &lines);
         let fold_header_set = folds.iter().map(|&(h, _)| h).collect();
         let md = parse_markdown(&abs, &source);
         Self {
@@ -380,7 +395,7 @@ impl Viewer {
             return found.clone();
         }
         let found: Arc<[clew_core::runnables::Runnable]> = match self.lang_key {
-            Some(lang @ ("rust" | "python")) if self.notebook.is_none() => {
+            Some(lang @ ("rust" | "python" | "lean")) if self.notebook.is_none() => {
                 clew_core::runnables::runnables(lang, &self.source).into()
             }
             _ => Arc::from(Vec::new()),
@@ -485,7 +500,7 @@ impl Viewer {
     /// Folds are indentation-derived, so the collapsed set stays valid.
     pub fn set_lines(&mut self, lines: Arc<Vec<HlLine>>) {
         self.max_cols = max_cols_of(&lines);
-        self.folds = analyze::fold_ranges(&lines);
+        self.folds = folds_of(self.lang_key, &self.source, &lines);
         self.fold_header_set = self.folds.iter().map(|&(h, _)| h).collect();
         self.lines = lines;
         self.lines_generation = next_generation();

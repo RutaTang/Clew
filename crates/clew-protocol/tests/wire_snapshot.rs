@@ -961,6 +961,7 @@ fn project_symbols(
                     },
                 )],
                 python: vec![("pyproject.toml".into(), vec!["src".into()])],
+                lean: vec![("proofs/lakefile.lean".into(), vec!["lib".into()])],
             })),
             _ => Patch::Unchanged,
         },

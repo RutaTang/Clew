@@ -426,23 +426,32 @@ pub(crate) fn c_answer(e: clew_protocol::MacroExpansion) -> InsightAnswer {
 /// The Lean server's goals, each in its own block.
 pub(crate) fn lean_answer(goal: LeanGoal) -> InsightAnswer {
     let markdown = match goal {
-        LeanGoal::Tactic(goals) if goals.is_empty() => {
-            format!("*{}*", tr!("No goals left here."))
-        }
-        LeanGoal::Tactic(goals) => {
+        LeanGoal::Tactic(goals, term) => {
             let n = goals.len();
-            goals
-                .iter()
-                .enumerate()
-                .map(|(i, g)| match n {
-                    1 => format!("```lean\n{g}\n```"),
-                    _ => format!(
-                        "**{}**\n\n```lean\n{g}\n```",
-                        tr!("Goal {i} of {n}", i = i + 1, n = n)
-                    ),
-                })
-                .collect::<Vec<_>>()
-                .join("\n\n")
+            let mut said = match n {
+                0 => format!("*{}*", tr!("No goals left here.")),
+                _ => goals
+                    .iter()
+                    .enumerate()
+                    .map(|(i, g)| match n {
+                        1 => format!("```lean\n{g}\n```"),
+                        _ => format!(
+                            "**{}**\n\n```lean\n{g}\n```",
+                            tr!("Goal {i} of {n}", i = i + 1, n = n)
+                        ),
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n\n"),
+            };
+            // The type the term at the cursor is to have, where it is not
+            // a goal said already.
+            if let Some(term) = term.filter(|t| !goals.contains(t)) {
+                said.push_str(&format!(
+                    "\n\n**{}**\n\n```lean\n{term}\n```",
+                    tr!("Expected type")
+                ));
+            }
+            said
         }
         LeanGoal::Term(goal) => format!("{}\n\n```lean\n{goal}\n```", tr!("Expected type")),
     };

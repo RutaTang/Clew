@@ -9893,6 +9893,106 @@ async fn the_goals_margin_says_how_far_lean_has_checked_and_offers_restart() {
             .any(|m| matches!(m, Message::Proof(crate::ProofMsg::RestartFile))),
         "{sent:?}"
     );
+
+    // Lean stopped checking the file (its worker died): said, not as
+    // checking, with the way on.
+    let stopped = format!(
+        r#"{{"jsonrpc":"2.0","method":"$/lean/fileProgress","params":{{"textDocument":{{"uri":"{uri}","version":1}},"processing":[{{"range":{{"start":{{"line":1,"character":0}},"end":{{"line":9,"character":0}}}},"kind":2}}]}}}}"#
+    );
+    let client = stub_lsp_client_saying(&root, vec![stopped]).await;
+    for _ in 0..200 {
+        if client.snapshot().is_ok_and(|s| s.stopped(&abs).is_some()) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    app.proj
+        .link
+        .lsp
+        .insert("lean".into(), crate::LspSlot::Ready(client));
+    let _ = app.update(Message::Noop);
+    assert!(shows(
+        &mut sim_of(&app),
+        "Lean stopped checking this file at line 2"
+    ));
+    assert!(!shows(&mut sim_of(&app), "Lean is checking line"));
+    assert_eq!(
+        app.lsp_status("lean").as_deref(),
+        Some("stopped checking Basic.lean"),
+        "not checking, nor ready"
+    );
+    assert!(!app.lsp_busy("lean"));
+    let sent = click(sim_of(&app), "Restart File");
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Proof(crate::ProofMsg::RestartFile))),
+        "{sent:?}"
+    );
+}
+
+/// The goals at a line Lean has not checked yet are asked once it has:
+/// asked before, the answer waited on the check and ran out of time, and a
+/// file that checks clean says nothing more to have them asked again.
+#[tokio::test]
+async fn goals_are_asked_once_lean_has_checked_as_far_as_the_cursor() {
+    let mut app = reader_app();
+    app.show_right_panel = true;
+    app.window_width = 1400.0;
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let abs = root.join("Basic.lean");
+    {
+        let v = app.proj.panes[0].as_mut().unwrap();
+        v.abs = abs.clone();
+        v.rel = "Basic.lean".into();
+        v.lang_key = Some("lean");
+        v.caret = Some((5, 0));
+    }
+    app.margin_tab = crate::MarginTab::Goals;
+    let uri = crate::lsp::client::path_to_uri(&abs);
+    let progress = format!(
+        r#"{{"jsonrpc":"2.0","method":"$/lean/fileProgress","params":{{"textDocument":{{"uri":"{uri}","version":1}},"processing":[{{"range":{{"start":{{"line":2,"character":0}},"end":{{"line":9,"character":0}}}},"kind":1}}]}}}}"#
+    );
+    let client = stub_lsp_client_saying(&root, vec![progress]).await;
+    for _ in 0..200 {
+        if client.snapshot().is_ok_and(|s| s.checking(&abs).is_some()) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    app.proj
+        .link
+        .lsp
+        .insert("lean".into(), crate::LspSlot::Ready(client));
+    let _ = app.update(Message::Noop);
+    let goals = app.proj.lean_goals.as_ref().expect("asked for");
+    assert!(goals.behind && goals.asking, "Lean is not at line 6 yet");
+    let token = goals.token;
+    // The request ran out of time before Lean got there: how far it has
+    // got is said, not the time-out.
+    let stamp = app.stamp();
+    let _ = app.update(Message::Proof(crate::ProofMsg::Goals {
+        stamp,
+        token,
+        result: Err("$/lean/plainGoal: timed out".into()),
+    }));
+    let total = app.active_viewer().unwrap().line_count().max(3);
+    assert!(shows(
+        &mut sim_of(&app),
+        &format!(
+            "Lean is checking line 3 of {total} in this file. The goals at line 6 show once it gets there."
+        )
+    ));
+    assert!(!shows(&mut sim_of(&app), "timed out"));
+    // Checked: asked again, now of a line Lean has reached.
+    let client = stub_lsp_client_saying(&root, Vec::new()).await;
+    app.proj
+        .link
+        .lsp
+        .insert("lean".into(), crate::LspSlot::Ready(client));
+    let _ = app.update(Message::Noop);
+    let goals = app.proj.lean_goals.as_ref().unwrap();
+    assert!(!goals.behind);
+    assert!(goals.token > token, "asked again");
 }
 
 /// The Goals margin offers a Mathlib project its build cache, says how
@@ -9930,10 +10030,22 @@ fn the_goals_margin_offers_mathlibs_build_cache() {
         "{sent:?}"
     );
     app.proj.mathlib = MathlibCache::Getting("Downloaded: 1200 file(s)".into());
+    // Lean's server is stopped while the cache is got: said so, not
+    // "start the server".
+    app.proj.link.lsp.remove("lean");
     let mut sim = sim_of(&app);
     assert!(shows(&mut sim, "Getting Mathlib's build cache…"));
     assert!(shows(&mut sim, "Downloaded: 1200 file(s)"));
+    assert!(shows(
+        &mut sim,
+        "starts again once Mathlib's build cache is in place"
+    ));
+    assert!(!shows(&mut sim, "Start the Lean server"));
     drop(sim);
+    app.proj
+        .link
+        .lsp
+        .insert("lean".into(), crate::LspSlot::Starting);
     app.proj.mathlib = MathlibCache::Failed("no network".into());
     let mut sim = sim_of(&app);
     assert!(shows(&mut sim, "Could not get Mathlib's build cache"));

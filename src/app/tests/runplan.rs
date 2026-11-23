@@ -629,6 +629,55 @@ fn a_django_class_or_module_runs_by_its_label() {
     assert!(matches!(plan, RunPlan::Pytest { .. }), "{plan:?}");
 }
 
+/// A Lean file's `main` has its ▶, on its name: Run alone in its menu —
+/// Lean has no debugger — and run as Run runs the file, through Lake. One
+/// in a namespace is none.
+#[test]
+fn a_lean_main_has_a_play_mark_that_runs_it() {
+    let mut app = scanned_app("runplan-lean-main");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    write(
+        &root,
+        "Main.lean",
+        "def greet := \"hi\"\n\ndef main : IO Unit :=\n  IO.println greet\n",
+    );
+    write(
+        &root,
+        "Other.lean",
+        "namespace Other\ndef main : IO Unit := pure ()\nend Other\n",
+    );
+    open_synchronously(&mut app, "Other.lean", None);
+    let pane = app.proj.active;
+    let v = app.proj.panes[pane].as_ref().unwrap();
+    assert!(app.run_marks(v).is_empty(), "`Other.main` is no program");
+    open_synchronously(&mut app, "Main.lean", None);
+    let v = app.proj.panes[pane].as_ref().unwrap();
+    assert_eq!(app.run_marks(v).into_iter().collect::<Vec<_>>(), [3]);
+    let _ = app.update(Message::Hover(HoverMsg::RunMarkClicked {
+        pane,
+        line: 3,
+        x: 4.0,
+        y: 40.0,
+    }));
+    let menu = app.proj.context_menu.clone().expect("the ▶'s menu");
+    assert_eq!(
+        menu.gutter,
+        Some(crate::GutterRun {
+            main: Some("Main.lean".into()),
+            debug: false
+        })
+    );
+    assert_eq!(menu.test, None);
+    // Run: through Lake — not found here, which it says.
+    let _ = app.update(Message::Hover(HoverMsg::ContextMenuClosed));
+    let _no_lean = clew_core::testutil::EnvVars::new().set("ELAN_HOME", root.join("no-elan"));
+    let _ = app.update(Message::Debug(DebugMsg::RunMain {
+        line: 3,
+        no_debug: true,
+    }));
+    assert!(app.status.contains("lake"), "{}", app.status);
+}
+
 /// The gutter's ▶: on a Rust file's tests, its test module and its `main`,
 /// and a Python file's test class, tests and `__main__` block — not on a
 /// parametrized test's cases. A click opens the short code menu there:
@@ -678,7 +727,13 @@ fn a_gutter_play_mark_runs_or_debugs_what_starts_on_its_line() {
     }));
     let menu = app.proj.context_menu.clone().expect("the ▶'s menu");
     assert_eq!(menu.test, Some(crate::TestAt::One));
-    assert_eq!(menu.gutter, Some(crate::GutterRun { main: None }));
+    assert_eq!(
+        menu.gutter,
+        Some(crate::GutterRun {
+            main: None,
+            debug: true
+        })
+    );
     assert_eq!(menu.line, 9, "0-based, as the code menu's");
     // On the module: its tests.
     let _ = app.update(Message::Hover(HoverMsg::ContextMenuClosed));
@@ -710,7 +765,8 @@ fn a_gutter_play_mark_runs_or_debugs_what_starts_on_its_line() {
     assert_eq!(
         menu.gutter,
         Some(crate::GutterRun {
-            main: Some("shapes".into())
+            main: Some("shapes".into()),
+            debug: true
         })
     );
     let _ = app.update(Message::Debug(DebugMsg::RunMain {

@@ -155,7 +155,7 @@ pub use payload::*;
 ///
 /// v30: [`PythonEnvKind::Hatch`] and [`PythonEnvKind::Pdm`]: a project's
 /// Hatch environment, and the interpreter PDM records for it.
-pub const PROTOCOL_VERSION: u32 = 30;
+pub const PROTOCOL_VERSION: u32 = 31;
 
 /// A hash of this crate's source as a token stream — comments and whitespace
 /// removed — computed at build time (see `build.rs`). Carried in `Hello` /
@@ -249,6 +249,11 @@ pub struct SourceManifests {
     /// relative to its own directory: where `import name` is looked for
     /// besides the project's root.
     pub python: Vec<(Rel, Vec<String>)>,
+    /// Each Lake package's lakefile (`lakefile.lean`, `lakefile.toml`; by
+    /// rel) with the source directories its libraries name (`srcDir`),
+    /// relative to its own: a Lean module is found under one of them, or
+    /// under the package's own folder.
+    pub lean: Vec<(Rel, Vec<String>)>,
 }
 
 impl SourceManifests {
@@ -257,6 +262,7 @@ impl SourceManifests {
             && self.haskell.is_empty()
             && self.cargo.is_empty()
             && self.python.is_empty()
+            && self.lean.is_empty()
     }
 }
 

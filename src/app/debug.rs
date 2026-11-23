@@ -501,7 +501,7 @@ impl App {
         let Some(root) = self.proj.project.as_ref().map(|p| p.root.clone()) else {
             return Task::none();
         };
-        let project = clew_core::lake_root(&root, &file);
+        let project = clew_core::lake_root(&root, &file).unwrap_or(root);
         self.start_session(
             true,
             Some(crate::app::runplan::RunPlan::Lean {
@@ -650,6 +650,11 @@ impl App {
         let found = viewer.runnables();
         clew_core::runnables::runnable_at(&found, line).filter(|r| r.kind == RunnableKind::Main)?;
         match viewer.lang_key? {
+            // Run by Lake on this computer, the file its program.
+            "lean" if !self.connection.is_remote() => viewer
+                .abs
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned()),
             "rust" if !self.connection.is_remote() => {
                 crate::app::runplan::cargo_plan_for(&viewer.abs)
                     .ok()
@@ -674,6 +679,7 @@ impl App {
         if found.is_empty()
             || (v.lang_key == Some("rust")
                 && (self.connection.is_remote() || !v.in_cargo_package()))
+            || (v.lang_key == Some("lean") && self.connection.is_remote())
         {
             return std::collections::HashSet::new();
         }
@@ -692,6 +698,13 @@ impl App {
     /// of the active file: a gutter ▶'s ([`DebugMsg::RunMain`]) — whatever
     /// a launch file names, it is this one that runs.
     pub(crate) fn run_main_at(&mut self, line: usize, no_debug: bool) -> Task<Message> {
+        // Lean's `main` runs through Lake, as Run runs the file.
+        if self
+            .active_viewer()
+            .is_some_and(|v| v.lang_key == Some("lean"))
+        {
+            return self.start_lean_run(no_debug);
+        }
         let plan = self
             .active_viewer()
             .and_then(|v| crate::app::runplan::main_plan_at(v.lang_key?, &v.abs, &v.source, line));

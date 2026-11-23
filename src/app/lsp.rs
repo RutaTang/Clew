@@ -219,6 +219,16 @@ impl App {
             self.reset_lsp(language);
             return Task::none();
         }
+        // Lean's server waits while `lake exe cache get` puts Mathlib's
+        // build in place: it starts again when that ends.
+        if base_language(language) == "lean"
+            && matches!(
+                self.proj.mathlib,
+                crate::app::proof::MathlibCache::Getting(_)
+            )
+        {
+            return Task::none();
+        }
         match self.proj.link.lsp.get(language) {
             Some(LspSlot::Ready(client)) if client.alive() => {
                 let client = client.clone();
@@ -831,11 +841,14 @@ impl App {
         // Lean's server runs in the Lake project of the Lean file being
         // read — a folder of its own, in many a repository — where it finds
         // the project's own modules; started in the opened folder, every
-        // import of them failed.
+        // import of them failed. For a file outside the project, where it
+        // ran last, else the project.
         let root = if language == "lean" && !self.connection.is_remote() {
             let lake = self
                 .lean_file()
-                .map_or_else(|| root.clone(), |file| clew_core::lake_root(&root, &file));
+                .and_then(|file| clew_core::lake_root(&root, &file))
+                .or_else(|| self.proj.link.lean_root.clone())
+                .unwrap_or_else(|| root.clone());
             self.proj.link.lean_root = Some(lake.clone());
             lake
         } else {

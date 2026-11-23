@@ -231,8 +231,9 @@ pub fn bears_on_manifests(rel: &str) -> bool {
     name == "composer.json"
         || name == "Cargo.toml"
         || name == "pyproject.toml"
+        || is_lakefile(name)
         || is_haskell_manifest(name)
-        || [".php", ".hs", ".lhs"]
+        || [".php", ".hs", ".lhs", ".lean"]
             .iter()
             .any(|ext| name.ends_with(ext))
 }
@@ -289,7 +290,47 @@ pub fn source_manifests<S: AsRef<str>>(root: &Path, rels: &[S]) -> clew_protocol
             out.python.push((rel.to_string(), roots));
         }
     }
+    if has(&[".lean"]) {
+        for rel in picked(&is_lakefile) {
+            out.lean
+                .push((rel.to_string(), read_lake_src_dirs(&root.join(rel))));
+        }
+    }
     out
+}
+
+/// Whether a file name is a Lake package's lakefile.
+pub fn is_lakefile(name: &str) -> bool {
+    matches!(name, "lakefile.lean" | "lakefile.toml")
+}
+
+/// The source directories the lakefile at `path` names for its libraries
+/// and executables (`srcDir := "lib"`, `srcDir = "lib"`), relative to its
+/// own folder; none for one that names none (its folder is the root). Read
+/// as text, bounded: a `lakefile.lean` is a Lean program, not run.
+pub fn read_lake_src_dirs(path: &Path) -> Vec<String> {
+    let Some(text) = crate::statefile::read_capped(path, 256 * 1024) else {
+        return Vec::new();
+    };
+    let mut dirs = Vec::new();
+    for (at, _) in text.match_indices("srcDir") {
+        let rest = text[at + "srcDir".len()..].trim_start();
+        let rest = rest
+            .strip_prefix(":=")
+            .or_else(|| rest.strip_prefix('='))
+            .map(str::trim_start);
+        let Some(literal) = rest.and_then(|r| r.strip_prefix('"')) else {
+            continue;
+        };
+        let Some(close) = literal.find('"') else {
+            continue;
+        };
+        let dir = literal[..close].trim_matches('/').trim_start_matches("./");
+        if !dir.is_empty() && !dir.contains("..") && !dirs.iter().any(|d| d == dir) {
+            dirs.push(dir.to_string());
+        }
+    }
+    dirs
 }
 
 /// Most `Cargo.toml`s [`source_manifests`] reads: more than of any other

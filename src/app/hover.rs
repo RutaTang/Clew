@@ -651,6 +651,12 @@ impl App {
         if main.is_none() && test.is_none() {
             return Task::none();
         }
+        let debug = self
+            .proj
+            .panes
+            .get(pane)
+            .and_then(Option::as_ref)
+            .is_none_or(|v| v.lang_key != Some("lean"));
         self.proj.tree_menu = None;
         self.proj.gutter_tip = None;
         self.proj.context_menu = Some(ContextMenu {
@@ -664,7 +670,7 @@ impl App {
             by_pointer: true,
             line_top: None,
             test,
-            gutter: Some(crate::GutterRun { main }),
+            gutter: Some(crate::GutterRun { main, debug }),
         });
         Task::none()
     }

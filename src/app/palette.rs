@@ -1127,6 +1127,7 @@ impl App {
                 if matches!(
                     self.proj.mathlib,
                     crate::app::proof::MathlibCache::Missing
+                        | crate::app::proof::MathlibCache::Built
                         | crate::app::proof::MathlibCache::Failed(_)
                         | crate::app::proof::MathlibCache::Dismissed
                 ) {

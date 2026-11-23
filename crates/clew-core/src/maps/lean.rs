@@ -171,6 +171,9 @@ struct File<'a> {
     simp_attributes: Vec<(String, Vec<String>, Vec<String>)>,
 }
 
+/// The name a `mutual` block's scope is kept under: no section's.
+const MUTUAL: &str = "\u{0}mutual";
+
 impl<'a> File<'a> {
     fn read(source: &'a Source) -> File<'a> {
         let code = blank(&source.text, true);
@@ -183,14 +186,55 @@ impl<'a> File<'a> {
         let mut attrs = String::new();
         let mut offset = 0;
         for raw in code.split_inclusive('\n') {
-            let line_start = offset;
+            let mut line_start = offset;
             offset += raw.len();
-            let line = raw.trim_end();
-            if line.trim().is_empty() || line.starts_with(char::is_whitespace) {
+            let mut line = raw.trim_end();
+            if line.trim().is_empty() {
                 continue;
+            }
+            if line.starts_with(char::is_whitespace) {
+                // A `mutual` block's declarations are indented (as Lean's
+                // own sources write them): read where they start.
+                let in_mutual = scopes.iter().any(|(ns, n)| !*ns && n == MUTUAL);
+                let trimmed = line.trim_start();
+                if !(in_mutual && crate::lean::declares(trimmed)) {
+                    continue;
+                }
+                line_start += line.len() - trimmed.len();
+                line = trimmed;
             }
             let mut words = line.split_whitespace().peekable();
             let first = *words.peek().unwrap_or(&"");
+            // A section or a `mutual` block behind its modifiers and
+            // attributes (`noncomputable section`, `@[expose] public
+            // section`) opens a scope its `end` closes: not opened, that
+            // `end` closed the namespace around it.
+            let opener = {
+                let mut head = line;
+                while let Some(inside) = head.strip_prefix("@[") {
+                    match inside.find(']') {
+                        Some(close) => head = inside[close + 1..].trim_start(),
+                        None => break,
+                    }
+                }
+                let mut ws = head.split_whitespace();
+                let mut w = ws.next().unwrap_or("");
+                while matches!(w, "noncomputable" | "public" | "private" | "meta") {
+                    w = ws.next().unwrap_or("");
+                }
+                match w {
+                    "section" => Some(ws.next().unwrap_or("").to_string()),
+                    "mutual" => Some(MUTUAL.to_string()),
+                    _ => None,
+                }
+            };
+            if first != "section"
+                && let Some(name) = opener
+            {
+                scopes.push((false, name));
+                close_decl(&mut decls, line_start);
+                continue;
+            }
             let namespaces = || {
                 scopes
                     .iter()
@@ -333,9 +377,13 @@ impl<'a> File<'a> {
                 }
                 (_, None) => continue,
             };
-            let simp = attrs.trim_start_matches("@[").split([',', ']']).any(|a| {
-                a.trim().trim_start_matches("@[").split_whitespace().next() == Some("simp")
-            });
+            // `@[simp]`, or simp given through another attribute:
+            // `@[to_additive (attr := simp)]`, `@[simps (attr := simp)]`.
+            let simp = attrs.contains("attr := simp")
+                || attrs.contains("attr:=simp")
+                || attrs.trim_start_matches("@[").split([',', ']']).any(|a| {
+                    a.trim().trim_start_matches("@[").split_whitespace().next() == Some("simp")
+                });
             attrs.clear();
             let start = line_start + (line.len() - rest.len()) + after_kw;
             decls.push(Decl {
@@ -467,7 +515,19 @@ fn theorems(files: &[File], decls: &[&Decl], index: &HashMap<&str, usize>) -> Op
 
 /// What a notation line declares: its symbol, and the text after `=>`.
 fn notation_of(line: &str) -> Option<(String, String, String)> {
-    let first = line.split_whitespace().next()?;
+    // Past its attributes (`@[inherit_doc] infixl …`) and its scope
+    // (`local notation`, `scoped infix`): Mathlib writes most of its
+    // notation so.
+    let mut head = line.trim_start();
+    while let Some(inside) = head.strip_prefix("@[") {
+        let close = inside.find(']')?;
+        head = inside[close + 1..].trim_start();
+    }
+    let mut words = head.split_whitespace();
+    let mut first = words.next()?;
+    while matches!(first, "local" | "scoped") {
+        first = words.next()?;
+    }
     let command = first.split(':').next()?;
     if !matches!(
         command,
@@ -726,6 +786,49 @@ mod tests {
         assert_eq!(node("Shop.total_append").detail, "@[simp]");
         assert_eq!(node("Shop.total").line, 12);
         assert_eq!(node("uses_root").kind, "theorem");
+    }
+
+    /// A namespace stays open past a `noncomputable section … end` and a
+    /// `mutual … end` in it, the `mutual`'s indented declarations are read,
+    /// and notation written scoped or with attributes is notation; a lemma
+    /// made simp through `to_additive` is simp.
+    #[test]
+    fn scopes_mutual_blocks_and_mathlib_notation() {
+        let maps = maps(&Corpus::of(&[(
+            "Foo.lean",
+            "namespace Foo\n\
+             def base : Nat := 1\n\
+             noncomputable section\n\
+             def inner : Nat := base\n\
+             end\n\
+             mutual\n  def ev : Nat → Bool\n    | 0 => true\n    | n + 1 => od n\n  def od : Nat → Bool\n    | 0 => false\n    | n + 1 => ev n\nend\n\
+             theorem t1 : base = 1 := rfl\n\
+             theorem t3 : ev 0 = true := rfl\n\
+             @[to_additive (attr := simp)]\ntheorem t2 : base + 0 = base := rfl\n\
+             local notation \"⟪\" a \"⟫\" => base + a\n\
+             @[inherit_doc] scoped infixl:65 \" +++ \" => Nat.add\n\
+             end Foo\n",
+        )]));
+        let deps = maps.iter().find(|m| m.id == "lean.theorems").unwrap();
+        let labels: Vec<&str> = deps.nodes.iter().map(|n| n.label.as_str()).collect();
+        for want in ["Foo.base", "Foo.ev", "Foo.t1", "Foo.t3"] {
+            assert!(labels.contains(&want), "{want} in {labels:?}");
+        }
+        for want in [
+            e("Foo.t1", "Foo.base", "uses"),
+            e("Foo.t3", "Foo.ev", "uses"),
+        ] {
+            assert!(edges(deps).contains(&want), "{want:?} in {:?}", edges(deps));
+        }
+        let n = maps.iter().find(|m| m.id == "lean.notation").unwrap();
+        let got = edges(n);
+        for want in [
+            e("⟪⟫", "Foo.base", "means"),
+            e("+++", "Nat.add", "means"),
+            e("simp set", "Foo.t2", "simp"),
+        ] {
+            assert!(got.contains(&want), "{want:?} in {got:?}");
+        }
     }
 
     #[test]

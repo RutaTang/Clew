@@ -1103,8 +1103,11 @@ pub struct ContextMenu {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GutterRun {
     /// The program that starts on the line, by its name, where one does:
-    /// a Rust `main`'s (`shapes`), a Python `__main__` block's file's.
+    /// a Rust `main`'s (`shapes`), a Python `__main__` block's file's, a
+    /// Lean `main`'s file's.
     pub main: Option<String>,
+    /// Whether it can be debugged too: Lean's has no debugger to run in.
+    pub debug: bool,
 }
 
 /// What a language can say about the code under the cursor that no other
@@ -1796,9 +1799,17 @@ impl LspSlot {
 /// What a server still checking files says of them on the status bar
 /// (Lean's `$/lean/fileProgress`): "checking Basic.lean", "checking
 /// Basic.lean and 2 more" — the first by path, so the name holds still.
+/// One Lean stopped checking, and checks no more until it is restarted:
+/// "stopped checking Basic.lean" — said as ready, it was not.
 fn checking_label(s: &lsp::client::Snapshot) -> Option<String> {
     let mut files: Vec<&std::path::Path> = s.checking_files().collect();
     files.sort();
+    if files.is_empty() {
+        let mut stopped: Vec<&std::path::Path> = s.stopped_files().collect();
+        stopped.sort();
+        let name = stopped.first()?.file_name()?.to_string_lossy();
+        return Some(tr!("stopped checking {file}", file = name));
+    }
     let name = files.first()?.file_name()?.to_string_lossy();
     Some(match files.len() - 1 {
         0 => tr!("checking {file}", file = name),

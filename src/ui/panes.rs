@@ -3000,6 +3000,17 @@ fn margin_goals(app: &App) -> Element<'_, Message> {
             rows = rows.push(servers());
             return scrollable(rows).height(Fill).into();
         }
+        // Stopped while `lake exe cache get` puts Mathlib's build in place.
+        None if matches!(
+            app.proj.mathlib,
+            crate::app::proof::MathlibCache::Getting(_)
+        ) =>
+        {
+            rows = rows.push(note(
+                tr!("The Lean server starts again once Mathlib's build cache is in place.").into(),
+            ));
+            return scrollable(rows).height(Fill).into();
+        }
         None => {
             rows = rows.push(note(
                 tr!("Start the Lean server to see the goals at the cursor here.").into(),
@@ -3061,6 +3072,19 @@ fn margin_goals(app: &App) -> Element<'_, Message> {
             }
         }
     }
+    // Lean stopped checking the file — its worker died, out of memory or
+    // in a crash — and checks nothing more of it until it is restarted:
+    // said as checking, it read "checking line 3" for good.
+    if !restarting && let Some(at) = snapshot.and_then(|s| s.stopped(&v.abs)) {
+        rows = rows.push(note(tr!(
+            "Lean stopped checking this file at line {line}. Restart the file to check it again.",
+            line = at + 1
+        )));
+        rows = rows.push(link(
+            tr!("Restart File"),
+            Message::Proof(crate::ProofMsg::RestartFile),
+        ));
+    }
     let goals = app.proj.lean_goals.as_ref().filter(|g| g.abs == v.abs);
     // An answer for another line while this one is asked, and Lean has not
     // checked this far yet: its goals are not this line's, and may not be
@@ -3068,10 +3092,12 @@ fn margin_goals(app: &App) -> Element<'_, Message> {
     let behind = snapshot
         .and_then(|s| s.checking(&v.abs))
         .filter(|at| *at < line);
+    // Nor is a request that ran out of time before Lean got to the line:
+    // asked again once it does, how far it has got is said meanwhile.
     let answer = goals.and_then(|g| {
         g.answer
             .as_ref()
-            .filter(|(at, _)| !(g.asking && *at != line && behind.is_some()))
+            .filter(|(at, got)| !(behind.is_some() && ((g.asking && *at != line) || got.is_err())))
     });
     match answer {
         // How far Lean has got, where it says: a goal is answered once the
@@ -3109,23 +3135,29 @@ fn margin_goals(app: &App) -> Element<'_, Message> {
                 .into(),
             ))
         }
-        Some((at, Ok(Some(LeanGoal::Tactic(left))))) if left.is_empty() => {
+        Some((at, Ok(Some(LeanGoal::Tactic(left, term))))) => {
             rows = rows.push(super::explain_view::section_header(&tr!(
                 "Goals at line {line}",
                 line = at + 1
             )));
-            // Said of a `sorry` too: none left, not "complete".
-            rows = rows.push(note(tr!("No goals left here.").into()));
-        }
-        Some((at, Ok(Some(LeanGoal::Tactic(left))))) => {
-            rows = rows.push(super::explain_view::section_header(&tr!(
-                "Goals at line {line}",
-                line = at + 1
-            )));
-            rows = rows.push(
-                container(Column::with_children(super::proof::goal_rows(left, None)).spacing(2))
+            if left.is_empty() {
+                // Said of a `sorry` too: none left, not "complete".
+                rows = rows.push(note(tr!("No goals left here.").into()));
+            } else {
+                rows = rows.push(
+                    container(
+                        Column::with_children(super::proof::goal_rows(left, None)).spacing(2),
+                    )
                     .padding([2, 10]),
-            );
+                );
+            }
+            // The term the cursor is on, in the proof: the type it is to
+            // have, as Lean's own view shows beside the goals — where it
+            // is not the goal said above.
+            if let Some(ty) = term.as_ref().filter(|t| !left.contains(t)) {
+                rows = rows.push(super::explain_view::section_header(tr!("Expected type")));
+                rows = rows.push(code(ty.clone(), theme::fg()));
+            }
         }
         Some((at, Ok(Some(LeanGoal::Term(ty))))) => {
             rows = rows.push(super::explain_view::section_header(&tr!(

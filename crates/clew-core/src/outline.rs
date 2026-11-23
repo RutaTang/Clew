@@ -117,9 +117,12 @@ impl<K: Hash + Eq> Ordinals<K> {
     }
 }
 
-/// Whether a symbol kind is a callable (a function or a method).
+/// Whether a symbol kind is a callable (a function or a method) — or a
+/// Lean theorem, a proof read as a function is: what Explain explains and
+/// the outline numbers among a file's same-name functions. A proof file was
+/// explained as a list of its theorems' names.
 pub fn is_callable(kind: &str) -> bool {
-    matches!(kind, "function" | "method")
+    matches!(kind, "function" | "method" | "theorem")
 }
 
 /// A work counter for the complexity tests: a hot loop reports its units of
@@ -477,9 +480,17 @@ fn lean_located(source: &str) -> Vec<Located> {
     let mut out = Vec::new();
     let mut lines_before = 0;
     let mut counted_to = 0;
-    for range in crate::lean::commands(source) {
+    let commands = crate::lean::commands(source);
+    let (_, ends) = crate::lean::scopes(source, &commands);
+    // Each command's first line, and the outline entry of each namespace
+    // by its command: a namespace spans to its `end`, its declarations
+    // nested in it — one line long, it held nothing.
+    let mut first_lines = Vec::with_capacity(commands.len());
+    let mut namespaces: Vec<(usize, usize)> = Vec::new();
+    for (index, range) in commands.iter().cloned().enumerate() {
         lines_before += source[counted_to..range.start].matches('\n').count();
         counted_to = range.start;
+        first_lines.push(lines_before + 1);
         let original = &source[range.clone()];
         let command = crate::lean::readable(original);
         let Some(tree) = parser.parse(command.as_bytes(), None) else {
@@ -496,13 +507,48 @@ fn lean_located(source: &str) -> Vec<Located> {
             let main = found.iter_mut().find(|l| {
                 l.symbol.line == line && !matches!(l.symbol.kind.as_str(), "field" | "constructor")
             });
-            match main {
-                Some(l) if l.symbol.name != name && name.ends_with(l.symbol.name.as_str()) => {
-                    l.symbol.name = name.to_string();
+            let at = match main {
+                Some(l) => {
+                    if l.symbol.name != name && name.ends_with(l.symbol.name.as_str()) {
+                        l.symbol.name = name.to_string();
+                    }
+                    found
+                        .iter()
+                        .position(|l| l.symbol.line == line && l.symbol.name == name)
                 }
-                Some(_) => {}
-                None => found.insert(0, lean_head_located(original, &head, line)),
+                None => {
+                    found.insert(0, lean_head_located(original, &head, line));
+                    Some(0)
+                }
+            };
+            // The declaration is its whole command: its `where` helpers and
+            // its `termination_by` too — the grammar's node ended at its
+            // body's first line, and an Explain of it lacked its helpers.
+            if let Some(at) = at {
+                let text = original.trim_end();
+                let last = (text.matches('\n').count() + 1).max(line);
+                let l = &mut found[at];
+                if last > l.symbol.end_line
+                    && !matches!(head.kind, "struct" | "class" | "inductive")
+                {
+                    l.symbol.end_line = last;
+                    l.declaration.1 = l.declaration.1.max(text.len());
+                    if let Some(body) = l.body.as_mut() {
+                        body.1 = last;
+                    }
+                }
+                if matches!(head.kind, "function" | "theorem") {
+                    found.extend(lean_where_helpers(original, line));
+                }
+                if matches!(head.kind, "struct" | "class") {
+                    lean_fields(original, line, &mut found);
+                }
             }
+        }
+        if ends.contains_key(&index)
+            && let Some(at) = found.iter().position(|l| l.symbol.kind == "module")
+        {
+            namespaces.push((index, out.len() + at));
         }
         out.extend(
             found
@@ -510,7 +556,229 @@ fn lean_located(source: &str) -> Vec<Located> {
                 .map(|l| l.moved(range.start, lines_before)),
         );
     }
+    for (index, at) in namespaces {
+        // To its `end`'s line, or the file's end where it has none.
+        let (end_line, end_byte) = match ends.get(&index).copied().flatten() {
+            Some(end) => {
+                let range = &commands[end];
+                let text = source[range.clone()].trim_end();
+                (first_lines[end], range.start + text.len())
+            }
+            None => (source.lines().count().max(1), source.trim_end().len()),
+        };
+        let l = &mut out[at];
+        if end_line > l.symbol.line {
+            l.symbol.end_line = end_line;
+            l.declaration.1 = l.declaration.1.max(end_byte);
+            l.body = Some((l.symbol.line, end_line));
+        }
+    }
     out
+}
+
+/// Each Lean declaration's namespace, by its 1-based line: what it is
+/// called by from outside it (`Clew.Extracted.Voice` for `toModel`
+/// declared in `namespace Voice` in `namespace Clew.Extracted`). Not the
+/// declarations at the top, which are in none.
+pub(crate) fn lean_owners(
+    source: &str,
+    symbols: &[Located],
+) -> std::collections::HashMap<usize, String> {
+    let commands = crate::lean::commands(source);
+    let (paths, _) = crate::lean::scopes(source, &commands);
+    // Each command's first line, in order, to find the one a line is in.
+    let mut firsts = Vec::with_capacity(commands.len());
+    let mut line = 1;
+    let mut counted_to = 0;
+    for range in &commands {
+        line += source[counted_to..range.start].matches('\n').count();
+        counted_to = range.start;
+        firsts.push(line);
+    }
+    symbols
+        .iter()
+        .filter_map(|l| {
+            let at = firsts
+                .partition_point(|&first| first <= l.symbol.line)
+                .checked_sub(1)?;
+            let path = paths.get(at).filter(|p| !p.is_empty())?;
+            Some((l.symbol.line, path.clone()))
+        })
+        .collect()
+}
+
+/// The helpers a Lean declaration defines in its `where` clause (`go` in
+/// `def f … := go n where go …`), each from its line to the next one's, as
+/// functions of their own: they were in no outline. `line` is the
+/// declaration's first line in `command`.
+fn lean_where_helpers(command: &str, line: usize) -> Vec<Located> {
+    let lines: Vec<&str> = command.lines().collect();
+    // The `where` on a line of its own, or ending one.
+    let Some(at) = lines.iter().enumerate().skip(line - 1).find_map(|(i, l)| {
+        let code = l.split("--").next().unwrap_or("").trim_end();
+        (code.trim() == "where" || code.ends_with(" where")).then_some(i)
+    }) else {
+        return Vec::new();
+    };
+    let indent_of = |l: &str| l.len() - l.trim_start().len();
+    let mut helpers: Vec<(usize, &str)> = Vec::new();
+    let mut indent = None;
+    for (i, l) in lines.iter().enumerate().skip(at + 1) {
+        let t = l.trim();
+        if t.is_empty() || t.starts_with("--") || t.starts_with("/-") {
+            continue;
+        }
+        let here = indent_of(l);
+        if t.starts_with("termination_by") || t.starts_with("decreasing_by") {
+            if here <= indent.unwrap_or(usize::MAX) {
+                break;
+            }
+            continue;
+        }
+        let at_indent = *indent.get_or_insert(here);
+        if here < at_indent {
+            break;
+        }
+        if here > at_indent {
+            continue;
+        }
+        let t = t.trim_start_matches("@[").trim_start();
+        let len = crate::lean::name_len(t);
+        let name = &t[..len];
+        let follows = t[len..].trim_start();
+        let defines = len > 0
+            && (follows.starts_with(':') && !follows.starts_with(":=")
+                || follows.starts_with('(')
+                || follows.starts_with('{')
+                || follows.starts_with('[')
+                || follows.is_empty());
+        if defines && name != "|" {
+            helpers.push((i, name));
+        }
+    }
+    let starts: Vec<usize> = helpers.iter().map(|(i, _)| *i).collect();
+    let offset_of = |i: usize| -> usize { lines[..i].iter().map(|l| l.len() + 1).sum() };
+    helpers
+        .iter()
+        .enumerate()
+        .map(|(n, &(i, name))| {
+            let last = starts
+                .get(n + 1)
+                .map_or_else(|| lines.len(), |&next| next)
+                .max(i + 1);
+            // Its own lines, past those it ends before (a blank, a comment).
+            let last = (i + 1..=last)
+                .rev()
+                .find(|&k| lines.get(k - 1).is_some_and(|l| !l.trim().is_empty()))
+                .unwrap_or(i + 1);
+            let start = offset_of(i);
+            let end = (offset_of(last - 1) + lines[last - 1].len()).min(command.len());
+            Located {
+                symbol: Symbol {
+                    name: name.to_string(),
+                    kind: "function".to_string(),
+                    line: i + 1,
+                    end_line: last,
+                },
+                declaration: (start, end),
+                signature_end: start + lines[i].len(),
+                cpp_public: None,
+                decl_line: i + 1,
+                body: Some((i + 1, last)),
+                container: None,
+                owner: Owner {
+                    scope: (0, command.len()),
+                    member_of: None,
+                },
+                accessed: false,
+            }
+        })
+        .collect()
+}
+
+/// A Lean structure's fields as its text writes them, set right in `found`
+/// (the command's entries; `line` its first line): a custom constructor
+/// (`mk ::`) is the constructor, not a field, and the field below it is
+/// one; each name of `x y : Nat` is a field. The grammar listed `mk` as a
+/// field, lost the field after it, and only the last of several names.
+fn lean_fields(command: &str, line: usize, found: &mut Vec<Located>) {
+    let lines: Vec<&str> = command.lines().collect();
+    let Some(at) = lines.iter().enumerate().skip(line - 1).find_map(|(i, l)| {
+        let code = l.split("--").next().unwrap_or("").trim_end();
+        (code.trim() == "where" || code.ends_with(" where")).then_some(i)
+    }) else {
+        return;
+    };
+    let indent_of = |l: &str| l.len() - l.trim_start().len();
+    let mut indent = None;
+    let mut offset: usize = lines[..=at].iter().map(|l| l.len() + 1).sum();
+    for (i, l) in lines.iter().enumerate().skip(at + 1) {
+        let start = offset;
+        offset += l.len() + 1;
+        let t = l.trim();
+        if t.is_empty() || t.starts_with("--") || t.starts_with("/-") || t.starts_with('|') {
+            continue;
+        }
+        let here = indent_of(l);
+        if here == 0 {
+            break;
+        }
+        if here != *indent.get_or_insert(here) {
+            continue;
+        }
+        let line_no = i + 1;
+        let entry = |name: &str, kind: &str, from: usize| Located {
+            symbol: Symbol {
+                name: name.to_string(),
+                kind: kind.to_string(),
+                line: line_no,
+                end_line: line_no,
+            },
+            declaration: (from, start + l.len()),
+            signature_end: start + l.len(),
+            cpp_public: None,
+            decl_line: line_no,
+            body: None,
+            container: None,
+            owner: Owner {
+                scope: (0, command.len()),
+                member_of: None,
+            },
+            accessed: false,
+        };
+        // `mk ::`: the constructor.
+        if let Some(name) = t.strip_suffix("::").map(str::trim)
+            && !name.is_empty()
+            && crate::lean::name_len(name) == name.len()
+        {
+            match found
+                .iter_mut()
+                .find(|f| f.symbol.line == line_no && f.symbol.name == name)
+            {
+                Some(f) => f.symbol.kind = "constructor".to_string(),
+                None => found.push(entry(name, "constructor", start + here)),
+            }
+            continue;
+        }
+        // The names before the field's type (or its binders).
+        let head_end = t.find([':', '(', '{', '[']).unwrap_or(t.len());
+        if t[head_end..].starts_with(":=") {
+            continue; // a default given to an inherited field
+        }
+        let names: Vec<&str> = t[..head_end].split_whitespace().collect();
+        if names.is_empty() || names.iter().any(|n| crate::lean::name_len(n) != n.len()) {
+            continue;
+        }
+        for name in names {
+            let known = found
+                .iter()
+                .any(|f| f.symbol.line == line_no && f.symbol.name == name);
+            if !known {
+                let from = start + l.find(name).unwrap_or(here);
+                found.push(entry(name, "field", from));
+            }
+        }
+    }
 }
 
 /// The outline entry of a Lean declaration the grammar could not read, from
@@ -1353,7 +1621,10 @@ fn analyze_impl(source: &str, lang_key: &str, scope_rust: bool) -> Option<Analys
         imports = crate::rustscope::scope_rust_imports_in(&tree, source, imports);
     }
     let calls = crate::projectcalls::calls_in(&tree, source, lang, &symbols);
-    let owners = crate::projectcalls::owners_in(&tree, source, lang, &symbols);
+    let owners = match lang {
+        Lang::Lean => lean_owners(source, &symbols),
+        _ => crate::projectcalls::owners_in(&tree, source, lang, &symbols),
+    };
     Some(Analysis {
         lang,
         symbols,
@@ -4663,6 +4934,120 @@ def stub_only(x: str) -> str: ...
                 .position(|l| l.starts_with("instance :"))
                 .unwrap()
                 + 1
+        );
+    }
+
+    /// A structure's custom constructor is its constructor, the field below
+    /// it a field, and each name of `x y : Nat` a field.
+    #[test]
+    fn a_lean_structures_fields_are_read_as_written() {
+        let src = "structure P where\n  mk ::\n  a : Nat\n  x y : Nat\n  f (n : Nat) : Nat\n  b : Nat := 0\n";
+        let items = extract_located(src, "lean");
+        let mut got: Vec<(&str, &str, usize)> = items
+            .iter()
+            .map(|l| {
+                (
+                    l.symbol.name.as_str(),
+                    l.symbol.kind.as_str(),
+                    l.symbol.line,
+                )
+            })
+            .collect();
+        got.sort_by_key(|g| (g.2, g.0));
+        assert_eq!(
+            got,
+            [
+                ("P", "struct", 1),
+                ("mk", "constructor", 2),
+                ("a", "field", 3),
+                ("x", "field", 4),
+                ("y", "field", 4),
+                ("f", "field", 5),
+                ("b", "field", 6)
+            ]
+        );
+    }
+
+    /// A string that runs on over lines holds its lines, whatever their
+    /// first column: no new command starts in it.
+    #[test]
+    fn a_lean_string_over_lines_is_its_declarations() {
+        let src = "def banner : String := \"first\nsecond line\nthird\"\n\ndef after : Nat := 1\n";
+        let items = extract_located(src, "lean");
+        let banner = find(&items, "banner");
+        assert_eq!(
+            (banner.symbol.line, banner.symbol.end_line),
+            (1, 3),
+            "{items:#?}"
+        );
+        assert_eq!(find(&items, "after").symbol.line, 5);
+        assert!(
+            !items.iter().any(|l| l.symbol.name == "second"),
+            "{items:#?}"
+        );
+    }
+
+    /// A declaration spans its `where` helpers and its `termination_by`,
+    /// and the helpers are listed; a `def … where` of field values defines
+    /// none. Notation, macros and syntax are listed by what they write.
+    #[test]
+    fn lean_where_helpers_and_notation_are_outlined() {
+        let src = "def w1 (n : Nat) : Nat := go n 0\nwhere\n  go : Nat → Nat → Nat\n    | 0, acc => acc\n    | k + 1, acc => go k (acc + 1)\n  helper (x : Nat) : Nat := x\n\n\
+                   def tm : Nat → Nat\n  | 0 => 0\n  | n + 1 => tm n\ntermination_by n => n\n\n\
+                   def p : Nat × Nat where\n  fst := 1\n  snd := 2\n\n\
+                   local notation \"⟪\" a \"⟫\" => a + 1\n\
+                   infixl:65 \" +++ \" => Nat.add\n\
+                   syntax (name := myTac) \"my_tac\" : tactic\n\
+                   declare_syntax_cat clew_cmd\n";
+        let items = extract_located(src, "lean");
+        let at = |name: &str| {
+            let l = find(&items, name);
+            (l.symbol.kind.as_str(), l.symbol.line, l.symbol.end_line)
+        };
+        assert_eq!(at("w1"), ("function", 1, 6), "{items:#?}");
+        assert_eq!(at("go"), ("function", 3, 5));
+        assert_eq!(at("helper"), ("function", 6, 6));
+        assert_eq!(at("tm"), ("function", 8, 11));
+        assert!(!items.iter().any(|l| l.symbol.name == "fst"), "{items:#?}");
+        assert_eq!(at("⟪"), ("macro", 17, 17));
+        assert_eq!(at("+++"), ("macro", 18, 18));
+        assert_eq!(at("myTac"), ("macro", 19, 19));
+        assert_eq!(at("clew_cmd"), ("macro", 20, 20));
+    }
+
+    /// A `mutual` block written indented, as Lean's own sources write it:
+    /// each of its declarations is listed. A namespace spans to its `end`,
+    /// its declarations in it and named through it; a section names
+    /// nothing, and a `mutual`'s `end` closes no namespace.
+    #[test]
+    fn lean_namespaces_and_mutual_blocks_hold_their_declarations() {
+        let src = "namespace Clew.Parity\n\nmutual\n  def isEven : Nat → Bool\n    | 0 => true\n    | n + 1 => isOdd n\n  def isOdd : Nat → Bool\n    | 0 => false\n    | n + 1 => isEven n\nend\n\nnoncomputable section\ndef inSection : Nat := 1\nend\n\ntheorem after : isEven 0 = true := rfl\n\nend Clew.Parity\n\ndef top : Nat := 0\n";
+        let items = extract_located(src, "lean");
+        let at = |name: &str| {
+            let l = find(&items, name);
+            (l.symbol.kind.as_str(), l.symbol.line, l.symbol.end_line)
+        };
+        assert_eq!(at("isEven"), ("function", 4, 6), "{items:#?}");
+        assert_eq!(at("isOdd"), ("function", 7, 9));
+        assert_eq!(at("after"), ("theorem", 16, 16));
+        let ns = find(&items, "Clew.Parity");
+        assert_eq!(
+            (ns.symbol.kind.as_str(), ns.symbol.line, ns.symbol.end_line),
+            ("module", 1, 18)
+        );
+        let owners = lean_owners(src, &items);
+        assert_eq!(owners.get(&4).map(String::as_str), Some("Clew.Parity"));
+        assert_eq!(owners.get(&13).map(String::as_str), Some("Clew.Parity"));
+        assert_eq!(owners.get(&16).map(String::as_str), Some("Clew.Parity"));
+        assert_eq!(owners.get(&20), None, "past its end");
+        assert_eq!(owners.get(&1), None, "the namespace itself is at the top");
+        // An unclosed namespace runs to the file's end.
+        let open = "namespace A\ndef f : Nat := 1\ndef g : Nat := 2\n";
+        let items = extract_located(open, "lean");
+        assert_eq!(find(&items, "A").symbol.end_line, 3);
+        assert_eq!(
+            lean_owners(open, &items).get(&3).map(String::as_str),
+            Some("A")
         );
     }
 
