@@ -977,7 +977,7 @@ impl App {
                     served,
                     by_pointer: false,
                     line_top: None,
-                    in_test: self.test_at(pane, line + 1).is_some(),
+                    test: self.test_at(pane, line + 1),
                 });
                 self.update(message)
             }

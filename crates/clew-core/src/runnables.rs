@@ -12,11 +12,17 @@ use tree_sitter::Node;
 use crate::highlight::{Lang, parse};
 use crate::outline::EntryPoints;
 
+mod params;
+
 /// What a runnable is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunnableKind {
-    /// A test: run on its own, by its test runner.
+    /// A test: run on its own, by its test runner. A parametrized Python
+    /// test's case is one too, named as pytest names it (`test_add[1-2]`).
     Test,
+    /// A group of tests, run together: a Python test class's (named for
+    /// the class), or a Python test file's (its name empty: the file).
+    Tests,
     /// The program's start: Rust's `fn main`, Python's
     /// `if __name__ == "__main__":` block.
     Main,
@@ -26,7 +32,8 @@ pub enum RunnableKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Runnable {
     pub kind: RunnableKind,
-    /// Its function's name (`adds`, `main`); `__main__` for Python's block.
+    /// Its function's name (`adds`, `main`); `__main__` for Python's block;
+    /// a test class's for its tests, empty for a file's.
     pub name: String,
     /// The 1-based line its mark goes on: its name's, or the block's `if`.
     pub line: usize,
@@ -59,9 +66,45 @@ pub fn runnables(lang: &str, source: &str) -> Vec<Runnable> {
     let mut scopes = Vec::new();
     match language {
         Lang::Rust => rust(tree.root_node(), source, &entries, &mut scopes, &mut out),
-        _ => python(tree.root_node(), source, &entries, &mut scopes, &mut out),
+        _ => {
+            let root = tree.root_node();
+            let parametrized = marks_parametrize(root, source);
+            python(root, source, &entries, &mut scopes, parametrized, &mut out);
+            // A test file's tests, all of them: what Run Test runs from a
+            // line in no test.
+            if out.iter().any(|r| r.kind == RunnableKind::Test) {
+                out.insert(
+                    0,
+                    Runnable {
+                        kind: RunnableKind::Tests,
+                        name: String::new(),
+                        line: 1,
+                        span: (1, lines.len().max(1)),
+                        scopes: Vec::new(),
+                    },
+                );
+            }
+        }
     }
     out
+}
+
+/// Whether a Python block (a module, a class's body) parametrizes all its
+/// tests with `pytestmark = pytest.mark.parametrize(…)`: their cases' ids
+/// then combine with it, and are not known from a test alone.
+fn marks_parametrize(block: Node, source: &str) -> bool {
+    let mut cursor = block.walk();
+    block.named_children(&mut cursor).any(|statement| {
+        statement.kind() == "expression_statement"
+            && statement
+                .named_child(0)
+                .filter(|a| a.kind() == "assignment")
+                .is_some_and(|a| {
+                    a.child_by_field_name("left")
+                        .is_some_and(|l| text(l, source) == "pytestmark")
+                        && text(a, source).contains("parametrize")
+                })
+    })
 }
 
 fn text<'a>(node: Node, source: &'a str) -> &'a str {
@@ -132,6 +175,7 @@ fn python(
     source: &str,
     entries: &EntryPoints,
     scopes: &mut Vec<String>,
+    parametrized: bool,
     out: &mut Vec<Runnable>,
 ) {
     let mut cursor = block.walk();
@@ -161,6 +205,18 @@ fn python(
                         span: span(statement),
                         scopes: scopes.clone(),
                     });
+                    // Each case of a parametrized test, on its own lines.
+                    if statement.kind() == "decorated_definition" && !parametrized {
+                        for case in params::cases(statement, source) {
+                            out.push(Runnable {
+                                kind: RunnableKind::Test,
+                                name: format!("{name_text}[{}]", case.id),
+                                line: case.span.0,
+                                span: case.span,
+                                scopes: scopes.clone(),
+                            });
+                        }
+                    }
                 }
             }
             "class_definition" if scopes.len() < MAX_SCOPES => {
@@ -180,9 +236,31 @@ fn python(
                 if !(name_text.starts_with("Test") || bases.contains("TestCase")) {
                     continue;
                 }
+                // A class parametrized as a whole gives its tests' cases
+                // its own ids too.
+                let parametrized = parametrized
+                    || marks_parametrize(body, source)
+                    || (statement.kind() == "decorated_definition"
+                        && text(statement, source)
+                            .get(..item.start_byte() - statement.start_byte())
+                            .is_some_and(|decorators| decorators.contains("parametrize")));
+                let first = out.len();
                 scopes.push(name_text.to_string());
-                python(body, source, entries, scopes, out);
+                python(body, source, entries, scopes, parametrized, out);
                 scopes.pop();
+                // The class's tests, all of them, when it has any.
+                if out.len() > first {
+                    out.insert(
+                        first,
+                        Runnable {
+                            kind: RunnableKind::Tests,
+                            name: name_text.to_string(),
+                            line: name.start_position().row + 1,
+                            span: span(statement),
+                            scopes: scopes.clone(),
+                        },
+                    );
+                }
             }
             "if_statement" if scopes.is_empty() => {
                 let Some(condition) = item.child_by_field_name("condition") else {
@@ -222,15 +300,18 @@ pub fn runnable_at(runnables: &[Runnable], line: usize) -> Option<&Runnable> {
 }
 
 /// A Python test's pytest node id: its file as given (`tests/test_x.py`,
-/// slashes), then its classes and its name, `::` between.
+/// slashes), then its classes and its name, `::` between. A file's tests
+/// are the file's.
 pub fn pytest_node(rel: &str, runnable: &Runnable) -> String {
     let mut node = rel.replace('\\', "/");
     for scope in &runnable.scopes {
         node.push_str("::");
         node.push_str(scope);
     }
-    node.push_str("::");
-    node.push_str(&runnable.name);
+    if !runnable.name.is_empty() {
+        node.push_str("::");
+        node.push_str(&runnable.name);
+    }
     node
 }
 
@@ -351,14 +432,17 @@ if __name__ == \"__main__\":
         assert_eq!(
             named(&found),
             [
+                (RunnableKind::Tests, "".into(), 1, vec![]),
                 (RunnableKind::Test, "test_adds".into(), 5, vec![]),
                 (RunnableKind::Test, "test_slow".into(), 10, vec![]),
+                (RunnableKind::Tests, "TestPrices".into(), 18, vec![]),
                 (
                     RunnableKind::Test,
                     "test_total".into(),
                     19,
                     vec!["TestPrices".to_string()]
                 ),
+                (RunnableKind::Tests, "Checks".into(), 26, vec![]),
                 (
                     RunnableKind::Test,
                     "test_empty".into(),
@@ -368,6 +452,19 @@ if __name__ == \"__main__\":
                 (RunnableKind::Main, "__main__".into(), 36, vec![]),
             ]
         );
+        // Outside a test, its class's tests; outside a class, the file's.
+        let class = runnable_at(&found, 22).unwrap();
+        assert_eq!(
+            (class.kind, class.name.as_str()),
+            (RunnableKind::Tests, "TestPrices")
+        );
+        assert_eq!(pytest_node("test_x.py", class), "test_x.py::TestPrices");
+        let file = runnable_at(&found, 15).unwrap();
+        assert_eq!((file.kind, file.name.as_str()), (RunnableKind::Tests, ""));
+        assert_eq!(pytest_node("test_x.py", file), "test_x.py");
+        assert_eq!(runnable_at(&found, 37).unwrap().kind, RunnableKind::Main);
+        // A file with no test has no tests to run.
+        assert!(runnables("python", "def helper():\n    pass\n").is_empty());
         let total = runnable_at(&found, 20).unwrap();
         assert_eq!(
             pytest_node("tests\\test_prices.py", total),
@@ -380,5 +477,132 @@ if __name__ == \"__main__\":
         );
         // Other languages have none yet.
         assert!(runnables("go", "func TestX(t *testing.T) {}").is_empty());
+    }
+
+    /// A parametrized test's cases, each by the id pytest gives it, on the
+    /// lines it is written on: a case is run alone from its line, the test
+    /// from its own. A case whose id is not known from the source, or that
+    /// shares its line, is run with the rest.
+    #[test]
+    fn a_parametrized_tests_cases_are_named_as_pytest_names_them() {
+        let source = "\
+import pytest
+from enum import Enum
+
+
+@pytest.mark.parametrize(\"a, b\", [
+    (1, 2),
+    (-3, 0.5),
+    pytest.param(4, 5, id=\"big\"),
+    (\"x\", None),
+    ([1], True),
+    (Color.RED, 2),
+    (1, 2),
+])
+def test_add(a, b):
+    pass
+
+
+@pytest.mark.parametrize(\"n\", [1, 2, 3])
+def test_one_line(n):
+    pass
+
+
+@pytest.mark.parametrize(
+    [\"word\"],
+    [
+        (\"hello\",),
+        (\"bye\",),
+    ],
+    ids=[\"greet\", None],
+)
+def test_ids(word):
+    pass
+
+
+@pytest.mark.parametrize(\"n\", [1, 2])
+@pytest.mark.parametrize(\"m\", [3, 4])
+def test_stacked(n, m):
+    pass
+
+
+class TestShapes:
+    @pytest.mark.parametrize(\"side\", [
+        1.0,
+        0.00001,
+    ])
+    def test_area(self, side):
+        pass
+
+
+@pytest.mark.parametrize(\"v\", [
+    1e16,
+    -0.0,
+    0x1F,
+    -7,
+    \"a b\",
+    r\"raw\",
+    {\"k\": 1},
+    True,
+    None,
+])
+def test_values(v):
+    pass
+";
+        let found = runnables("python", source);
+        let tests: Vec<(String, usize)> = found
+            .iter()
+            .filter(|r| r.kind == RunnableKind::Test)
+            .map(|r| (r.name.clone(), r.line))
+            .collect();
+        let expected: Vec<(String, usize)> = [
+            ("test_add", 14),
+            // The two `(1, 2)`s share their id: pytest renames both.
+            ("test_add[-3-0.5]", 7),
+            ("test_add[big]", 8),
+            ("test_add[x-None]", 9),
+            ("test_add[a4-True]", 10),
+            // `Color.RED` may be an enum, named by its value: no id.
+            ("test_one_line", 19),
+            ("test_ids", 31),
+            ("test_ids[greet]", 26),
+            ("test_ids[bye]", 27),
+            ("test_stacked", 37),
+            ("test_area", 46),
+            ("test_area[1.0]", 43),
+            ("test_area[1e-05]", 44),
+            // As real pytest (9.2) collects them.
+            ("test_values", 61),
+            ("test_values[1e+16]", 51),
+            ("test_values[-0.0]", 52),
+            ("test_values[31]", 53),
+            ("test_values[-7]", 54),
+            ("test_values[a b]", 55),
+            ("test_values[raw]", 56),
+            ("test_values[v6]", 57),
+            ("test_values[True]", 58),
+            ("test_values[None]", 59),
+        ]
+        .iter()
+        .map(|(n, l)| (n.to_string(), *l))
+        .collect();
+        assert_eq!(tests, expected);
+        // From a case's line, that case; from the def, the whole test.
+        let case = runnable_at(&found, 8).unwrap();
+        assert_eq!(pytest_node("t.py", case), "t.py::test_add[big]");
+        assert_eq!(runnable_at(&found, 14).unwrap().name, "test_add");
+        assert_eq!(runnable_at(&found, 18).unwrap().name, "test_one_line");
+        let area = runnable_at(&found, 44).unwrap();
+        assert_eq!(
+            pytest_node("t.py", area),
+            "t.py::TestShapes::test_area[1e-05]"
+        );
+        // A module parametrizing all its tests: no case is known alone.
+        let marked = format!("pytestmark = pytest.mark.parametrize(\"k\", [1, 2])\n{source}");
+        assert!(
+            runnables("python", &marked)
+                .iter()
+                .all(|r| !r.name.contains('[')),
+        );
     }
 }

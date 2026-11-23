@@ -1694,7 +1694,7 @@ fn a_functions_explain_writes_its_own_explanation() {
             served: true,
             by_pointer: true,
             line_top: None,
-            in_test: false,
+            test: None,
         });
     };
     let origin = explain::Node::Function {
@@ -3290,7 +3290,7 @@ fn the_context_menu_bookmarks_its_line_with_a_note() {
             served: true,
             by_pointer: true,
             line_top: None,
-            in_test: false,
+            test: None,
         });
     };
     // Toggle Bookmark: on the menu's line (0-based 3: line 4), the caret
@@ -3351,7 +3351,7 @@ fn the_context_menu_bookmarks_its_line_with_a_note() {
 
     // On a bookmarked line, the menu says it edits the note.
     menu_on(&mut app, 5);
-    let menu = app.proj.context_menu.unwrap();
+    let menu = app.proj.context_menu.clone().unwrap();
     let (targets, _) = crate::ui::heard::gather_all_of(|| crate::ui::context_menu(&app, &menu));
     assert!(
         targets.iter().any(|t| t.shown == "Edit Bookmark Note…"),
@@ -3958,8 +3958,8 @@ fn the_download_question_looks_for_the_program_on_path() {
             assert_eq!(consent.on_path.as_ref(), Some(&program));
         }
     }
-    // Pyright's server refuses `--version` (it will not start without a
-    // connection): asked so, it was never offered. It is offered as found.
+    // A pyright of the user's own on the PATH serves as Clew's would: it
+    // is run as found, with nothing asked or downloaded and no Node.
     let pyright = bin.join("pyright-langserver");
     std::fs::write(
         &pyright,
@@ -3973,9 +3973,13 @@ fn the_download_question_looks_for_the_program_on_path() {
     for message in run_task(looked) {
         let _ = app.update(message);
     }
-    let consent = app.proj.pending_lsp_consent.front().expect("asked");
-    assert_eq!(consent.language, "python");
-    assert_eq!(consent.on_path.as_ref(), Some(&pyright));
+    assert!(
+        app.proj
+            .pending_lsp_consent
+            .iter()
+            .all(|c| c.language != "python"),
+        "pyright on the PATH was asked about"
+    );
     // Not TypeScript's: clew's own install pins the TypeScript it runs, and
     // the user's server in its place would run the repository's
     // `node_modules/typescript` — one click from a question that says
@@ -4142,7 +4146,7 @@ fn context_menu_flow() {
         x: 120.0,
         y: 40.0,
     }));
-    let menu = app.proj.context_menu.expect("menu open");
+    let menu = app.proj.context_menu.clone().expect("menu open");
     assert_eq!((menu.line, menu.col), (2, 7));
 
     // Choosing an action closes the menu and dispatches the goto for the
@@ -10184,7 +10188,7 @@ fn add_to_ask_without_a_selection_adds_the_line_clicked() {
         served: true,
         by_pointer: true,
         line_top: None,
-        in_test: false,
+        test: None,
     };
     // `pub fn origin() -> Point {`, the third line.
     app.proj.context_menu = Some(menu(2));
@@ -10244,7 +10248,7 @@ fn a_popup_asked_from_the_menu_keeps_where_it_was_asked() {
         served: true,
         by_pointer: true,
         line_top: None,
-        in_test: false,
+        test: None,
     };
     app.proj.context_menu = Some(menu(None));
     let _ = app.update(Message::TimeTravel(TimeTravelMsg::WhyIsThisHere));
@@ -10303,7 +10307,7 @@ fn a_popup_asked_from_the_menu_keeps_where_it_was_asked() {
     app.proj.context_menu = Some(ContextMenu {
         by_pointer: false,
         line_top: None,
-        in_test: false,
+        test: None,
         ..menu(Some(crate::InsightKind::ExpandMacro))
     });
     let _ = app.update(Message::Hover(HoverMsg::Insight));
@@ -14128,7 +14132,7 @@ fn a_project_switch_drops_every_anchor_into_the_old_project() {
         served: true,
         by_pointer: true,
         line_top: None,
-        in_test: false,
+        test: None,
     });
     app.proj.find.open = true;
     app.proj.find.query = "Point".into();
@@ -21439,7 +21443,7 @@ fn expand_macro_waits_for_the_server() {
         served,
         by_pointer: true,
         line_top: None,
-        in_test: false,
+        test: None,
     };
     let offered = |app: &App| {
         crate::ui::heard::gather(app)
@@ -23381,7 +23385,7 @@ fn opening_a_text_input_form_takes_the_keyboard_from_the_code() {
         served: true,
         by_pointer: true,
         line_top: None,
-        in_test: false,
+        test: None,
     });
     let _ = app.update(Message::Debug(DebugMsg::ConditionalBreakpointFromMenu));
     assert_eq!(app.proj.bp_cond_edit.as_ref().map(|e| &e.0), Some(&abs));
@@ -24830,7 +24834,7 @@ fn fill_project_session(app: &mut App) {
         served: true,
         by_pointer: true,
         line_top: None,
-        in_test: false,
+        test: None,
     });
     p.diff = Some(DiffState::new(
         file.clone(),
@@ -32157,7 +32161,7 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
                 served: true,
                 by_pointer: true,
                 line_top: None,
-                in_test: false,
+                test: None,
             })
         }),
         Box::new(|a| {
@@ -40823,9 +40827,9 @@ fn a_plugins_code_command_is_in_the_code_menu_and_runs_at_the_line_clicked() {
         served: true,
         by_pointer: true,
         line_top: None,
-        in_test: false,
+        test: None,
     };
-    app.proj.context_menu = Some(menu);
+    app.proj.context_menu = Some(menu.clone());
     let (targets, _) = crate::ui::heard::gather_all_of(|| crate::ui::context_menu(&app, &menu));
     let row = targets
         .iter()
@@ -44326,6 +44330,7 @@ fn a_remote_python_test_runs_on_its_host() {
         file: file.clone(),
         node: node.clone(),
         name: "test_sum".into(),
+        tested: crate::app::runplan::Tested::One,
     };
     let start = app.start_session(true, Some(plan));
     assert!(

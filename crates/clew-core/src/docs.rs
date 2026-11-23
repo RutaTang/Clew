@@ -136,10 +136,129 @@ fn extract_with(
             }
         }
     }
+    // A Python function's `@overload` signatures are not in the outline
+    // (one entry, the implementation's): a docstring written on one of
+    // them is the implementation's when it has none of its own.
+    if lang == Lang::Python && source.contains("overload") {
+        let wanted: HashMap<usize, &str> = targets
+            .iter()
+            .filter(|t| t.kind == "function" && !out.contains_key(&t.key))
+            .map(|t| (t.key, t.name))
+            .collect();
+        for (key, stub_line) in python_overload_stubs(source, &wanted) {
+            let stub = Target {
+                key: stub_line,
+                anchor: stub_line,
+                kind: "function",
+                name: wanted[&key],
+                owner: None,
+            };
+            if let Some(doc) = style.doc_for(&lines, &openers, &ends, &stub) {
+                let mut doc = clean_doc_text(&doc, lang);
+                if doc.chars().count() > max {
+                    doc = doc.chars().take(max).collect::<String>() + "…";
+                }
+                if !doc.trim().is_empty() {
+                    out.entry(key).or_insert(doc);
+                }
+            }
+        }
+    }
     if has_overloading(lang) {
         share_overload_docs(source, lang, &mut targets, &mut out);
     }
     out
+}
+
+/// Most classes deep the `@overload` stubs of a method are looked for.
+const MAX_OVERLOAD_DEPTH: usize = 32;
+
+/// For each function of `wanted` (its `def` line and name), the first
+/// `@overload` signature right above it of the same name, in the same
+/// block, that has a docstring: `(function's line, signature's line)`.
+fn python_overload_stubs(source: &str, wanted: &HashMap<usize, &str>) -> Vec<(usize, usize)> {
+    use tree_sitter::Node;
+    let Some(tree) = crate::highlight::parse(source, Lang::Python) else {
+        return Vec::new();
+    };
+    let text = |node: Node| source.get(node.byte_range()).unwrap_or("");
+    // A statement's function and whether it is an `@overload` stub.
+    fn function<'t>(statement: Node<'t>, source: &str) -> Option<(Node<'t>, bool)> {
+        match statement.kind() {
+            "function_definition" => Some((statement, false)),
+            "decorated_definition" => {
+                let def = statement
+                    .child_by_field_name("definition")
+                    .filter(|d| d.kind() == "function_definition")?;
+                let mut cursor = statement.walk();
+                let stub = statement
+                    .children(&mut cursor)
+                    .filter(|c| c.kind() == "decorator")
+                    .any(|d| {
+                        let decorator = source.get(d.byte_range()).unwrap_or("");
+                        let name = decorator.trim_start_matches('@').trim();
+                        name.rsplit('.').next().unwrap_or(name).trim() == "overload"
+                    });
+                Some((def, stub))
+            }
+            _ => None,
+        }
+    }
+    let has_docstring = |def: Node| {
+        def.child_by_field_name("body")
+            .and_then(|body| body.named_child(0))
+            .filter(|first| first.kind() == "expression_statement")
+            .and_then(|first| first.named_child(0))
+            .is_some_and(|value| value.kind() == "string")
+    };
+    let mut found = Vec::new();
+    let mut blocks = vec![(tree.root_node(), 0)];
+    while let Some((block, depth)) = blocks.pop() {
+        let statements: Vec<Node> = {
+            let mut cursor = block.walk();
+            block.named_children(&mut cursor).collect()
+        };
+        for (i, &statement) in statements.iter().enumerate() {
+            let class = match statement.kind() {
+                "class_definition" => Some(statement),
+                "decorated_definition" => statement
+                    .child_by_field_name("definition")
+                    .filter(|d| d.kind() == "class_definition"),
+                _ => None,
+            };
+            if let Some(body) = class.and_then(|c| c.child_by_field_name("body"))
+                && depth < MAX_OVERLOAD_DEPTH
+            {
+                blocks.push((body, depth + 1));
+                continue;
+            }
+            let Some((def, false)) = function(statement, source) else {
+                continue;
+            };
+            let line = def.start_position().row + 1;
+            let Some(&name) = wanted.get(&line) else {
+                continue;
+            };
+            let stub = statements[..i]
+                .iter()
+                .rev()
+                .map_while(|&above| {
+                    function(above, source).filter(|&(stub, is_stub)| {
+                        is_stub
+                            && stub
+                                .child_by_field_name("name")
+                                .is_some_and(|n| text(n) == name)
+                    })
+                })
+                .map(|(stub, _)| stub)
+                .filter(|&stub| has_docstring(stub))
+                .last();
+            if let Some(stub) = stub {
+                found.push((line, stub.start_position().row + 1));
+            }
+        }
+    }
+    found
 }
 
 /// Overloads: the doc sits above the first overload signature, so only that
@@ -2812,9 +2931,17 @@ mod markup_tests {
             "Area.",
         );
         shared(
+            "class K:\n    @property\n    def f(self) -> int:\n        \"\"\"Converts.\"\"\"\n    @f.setter\n    def f(self, x: int) -> None: ...\n",
+            "python",
+            &[3, 6],
+            "Converts.",
+        );
+        // A function's `@overload` signatures are one entry, its
+        // implementation's, which takes the docstring written on them.
+        shared(
             "class K:\n    @overload\n    def f(self, x: int) -> int:\n        \"\"\"Converts.\"\"\"\n    @overload\n    def f(self, x: str) -> str: ...\n    def f(self, x):\n        return x\n",
             "python",
-            &[3, 6, 7],
+            &[7],
             "Converts.",
         );
     }

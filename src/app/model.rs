@@ -1051,8 +1051,21 @@ pub struct TimeStep {
     pub focus_line: Option<usize>,
 }
 
+/// What Run Test runs from a line (see [`ContextMenu::test`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TestAt {
+    /// The test the line is in.
+    One,
+    /// One case of a parametrized test, by pytest's name for it
+    /// (`test_add[1-2]`).
+    Case(String),
+    /// A group's tests, by the group's name: a test class's (`TestCart`)
+    /// or a test file's (`test_cart.py`).
+    Group(String),
+}
+
 /// An open right-click navigation menu.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct ContextMenu {
     pub pane: usize,
     pub line: usize,
@@ -1073,9 +1086,11 @@ pub struct ContextMenu {
     /// coordinates. With no room below the line, the menu opens above it —
     /// flipped up from under it, it covered the line it was for.
     pub line_top: Option<f32>,
-    /// The line is in a test Run Test runs (a Rust or Python test): the
-    /// menu offers Run Test and Debug Test.
-    pub in_test: bool,
+    /// What Run Test runs from the line, when it runs anything there: the
+    /// test the line is in (a Rust or Python test), one case of a
+    /// parametrized test, or a test class's or file's tests. The menu
+    /// offers running and debugging it, by its name.
+    pub test: Option<TestAt>,
 }
 
 /// What a language can say about the code under the cursor that no other

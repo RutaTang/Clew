@@ -573,21 +573,41 @@ impl App {
         self.start_session(true, None)
     }
 
-    /// The name of the test at 1-based `line` of pane `pane`'s file, when
-    /// Run Test can run it there: a Rust or Python test, in a file on this
-    /// computer.
-    pub(crate) fn test_at(&self, pane: usize, line: usize) -> Option<String> {
-        if self.connection.is_remote() {
-            return None;
-        }
+    /// What Run Test runs from 1-based `line` of pane `pane`'s file, when
+    /// it runs anything there: the Rust or Python test the line is in, one
+    /// case of a parametrized Python test, or a Python test class's or
+    /// file's tests. A remote project's Python tests run on its host; its
+    /// Rust tests need a launch file.
+    pub(crate) fn test_at(&self, pane: usize, line: usize) -> Option<crate::TestAt> {
+        use clew_core::runnables::RunnableKind;
         let viewer = self.proj.panes.get(pane).and_then(Option::as_ref)?;
         let lang = viewer
             .lang_key
             .filter(|l| matches!(*l, "rust" | "python"))?;
+        if self.connection.is_remote() && lang != "python" {
+            return None;
+        }
         let found = clew_core::runnables::runnables(lang, &viewer.source);
-        clew_core::runnables::runnable_at(&found, line)
-            .filter(|r| r.kind == clew_core::runnables::RunnableKind::Test)
-            .map(|r| r.name.clone())
+        let test = clew_core::runnables::runnable_at(&found, line)?;
+        Some(match test.kind {
+            RunnableKind::Main => return None,
+            RunnableKind::Tests if test.name.is_empty() => crate::TestAt::Group(
+                viewer
+                    .abs
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+            ),
+            RunnableKind::Tests => crate::TestAt::Group(test.name.clone()),
+            // A case the project's own hook may rename runs as the whole
+            // test (`test_plan_at`), and is offered as it.
+            RunnableKind::Test
+                if test.name.contains('[') && !crate::app::runplan::renames_cases(&viewer.abs) =>
+            {
+                crate::TestAt::Case(test.name.clone())
+            }
+            RunnableKind::Test => crate::TestAt::One,
+        })
     }
 
     /// Run (`no_debug`) or debug the one test at 1-based `line` of the

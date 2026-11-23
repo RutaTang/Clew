@@ -558,6 +558,9 @@ fn located_in_tree(tree: &Tree, source: &str, lang: Lang) -> Vec<Located> {
     // through its parents — each found by tree-sitter walking down from the
     // root.
     cursor.set_max_start_depth(Some(MAX_DEF_DEPTH));
+    // Python's functions, by their index in `out`: the scope each is
+    // declared in, and whether it is an `@overload` stub.
+    let mut overloads: Vec<(usize, usize, bool)> = Vec::new();
     let mut matches = cursor.matches(query, tree.root_node(), source.as_bytes());
     while let Some(m) = matches.next() {
         let mut kind: Option<&str> = None;
@@ -593,10 +596,14 @@ fn located_in_tree(tree: &Tree, source: &str, lang: Lang) -> Vec<Located> {
             .map_or(0, |(_, last)| last)
             .max(def.end_position().row + 1)
             .max(line);
+        if lang == Lang::Python && kind == "function" {
+            let (scope, stub) = python_overload(def, source);
+            overloads.push((out.len(), scope, stub));
+        }
         out.push(Located {
             symbol: Symbol {
                 name: name.to_string(),
-                kind: refine_kind(def, kind, lang).to_string(),
+                kind: refine_kind(def, kind, lang, name, source).to_string(),
                 line,
                 end_line,
             },
@@ -610,6 +617,7 @@ fn located_in_tree(tree: &Tree, source: &str, lang: Lang) -> Vec<Located> {
             accessed: lang == Lang::Python && python_property(def, source),
         });
     }
+    drop_overload_stubs(&mut out, &overloads);
     // Stable, so of two patterns naming the same symbol the first match wins
     // (e.g. the Rust method pattern over the plain function one).
     out.sort_by(|a, b| {
@@ -848,7 +856,12 @@ fn member_access(mut def: Node, access: &HashMap<usize, bool>) -> Option<bool> {
 /// Lean writes several kinds of declaration with one node: a `definition` is
 /// a `def` or an `abbrev`, a `theorem` or a `lemma`, or an `instance`, and a
 /// `structure` is a `structure` or a `class`. Its keyword says which.
-fn refine_kind<'a>(def: Node, kind: &'a str, lang: Lang) -> &'a str {
+///
+/// Python has no constants: a module's assignment is one by its name
+/// (`MAX_RETRIES`), else a variable (`logger = make()`, `app = Flask(…)`),
+/// or a type when it makes one (`Vector: TypeAlias = …`, `NewType`,
+/// `TypeVar`).
+fn refine_kind<'a>(def: Node, kind: &'a str, lang: Lang, name: &str, source: &str) -> &'a str {
     let function_valued = || {
         def.child_by_field_name("value")
             .is_some_and(|v| matches!(v.kind(), "arrow_function" | "function_expression"))
@@ -867,8 +880,89 @@ fn refine_kind<'a>(def: Node, kind: &'a str, lang: Lang) -> &'a str {
                 _ => kind,
             }
         }
+        Lang::Python if kind == "constant" => python_assignment_kind(def, name, source),
         _ => kind,
     }
+}
+
+/// What a Python module's assignment `def` to `name` declares: a type
+/// (annotated `TypeAlias`, or made by `NewType`, `TypeVar`, `ParamSpec`,
+/// `TypeVarTuple` or `TypeAliasType`), a constant (named in capitals, as
+/// PEP 8 has constants named), else a variable.
+fn python_assignment_kind(def: Node, name: &str, source: &str) -> &'static str {
+    let text = |node: Node| source.get(node.byte_range()).unwrap_or("");
+    let last = |path: &str| path.rsplit('.').next().unwrap_or(path).trim().to_string();
+    let annotated_alias = def
+        .child_by_field_name("type")
+        .is_some_and(|t| last(text(t)) == "TypeAlias");
+    let made_type = def
+        .child_by_field_name("right")
+        .filter(|r| r.kind() == "call")
+        .and_then(|call| call.child_by_field_name("function"))
+        .is_some_and(|f| {
+            matches!(
+                last(text(f)).as_str(),
+                "NewType" | "TypeVar" | "ParamSpec" | "TypeVarTuple" | "TypeAliasType"
+            )
+        });
+    if annotated_alias || made_type {
+        "type"
+    } else if name.chars().any(|c| c.is_ascii_uppercase())
+        && !name.chars().any(|c| c.is_lowercase())
+    {
+        "constant"
+    } else {
+        "variable"
+    }
+}
+
+/// The scope a Python function `def` is declared in (its block's first
+/// byte), and whether it is an `@overload` stub: `@overload` or
+/// `@typing.overload` above it.
+fn python_overload(def: Node, source: &str) -> (usize, bool) {
+    let decorated = def.parent().filter(|p| p.kind() == "decorated_definition");
+    let statement = decorated.unwrap_or(def);
+    let scope = statement.parent().map_or(0, |scope| scope.start_byte());
+    let Some(decorated) = decorated else {
+        return (scope, false);
+    };
+    let mut cursor = decorated.walk();
+    let stub = decorated
+        .children(&mut cursor)
+        .filter(|c| c.kind() == "decorator")
+        .filter_map(|c| source.get(c.byte_range()))
+        .any(|text| {
+            let name = text.trim_start_matches('@').trim();
+            name.rsplit('.').next().unwrap_or(name).trim() == "overload"
+        });
+    (scope, stub)
+}
+
+/// Drops the `@overload` stubs of `out` that a later definition of the
+/// same name in the same scope follows — the implementation, or in a
+/// stub file the last overload: one entry for the function, where the
+/// outline listed it once per signature. `overloads` holds Python
+/// functions' indices in `out`, their scopes, and which are stubs.
+fn drop_overload_stubs(out: &mut Vec<Located>, overloads: &[(usize, usize, bool)]) {
+    if !overloads.iter().any(|&(_, _, stub)| stub) {
+        return;
+    }
+    let mut drop = vec![false; out.len()];
+    for &(i, scope, stub) in overloads {
+        if !stub {
+            continue;
+        }
+        let name = &out[i].symbol.name;
+        let line = out[i].symbol.line;
+        drop[i] = overloads.iter().any(|&(j, other, _)| {
+            other == scope && out[j].symbol.name == *name && out[j].symbol.line > line
+        });
+    }
+    let mut index = 0;
+    out.retain(|_| {
+        index += 1;
+        !drop[index - 1]
+    });
 }
 
 /// Whether the Python definition `def` is a property's: decorated
@@ -4252,7 +4346,7 @@ fn build_inner() -> B { B }
             seen,
             [
                 ("MAX_RETRIES", "constant"),
-                ("logger", "constant"),
+                ("logger", "variable"),
                 ("Point", "class"),
                 ("x", "field"),
                 ("y", "field"),
@@ -4261,6 +4355,80 @@ fn build_inner() -> B { B }
                 ("Colour", "class"),
                 ("RED", "field"),
                 ("GREEN", "field"),
+            ]
+        );
+    }
+
+    /// A Python module's assignments are what they declare: a constant by
+    /// its capitals, a type alias (PEP 695's `type`, generic or not, an
+    /// annotated `TypeAlias`, a `NewType` or `TypeVar`) as a type, anything
+    /// else a variable. A function's `@overload` signatures are one entry —
+    /// its implementation's, or in a stub file its last signature's — not
+    /// one per signature; a property and its setter stay two.
+    #[test]
+    fn python_aliases_variables_and_overloads_are_outlined_as_they_are() {
+        let src = "\
+from typing import overload, NewType, TypeAlias, TypeVar
+import typing
+
+TIMEOUT_S = 30
+_DEFAULT_HOST = 'localhost'
+app = make_app()
+__all__ = ['parse']
+type Vector = list[float]
+type Pair[T] = tuple[T, T]
+Matrix: TypeAlias = list[Vector]
+UserId = NewType('UserId', int)
+T = TypeVar('T')
+
+@overload
+def parse(x: int) -> int: ...
+@typing.overload
+def parse(x: str) -> str: ...
+def parse(x):
+    return x
+
+class Reader:
+    @overload
+    def read(self, n: int) -> bytes: ...
+    @overload
+    def read(self) -> bytes: ...
+    def read(self, n=-1):
+        return b''
+
+    @property
+    def size(self): return 0
+    @size.setter
+    def size(self, v): pass
+
+@overload
+def stub_only(x: int) -> int: ...
+@overload
+def stub_only(x: str) -> str: ...
+";
+        let symbols = extract(src, "python");
+        let seen: Vec<(&str, &str, usize)> = symbols
+            .iter()
+            .map(|s| (s.name.as_str(), s.kind.as_str(), s.line))
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                ("TIMEOUT_S", "constant", 4),
+                ("_DEFAULT_HOST", "constant", 5),
+                ("app", "variable", 6),
+                ("__all__", "variable", 7),
+                ("Vector", "type", 8),
+                ("Pair", "type", 9),
+                ("Matrix", "type", 10),
+                ("UserId", "type", 11),
+                ("T", "type", 12),
+                ("parse", "function", 18),
+                ("Reader", "class", 21),
+                ("read", "function", 26),
+                ("size", "function", 30),
+                ("size", "function", 32),
+                ("stub_only", "function", 37),
             ]
         );
     }

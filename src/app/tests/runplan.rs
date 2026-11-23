@@ -4,7 +4,7 @@
 //! of a test ends; and the debugger reading a Rust panic.
 
 use super::*;
-use crate::app::runplan::{CargoTest, RunPlan};
+use crate::app::runplan::{CargoTest, RunPlan, Tested};
 use crate::app::state::RunTab;
 
 fn write(root: &Path, rel: &str, text: &str) {
@@ -189,9 +189,16 @@ fn run_test_runs_the_python_test_at_the_line() {
         line: Some(3),
         no_debug: true,
     }));
-    let Some(RunPlan::Pytest { file, node, name }) = app.debug.plan.clone() else {
+    let Some(RunPlan::Pytest {
+        file,
+        node,
+        name,
+        tested,
+    }) = app.debug.plan.clone()
+    else {
         panic!("{:?}", app.debug.plan);
     };
+    assert_eq!(tested, Tested::One);
     assert_eq!(file, root.join("tests/test_prices.py"));
     assert_eq!(
         node,
@@ -223,7 +230,7 @@ fn the_code_menu_offers_the_test_at_its_line() {
     write(&root, "src/lib.rs", LIB);
     open_synchronously(&mut app, "src/lib.rs", None);
     let pane = app.proj.active;
-    assert!(app.test_at(pane, 12).is_some_and(|name| name == "adds"));
+    assert_eq!(app.test_at(pane, 12), Some(crate::TestAt::One));
     assert!(app.test_at(pane, 2).is_none(), "in `area`");
     open_synchronously(&mut app, "notes.txt", None);
     assert!(app.test_at(app.proj.active, 1).is_none());
@@ -447,5 +454,146 @@ fn a_django_projects_test_runs_by_djangos_runner() {
         "[pytest]\nDJANGO_SETTINGS_MODULE = shop.settings\n",
     );
     let plan = crate::app::runplan::test_plan_at("python", &file, tests, 6).expect("a test");
+    assert!(matches!(plan, RunPlan::Pytest { .. }), "{plan:?}");
+}
+
+/// From a line of a Python test file, Run Test runs what the line is in:
+/// a test, one case of a parametrized test, a test class's tests, or —
+/// anywhere else — the file's. The code menu names each, and each run
+/// says how its tests ended.
+#[test]
+fn run_test_runs_a_class_a_file_or_a_case_from_their_lines() {
+    let mut app = scanned_app("runplan-groups");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let source = "\
+import pytest
+
+
+def helper():
+    return 1
+
+
+class TestCart:
+    total = 0
+
+    def test_total(self):
+        assert helper() == 1
+
+
+@pytest.mark.parametrize(\"a, b\", [
+    (1, 2),
+    (3, 4),
+])
+def test_add(a, b):
+    assert a < b
+";
+    write(&root, "tests/test_cart.py", source);
+    open_synchronously(&mut app, "tests/test_cart.py", None);
+    let pane = app.proj.active;
+    let file = root.join("tests/test_cart.py");
+    let at = |line| crate::app::runplan::test_plan_at("python", &file, source, line).unwrap();
+    // What the code menu offers at each line.
+    assert_eq!(app.test_at(pane, 12), Some(crate::TestAt::One));
+    assert_eq!(
+        app.test_at(pane, 9),
+        Some(crate::TestAt::Group("TestCart".into()))
+    );
+    assert_eq!(
+        app.test_at(pane, 5),
+        Some(crate::TestAt::Group("test_cart.py".into()))
+    );
+    assert_eq!(
+        app.test_at(pane, 17),
+        Some(crate::TestAt::Case("test_add[3-4]".into()))
+    );
+    // A class's tests, by the class's node id.
+    let class = at(10);
+    let RunPlan::Pytest {
+        node, name, tested, ..
+    } = &class
+    else {
+        panic!("{class:?}");
+    };
+    assert_eq!(node, &format!("{}::TestCart", file.display()));
+    assert_eq!((name.as_str(), *tested), ("TestCart", Tested::Group));
+    assert_eq!(class.verdict(0).unwrap(), "Tests in TestCart passed");
+    assert_eq!(class.verdict(1).unwrap(), "Some tests in TestCart failed");
+    assert_eq!(
+        class.verdict(5).unwrap(),
+        "pytest found no tests in TestCart"
+    );
+    // The file's, from a line in none of them.
+    let whole = at(5);
+    let RunPlan::Pytest { node, name, .. } = &whole else {
+        panic!("{whole:?}");
+    };
+    assert_eq!(node, &file.display().to_string());
+    assert_eq!(name, "test_cart.py");
+    // One case, alone; the whole test from its `def`.
+    let RunPlan::Pytest { node, tested, .. } = at(17) else {
+        panic!();
+    };
+    assert_eq!(node, format!("{}::test_add[3-4]", file.display()));
+    assert_eq!(tested, Tested::One);
+    let RunPlan::Pytest { node, .. } = at(19) else {
+        panic!();
+    };
+    assert_eq!(node, format!("{}::test_add", file.display()));
+    // A project whose hook names cases its own way: the whole test.
+    write(
+        &root,
+        "conftest.py",
+        "def pytest_make_parametrize_id(config, val, argname):\n    return None\n",
+    );
+    let RunPlan::Pytest { node, name, .. } = at(17) else {
+        panic!();
+    };
+    assert_eq!(node, format!("{}::test_add", file.display()));
+    assert_eq!(name, "test_add");
+    assert_eq!(app.test_at(pane, 17), Some(crate::TestAt::One));
+    // Run from the menu's line, the run is named for what it runs.
+    let _ = app.update(Message::Debug(DebugMsg::RunTest {
+        line: Some(9),
+        no_debug: true,
+    }));
+    assert_eq!(app.status, "Running TestCart…");
+}
+
+/// In a Django project, a test class and a test module run by Django's
+/// runner too, by their dotted labels; a module with no test class has
+/// nothing Django's runner runs, and pytest runs it.
+#[test]
+fn a_django_class_or_module_runs_by_its_label() {
+    let root = test_dir("runplan-django-groups");
+    let _ = std::fs::remove_dir_all(&root);
+    write(&root, "manage.py", "import django\n");
+    let tests = "from django.test import TestCase\n\n\nclass CartTests(TestCase):\n    def test_total(self):\n        self.assertEqual(1, 1)\n\n\ndef helper():\n    pass\n";
+    write(&root, "shop/tests.py", tests);
+    let file = root.join("shop/tests.py");
+    let label_at = |line| match crate::app::runplan::test_plan_at("python", &file, tests, line) {
+        Some(RunPlan::Django {
+            label,
+            name,
+            tested,
+            ..
+        }) => (label, name, tested),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(
+        label_at(4),
+        (
+            "shop.tests.CartTests".into(),
+            "CartTests".into(),
+            Tested::Group
+        )
+    );
+    assert_eq!(
+        label_at(10),
+        ("shop.tests".into(), "tests.py".into(), Tested::Group)
+    );
+    let loose = "import django\n\n\ndef test_loose():\n    assert True\n";
+    write(&root, "shop/test_loose.py", loose);
+    let file = root.join("shop/test_loose.py");
+    let plan = crate::app::runplan::test_plan_at("python", &file, loose, 1).expect("the file");
     assert!(matches!(plan, RunPlan::Pytest { .. }), "{plan:?}");
 }

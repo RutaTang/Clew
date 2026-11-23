@@ -368,30 +368,43 @@ pub(crate) fn context_menu<'a>(app: &App, menu: &'a crate::ContextMenu) -> Eleme
             ]
         },
         {
-            // The test the line is in, run or debugged alone, beside where
-            // it stops: Rust's through Cargo, Python's by pytest.
+            // What Run Test runs from the line, run or debugged, beside
+            // where it stops — named, where it is more than the test the
+            // line is in: one case of a parametrized test, or a class's or
+            // a file's tests. Rust's through Cargo, Python's by pytest.
             let mut debugging = Vec::new();
-            if menu.in_test {
+            if let Some(test) = &menu.test {
                 let line = Some(menu.line + 1);
+                let (run, debug): (std::borrow::Cow<'static, str>, _) = match test {
+                    crate::TestAt::One => (tr!("Run Test").into(), tr!("Debug Test").into()),
+                    crate::TestAt::Case(name) => (
+                        tr!("Run {test}", test = name).into(),
+                        tr!("Debug {test}", test = name).into(),
+                    ),
+                    crate::TestAt::Group(name) => (
+                        tr!("Run Tests in {name}", name = name).into(),
+                        tr!("Debug Tests in {name}", name = name).into(),
+                    ),
+                };
                 debugging.push(Row {
+                    label: run,
+                    msg: Message::Debug(DebugMsg::RunTest {
+                        line,
+                        no_debug: true,
+                    }),
                     keys: Some(app.keymap.chord(crate::keymap::Action::RunTest).caps()),
-                    ..plain(
-                        tr!("Run Test"),
-                        Message::Debug(DebugMsg::RunTest {
-                            line,
-                            no_debug: true,
-                        }),
-                    )
+                    able: true,
+                    ai: false,
                 });
                 debugging.push(Row {
+                    label: debug,
+                    msg: Message::Debug(DebugMsg::RunTest {
+                        line,
+                        no_debug: false,
+                    }),
                     keys: Some(app.keymap.chord(crate::keymap::Action::DebugTest).caps()),
-                    ..plain(
-                        tr!("Debug Test"),
-                        Message::Debug(DebugMsg::RunTest {
-                            line,
-                            no_debug: false,
-                        }),
-                    )
+                    able: true,
+                    ai: false,
                 });
             }
             debugging

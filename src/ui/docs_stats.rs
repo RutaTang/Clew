@@ -242,6 +242,7 @@ pub(crate) fn kind_badge(kind: &str) -> &str {
         "trait" | "interface" => "trait",
         "class" => "class",
         "constant" | "const" => "const",
+        "variable" | "var" => "var",
         "theorem" => "thm",
         "example" => "ex",
         "instance" => "inst",

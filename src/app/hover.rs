@@ -561,7 +561,7 @@ impl App {
             served,
             by_pointer: true,
             line_top: None,
-            in_test: self.test_at(pane, line + 1).is_some(),
+            test: self.test_at(pane, line + 1),
         });
         // The menu acts where it was opened: the caret goes there, as a
         // click puts it — the code said nothing of what it would act on. A

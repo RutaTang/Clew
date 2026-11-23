@@ -21,11 +21,15 @@ pub enum RunPlan {
         target: CargoTarget,
         test: Option<CargoTest>,
     },
-    /// One Python test, run by pytest by its node id.
+    /// Python tests, run by pytest by their node id: one test (or one
+    /// case of a parametrized one), a test class's, or a test file's.
     Pytest {
         file: PathBuf,
         node: String,
+        /// What the run is called: the test's name, its class's, or its
+        /// file's.
         name: String,
+        tested: Tested,
     },
     /// One test of a Django project, run by Django's own test runner
     /// (`manage.py test <label>`), where pytest has no Django settings to
@@ -35,9 +39,11 @@ pub enum RunPlan {
         file: PathBuf,
         /// The project's `manage.py`.
         manage: PathBuf,
-        /// The test's dotted label (`shop.tests.TestCart.test_total`).
+        /// The test's dotted label (`shop.tests.TestCart.test_total`), its
+        /// class's or its module's.
         label: String,
         name: String,
+        tested: Tested,
     },
     /// A Lean file's `main`, run by Lean in its Lake project (`lake env
     /// lean --run`): no debugger, its output and how it ended.
@@ -48,6 +54,15 @@ pub enum RunPlan {
         /// The `lake` it runs with.
         lake: PathBuf,
     },
+}
+
+/// How much of a test file a test run runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tested {
+    /// One test, or one case of a parametrized test.
+    One,
+    /// A group of tests: a test class's, or a test file's.
+    Group,
 }
 
 /// One Rust test of a Cargo target.
@@ -94,9 +109,35 @@ impl RunPlan {
     /// passed or failed — or, for pytest, that it found no such test (5),
     /// could not load it (2: an import or collection error), or stopped
     /// with an error of its own (3, 4): the test never ran, and "failed"
-    /// said it had. `None` for a run of anything but one test.
+    /// said it had. A group's run says the same of its tests. `None` for
+    /// a run of anything but tests.
     pub(crate) fn verdict(&self, code: i64) -> Option<String> {
         let name = self.test_name()?;
+        let group = matches!(
+            self,
+            RunPlan::Pytest {
+                tested: Tested::Group,
+                ..
+            } | RunPlan::Django {
+                tested: Tested::Group,
+                ..
+            }
+        );
+        if group {
+            return Some(match (self, code) {
+                (_, 0) => tr!("Tests in {name} passed", name = name),
+                (RunPlan::Pytest { .. }, 5) => tr!("pytest found no tests in {name}", name = name),
+                (RunPlan::Pytest { .. }, 2) => tr!(
+                    "pytest could not load {name} (see the run's output)",
+                    name = name
+                ),
+                (RunPlan::Pytest { .. }, 3 | 4) => tr!(
+                    "pytest stopped with an error before the tests in {name} ran (see the run's output)",
+                    name = name
+                ),
+                _ => tr!("Some tests in {name} failed", name = name),
+            });
+        }
         Some(match (self, code) {
             (_, 0) => tr!("Test {name} passed", name = name),
             (RunPlan::Pytest { .. }, 5) => tr!("pytest found no test named {name}", name = name),
@@ -223,8 +264,10 @@ pub(crate) fn cargo_plan_for(file: &Path) -> Result<RunPlan, NoProgram> {
 /// Python one by pytest. `None` where the line is in no test.
 pub(crate) fn test_plan_at(lang: &str, file: &Path, source: &str, line: usize) -> Option<RunPlan> {
     let found = runnables(lang, source);
-    let test = runnable_at(&found, line).filter(|r| r.kind == RunnableKind::Test)?;
+    let mut test = runnable_at(&found, line)
+        .filter(|r| matches!(r.kind, RunnableKind::Test | RunnableKind::Tests))?;
     match lang {
+        "rust" if test.kind != RunnableKind::Test => None,
         "rust" => {
             let target = clew_core::cargorun::target_of(file)?;
             Some(RunPlan::Cargo {
@@ -235,15 +278,60 @@ pub(crate) fn test_plan_at(lang: &str, file: &Path, source: &str, line: usize) -
                 target,
             })
         }
-        "python" => Some(
-            django_plan(file, source, test).unwrap_or_else(|| RunPlan::Pytest {
-                file: file.to_path_buf(),
-                node: pytest_node(&file.to_string_lossy(), test),
-                name: test.name.clone(),
-            }),
-        ),
+        "python" => {
+            // A case whose id the project's own hook may rename: the whole
+            // test, which is found whatever its cases are called.
+            if test.name.contains('[') && renames_cases(file) {
+                let whole = test.name.split('[').next().unwrap_or_default();
+                test = found
+                    .iter()
+                    .find(|r| {
+                        r.kind == RunnableKind::Test && r.name == whole && r.scopes == test.scopes
+                    })
+                    .unwrap_or(test);
+            }
+            let tested = match test.kind {
+                RunnableKind::Tests => Tested::Group,
+                _ => Tested::One,
+            };
+            let name = match test.name.is_empty() {
+                true => file_name(file),
+                false => test.name.clone(),
+            };
+            let classes = found
+                .iter()
+                .any(|r| r.kind == RunnableKind::Test && !r.scopes.is_empty());
+            Some(
+                django_plan(file, source, test, classes).unwrap_or_else(|| RunPlan::Pytest {
+                    file: file.to_path_buf(),
+                    node: pytest_node(&file.to_string_lossy(), test),
+                    name,
+                    tested,
+                }),
+            )
+        }
         _ => None,
     }
+}
+
+/// A file's name, as a run of its tests is called (`test_cart.py`).
+fn file_name(file: &Path) -> String {
+    file.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// Whether a `conftest.py` above `file` names parametrized cases its own
+/// way (`pytest_make_parametrize_id`), so that a case's id is not the one
+/// read from the test.
+pub(crate) fn renames_cases(file: &Path) -> bool {
+    file.ancestors()
+        .skip(1)
+        .take(MAX_MANAGE_DEPTH)
+        .filter_map(|dir| {
+            clew_core::statefile::read_capped(&dir.join("conftest.py"), MAX_CONFIG_BYTES)
+        })
+        .any(|text| text.contains("pytest_make_parametrize_id"))
 }
 
 /// Most folders above a test file looked in for its project's `manage.py`.
@@ -252,18 +340,25 @@ const MAX_MANAGE_DEPTH: usize = 8;
 /// Most bytes of a configuration file read for its pytest-django setup.
 const MAX_CONFIG_BYTES: u64 = 512 * 1024;
 
-/// One test of a Django project's, run as Django runs its tests
+/// Tests of a Django project's, run as Django runs its tests
 /// (`manage.py test`): a test method of a class in a file that uses
-/// Django, in a project with a `manage.py` above it whose pytest is not
-/// set up for Django (pytest-django, `DJANGO_SETTINGS_MODULE`) — under
+/// Django, its class's, or its module's when it has test classes
+/// (`classes`), in a project with a `manage.py` above it whose pytest is
+/// not set up for Django (pytest-django, `DJANGO_SETTINGS_MODULE`) — under
 /// pytest alone, Django's settings were never configured and its tests
 /// failed before they ran.
 fn django_plan(
     file: &Path,
     source: &str,
     test: &clew_core::runnables::Runnable,
+    classes: bool,
 ) -> Option<RunPlan> {
-    if test.scopes.is_empty() || !source.contains("django") {
+    let unittest = match test.kind {
+        RunnableKind::Tests if test.name.is_empty() => classes,
+        RunnableKind::Tests => true,
+        _ => !test.scopes.is_empty() && !test.name.contains('['),
+    };
+    if !unittest || !source.contains("django") {
         return None;
     }
     let project = file
@@ -283,12 +378,21 @@ fn django_plan(
         parts.pop();
     }
     parts.extend(test.scopes.iter().cloned());
-    parts.push(test.name.clone());
+    if !test.name.is_empty() {
+        parts.push(test.name.clone());
+    }
     Some(RunPlan::Django {
         file: file.to_path_buf(),
         manage: project.join("manage.py"),
         label: parts.join("."),
-        name: test.name.clone(),
+        name: match test.name.is_empty() {
+            true => file_name(file),
+            false => test.name.clone(),
+        },
+        tested: match test.kind {
+            RunnableKind::Tests => Tested::Group,
+            _ => Tested::One,
+        },
     })
 }
 

@@ -767,12 +767,20 @@ const JS_EXTRA_TAGS: &str = r#"
 /// assignments, its classes and its functions: a class's fields — a
 /// dataclass's, a pydantic or Django model's, an enum's members, each an
 /// assignment in the class's body. A model read in the outline showed its
-/// methods and none of what it holds.
+/// methods and none of what it holds. And a module's type aliases (PEP
+/// 695's `type Vector = list[float]`, generic ones too), which the
+/// outline left out.
 const PYTHON_EXTRA_TAGS: &str = r#"
 (class_definition
   body: (block
     (expression_statement
       (assignment left: (identifier) @name) @definition.field)))
+(module
+  (type_alias_statement
+    left: [
+      (type (identifier) @name)
+      (type (generic_type (identifier) @name))
+    ]) @definition.type)
 "#;
 
 /// Added to tree-sitter-java's own tags query, which has no constructors: the
