@@ -97,7 +97,7 @@ fn rust_crate_doc(source: &str, include: &dyn Fn(&str) -> Option<String>) -> Str
             break;
         }
     }
-    parts.join("\n").trim().to_string()
+    crate::docs::rustdoc_shown(parts.join("\n").trim())
 }
 
 /// Where an attribute's text, after its `#![`, ends: its closing `]`,
@@ -130,7 +130,10 @@ fn attribute_end(text: &str) -> Option<usize> {
 /// The doc an inner attribute gives: `doc = "…"`, or `doc =
 /// include_str!("…")` read by `include` — on its own or in a `cfg_attr`
 /// (`#![cfg_attr(docsrs, doc = include_str!("../README.md"))]`).
-fn doc_attribute(attr: &str, include: &dyn Fn(&str) -> Option<String>) -> Option<String> {
+pub(crate) fn doc_attribute(
+    attr: &str,
+    include: &dyn Fn(&str) -> Option<String>,
+) -> Option<String> {
     let at = attr.match_indices("doc").map(|(i, _)| i).find(|&i| {
         let before = attr[..i].chars().next_back();
         !before.is_some_and(|c| c.is_alphanumeric() || c == '_')
@@ -174,7 +177,7 @@ fn string_literal(text: &str) -> Option<String> {
 /// A `/*! … */` or `/** … */` block's text as rustdoc reads it: a column of
 /// leading `*`s taken off, then the common indent, blank lines at the ends
 /// dropped.
-fn block_doc(inner: &str) -> String {
+pub(crate) fn block_doc(inner: &str) -> String {
     let lines: Vec<&str> = inner.lines().map(|l| l.trim_end()).collect();
     let starred = lines
         .iter()

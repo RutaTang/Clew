@@ -459,11 +459,13 @@ impl DocStyle {
         }
         // Up from the line directly above the signature, past the lines glued
         // between it and its doc.
-        let end = ends.get(sig_line - 2).copied().flatten()?;
+        let end = ends.get(sig_line - 2).copied().flatten();
+        if matches!(self, DocStyle::RustLike) {
+            return rust_item_doc(lines, end, sig_line - 2);
+        }
+        let end = end?;
         match self {
             DocStyle::Block(syntax) => collect_block(lines, openers, end, syntax),
-            // `//!` documents the module it sits in, never the item below it.
-            DocStyle::RustLike => collect_line_docs(lines, end, &["///"]),
             DocStyle::SlashSlash => collect_line_docs(lines, end, &["//"]),
             DocStyle::DashDash => collect_line_docs(lines, end, &["--"]),
             // A magic comment (`# frozen_string_literal: true`) or a
@@ -479,6 +481,98 @@ impl DocStyle {
             _ => None,
         }
     }
+}
+
+/// A Rust item's doc, as rustdoc reads it: its `///` lines — or its
+/// `/** … */` block — ending on `end` (`//!` documents the module it sits
+/// in, never the item below it), then the `#[doc = "…"]` among the
+/// attributes between there and the item (`last` the line above it); the
+/// lines a doctest hides (`# use …;`) left out of its examples.
+fn rust_item_doc(lines: &[&str], end: Option<usize>, last: usize) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(end) = end {
+        let comment = match lines[end].trim_end().ends_with("*/") {
+            true => rust_block_doc(lines, end),
+            false => collect_line_docs(lines, end, &["///"]),
+        };
+        parts.extend(comment);
+    }
+    let first = end.map_or(0, |e| e + 1);
+    for line in lines.get(first..=last).unwrap_or_default() {
+        let t = line.trim();
+        if let Some(attr) = t.strip_prefix("#[").and_then(|a| a.strip_suffix(']'))
+            && let Some(doc) = crate::apidoc::doc_attribute(attr, &|_| None)
+        {
+            parts.push(doc);
+        }
+    }
+    non_empty(&rustdoc_shown(&parts.join("\n")))
+}
+
+/// The `/** … */` block ending on line `end`, its text as rustdoc reads it;
+/// `None` for a plain `/* … */` comment.
+fn rust_block_doc(lines: &[&str], end: usize) -> Option<String> {
+    const MAX_BLOCK_LINES: usize = 400;
+    let first = (end.saturating_sub(MAX_BLOCK_LINES)..=end)
+        .rev()
+        .find(|&i| lines[i].contains("/*"))?;
+    let opener = lines[first].trim_start();
+    if !opener.starts_with("/**") || opener.starts_with("/***") || opener.starts_with("/**/") {
+        return None;
+    }
+    let text = lines[first..=end].join("\n");
+    let inner = text.trim().strip_prefix("/**")?.strip_suffix("*/")?;
+    Some(crate::apidoc::block_doc(inner))
+}
+
+/// A Rust doc as rustdoc shows it: in its examples (a fenced block of Rust,
+/// as rustdoc tells one), a line `# …` is hidden — the setup a doctest
+/// needs and the reader does not — and `##` is a `#` written out.
+pub fn rustdoc_shown(doc: &str) -> String {
+    let mut out: Vec<std::borrow::Cow<'_, str>> = Vec::new();
+    let mut fence: Option<(&str, bool)> = None;
+    for line in doc.lines() {
+        let t = line.trim_start();
+        let marker = ["```", "~~~"].into_iter().find(|m| t.starts_with(m));
+        match (fence, marker) {
+            (None, Some(m)) => fence = Some((m, is_rust_fence(t.trim_start_matches(['`', '~'])))),
+            (Some((open, _)), Some(m)) if m == open => fence = None,
+            (Some((_, true)), _) if t == "#" || t.starts_with("# ") => continue,
+            (Some((_, true)), _) if t.starts_with("##") => {
+                out.push(line.replacen("##", "#", 1).into());
+                continue;
+            }
+            _ => {}
+        }
+        out.push(line.into());
+    }
+    out.join("\n")
+}
+
+/// Whether a fenced block's info string marks Rust code, as rustdoc reads
+/// it: none, `rust`, or only rustdoc's own words (`no_run`, `ignore`,
+/// `should_panic`, `edition2021`, …).
+fn is_rust_fence(info: &str) -> bool {
+    info.split([',', ' ', '\t'])
+        .map(str::trim)
+        .filter(|w| !w.is_empty())
+        .all(|w| {
+            matches!(
+                w,
+                "rust"
+                    | "ignore"
+                    | "should_panic"
+                    | "no_run"
+                    | "compile_fail"
+                    | "test_harness"
+                    | "standalone_crate"
+                    | "allow_fail"
+            ) || w.starts_with("edition")
+                || w.starts_with("ignore-")
+                || (w.len() == 5
+                    && w.starts_with('E')
+                    && w[1..].bytes().all(|b| b.is_ascii_digit()))
+        })
 }
 
 /// Collect a contiguous run of line-comment docs upward from `end`, keeping only
@@ -1955,6 +2049,33 @@ mod tests {
     fn docs_of(src: &str, lang: &str) -> HashMap<usize, String> {
         let syms = crate::outline::extract(src, lang);
         extract(src, lang, &syms)
+    }
+
+    /// A Rust item's doc in each of rustdoc's forms — `/** */`, `#[doc]`
+    /// among its attributes — and its examples as rustdoc shows them.
+    #[test]
+    fn rust_docs_in_every_form_and_examples_as_shown() {
+        let src = "/**\n * Adds two numbers.\n *\n * ```\n * # use calc::add;\n * assert_eq!(add(1, 2), 3);\n * ```\n */\npub fn add(a: i32, b: i32) -> i32 { a + b }\n\n\
+                   /// Subtracts.\n#[doc = \"Saturating.\"]\n#[inline]\npub fn sub(a: u8, b: u8) -> u8 { a.saturating_sub(b) }\n\n\
+                   /* not a doc */\npub fn mul() {}\n";
+        let docs = docs_of(src, "rust");
+        assert_eq!(
+            docs.get(&9).map(String::as_str),
+            Some("Adds two numbers.\n\n```\nassert_eq!(add(1, 2), 3);\n```"),
+            "{docs:?}"
+        );
+        assert_eq!(
+            docs.get(&14).map(String::as_str),
+            Some("Subtracts.\nSaturating.")
+        );
+        assert_eq!(docs.get(&17), None, "{docs:?}");
+        // `##` is a `#` written out; a block of another language keeps its `#`s.
+        assert_eq!(
+            rustdoc_shown(
+                "```no_run\n## not hidden\n# hidden\nlet x = 1;\n```\n```sh\n# a comment\n```"
+            ),
+            "```no_run\n# not hidden\nlet x = 1;\n```\n```sh\n# a comment\n```"
+        );
     }
 
     #[test]
