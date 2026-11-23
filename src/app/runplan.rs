@@ -45,6 +45,10 @@ pub enum RunPlan {
         name: String,
         tested: Tested,
     },
+    /// A Python program's start (`if __name__ == "__main__":`), its file
+    /// run as a script: what the code's own Run mark runs, whatever a
+    /// launch file names.
+    Script { file: PathBuf },
     /// A Lean file's `main`, run by Lean in its Lake project (`lake env
     /// lean --run`): no debugger, its output and how it ended.
     Lean {
@@ -65,14 +69,26 @@ pub enum Tested {
     Group,
 }
 
-/// One Rust test of a Cargo target.
+/// Rust tests of a Cargo target: one, or a group.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CargoTest {
-    /// Its name in its test binary as worked out from the code
-    /// (`parser::tests::adds`).
-    pub path: String,
-    /// Its function's name (`adds`).
+    /// Which, by the names its test binary lists them under.
+    pub runs: CargoTests,
+    /// What the run is called: the test's function's name (`adds`), its
+    /// module's (`tests`), or its file's (`parser.rs`).
     pub name: String,
+}
+
+/// Which tests of a test binary a run runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CargoTests {
+    /// One test, by its name as worked out from the code
+    /// (`parser::tests::adds`).
+    One(String),
+    /// A group: the tests named one of these or below it — a module
+    /// (`parser::tests`), a test at its file's root — every test of the
+    /// target where there are none.
+    Under(Vec<String>),
 }
 
 impl RunPlan {
@@ -87,7 +103,7 @@ impl RunPlan {
                 _ => target_name(target),
             },
             RunPlan::Pytest { name, .. } | RunPlan::Django { name, .. } => name.clone(),
-            RunPlan::Lean { file, .. } => file
+            RunPlan::Script { file } | RunPlan::Lean { file, .. } => file
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default(),
@@ -101,7 +117,9 @@ impl RunPlan {
                 test: Some(test), ..
             } => Some(&test.name),
             RunPlan::Pytest { name, .. } | RunPlan::Django { name, .. } => Some(name),
-            RunPlan::Cargo { test: None, .. } | RunPlan::Lean { .. } => None,
+            RunPlan::Cargo { test: None, .. } | RunPlan::Script { .. } | RunPlan::Lean { .. } => {
+                None
+            }
         }
     }
 
@@ -120,6 +138,12 @@ impl RunPlan {
                 ..
             } | RunPlan::Django {
                 tested: Tested::Group,
+                ..
+            } | RunPlan::Cargo {
+                test: Some(CargoTest {
+                    runs: CargoTests::Under(_),
+                    ..
+                }),
                 ..
             }
         );
@@ -159,7 +183,10 @@ impl RunPlan {
             RunPlan::Cargo { target, test } => {
                 test.is_some() || matches!(target.kind, TargetKind::Test(_))
             }
-            RunPlan::Pytest { .. } | RunPlan::Django { .. } | RunPlan::Lean { .. } => false,
+            RunPlan::Pytest { .. }
+            | RunPlan::Django { .. }
+            | RunPlan::Script { .. }
+            | RunPlan::Lean { .. } => false,
         }
     }
 
@@ -199,6 +226,12 @@ impl RunPlan {
                     .map_or_else(|| root.to_path_buf(), Path::to_path_buf),
                 Some(crate::dap::Lang::Python),
             ),
+            RunPlan::Script { file } => (
+                file.clone(),
+                Vec::new(),
+                root.to_path_buf(),
+                Some(crate::dap::Lang::Python),
+            ),
             RunPlan::Lean { file, project, .. } => {
                 (file.clone(), Vec::new(), project.clone(), None)
             }
@@ -213,6 +246,7 @@ impl RunPlan {
             RunPlan::Cargo { target, .. } => target.package_dir().to_path_buf(),
             RunPlan::Pytest { file, .. }
             | RunPlan::Django { file, .. }
+            | RunPlan::Script { file }
             | RunPlan::Lean { file, .. } => {
                 file.parent().map(Path::to_path_buf).unwrap_or_default()
             }
@@ -267,13 +301,41 @@ pub(crate) fn test_plan_at(lang: &str, file: &Path, source: &str, line: usize) -
     let mut test = runnable_at(&found, line)
         .filter(|r| matches!(r.kind, RunnableKind::Test | RunnableKind::Tests))?;
     match lang {
-        "rust" if test.kind != RunnableKind::Test => None,
         "rust" => {
             let target = clew_core::cargorun::target_of(file)?;
+            let runs = match (test.kind, test.name.is_empty()) {
+                (RunnableKind::Test, _) => {
+                    CargoTests::One(target.test_path(&test.scopes, &test.name))
+                }
+                (_, false) => CargoTests::Under(vec![target.test_path(&test.scopes, &test.name)]),
+                // A file's tests: its module's; a test target's root file
+                // holds every test of it; a library's or a program's root,
+                // its own modules' and tests' — not the crate's every test.
+                (_, true) if !target.module.is_empty() => {
+                    CargoTests::Under(vec![target.module.join("::")])
+                }
+                (_, true) if matches!(target.kind, TargetKind::Test(_)) => {
+                    CargoTests::Under(Vec::new())
+                }
+                (_, true) => CargoTests::Under(
+                    found
+                        .iter()
+                        .filter(|r| {
+                            r.scopes.is_empty()
+                                && !r.name.is_empty()
+                                && matches!(r.kind, RunnableKind::Test | RunnableKind::Tests)
+                        })
+                        .map(|r| r.name.clone())
+                        .collect(),
+                ),
+            };
             Some(RunPlan::Cargo {
                 test: Some(CargoTest {
-                    path: target.test_path(&test.scopes, &test.name),
-                    name: test.name.clone(),
+                    runs,
+                    name: match test.name.is_empty() {
+                        true => file_name(file),
+                        false => test.name.clone(),
+                    },
                 }),
                 target,
             })
@@ -310,6 +372,22 @@ pub(crate) fn test_plan_at(lang: &str, file: &Path, source: &str, line: usize) -
                 }),
             )
         }
+        _ => None,
+    }
+}
+
+/// The program whose start is at 1-based `line` of `file` (its text
+/// `source`, in language `lang`), as the run that runs it: a Rust file's
+/// `main`, its program built by Cargo; a Python file's `__main__` block,
+/// the file run as a script. `None` where no program starts there.
+pub(crate) fn main_plan_at(lang: &str, file: &Path, source: &str, line: usize) -> Option<RunPlan> {
+    let found = runnables(lang, source);
+    runnable_at(&found, line).filter(|r| r.kind == RunnableKind::Main)?;
+    match lang {
+        "rust" => cargo_plan_for(file).ok(),
+        "python" => Some(RunPlan::Script {
+            file: file.to_path_buf(),
+        }),
         _ => None,
     }
 }

@@ -245,6 +245,12 @@ pub struct Viewer {
     /// annotated line cost O(annotations) per frame (see
     /// [`Viewer::annotations`]).
     annotations: Annotations,
+    /// The file's runnables ([`Viewer::runnables`]) as of its lines
+    /// ([`Viewer::lines_generation`]): parsed once per text, not per frame.
+    runnables_cache: Memo<u64, Arc<[clew_core::runnables::Runnable]>>,
+    /// Whether the file is in a Cargo package (read once): a Rust file's
+    /// tests and `main` run through Cargo, and none run outside one.
+    in_cargo: std::cell::OnceCell<bool>,
 }
 
 /// Parse markdown items for `.md`-family files, so a readme renders as a
@@ -337,6 +343,8 @@ impl Viewer {
             lines_generation: next_generation(),
             annotations: Annotations::default(),
             git: None,
+            runnables_cache: std::cell::RefCell::new(None),
+            in_cargo: std::cell::OnceCell::new(),
         }
     }
 
@@ -359,6 +367,33 @@ impl Viewer {
     /// clamped under a reader scrolled right.
     pub fn lines_generation(&self) -> u64 {
         self.lines_generation
+    }
+
+    /// What runs on its own in the file — its tests, its test groups, its
+    /// program's start ([`clew_core::runnables::runnables`]) — read once per
+    /// text. None in a notebook, whose text is its JSON.
+    pub fn runnables(&self) -> Arc<[clew_core::runnables::Runnable]> {
+        let key = self.lines_generation;
+        if let Some((at, found)) = self.runnables_cache.borrow().as_ref()
+            && *at == key
+        {
+            return found.clone();
+        }
+        let found: Arc<[clew_core::runnables::Runnable]> = match self.lang_key {
+            Some(lang @ ("rust" | "python")) if self.notebook.is_none() => {
+                clew_core::runnables::runnables(lang, &self.source).into()
+            }
+            _ => Arc::from(Vec::new()),
+        };
+        *self.runnables_cache.borrow_mut() = Some((key, found.clone()));
+        found
+    }
+
+    /// Whether the file is in a Cargo package Clew can read: read once.
+    pub fn in_cargo_package(&self) -> bool {
+        *self
+            .in_cargo
+            .get_or_init(|| clew_core::cargorun::target_of(&self.abs).is_some())
     }
 
     /// The code view's summary of this document's annotations — the inlay

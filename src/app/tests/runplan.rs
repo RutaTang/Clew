@@ -4,7 +4,7 @@
 //! of a test ends; and the debugger reading a Rust panic.
 
 use super::*;
-use crate::app::runplan::{CargoTest, RunPlan, Tested};
+use crate::app::runplan::{CargoTest, CargoTests, RunPlan, Tested};
 use crate::app::state::RunTab;
 
 fn write(root: &Path, rel: &str, text: &str) {
@@ -99,13 +99,37 @@ fn run_test_runs_the_rust_test_at_the_cursor() {
     write(&root, "Cargo.toml", MANIFEST);
     write(&root, "src/lib.rs", LIB);
     open_synchronously(&mut app, "src/lib.rs", None);
-    // In `area`, no test: nothing runs.
+    // In `area`, no test: the file's tests — of a library's root, its own
+    // modules', not the crate's every test.
+    assert_eq!(
+        crate::app::runplan::test_plan_at("rust", &root.join("src/lib.rs"), LIB, 2).and_then(
+            |plan| match plan {
+                RunPlan::Cargo { test: Some(t), .. } => Some((t.runs, t.name)),
+                _ => None,
+            }
+        ),
+        Some((CargoTests::Under(vec!["tests".into()]), "lib.rs".into()))
+    );
+    // In `mod tests`, out of any test: the module's.
+    assert_eq!(
+        crate::app::runplan::test_plan_at("rust", &root.join("src/lib.rs"), LIB, 8).and_then(
+            |plan| match plan {
+                RunPlan::Cargo { test: Some(t), .. } => Some((t.runs, t.name)),
+                _ => None,
+            }
+        ),
+        Some((CargoTests::Under(vec!["tests".into()]), "tests".into()))
+    );
+    // A file with no test runs nothing, and says so.
+    write(&root, "src/plain.rs", "pub fn f() {}\n");
+    open_synchronously(&mut app, "src/plain.rs", None);
     let _ = app.update(Message::Debug(DebugMsg::RunTest {
-        line: Some(2),
+        line: Some(1),
         no_debug: true,
     }));
     assert!(app.debug.session.is_none());
     assert!(app.status.starts_with("No test here"), "{}", app.status);
+    open_synchronously(&mut app, "src/lib.rs", None);
     // In `adds`, at the cursor.
     app.active_viewer_mut().unwrap().caret = Some((11, 4));
     let _ = app.update(Message::Debug(DebugMsg::RunTest {
@@ -113,13 +137,16 @@ fn run_test_runs_the_rust_test_at_the_cursor() {
         no_debug: true,
     }));
     let Some(RunPlan::Cargo {
-        test: Some(CargoTest { path, name }),
+        test: Some(CargoTest { runs, name }),
         ..
     }) = &app.debug.plan
     else {
         panic!("{:?}", app.debug.plan);
     };
-    assert_eq!((path.as_str(), name.as_str()), ("tests::adds", "adds"));
+    assert_eq!(
+        (runs, name.as_str()),
+        (&CargoTests::One("tests::adds".into()), "adds")
+    );
     assert!(app.debug.no_debug);
     assert_eq!(
         app.status,
@@ -220,8 +247,8 @@ fn run_test_runs_the_python_test_at_the_line() {
     assert_eq!(app.status, "pytest found no test named test_total");
 }
 
-/// The code menu offers Run Test and Debug Test on a line in a test, and
-/// only there.
+/// The code menu offers Run Test and Debug Test on a line in a test; out
+/// of any test, its file's tests; in a file with none, nothing.
 #[test]
 fn the_code_menu_offers_the_test_at_its_line() {
     let mut app = scanned_app("runplan-menu");
@@ -231,7 +258,11 @@ fn the_code_menu_offers_the_test_at_its_line() {
     open_synchronously(&mut app, "src/lib.rs", None);
     let pane = app.proj.active;
     assert_eq!(app.test_at(pane, 12), Some(crate::TestAt::One));
-    assert!(app.test_at(pane, 2).is_none(), "in `area`");
+    assert_eq!(
+        app.test_at(pane, 2),
+        Some(crate::TestAt::Group("lib.rs".into())),
+        "in `area`"
+    );
     open_synchronously(&mut app, "notes.txt", None);
     assert!(app.test_at(app.proj.active, 1).is_none());
 }
@@ -596,4 +627,129 @@ fn a_django_class_or_module_runs_by_its_label() {
     let file = root.join("shop/test_loose.py");
     let plan = crate::app::runplan::test_plan_at("python", &file, loose, 1).expect("the file");
     assert!(matches!(plan, RunPlan::Pytest { .. }), "{plan:?}");
+}
+
+/// The gutter's ▶: on a Rust file's tests, its test module and its `main`,
+/// and a Python file's test class, tests and `__main__` block — not on a
+/// parametrized test's cases. A click opens the short code menu there:
+/// Run and Debug of what starts on the line, and the breakpoint the ▶
+/// stands in for. Its rows run that, whatever a launch file names.
+#[test]
+fn a_gutter_play_mark_runs_or_debugs_what_starts_on_its_line() {
+    let mut app = scanned_app("runplan-gutter-marks");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    write(&root, "Cargo.toml", MANIFEST);
+    write(&root, "src/lib.rs", LIB);
+    write(
+        &root,
+        "src/main.rs",
+        "fn main() {\n    println!(\"{}\", shapes::area(2.0));\n}\n",
+    );
+    // A launch file naming another program: the ▶ runs this one.
+    write(
+        &root,
+        ".clew/launch.json",
+        r#"{"configurations": [{"type": "python", "program": "other.py"}]}"#,
+    );
+    write(
+        &root,
+        "app.py",
+        "import pytest\n\nclass TestCart:\n    def test_total(self):\n        pass\n\n\
+         @pytest.mark.parametrize('n', [1, 2])\ndef test_n(n):\n    pass\n\n\
+         if __name__ == '__main__':\n    print('hi')\n",
+    );
+
+    open_synchronously(&mut app, "src/lib.rs", None);
+    let pane = app.proj.active;
+    let marks = |app: &App| {
+        let v = app.proj.panes[pane].as_ref().unwrap();
+        let mut lines: Vec<usize> = app.run_marks(v).into_iter().collect();
+        lines.sort();
+        lines
+    };
+    assert_eq!(marks(&app), [6, 10], "`mod tests` and `adds`");
+
+    // A click on `adds`'s ▶: its menu, short.
+    let _ = app.update(Message::Hover(HoverMsg::RunMarkClicked {
+        pane,
+        line: 10,
+        x: 4.0,
+        y: 200.0,
+    }));
+    let menu = app.proj.context_menu.clone().expect("the ▶'s menu");
+    assert_eq!(menu.test, Some(crate::TestAt::One));
+    assert_eq!(menu.gutter, Some(crate::GutterRun { main: None }));
+    assert_eq!(menu.line, 9, "0-based, as the code menu's");
+    // On the module: its tests.
+    let _ = app.update(Message::Hover(HoverMsg::ContextMenuClosed));
+    let _ = app.update(Message::Hover(HoverMsg::RunMarkClicked {
+        pane,
+        line: 6,
+        x: 4.0,
+        y: 120.0,
+    }));
+    assert_eq!(
+        app.proj.context_menu.as_ref().and_then(|m| m.test.clone()),
+        Some(crate::TestAt::Group("tests".into()))
+    );
+    let _ = app.update(Message::Hover(HoverMsg::ContextMenuClosed));
+
+    // `main`: named for its program, and run as Cargo builds it.
+    open_synchronously(&mut app, "src/main.rs", None);
+    let pane = app.proj.active;
+    let v = app.proj.panes[pane].as_ref().unwrap();
+    assert_eq!(app.run_marks(v).into_iter().collect::<Vec<_>>(), [1]);
+    let _ = app.update(Message::Hover(HoverMsg::RunMarkClicked {
+        pane,
+        line: 1,
+        x: 4.0,
+        y: 10.0,
+    }));
+    let menu = app.proj.context_menu.clone().expect("the ▶'s menu");
+    assert_eq!(menu.test, None);
+    assert_eq!(
+        menu.gutter,
+        Some(crate::GutterRun {
+            main: Some("shapes".into())
+        })
+    );
+    let _ = app.update(Message::Debug(DebugMsg::RunMain {
+        line: 1,
+        no_debug: true,
+    }));
+    assert!(
+        matches!(&app.debug.plan, Some(RunPlan::Cargo { target, test: None })
+            if target.kind == clew_core::cargorun::TargetKind::Bin("shapes".into())),
+        "{:?}",
+        app.debug.plan
+    );
+
+    // Python: the class, its test and the parametrized test, each once
+    // (no ▶ on its cases' lines), and the `__main__` block.
+    open_synchronously(&mut app, "app.py", None);
+    let pane = app.proj.active;
+    let v = app.proj.panes[pane].as_ref().unwrap();
+    let mut lines: Vec<usize> = app.run_marks(v).into_iter().collect();
+    lines.sort();
+    assert_eq!(lines, [3, 4, 8, 11]);
+    assert_eq!(app.main_at(pane, 11).as_deref(), Some("app.py"));
+    let runs = app.run_tabs().len();
+    let _ = app.update(Message::Debug(DebugMsg::RunMain {
+        line: 11,
+        no_debug: false,
+    }));
+    assert_eq!(app.run_tabs().len(), runs + 1, "a run of its own");
+    assert_eq!(
+        app.debug.plan,
+        Some(RunPlan::Script {
+            file: root.join("app.py")
+        }),
+        "the file, not the launch file's program"
+    );
+    // Where nothing starts, nothing runs.
+    let _ = app.update(Message::Debug(DebugMsg::RunMain {
+        line: 2,
+        no_debug: true,
+    }));
+    assert_eq!(app.status, "No program starts here.");
 }

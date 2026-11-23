@@ -290,16 +290,35 @@ async fn build_with_cargo(
         let _ = output.send(not_run(error)).await;
         return None;
     };
-    match clew_core::cargorun::listed_test(&list, &test.path) {
-        Some(found) => Some((executable, clew_core::cargorun::test_args(&found), package)),
-        None => {
-            let error = tr!(
-                "When built, {target} has no test named {name}. It may be behind a #[cfg] or a Cargo feature this run doesn't turn on (Settings → Language servers → Rust).",
-                target = name,
-                name = test.name
-            );
-            let _ = output.send(not_run(error)).await;
-            None
+    use crate::app::runplan::CargoTests;
+    match &test.runs {
+        CargoTests::One(path) => match clew_core::cargorun::listed_test(&list, path) {
+            Some(found) => Some((executable, clew_core::cargorun::test_args(&found), package)),
+            None => {
+                let error = tr!(
+                    "When built, {target} has no test named {name}. It may be behind a #[cfg] or a Cargo feature this run doesn't turn on (Settings → Language servers → Rust).",
+                    target = name,
+                    name = test.name
+                );
+                let _ = output.send(not_run(error)).await;
+                None
+            }
+        },
+        // A group: its tests as the binary lists them, by their module's
+        // filter where it picks them alone, else each by name.
+        CargoTests::Under(under) => {
+            let selected = clew_core::cargorun::listed_under(&list, under);
+            if selected.is_empty() {
+                let error = tr!(
+                    "When built, {target} has no tests in {name}. They may be behind a #[cfg] or a Cargo feature this run doesn't turn on (Settings → Language servers → Rust).",
+                    target = name,
+                    name = test.name
+                );
+                let _ = output.send(not_run(error)).await;
+                return None;
+            }
+            let args = clew_core::cargorun::group_args(&list, under, &selected);
+            Some((executable, args, package))
         }
     }
 }
@@ -610,6 +629,69 @@ impl App {
         })
     }
 
+    /// The program that starts at 1-based `line` of pane `pane`'s file, by
+    /// its name, where one does and runs from here: a Rust `main`'s, built
+    /// by Cargo on this computer; a Python `__main__` block's file.
+    pub(crate) fn main_at(&self, pane: usize, line: usize) -> Option<String> {
+        use clew_core::runnables::RunnableKind;
+        let viewer = self.proj.panes.get(pane).and_then(Option::as_ref)?;
+        let found = viewer.runnables();
+        clew_core::runnables::runnable_at(&found, line).filter(|r| r.kind == RunnableKind::Main)?;
+        match viewer.lang_key? {
+            "rust" if !self.connection.is_remote() => {
+                crate::app::runplan::cargo_plan_for(&viewer.abs)
+                    .ok()
+                    .map(|plan| plan.label())
+            }
+            "python" => viewer
+                .abs
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned()),
+            _ => None,
+        }
+    }
+
+    /// The lines of `v`'s file marked ▶ in its gutter, 1-based: its tests,
+    /// its test groups (a class's, a module's) and its program's start —
+    /// not a parametrized test's cases, nor the file's own group, which have
+    /// no line of their own. Not where they can't be run from here: a
+    /// remote project's Rust, a Rust file in no Cargo package.
+    pub(crate) fn run_marks(&self, v: &crate::viewer::Viewer) -> std::collections::HashSet<usize> {
+        use clew_core::runnables::RunnableKind;
+        let found = v.runnables();
+        if found.is_empty()
+            || (v.lang_key == Some("rust")
+                && (self.connection.is_remote() || !v.in_cargo_package()))
+        {
+            return std::collections::HashSet::new();
+        }
+        found
+            .iter()
+            .filter(|r| match r.kind {
+                RunnableKind::Test => !r.name.contains('['),
+                RunnableKind::Tests => !r.name.is_empty(),
+                RunnableKind::Main => true,
+            })
+            .map(|r| r.line)
+            .collect()
+    }
+
+    /// Run (`no_debug`) or debug the program that starts at 1-based `line`
+    /// of the active file: a gutter ▶'s ([`DebugMsg::RunMain`]) — whatever
+    /// a launch file names, it is this one that runs.
+    pub(crate) fn run_main_at(&mut self, line: usize, no_debug: bool) -> Task<Message> {
+        let plan = self
+            .active_viewer()
+            .and_then(|v| crate::app::runplan::main_plan_at(v.lang_key?, &v.abs, &v.source, line));
+        match plan {
+            Some(plan) => self.start_session(no_debug, Some(plan)),
+            None => {
+                self.status = tr!("No program starts here.").into();
+                Task::none()
+            }
+        }
+    }
+
     /// Run (`no_debug`) or debug the one test at 1-based `line` of the
     /// active file — the code menu's line — or, `None`, the one the cursor
     /// is in: a Rust test built by Cargo and run alone, a Python one by
@@ -728,7 +810,14 @@ impl App {
         // run by its Lean: a remote project's are those its launch file
         // names. A Python test is run on the remote host, by its pytest.
         let remote_test = match (&plan, remote) {
-            (Some(plan @ RunPlan::Pytest { .. } | plan @ RunPlan::Django { .. }), true) => {
+            (
+                Some(
+                    plan @ RunPlan::Pytest { .. }
+                    | plan @ RunPlan::Django { .. }
+                    | plan @ RunPlan::Script { .. },
+                ),
+                true,
+            ) => {
                 let (program, args, cwd, _) = plan.launch(&root);
                 Some(
                     serde_json::json!({
@@ -943,11 +1032,18 @@ impl App {
                 Some(RunPlan::Cargo {
                     target,
                     test: Some(test),
-                }) => tr!(
-                    "Building the tests of {target} with Cargo, to run {test}…",
-                    target = crate::app::runplan::target_name(target),
-                    test = test.name
-                ),
+                }) => match test.runs {
+                    crate::app::runplan::CargoTests::One(_) => tr!(
+                        "Building the tests of {target} with Cargo, to run {test}…",
+                        target = crate::app::runplan::target_name(target),
+                        test = test.name
+                    ),
+                    crate::app::runplan::CargoTests::Under(_) => tr!(
+                        "Building the tests of {target} with Cargo, to run the tests in {name}…",
+                        target = crate::app::runplan::target_name(target),
+                        name = test.name
+                    ),
+                },
                 _ => tr!("Building {program} with Cargo…", program = program_name),
             },
             Some(_) if no_debug => match reading {
@@ -965,10 +1061,16 @@ impl App {
             None if matches!(plan, Some(RunPlan::Lean { .. })) => {
                 tr!("Running {file} with Lean…", file = program_name)
             }
-            None if matches!(plan, Some(RunPlan::Pytest { .. } | RunPlan::Django { .. })) => tr!(
-                "Running {test} on the remote host…",
-                test = plan.as_ref().map(RunPlan::label).unwrap_or_default()
-            ),
+            None if matches!(
+                plan,
+                Some(RunPlan::Pytest { .. } | RunPlan::Django { .. } | RunPlan::Script { .. })
+            ) =>
+            {
+                tr!(
+                    "Running {test} on the remote host…",
+                    test = plan.as_ref().map(RunPlan::label).unwrap_or_default()
+                )
+            }
             None if no_debug => tr!("Starting the program on the remote host…").into(),
             None => tr!("Starting debugger on the remote host…").into(),
         };
@@ -3413,6 +3515,7 @@ impl App {
             DebugMsg::Start => self.start_debug(),
             DebugMsg::Run => self.start_run(),
             DebugMsg::RunTest { line, no_debug } => self.run_test_at(line, no_debug),
+            DebugMsg::RunMain { line, no_debug } => self.run_main_at(line, no_debug),
             DebugMsg::ShowTab(tab) => self.show_run_tab(tab),
             DebugMsg::CloseTab(tab) => self.close_run_tab(tab),
             DebugMsg::Again => self.on_debug_again(),

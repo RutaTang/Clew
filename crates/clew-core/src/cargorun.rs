@@ -433,6 +433,50 @@ pub fn listed_test(list: &str, wanted: &str) -> Option<String> {
     }
 }
 
+/// Of a test binary's `--list --format terse` lines, the tests of a group,
+/// in the order listed: those named one of `under` or below it — a module
+/// (`parser::tests`), or a test at its file's root. Every test where
+/// `under` is empty.
+pub fn listed_under(list: &str, under: &[String]) -> Vec<String> {
+    list.lines()
+        .filter_map(|l| l.strip_suffix(": test"))
+        .filter(|test| {
+            under.is_empty()
+                || under.iter().any(|u| {
+                    test.strip_prefix(u.as_str())
+                        .is_some_and(|rest| rest.is_empty() || rest.starts_with("::"))
+                })
+        })
+        .map(str::to_string)
+        .collect()
+}
+
+/// The arguments a test binary runs the group `under` with, `selected` the
+/// tests of its `list` in it ([`listed_under`]): none, for every test; the
+/// one filter its module makes (`parser::tests::`) where that picks those
+/// tests and no other; else each by its exact name — the filter is matched
+/// anywhere in a name, and `a::tests::` also ran `b::a::tests::x`. Its
+/// ignored tests stay ignored, as `cargo test` leaves them.
+pub fn group_args(list: &str, under: &[String], selected: &[String]) -> Vec<String> {
+    if under.is_empty() {
+        return Vec::new();
+    }
+    if let [module] = under {
+        let filter = format!("{module}::");
+        let picked = list
+            .lines()
+            .filter_map(|l| l.strip_suffix(": test"))
+            .filter(|t| t.contains(&filter))
+            .count();
+        if picked == selected.len() && !selected.iter().any(|t| t == module) {
+            return vec![filter];
+        }
+    }
+    let mut args = selected.to_vec();
+    args.push("--exact".into());
+    args
+}
+
 /// The user's Cargo, on the path a launched program gets — where rustup
 /// puts it (`~/.cargo/bin`) included, which an app started from the desktop
 /// often has not on its own ([`crate::linerpc::spawn_path`]).
@@ -602,6 +646,45 @@ pub fn test_args(path: &str) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::testutil::TempDir;
+
+    /// A group's tests are the ones under its module, or every test of
+    /// the target; run by the module's filter where it picks them alone,
+    /// else each by its exact name, ignored ones left ignored.
+    #[test]
+    fn a_groups_tests_run_by_their_module_or_by_name() {
+        let list = "a::tests::one: test\na::tests::two: test\nb::a::tests::x: test\n\
+                    tests::root: test\nlone: test\nbench_it: bench\n";
+        let under = |u: &[&str]| u.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            listed_under(list, &under(&["a::tests"])),
+            ["a::tests::one", "a::tests::two"]
+        );
+        assert_eq!(listed_under(list, &[]).len(), 5, "every test, no bench");
+        assert_eq!(
+            listed_under(list, &under(&["tests", "lone"])),
+            ["tests::root", "lone"]
+        );
+        assert!(listed_under(list, &under(&["a::test"])).is_empty());
+
+        // `b::tests::` is found in no other name: the filter alone.
+        let b = under(&["b::a::tests"]);
+        assert_eq!(
+            group_args(list, &b, &listed_under(list, &b)),
+            ["b::a::tests::"]
+        );
+        // `a::tests::` is found in `b::a::tests::x` too: by name.
+        let a = under(&["a::tests"]);
+        assert_eq!(
+            group_args(list, &a, &listed_under(list, &a)),
+            ["a::tests::one", "a::tests::two", "--exact"]
+        );
+        let root = under(&["tests", "lone"]);
+        assert_eq!(
+            group_args(list, &root, &listed_under(list, &root)),
+            ["tests::root", "lone", "--exact"]
+        );
+        assert!(group_args(list, &[], &listed_under(list, &[])).is_empty());
+    }
 
     fn write(root: &Path, rel: &str, text: &str) -> PathBuf {
         let path = root.join(rel);

@@ -4313,6 +4313,7 @@ fn escape_names_the_topmost_overlay() {
         by_pointer: true,
         line_top: None,
         test: None,
+        gutter: None,
     });
     assert!(matches!(
         super::escape_message(&app),
@@ -4380,6 +4381,7 @@ fn escape_closes_overlays_one_at_a_time() {
         by_pointer: true,
         line_top: None,
         test: None,
+        gutter: None,
     });
     open_tools_menu(&mut app);
     let escape = || {
@@ -4640,6 +4642,7 @@ fn the_context_menu_has_each_languages_own_rows() {
         by_pointer: true,
         line_top: None,
         test: None,
+        gutter: None,
     });
     let mut sim = sim_of(&app);
     assert!(shows(&mut sim, "Memory Layout"));
@@ -5299,6 +5302,7 @@ fn the_code_menu_shows_the_breakpoints_key() {
         by_pointer: true,
         line_top: None,
         test: None,
+        gutter: None,
     });
     let mut sim = sim_of(&app);
     let row = text_at(&mut sim, |t| t == "Toggle Breakpoint", 0).expect("the row");
@@ -5443,6 +5447,7 @@ fn a_breakpoints_condition_dialog_edits_and_removes_it() {
             by_pointer: true,
             line_top: None,
             test: None,
+            gutter: None,
         });
     };
     menu(&mut app);
@@ -12087,6 +12092,7 @@ fn the_flow_tab_lists_occurrences_under_their_roles() {
         by_pointer: true,
         line_top: None,
         test: None,
+        gutter: None,
     });
     assert!(shows(&mut sim_of(&app), "Trace Value"));
     app.proj.context_menu = None;
@@ -13677,6 +13683,7 @@ fn the_context_menu_offers_the_languages_own_action() {
         by_pointer: true,
         line_top: None,
         test: None,
+        gutter: None,
     };
     app.proj.context_menu = Some(menu(Some(crate::InsightKind::ExpandMacro)));
     assert!(shows(&mut sim_of(&app), "Expand Macro"));
@@ -17854,6 +17861,7 @@ fn the_context_menu_waits_for_the_language_server() {
         by_pointer: true,
         line_top: None,
         test: None,
+        gutter: None,
     };
     app.proj.context_menu = Some(menu(false));
     for waits in ["Go to Definition", "Find References", "Call Hierarchy"] {
@@ -20022,6 +20030,7 @@ fn audited_states() -> Vec<(String, App)> {
         by_pointer: true,
         line_top: None,
         test: None,
+        gutter: None,
     });
     states.push(("the context menu".into(), app));
     let mut app = base_clone(&base);

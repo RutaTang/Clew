@@ -978,6 +978,7 @@ impl App {
                     by_pointer: false,
                     line_top: None,
                     test: self.test_at(pane, line + 1),
+                    gutter: None,
                 });
                 self.update(message)
             }

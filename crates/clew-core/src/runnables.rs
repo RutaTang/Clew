@@ -20,8 +20,9 @@ pub enum RunnableKind {
     /// A test: run on its own, by its test runner. A parametrized Python
     /// test's case is one too, named as pytest names it (`test_add[1-2]`).
     Test,
-    /// A group of tests, run together: a Python test class's (named for
-    /// the class), or a Python test file's (its name empty: the file).
+    /// A group of tests, run together: a Python test class's or a Rust
+    /// module's (named for it), or a test file's (its name empty: the
+    /// file).
     Tests,
     /// The program's start: Rust's `fn main`, Python's
     /// `if __name__ == "__main__":` block.
@@ -70,21 +71,21 @@ pub fn runnables(lang: &str, source: &str) -> Vec<Runnable> {
             let root = tree.root_node();
             let parametrized = marks_parametrize(root, source);
             python(root, source, &entries, &mut scopes, parametrized, &mut out);
-            // A test file's tests, all of them: what Run Test runs from a
-            // line in no test.
-            if out.iter().any(|r| r.kind == RunnableKind::Test) {
-                out.insert(
-                    0,
-                    Runnable {
-                        kind: RunnableKind::Tests,
-                        name: String::new(),
-                        line: 1,
-                        span: (1, lines.len().max(1)),
-                        scopes: Vec::new(),
-                    },
-                );
-            }
         }
+    }
+    // A test file's tests, all of them: what Run Test runs from a line in
+    // no test.
+    if out.iter().any(|r| r.kind == RunnableKind::Test) {
+        out.insert(
+            0,
+            Runnable {
+                kind: RunnableKind::Tests,
+                name: String::new(),
+                line: 1,
+                span: (1, lines.len().max(1)),
+                scopes: Vec::new(),
+            },
+        );
     }
     out
 }
@@ -158,9 +159,25 @@ fn rust(
                 ) else {
                     continue;
                 };
-                scopes.push(text(name, source).to_string());
+                let name_text = text(name, source);
+                let first = out.len();
+                scopes.push(name_text.to_string());
                 rust(body, source, entries, scopes, out);
                 scopes.pop();
+                // The module's tests, all of them, when it has any: a
+                // `mod tests` run as a whole.
+                if out[first..].iter().any(|r| r.kind == RunnableKind::Test) {
+                    out.insert(
+                        first,
+                        Runnable {
+                            kind: RunnableKind::Tests,
+                            name: name_text.to_string(),
+                            line: name.start_position().row + 1,
+                            span: span(item),
+                            scopes: scopes.clone(),
+                        },
+                    );
+                }
             }
             _ => {}
         }
@@ -357,11 +374,19 @@ mod tests {
         assert_eq!(
             named(&found),
             [
+                (RunnableKind::Tests, String::new(), 1, vec![]),
                 (RunnableKind::Main, "main".into(), 1, vec![]),
+                (RunnableKind::Tests, "tests".into(), 8, vec![]),
                 (
                     RunnableKind::Test,
                     "adds".into(),
                     12,
+                    vec!["tests".to_string()]
+                ),
+                (
+                    RunnableKind::Tests,
+                    "deeper".into(),
+                    16,
                     vec!["tests".to_string()]
                 ),
                 (
@@ -381,8 +406,17 @@ mod tests {
             runnable_at(&found, 2).map(|r| r.name.as_str()),
             Some("main")
         );
-        assert_eq!(runnable_at(&found, 5), None, "a plain function");
-        assert_eq!(runnable_at(&found, 21), None, "in the module, no test");
+        // Out of any test: the module's tests, or the file's.
+        assert_eq!(
+            runnable_at(&found, 21).map(|r| (r.kind, r.name.as_str())),
+            Some((RunnableKind::Tests, "tests")),
+            "in the module, no test"
+        );
+        assert_eq!(
+            runnable_at(&found, 5).map(|r| (r.kind, r.name.as_str())),
+            Some((RunnableKind::Tests, "")),
+            "a plain function"
+        );
     }
 
     /// A Python file's tests — functions, and methods of test classes —

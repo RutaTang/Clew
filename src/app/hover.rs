@@ -521,6 +521,48 @@ impl App {
             })
     }
 
+    /// A line's ▶ was clicked: the code menu opens there in its short form
+    /// — running and debugging what starts on the line, and the breakpoint
+    /// the ▶ stands in for.
+    pub(crate) fn on_run_mark_clicked(
+        &mut self,
+        pane: usize,
+        line: usize,
+        x: f32,
+        y: f32,
+    ) -> Task<Message> {
+        if pane == 0 || self.proj.split {
+            self.proj.active = pane;
+        }
+        let (sx, sy) = self
+            .proj
+            .panes
+            .get(pane)
+            .and_then(Option::as_ref)
+            .map_or((0.0, 0.0), |v| (v.scroll_x, v.scroll_y));
+        let main = self.main_at(pane, line);
+        let test = self.test_at(pane, line);
+        if main.is_none() && test.is_none() {
+            return Task::none();
+        }
+        self.proj.tree_menu = None;
+        self.proj.gutter_tip = None;
+        self.proj.context_menu = Some(ContextMenu {
+            pane,
+            line: line.saturating_sub(1),
+            col: 0,
+            x: x - sx,
+            y: y - sy,
+            insight: None,
+            served: self.served(pane),
+            by_pointer: true,
+            line_top: None,
+            test,
+            gutter: Some(crate::GutterRun { main }),
+        });
+        Task::none()
+    }
+
     pub(crate) fn on_context_menu_opened(
         &mut self,
         pane: usize,
@@ -562,6 +604,7 @@ impl App {
             by_pointer: true,
             line_top: None,
             test: self.test_at(pane, line + 1),
+            gutter: None,
         });
         // The menu acts where it was opened: the caret goes there, as a
         // click puts it — the code said nothing of what it would act on. A
@@ -649,6 +692,9 @@ impl App {
     /// (after its one ownership check and the menu bookkeeping).
     pub(crate) fn update_hover(&mut self, message: HoverMsg) -> Task<Message> {
         match message {
+            HoverMsg::RunMarkClicked { pane, line, x, y } => {
+                self.on_run_mark_clicked(pane, line, x, y)
+            }
             HoverMsg::ContextMenuOpened {
                 pane,
                 line,

@@ -1398,6 +1398,15 @@ pub(crate) fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element
             line,
         })
     })
+    // A ▶ on each line something runs from: a click offers Run and Debug.
+    .run_marks(app.run_marks(v), move |line, at| {
+        Message::Hover(HoverMsg::RunMarkClicked {
+            pane,
+            line,
+            x: at.x - frame,
+            y: at.y - frame,
+        })
+    })
     .indent_guides(app.show_indent_guides)
     .git_gutter(v.git.as_deref())
     .blame(

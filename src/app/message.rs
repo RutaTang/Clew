@@ -619,6 +619,15 @@ pub enum HoverMsg {
         x: f32,
         y: f32,
     },
+    /// A line's ▶ in the gutter was clicked (1-based `line` of `pane`, at
+    /// `x`, `y` in the code's space): what starts there is offered, run or
+    /// debugged.
+    RunMarkClicked {
+        pane: usize,
+        line: usize,
+        x: f32,
+        y: f32,
+    },
     ContextMenuClosed,
     ContextGoto(GotoKind),
     Requested {
@@ -1857,6 +1866,10 @@ pub enum DebugMsg {
     /// active file — the code menu's line — or, `None`, at the cursor: Run
     /// Test, Debug Test.
     RunTest { line: Option<usize>, no_debug: bool },
+    /// Run (`no_debug`) or debug the program that starts at a 1-based line
+    /// of the active file — a gutter ▶'s: a Rust `main`, built by Cargo; a
+    /// Python `__main__` block's file, run as a script.
+    RunMain { line: usize, no_debug: bool },
     /// The adapter is ready; carry its handle + the TCP address it announced
     /// (for child sessions).
     /// Every DAP-side message names the `run` it belongs to (`App::debug_run`):
@@ -2753,6 +2766,7 @@ impl HoverMsg {
             | HoverMsg::InsightAnswered { stamp, .. } => Some(Origin::Stamped(stamp)),
             HoverMsg::Gutter { .. }
             | HoverMsg::ContextMenuOpened { .. }
+            | HoverMsg::RunMarkClicked { .. }
             | HoverMsg::ContextMenuClosed
             | HoverMsg::ContextGoto(..)
             | HoverMsg::Requested { .. }
@@ -3224,6 +3238,7 @@ impl DebugMsg {
             DebugMsg::Start
             | DebugMsg::Run
             | DebugMsg::RunTest { .. }
+            | DebugMsg::RunMain { .. }
             | DebugMsg::Control(..)
             | DebugMsg::Stop
             | DebugMsg::ShowTab(..)

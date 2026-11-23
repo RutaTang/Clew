@@ -116,6 +116,30 @@ pub(crate) fn gutter_words(app: &App, pane: usize, line: usize) -> Option<String
             (None, _) => tr!("Breakpoint. Click to remove").to_string(),
         });
     }
+    // A ▶ (drawn where no breakpoint is): what a click on it offers.
+    if said.is_empty() && app.run_marks(v).contains(&(line + 1)) {
+        use clew_core::runnables::RunnableKind;
+        let found = v.runnables();
+        if let Some(r) = found.iter().find(|r| r.line == line + 1) {
+            said.push(match r.kind {
+                RunnableKind::Test => tr!("Run or debug {test}", test = r.name),
+                RunnableKind::Tests => tr!("Run or debug the tests in {name}", name = r.name),
+                // Named without reading the package (this is drawn each
+                // frame): Rust's `main`, a Python block's file.
+                RunnableKind::Main => tr!(
+                    "Run or debug {program}",
+                    program = match v.lang_key {
+                        Some("python") => v
+                            .abs
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| r.name.clone()),
+                        _ => r.name.clone(),
+                    }
+                ),
+            });
+        }
+    }
     if let Some(bm) = app
         .proj
         .bookmarks
@@ -294,7 +318,7 @@ pub(crate) fn context_menu<'a>(app: &App, menu: &'a crate::ContextMenu) -> Eleme
         .collect();
     // In groups: going somewhere, understanding what is here, the
     // plugins', marking the line, debugging.
-    let groups = [
+    let mut groups = vec![
         navigate,
         vec![
             plain(tr!("View Docs"), Message::Docs(DocsMsg::ViewFromMenu)),
@@ -373,6 +397,30 @@ pub(crate) fn context_menu<'a>(app: &App, menu: &'a crate::ContextMenu) -> Eleme
             // line is in: one case of a parametrized test, or a class's or
             // a file's tests. Rust's through Cargo, Python's by pytest.
             let mut debugging = Vec::new();
+            // A gutter ▶ on a program's start: it, run or debugged.
+            if let Some(main) = menu.gutter.as_ref().and_then(|g| g.main.as_ref()) {
+                let line = menu.line + 1;
+                debugging.push(Row {
+                    label: tr!("Run {program}", program = main).into(),
+                    msg: Message::Debug(DebugMsg::RunMain {
+                        line,
+                        no_debug: true,
+                    }),
+                    keys: None,
+                    able: true,
+                    ai: false,
+                });
+                debugging.push(Row {
+                    label: tr!("Debug {program}", program = main).into(),
+                    msg: Message::Debug(DebugMsg::RunMain {
+                        line,
+                        no_debug: false,
+                    }),
+                    keys: None,
+                    able: true,
+                    ai: false,
+                });
+            }
             if let Some(test) = &menu.test {
                 let line = Some(menu.line + 1);
                 let (run, debug): (std::borrow::Cow<'static, str>, _) = match test {
@@ -411,11 +459,16 @@ pub(crate) fn context_menu<'a>(app: &App, menu: &'a crate::ContextMenu) -> Eleme
         },
         vec![
             // Its key, as Settings lists it: the menu showed Ctrl+D on
-            // Toggle Bookmark and nothing on this one.
+            // Toggle Bookmark and nothing on this one. From a ▶, which is
+            // drawn only where no breakpoint is, the one it stands in for.
             Row {
                 keys: keys("F9"),
                 ..plain(
-                    tr!("Toggle Breakpoint"),
+                    if menu.gutter.is_some() {
+                        tr!("Add Breakpoint")
+                    } else {
+                        tr!("Toggle Breakpoint")
+                    },
                     Message::Debug(DebugMsg::ToggleBreakpointFromMenu),
                 )
             },
@@ -432,6 +485,10 @@ pub(crate) fn context_menu<'a>(app: &App, menu: &'a crate::ContextMenu) -> Eleme
             ),
         ],
     ];
+    // From a gutter ▶: what runs from the line, and its breakpoint.
+    if menu.gutter.is_some() {
+        groups.drain(..groups.len() - 2);
+    }
     // As designed, or as wide as its longest row (its keys too) in the
     // reader's language, so none wraps or is clipped. A row is its words,
     // the room between and its keys, two gaps of 16 apart (the keys' slot

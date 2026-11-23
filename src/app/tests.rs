@@ -1695,6 +1695,7 @@ fn a_functions_explain_writes_its_own_explanation() {
             by_pointer: true,
             line_top: None,
             test: None,
+            gutter: None,
         });
     };
     let origin = explain::Node::Function {
@@ -3373,6 +3374,7 @@ fn the_context_menu_bookmarks_its_line_with_a_note() {
             by_pointer: true,
             line_top: None,
             test: None,
+            gutter: None,
         });
     };
     // Toggle Bookmark: on the menu's line (0-based 3: line 4), the caret
@@ -10271,6 +10273,7 @@ fn add_to_ask_without_a_selection_adds_the_line_clicked() {
         by_pointer: true,
         line_top: None,
         test: None,
+        gutter: None,
     };
     // `pub fn origin() -> Point {`, the third line.
     app.proj.context_menu = Some(menu(2));
@@ -10331,6 +10334,7 @@ fn a_popup_asked_from_the_menu_keeps_where_it_was_asked() {
         by_pointer: true,
         line_top: None,
         test: None,
+        gutter: None,
     };
     app.proj.context_menu = Some(menu(None));
     let _ = app.update(Message::TimeTravel(TimeTravelMsg::WhyIsThisHere));
@@ -10390,6 +10394,7 @@ fn a_popup_asked_from_the_menu_keeps_where_it_was_asked() {
         by_pointer: false,
         line_top: None,
         test: None,
+        gutter: None,
         ..menu(Some(crate::InsightKind::ExpandMacro))
     });
     let _ = app.update(Message::Hover(HoverMsg::Insight));
@@ -14215,6 +14220,7 @@ fn a_project_switch_drops_every_anchor_into_the_old_project() {
         by_pointer: true,
         line_top: None,
         test: None,
+        gutter: None,
     });
     app.proj.find.open = true;
     app.proj.find.query = "Point".into();
@@ -21526,6 +21532,7 @@ fn expand_macro_waits_for_the_server() {
         by_pointer: true,
         line_top: None,
         test: None,
+        gutter: None,
     };
     let offered = |app: &App| {
         crate::ui::heard::gather(app)
@@ -23468,6 +23475,7 @@ fn opening_a_text_input_form_takes_the_keyboard_from_the_code() {
         by_pointer: true,
         line_top: None,
         test: None,
+        gutter: None,
     });
     let _ = app.update(Message::Debug(DebugMsg::ConditionalBreakpointFromMenu));
     assert_eq!(app.proj.bp_cond_edit.as_ref().map(|e| &e.0), Some(&abs));
@@ -24917,6 +24925,7 @@ fn fill_project_session(app: &mut App) {
         by_pointer: true,
         line_top: None,
         test: None,
+        gutter: None,
     });
     p.diff = Some(DiffState::new(
         file.clone(),
@@ -32244,6 +32253,7 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
                 by_pointer: true,
                 line_top: None,
                 test: None,
+                gutter: None,
             })
         }),
         Box::new(|a| {
@@ -40910,6 +40920,7 @@ fn a_plugins_code_command_is_in_the_code_menu_and_runs_at_the_line_clicked() {
         by_pointer: true,
         line_top: None,
         test: None,
+        gutter: None,
     };
     app.proj.context_menu = Some(menu.clone());
     let (targets, _) = crate::ui::heard::gather_all_of(|| crate::ui::context_menu(&app, &menu));

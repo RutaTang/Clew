@@ -1091,6 +1091,17 @@ pub struct ContextMenu {
     /// parametrized test, or a test class's or file's tests. The menu
     /// offers running and debugging it, by its name.
     pub test: Option<TestAt>,
+    /// Opened from a line's ▶ in the gutter: it offers running what starts
+    /// there, and the breakpoint the ▶ stands in for — no more.
+    pub gutter: Option<GutterRun>,
+}
+
+/// What a gutter ▶'s menu runs, beside [`ContextMenu::test`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GutterRun {
+    /// The program that starts on the line, by its name, where one does:
+    /// a Rust `main`'s (`shapes`), a Python `__main__` block's file's.
+    pub main: Option<String>,
 }
 
 /// What a language can say about the code under the cursor that no other
