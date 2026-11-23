@@ -3737,13 +3737,24 @@ type Waiter = (
     Arc<Spots>,
 );
 
+/// The turn at waiting for the wake phrase ([`crate::app::wake::TEST_TURN`]),
+/// taken after this test's share of the environment — always in that
+/// order. A test that waits twice keeps its share past its first turn, so
+/// the turn taken first deadlocked the suite: this test waiting for the turn
+/// with its share, the turn's holder waiting for a share behind a writer,
+/// and the writer waiting for this test's share to go.
+fn wake_turn() -> std::sync::MutexGuard<'static, ()> {
+    super::env_share();
+    crate::app::wake::TEST_TURN
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
 /// [`voice_app`] with the keyword spotter downloaded, heard by a spotter
 /// that hears the phrase in its `call`th piece — and waiting for it turned
 /// on.
 fn wake_app(tag: &str, words: &str, call: usize) -> Waiter {
-    let turn = crate::app::wake::TEST_TURN
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let turn = wake_turn();
     let (mut app, script, hears) = voice_app(tag, words);
     install_wake(app.voice.store.as_ref().unwrap());
     let spots = Arc::new(Spots {
@@ -5817,9 +5828,7 @@ fn what_was_heard_at_another_rate_is_let_go() {
 /// it taken for a download's failure.
 #[test]
 fn a_microphone_that_will_not_open_stops_waiting() {
-    let _turn = crate::app::wake::TEST_TURN
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let _turn = wake_turn();
     let (mut app, _, _) = voice_app("wake-no-mic", "open settings");
     install_wake(app.voice.store.as_ref().unwrap());
     app.voice.wake.spotters = Some(Arc::new(Spots::default()));
@@ -5844,9 +5853,7 @@ fn a_microphone_that_will_not_open_stops_waiting() {
 /// get it.
 #[test]
 fn waiting_needs_its_model_and_is_turned_off() {
-    let _turn = crate::app::wake::TEST_TURN
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let _turn = wake_turn();
     let (mut app, script, _) = voice_app("wake-needs", "open settings");
     let spots = Arc::new(Spots {
         call: Mutex::new(2),
@@ -6077,9 +6084,7 @@ fn junk_wake_fetch(
 /// what it still needs — not that all is ready.
 #[test]
 fn a_spotter_downloaded_without_a_speech_model_says_what_is_missing() {
-    let _turn = crate::app::wake::TEST_TURN
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let _turn = wake_turn();
     let (mut app, _script, _) = voice_app("wake-download-no-model", "open settings");
     let store = app.voice.store.clone().unwrap();
     std::fs::remove_file(store.path(app.voice.prefs.model())).unwrap();
@@ -6300,9 +6305,7 @@ fn read_wav(path: &Path) -> (Vec<f32>, u32) {
 #[test]
 #[ignore = "needs clew-speak on PATH, CLEW_WAKE_MODEL and “Hey, Clew” said to the audio input"]
 fn a_real_microphone_wakes_clew() {
-    let _turn = crate::app::wake::TEST_TURN
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let _turn = wake_turn();
     let Some(from) = std::env::var_os("CLEW_WAKE_MODEL") else {
         eprintln!("skipped: CLEW_WAKE_MODEL names no Keyword Spotter folder");
         return;
