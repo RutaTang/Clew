@@ -44,7 +44,10 @@ pub(crate) fn commands(source: &str) -> Vec<Range<usize>> {
     let mut depth = 0usize;
     // Whether the last line with anything on it held attributes alone.
     let mut attributes_above = false;
-    // In a `mutual` block: its declarations' indent, once its first says.
+    // In a `mutual` block: its declarations' indent, once its first
+    // indented one says. Only a declaration (or its doc comment or
+    // attributes) says: a body's line at that indent (`if …`, under a
+    // `def` at column 0) starts nothing.
     let mut mutual: Option<Option<usize>> = None;
     // A string literal left open at the end of the line above: the next
     // line is its text, whatever its first column holds.
@@ -57,17 +60,11 @@ pub(crate) fn commands(source: &str) -> Vec<Range<usize>> {
         if depth == 0
             && !in_string
             && indent > 0
-            && !inner.is_empty()
-            && !inner.starts_with("--")
+            && (declares(inner) || inner.starts_with("/-") || inner.starts_with("@["))
             && let Some(block) = mutual.as_mut()
         {
             let at = *block.get_or_insert(indent);
-            if at == indent
-                && offset > 0
-                && !attributes_above
-                && starts_command(inner)
-                && starts.last() != Some(&offset)
-            {
+            if at == indent && offset > 0 && !attributes_above && starts.last() != Some(&offset) {
                 starts.push(offset);
             }
         }
@@ -880,6 +877,23 @@ pub fn mathlib_build(root: &Path) -> Option<(PathBuf, bool)> {
 
 #[cfg(test)]
 mod tests {
+
+    /// In a `mutual` block, a declaration starts a command at the block's
+    /// own indent, whether at column 0 or indented; the lines of a body
+    /// start none, at whatever indent.
+    #[test]
+    fn a_mutual_blocks_bodies_start_no_commands() {
+        let lines = |src: &str| -> Vec<usize> {
+            commands(src)
+                .iter()
+                .map(|r| src[..r.start].matches('\n').count())
+                .collect()
+        };
+        let flush = "mutual\ndef f (n : Nat) : Nat :=\n  if n = 0 then 0 else g (n - 1)\ndef g (n : Nat) : Nat :=\n  if n = 0 then 1 else f (n - 1)\nend\n";
+        assert_eq!(lines(flush), [0, 1, 3, 5]);
+        let indented = "mutual\n  def f (n : Nat) : Nat :=\n    if n = 0 then 0 else g (n - 1)\n  /-- The other. -/\n  def g (n : Nat) : Nat :=\n    f n\nend\n";
+        assert_eq!(lines(indented), [0, 1, 3, 4, 6]);
+    }
 
     /// A namespace, a section and a `mutual` block each fold from their
     /// opening line to the line before their `end`; one too short to hide

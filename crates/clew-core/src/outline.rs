@@ -712,11 +712,21 @@ fn lean_fields(command: &str, line: usize, found: &mut Vec<Located>) {
     let indent_of = |l: &str| l.len() - l.trim_start().len();
     let mut indent = None;
     let mut offset: usize = lines[..=at].iter().map(|l| l.len() + 1).sum();
+    // Inside a field's doc comment, over lines: its words are no fields.
+    let mut in_comment = false;
     for (i, l) in lines.iter().enumerate().skip(at + 1) {
         let start = offset;
         offset += l.len() + 1;
         let t = l.trim();
-        if t.is_empty() || t.starts_with("--") || t.starts_with("/-") || t.starts_with('|') {
+        if in_comment {
+            in_comment = !t.contains("-/");
+            continue;
+        }
+        if let Some(rest) = t.strip_prefix("/-") {
+            in_comment = !rest.contains("-/");
+            continue;
+        }
+        if t.is_empty() || t.starts_with("--") || t.starts_with('|') {
             continue;
         }
         let here = indent_of(l);
@@ -760,10 +770,14 @@ fn lean_fields(command: &str, line: usize, found: &mut Vec<Located>) {
             }
             continue;
         }
-        // The names before the field's type (or its binders).
-        let head_end = t.find([':', '(', '{', '[']).unwrap_or(t.len());
-        if t[head_end..].starts_with(":=") {
-            continue; // a default given to an inherited field
+        // The names before the field's type (or its binders): a field has
+        // one, or a default given to an inherited field (`x := 1`), which
+        // is none.
+        let Some(head_end) = t.find([':', '(', '{', '[']) else {
+            continue;
+        };
+        if t[head_end..].starts_with(":=") || !t.contains(':') {
+            continue;
         }
         let names: Vec<&str> = t[..head_end].split_whitespace().collect();
         if names.is_empty() || names.iter().any(|n| crate::lean::name_len(n) != n.len()) {
@@ -4941,7 +4955,7 @@ def stub_only(x: str) -> str: ...
     /// it a field, and each name of `x y : Nat` a field.
     #[test]
     fn a_lean_structures_fields_are_read_as_written() {
-        let src = "structure P where\n  mk ::\n  a : Nat\n  x y : Nat\n  f (n : Nat) : Nat\n  b : Nat := 0\n";
+        let src = "structure P where\n  mk ::\n  a : Nat\n  x y : Nat\n  f (n : Nat) : Nat\n  /-- The\n  fallback value -/\n  b : Nat := 0\n";
         let items = extract_located(src, "lean");
         let mut got: Vec<(&str, &str, usize)> = items
             .iter()
@@ -4963,7 +4977,7 @@ def stub_only(x: str) -> str: ...
                 ("x", "field", 4),
                 ("y", "field", 4),
                 ("f", "field", 5),
-                ("b", "field", 6)
+                ("b", "field", 8)
             ]
         );
     }
