@@ -1012,6 +1012,12 @@ pub(crate) fn lsp_consent_modal(
             tr!("This will run:"),
             tr!("Install"),
         ),
+        // debugpy and js-debug: a pinned download into Clew's own folder.
+        LspProvision::DebugAdapter { install, .. } if install.is_download() => (
+            tr!("Install a debug adapter?"),
+            server_blurb,
+            tr!("Install"),
+        ),
         LspProvision::DebugAdapter { .. } => (
             tr!("Install a debug adapter?"),
             tr!("This will run:"),
