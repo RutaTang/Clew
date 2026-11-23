@@ -631,6 +631,23 @@ fn rust_setup(launch: &mut serde_json::Value, sysroot: Option<&Path>, quiet: boo
     launch["preRunCommands"] = json!([format!("{mark}breakpoint set --name rust_panic")]);
 }
 
+/// A native launch (lldb-dap's, `adapter` the adapter run) for a program
+/// known to be Rust's — Cargo built it — set up as [`resolve`] sets up one
+/// whose debug information says Rust: Rust's type summaries and the stop at
+/// its panic. `resolve` reads that from the ELF file alone; a Mach-O
+/// program's DWARF stays in its object files (macOS) and a PE one's in its
+/// PDB (Windows), and their runs were left without either. A launch already
+/// set up is left as it is.
+pub fn set_up_for_rust(launch: &mut serde_json::Value, adapter: &Path, cwd: &Path) {
+    if launch.get("initCommands").is_some() || launch.get("preRunCommands").is_some() {
+        return;
+    }
+    let quiet = adapter
+        .file_name()
+        .is_some_and(|n| n.to_string_lossy().starts_with("lldb-dap"));
+    rust_setup(launch, rust_sysroot(cwd).as_deref(), quiet);
+}
+
 /// The sysroot of the Rust toolchain that builds the program in `cwd` —
 /// its `rust-toolchain.toml` honoured, as `rustc` there is rustup's — or
 /// `None` when there is no `rustc` or it does not answer in time.
@@ -1939,6 +1956,17 @@ mod tests {
         let mut launch = json!({});
         rust_setup(&mut launch, None, false);
         assert!(launch.get("initCommands").is_none());
+        // A program Cargo built is Rust's, whatever its file says: set up
+        // once, and a launch already set up is left alone.
+        let mut launch = json!({"program": "/p/target/debug/app"});
+        set_up_for_rust(&mut launch, Path::new("/usr/bin/lldb-dap"), dir.path());
+        assert_eq!(
+            launch["preRunCommands"],
+            json!(["?breakpoint set --name rust_panic"])
+        );
+        let set_up = launch.clone();
+        set_up_for_rust(&mut launch, Path::new("/usr/bin/lldb-dap"), dir.path());
+        assert_eq!(launch, set_up);
         // rustc's own DWARF language code.
         let (info, abbrev) = dwarf_unit(5, DW_LANG_RUST, 0x0b);
         let app = dir.path().join("app");

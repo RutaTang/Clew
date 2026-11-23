@@ -1373,8 +1373,22 @@ impl App {
                             cwd.clone(),
                             choices.clone(),
                         );
+                        // Cargo built it: a Rust program, whatever its debug
+                        // information can be read to say (macOS keeps it in
+                        // the object files).
+                        let rust = cargo_env.is_some();
                         tokio::task::spawn_blocking(move || {
-                            dap::adapter::resolve(lang, &program, &args, &root, &cwd, &choices)
+                            let mut resolved =
+                                dap::adapter::resolve(lang, &program, &args, &root, &cwd, &choices);
+                            if let (true, Ok(dap::Resolved::Ready(adapter))) = (rust, &mut resolved)
+                            {
+                                clew_core::debugadapter::set_up_for_rust(
+                                    &mut adapter.launch,
+                                    &adapter.command,
+                                    &cwd,
+                                );
+                            }
+                            resolved
                         })
                         .await
                         .unwrap_or_else(|e| {
