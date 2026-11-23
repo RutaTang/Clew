@@ -891,6 +891,7 @@ impl App {
             extras: Default::default(),
         });
         self.proj.asking = false;
+        self.warm_voice_for_question(spoken);
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<ChatStreamPiece>();
 
@@ -1094,6 +1095,7 @@ impl App {
             extras: Default::default(),
         });
         self.proj.asking = false;
+        self.warm_voice_for_question(spoken);
         // Said aloud, it is answered without the card opening over the code
         // (see `on_words`).
         if !spoken {

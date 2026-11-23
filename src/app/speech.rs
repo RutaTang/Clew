@@ -1106,6 +1106,37 @@ impl App {
             .is_some_and(|s| speech::installed(s, model))
     }
 
+    /// The voice answers in the reader's language `usual` are said in, here,
+    /// and its folder: the one a reading about to begin loads.
+    fn voice_for_answers(&self, usual: &str) -> Option<(&'static VoiceModel, PathBuf)> {
+        let store = self.voice.store.as_ref()?;
+        let model = clew_voice::say::known_language(usual)
+            .and_then(|lang| speech::for_language_among(lang, |m: &VoiceModel| usable(store, m)))?;
+        Some((model, speech::dir(store, model)))
+    }
+
+    /// A question was asked (`spoken`, or typed) whose answer will be read
+    /// aloud: its voice starts loading now, while the model thinks — loaded
+    /// on the answer's first sentence, it held that sentence for the
+    /// seconds a voice takes to load (nine, measured, for Qwen3-TTS).
+    pub(crate) fn warm_voice_for_question(&self, spoken: bool) {
+        if !self.voice.prefs.read_aloud.reads(spoken) {
+            return;
+        }
+        let usual = self
+            .voice
+            .prefs
+            .language
+            .clone()
+            .unwrap_or_else(|| crate::i18n::current().code().to_string());
+        if let Some((model, dir)) = self.voice_for_answers(&usual) {
+            let synthesizer = self.voice.speech.synthesizer.clone();
+            let _ = std::thread::Builder::new()
+                .name("clew-voice-warm".into())
+                .spawn(move || synthesizer.warm(model, &dir));
+        }
+    }
+
     /// The answer on stream `stream` grew — or, `done`, is over: what of it
     /// is ready to be said is said, when such answers are read aloud
     /// ([`ReadAloud`]).
@@ -1140,14 +1171,7 @@ impl App {
             .language
             .clone()
             .unwrap_or_else(|| crate::i18n::current().code().to_string());
-        // The voice the answer's language is said in, here: what loads as
-        // its reading begins.
-        let warm = self.voice.store.as_ref().and_then(|store| {
-            let model = clew_voice::say::known_language(&usual).and_then(|lang| {
-                speech::for_language_among(lang, |m: &VoiceModel| usable(store, m))
-            })?;
-            Some((model, speech::dir(store, model)))
-        });
+        let warm = self.voice_for_answers(&usual);
         let speech = &mut self.voice.speech;
         if speech.reading.as_ref().is_none_or(|(s, _)| *s != stream) {
             // Another answer: what was being said of the last one — or a
