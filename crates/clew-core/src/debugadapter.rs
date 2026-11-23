@@ -1127,6 +1127,19 @@ fn python_with_adapter(
         launch.remove("program");
         launch.insert("module".into(), json!(package.module));
     }
+    // One of a Django project's tests, by Django's runner (`manage.py
+    // test <label>`): debugged as a test is, stopping where it fails —
+    // unittest catches the failure, past the project's own code — and with
+    // Django's templates debugged too.
+    let django_test = Path::new(program)
+        .file_name()
+        .is_some_and(|n| n == "manage.py")
+        && args.first().is_some_and(|a| a == "test");
+    if django_test && let Some(launch) = launch.as_object_mut() {
+        launch.insert("justMyCode".into(), json!(true));
+        launch.insert("django".into(), json!(true));
+        launch.insert(EXCEPTIONS.into(), json!(["userUnhandled"]));
+    }
     // A test file is run as its tests are: under pytest, which collects
     // and runs them. Run as a script it defined its tests and ended, and
     // Run picked the project's program instead, saying the test "does not
@@ -1804,6 +1817,32 @@ mod tests {
             install.describe(),
             format!("/u/bin/uv sync --script {}", script.display())
         );
+    }
+
+    /// One of a Django project's tests, run by its own runner, is debugged
+    /// as a test is: stopping where it fails (unittest catches the
+    /// failure), stepping only through the project's code, with Django's
+    /// templates debugged. A plain `manage.py` command is not a test.
+    #[cfg(unix)]
+    #[test]
+    fn a_django_test_is_debugged_as_a_test() {
+        let dir = TempDir::new("dap-django-test");
+        let python = fake_python(&dir, "echo '1 1 1'");
+        let launch = |args: &[&str]| {
+            let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+            match python_with(&python, "/p/manage.py", &args, Path::new("/p")).unwrap() {
+                Resolution::Ready(spec) => spec.launch,
+                other => panic!("{other:?}"),
+            }
+        };
+        let test = launch(&["test", "shop.tests.CartTests.test_total", "--noinput"]);
+        assert_eq!(test["program"], "/p/manage.py");
+        assert_eq!(test["justMyCode"], true);
+        assert_eq!(test["django"], true);
+        assert_eq!(test[EXCEPTIONS], json!(["userUnhandled"]));
+        let serve = launch(&["runserver"]);
+        assert!(serve.get(EXCEPTIONS).is_none(), "{serve}");
+        assert_eq!(serve["justMyCode"], false);
     }
 
     /// A namespace package's module (no `__init__.py`) that imports its

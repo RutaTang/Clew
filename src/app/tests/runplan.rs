@@ -403,3 +403,49 @@ async fn a_lean_files_main_runs_through_lake() {
     // Ended: the status line no longer says it runs.
     assert!(!app.status.contains("Running"), "{}", app.status);
 }
+
+/// A test method of a Django project — a `manage.py` above it, Django
+/// used in its file — runs by Django's runner, by its dotted label, in the
+/// project's folder: under pytest alone Django's settings were never set,
+/// and it failed before it ran. Where pytest is set up for Django, or the
+/// test is a bare function, pytest runs it as before.
+#[test]
+fn a_django_projects_test_runs_by_djangos_runner() {
+    let root = test_dir("runplan-django");
+    let _ = std::fs::remove_dir_all(&root);
+    write(&root, "manage.py", "import django\n");
+    let tests = "from django.test import TestCase\n\n\nclass CartTests(TestCase):\n    def test_total(self):\n        self.assertEqual(1, 1)\n\n\ndef test_loose():\n    assert True\n";
+    write(&root, "shop/tests/test_cart.py", tests);
+    let file = root.join("shop/tests/test_cart.py");
+    let plan = crate::app::runplan::test_plan_at("python", &file, tests, 6).expect("a test");
+    let RunPlan::Django {
+        manage,
+        label,
+        name,
+        ..
+    } = &plan
+    else {
+        panic!("Django's runner: {plan:?}");
+    };
+    assert_eq!(manage, &root.join("manage.py"));
+    assert_eq!(label, "shop.tests.test_cart.CartTests.test_total");
+    assert_eq!(name, "test_total");
+    let (program, args, cwd, lang) = plan.launch(&root);
+    assert_eq!(program, root.join("manage.py"));
+    assert_eq!(args, ["test", label.as_str(), "--noinput"]);
+    assert_eq!(cwd, root);
+    assert_eq!(lang, Some(crate::dap::Lang::Python));
+    assert_eq!(plan.verdict(0).unwrap(), "Test test_total passed");
+    assert_eq!(plan.verdict(1).unwrap(), "Test test_total failed");
+    // A bare function is no Django test: pytest's.
+    let loose = crate::app::runplan::test_plan_at("python", &file, tests, 10).expect("a test");
+    assert!(matches!(loose, RunPlan::Pytest { .. }), "{loose:?}");
+    // pytest set up for Django runs them all.
+    write(
+        &root,
+        "pytest.ini",
+        "[pytest]\nDJANGO_SETTINGS_MODULE = shop.settings\n",
+    );
+    let plan = crate::app::runplan::test_plan_at("python", &file, tests, 6).expect("a test");
+    assert!(matches!(plan, RunPlan::Pytest { .. }), "{plan:?}");
+}

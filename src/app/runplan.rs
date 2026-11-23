@@ -27,6 +27,18 @@ pub enum RunPlan {
         node: String,
         name: String,
     },
+    /// One test of a Django project, run by Django's own test runner
+    /// (`manage.py test <label>`), where pytest has no Django settings to
+    /// run it with.
+    Django {
+        /// The test's file.
+        file: PathBuf,
+        /// The project's `manage.py`.
+        manage: PathBuf,
+        /// The test's dotted label (`shop.tests.TestCart.test_total`).
+        label: String,
+        name: String,
+    },
     /// A Lean file's `main`, run by Lean in its Lake project (`lake env
     /// lean --run`): no debugger, its output and how it ended.
     Lean {
@@ -59,7 +71,7 @@ impl RunPlan {
                 TargetKind::Test(name) => tr!("{target} tests", target = name),
                 _ => target_name(target),
             },
-            RunPlan::Pytest { name, .. } => name.clone(),
+            RunPlan::Pytest { name, .. } | RunPlan::Django { name, .. } => name.clone(),
             RunPlan::Lean { file, .. } => file
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
@@ -73,7 +85,7 @@ impl RunPlan {
             RunPlan::Cargo {
                 test: Some(test), ..
             } => Some(&test.name),
-            RunPlan::Pytest { name, .. } => Some(name),
+            RunPlan::Pytest { name, .. } | RunPlan::Django { name, .. } => Some(name),
             RunPlan::Cargo { test: None, .. } | RunPlan::Lean { .. } => None,
         }
     }
@@ -106,7 +118,7 @@ impl RunPlan {
             RunPlan::Cargo { target, test } => {
                 test.is_some() || matches!(target.kind, TargetKind::Test(_))
             }
-            RunPlan::Pytest { .. } | RunPlan::Lean { .. } => false,
+            RunPlan::Pytest { .. } | RunPlan::Django { .. } | RunPlan::Lean { .. } => false,
         }
     }
 
@@ -137,6 +149,15 @@ impl RunPlan {
                 root.to_path_buf(),
                 Some(crate::dap::Lang::Python),
             ),
+            // In the folder of its `manage.py`, as Django's tests are run.
+            RunPlan::Django { manage, label, .. } => (
+                manage.clone(),
+                vec!["test".into(), label.clone(), "--noinput".into()],
+                manage
+                    .parent()
+                    .map_or_else(|| root.to_path_buf(), Path::to_path_buf),
+                Some(crate::dap::Lang::Python),
+            ),
             RunPlan::Lean { file, project, .. } => {
                 (file.clone(), Vec::new(), project.clone(), None)
             }
@@ -149,7 +170,9 @@ impl RunPlan {
     pub(crate) fn shown(&self) -> PathBuf {
         let beside = match self {
             RunPlan::Cargo { target, .. } => target.package_dir().to_path_buf(),
-            RunPlan::Pytest { file, .. } | RunPlan::Lean { file, .. } => {
+            RunPlan::Pytest { file, .. }
+            | RunPlan::Django { file, .. }
+            | RunPlan::Lean { file, .. } => {
                 file.parent().map(Path::to_path_buf).unwrap_or_default()
             }
         };
@@ -212,13 +235,80 @@ pub(crate) fn test_plan_at(lang: &str, file: &Path, source: &str, line: usize) -
                 target,
             })
         }
-        "python" => Some(RunPlan::Pytest {
-            file: file.to_path_buf(),
-            node: pytest_node(&file.to_string_lossy(), test),
-            name: test.name.clone(),
-        }),
+        "python" => Some(
+            django_plan(file, source, test).unwrap_or_else(|| RunPlan::Pytest {
+                file: file.to_path_buf(),
+                node: pytest_node(&file.to_string_lossy(), test),
+                name: test.name.clone(),
+            }),
+        ),
         _ => None,
     }
+}
+
+/// Most folders above a test file looked in for its project's `manage.py`.
+const MAX_MANAGE_DEPTH: usize = 8;
+
+/// Most bytes of a configuration file read for its pytest-django setup.
+const MAX_CONFIG_BYTES: u64 = 512 * 1024;
+
+/// One test of a Django project's, run as Django runs its tests
+/// (`manage.py test`): a test method of a class in a file that uses
+/// Django, in a project with a `manage.py` above it whose pytest is not
+/// set up for Django (pytest-django, `DJANGO_SETTINGS_MODULE`) — under
+/// pytest alone, Django's settings were never configured and its tests
+/// failed before they ran.
+fn django_plan(
+    file: &Path,
+    source: &str,
+    test: &clew_core::runnables::Runnable,
+) -> Option<RunPlan> {
+    if test.scopes.is_empty() || !source.contains("django") {
+        return None;
+    }
+    let project = file
+        .ancestors()
+        .skip(1)
+        .take(MAX_MANAGE_DEPTH)
+        .find(|dir| dir.join("manage.py").is_file())?;
+    if pytest_runs_django(project) {
+        return None;
+    }
+    let module = file.strip_prefix(project).ok()?.with_extension("");
+    let mut parts: Vec<String> = module
+        .components()
+        .map(|c| c.as_os_str().to_str().map(str::to_string))
+        .collect::<Option<_>>()?;
+    if parts.last().is_some_and(|p| p == "__init__") {
+        parts.pop();
+    }
+    parts.extend(test.scopes.iter().cloned());
+    parts.push(test.name.clone());
+    Some(RunPlan::Django {
+        file: file.to_path_buf(),
+        manage: project.join("manage.py"),
+        label: parts.join("."),
+        name: test.name.clone(),
+    })
+}
+
+/// Whether the project at `dir` has pytest set up to run its Django tests
+/// (pytest-django, with the settings named): then pytest runs them.
+fn pytest_runs_django(dir: &Path) -> bool {
+    [
+        "pytest.ini",
+        "pyproject.toml",
+        "setup.cfg",
+        "tox.ini",
+        "conftest.py",
+    ]
+    .iter()
+    .filter_map(|f| clew_core::statefile::read_capped(&dir.join(f), MAX_CONFIG_BYTES))
+    .any(|text| {
+        text.contains("DJANGO_SETTINGS_MODULE")
+            || text.contains("pytest_django")
+            || text.contains("pytest-django")
+    })
 }
 
 /// A Cargo target as a sentence names it, in the reader's language: the

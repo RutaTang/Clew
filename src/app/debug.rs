@@ -708,15 +708,18 @@ impl App {
         // run by its Lean: a remote project's are those its launch file
         // names. A Python test is run on the remote host, by its pytest.
         let remote_test = match (&plan, remote) {
-            (Some(crate::app::runplan::RunPlan::Pytest { file, node, .. }), true) => Some(
-                serde_json::json!({
-                    "type": "python",
-                    "program": file.to_string_lossy(),
-                    "args": [node],
-                    "cwd": root.to_string_lossy(),
-                })
-                .to_string(),
-            ),
+            (Some(plan @ RunPlan::Pytest { .. } | plan @ RunPlan::Django { .. }), true) => {
+                let (program, args, cwd, _) = plan.launch(&root);
+                Some(
+                    serde_json::json!({
+                        "type": "python",
+                        "program": program.to_string_lossy(),
+                        "args": args,
+                        "cwd": cwd.to_string_lossy(),
+                    })
+                    .to_string(),
+                )
+            }
             _ => None,
         };
         if remote && plan.is_some() && remote_test.is_none() {
@@ -942,7 +945,7 @@ impl App {
             None if matches!(plan, Some(RunPlan::Lean { .. })) => {
                 tr!("Running {file} with Lean…", file = program_name)
             }
-            None if matches!(plan, Some(RunPlan::Pytest { .. })) => tr!(
+            None if matches!(plan, Some(RunPlan::Pytest { .. } | RunPlan::Django { .. })) => tr!(
                 "Running {test} on the remote host…",
                 test = plan.as_ref().map(RunPlan::label).unwrap_or_default()
             ),
