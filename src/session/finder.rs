@@ -177,10 +177,13 @@ impl Finder {
 
     pub fn refresh_symbols(&mut self, symbols: &[SymbolEntry]) {
         self.selected = 0;
+        // By the name it is called by from outside its owner: `Regex::new`
+        // is found typed so, and `new` still finds it.
+        let names: Vec<String> = symbols.iter().map(SymbolEntry::shown_name).collect();
         let mut ranked = tests_last(
             rank(
                 &self.query,
-                symbols.iter().map(|s| s.name.as_str()),
+                names.iter().map(String::as_str),
                 usize::MAX,
                 true,
             ),
@@ -593,11 +596,46 @@ mod tests {
         assert_eq!(f.results.first(), Some(&1));
     }
 
+    /// A method is found by its owner's name with its own (`Regex::new`,
+    /// `Cart.total`) — and by its own alone, named so in the list.
+    #[test]
+    fn a_method_is_found_by_its_owners_name() {
+        let symbol = |owner: Option<&str>, name: &str, rel: &str| SymbolEntry {
+            owner: owner.map(str::to_string),
+            name: name.into(),
+            kind: "method".into(),
+            rel: rel.into(),
+            abs: std::path::Path::new("/p").join(rel),
+            line: 1,
+            is_test: false,
+            entry: None,
+        };
+        let symbols = [
+            symbol(Some("Builder"), "new", "src/builder.rs"),
+            symbol(Some("Regex"), "new", "src/regex.rs"),
+            symbol(Some("Cart"), "total", "shop/cart.py"),
+            symbol(None, "new", "src/free.rs"),
+        ];
+        assert_eq!(symbols[1].shown_name(), "Regex::new");
+        assert_eq!(symbols[2].shown_name(), "Cart.total");
+        assert_eq!(symbols[3].shown_name(), "new");
+        let mut f = Finder {
+            query: "Regex::new".into(),
+            ..Default::default()
+        };
+        f.refresh_symbols(&symbols);
+        assert_eq!(f.results.first(), Some(&1), "{:?}", f.results);
+        f.query = "new".into();
+        f.refresh_symbols(&symbols);
+        assert_eq!(f.results.len(), 3, "{:?}", f.results);
+    }
+
     /// The symbols a query names list the tests last: a project's tests are
     /// named for what they test, and crowded out what was asked for.
     #[test]
     fn tests_come_after_the_symbols_they_are_named_for() {
         let symbol = |name: &str, is_test: bool| SymbolEntry {
+            owner: None,
             name: name.into(),
             kind: "function".into(),
             rel: "src/lib.rs".into(),
@@ -646,6 +684,7 @@ mod tests {
             "teashop/top_list.py",
         ]);
         let symbol = |name: &str| SymbolEntry {
+            owner: None,
             name: name.into(),
             kind: "function".into(),
             rel: "teashop/checkout.py".into(),

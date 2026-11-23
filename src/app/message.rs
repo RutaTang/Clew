@@ -2126,6 +2126,21 @@ pub enum LspMsg {
         name: &'static str,
         program: PathBuf,
     },
+    /// Whether the project's Rust toolchain has Rust's own sources
+    /// (`rust-src`), looked at as rust-analyzer started: `None` with no
+    /// rustup toolchain to ask; `Err` with the toolchain they are missing
+    /// from (`None` its default).
+    RustSrcFound {
+        stamp: Stamp,
+        found: Option<Result<(), Option<String>>>,
+    },
+    /// The status bar's Add Rust's Sources: `rustup component add rust-src`.
+    AddRustSrc,
+    /// How adding them went: rustup's word why, where it could not.
+    RustSrcAdded {
+        stamp: Stamp,
+        result: Result<(), String>,
+    },
     DownloadResult {
         stamp: Stamp,
         language: String,
@@ -3277,6 +3292,8 @@ impl LspMsg {
             | LspMsg::Fetched { stamp, .. }
             | LspMsg::Staged { stamp, .. }
             | LspMsg::FoundOnPath { stamp, .. }
+            | LspMsg::RustSrcFound { stamp, .. }
+            | LspMsg::RustSrcAdded { stamp, .. }
             | LspMsg::PanelListed { stamp, .. } => Some(Origin::Stamped(stamp)),
             LspMsg::ConsentAllowed(..)
             | LspMsg::CommandAllowed(..)
@@ -3287,6 +3304,7 @@ impl LspMsg {
             | LspMsg::ToggleInlayHints
             | LspMsg::TogglePanel
             | LspMsg::Restart(..)
+            | LspMsg::AddRustSrc
             | LspMsg::Remove { .. }
             | LspMsg::DownloadFor(..) => None,
         }

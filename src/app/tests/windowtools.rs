@@ -131,6 +131,7 @@ fn the_agent_goes_to_a_symbol_by_name() {
         app.proj.symbol_index_by_file.insert(
             abs.clone(),
             Arc::new(vec![crate::index::SymbolEntry {
+                owner: None,
                 name: "origin".into(),
                 kind: "function".into(),
                 rel: "src/lib.rs".into(),

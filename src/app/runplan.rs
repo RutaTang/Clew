@@ -49,6 +49,19 @@ pub enum RunPlan {
     /// run as a script: what the code's own Run mark runs, whatever a
     /// launch file names.
     Script { file: PathBuf },
+    /// One example of a Rust doc comment, run by rustdoc as `cargo test
+    /// --doc` runs it, alone: no debugger (rustdoc builds and runs it
+    /// itself), its output and how it ended.
+    Doctest {
+        /// Its package's library.
+        target: CargoTarget,
+        /// The file its comment is in.
+        file: PathBuf,
+        /// The 1-based line its example opens on.
+        line: usize,
+        /// The item it documents (`add`); empty for a module's own.
+        item: String,
+    },
     /// A Lean file's `main`, run by Lean in its Lake project (`lake env
     /// lean --run`): no debugger, its output and how it ended.
     Lean {
@@ -103,6 +116,9 @@ impl RunPlan {
                 _ => target_name(target),
             },
             RunPlan::Pytest { name, .. } | RunPlan::Django { name, .. } => name.clone(),
+            RunPlan::Doctest { item, file, .. } => {
+                tr!("Doctest of {item}", item = doctest_item(item, file))
+            }
             RunPlan::Script { file } | RunPlan::Lean { file, .. } => file
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
@@ -117,9 +133,10 @@ impl RunPlan {
                 test: Some(test), ..
             } => Some(&test.name),
             RunPlan::Pytest { name, .. } | RunPlan::Django { name, .. } => Some(name),
-            RunPlan::Cargo { test: None, .. } | RunPlan::Script { .. } | RunPlan::Lean { .. } => {
-                None
-            }
+            RunPlan::Cargo { test: None, .. }
+            | RunPlan::Script { .. }
+            | RunPlan::Lean { .. }
+            | RunPlan::Doctest { .. } => None,
         }
     }
 
@@ -130,6 +147,13 @@ impl RunPlan {
     /// said it had. A group's run says the same of its tests. `None` for
     /// a run of anything but tests.
     pub(crate) fn verdict(&self, code: i64) -> Option<String> {
+        if let RunPlan::Doctest { item, file, .. } = self {
+            let item = doctest_item(item, file);
+            return Some(match code {
+                0 => tr!("Doctest of {item} passed", item = item),
+                _ => tr!("Doctest of {item} failed", item = item),
+            });
+        }
         let name = self.test_name()?;
         let group = matches!(
             self,
@@ -181,12 +205,13 @@ impl RunPlan {
     pub(crate) fn builds_tests(&self) -> bool {
         match self {
             RunPlan::Cargo { target, test } => {
-                test.is_some() || matches!(target.kind, TargetKind::Test(_))
+                test.is_some() || matches!(target.kind, TargetKind::Test(_) | TargetKind::Bench(_))
             }
             RunPlan::Pytest { .. }
             | RunPlan::Django { .. }
             | RunPlan::Script { .. }
-            | RunPlan::Lean { .. } => false,
+            | RunPlan::Lean { .. }
+            | RunPlan::Doctest { .. } => false,
         }
     }
 
@@ -235,6 +260,12 @@ impl RunPlan {
             RunPlan::Lean { file, project, .. } => {
                 (file.clone(), Vec::new(), project.clone(), None)
             }
+            RunPlan::Doctest { target, file, .. } => (
+                file.clone(),
+                Vec::new(),
+                target.package_dir().to_path_buf(),
+                None,
+            ),
         }
     }
 
@@ -243,7 +274,9 @@ impl RunPlan {
     /// runs of different packages' `main` are told apart.
     pub(crate) fn shown(&self) -> PathBuf {
         let beside = match self {
-            RunPlan::Cargo { target, .. } => target.package_dir().to_path_buf(),
+            RunPlan::Cargo { target, .. } | RunPlan::Doctest { target, .. } => {
+                target.package_dir().to_path_buf()
+            }
             RunPlan::Pytest { file, .. }
             | RunPlan::Django { file, .. }
             | RunPlan::Script { file }
@@ -274,14 +307,20 @@ pub(crate) enum NoProgram {
 pub(crate) fn cargo_plan_for(file: &Path) -> Result<RunPlan, NoProgram> {
     let target = clew_core::cargorun::target_of(file).ok_or(NoProgram::NoPackage)?;
     match target.kind {
-        TargetKind::Bin(_) | TargetKind::Example(_) | TargetKind::Test(_) => Ok(RunPlan::Cargo {
+        // A bench's own `main` (a `harness = false` bench) is what its ▶
+        // runs, as `cargo bench` runs it: the package's program ran in its
+        // place, or nothing did.
+        TargetKind::Bin(_)
+        | TargetKind::Example(_)
+        | TargetKind::Test(_)
+        | TargetKind::Bench(_) => Ok(RunPlan::Cargo {
             target: CargoTarget {
                 module: Vec::new(),
                 ..target
             },
             test: None,
         }),
-        TargetKind::Lib | TargetKind::Bench(_) => {
+        TargetKind::Lib => {
             use clew_core::cargorun::PackageProgram;
             match clew_core::cargorun::package_program(&target.manifest) {
                 PackageProgram::One(program) => Ok(RunPlan::Cargo {
@@ -300,9 +339,24 @@ pub(crate) fn cargo_plan_for(file: &Path) -> Result<RunPlan, NoProgram> {
 /// Python one by pytest. `None` where the line is in no test.
 pub(crate) fn test_plan_at(lang: &str, file: &Path, source: &str, line: usize) -> Option<RunPlan> {
     let found = runnables(lang, source);
-    let mut test = runnable_at(&found, line)
-        .filter(|r| matches!(r.kind, RunnableKind::Test | RunnableKind::Tests))?;
+    let mut test = runnable_at(&found, line).filter(|r| {
+        matches!(
+            r.kind,
+            RunnableKind::Test | RunnableKind::Tests | RunnableKind::Doctest
+        )
+    })?;
     match lang {
+        // rustdoc runs a library's doc examples: a binary's are not tests.
+        "rust" if test.kind == RunnableKind::Doctest => {
+            let target =
+                clew_core::cargorun::target_of(file).filter(|t| t.kind == TargetKind::Lib)?;
+            Some(RunPlan::Doctest {
+                target,
+                file: file.to_path_buf(),
+                line: test.line,
+                item: test.name.clone(),
+            })
+        }
         "rust" => {
             let target = clew_core::cargorun::target_of(file)?;
             let runs = match (test.kind, test.name.is_empty()) {
@@ -391,6 +445,15 @@ pub(crate) fn main_plan_at(lang: &str, file: &Path, source: &str, line: usize) -
             file: file.to_path_buf(),
         }),
         _ => None,
+    }
+}
+
+/// What a doc example documents, as its run is called: the item (`add`),
+/// or a module's own example, its file (`lib.rs`).
+fn doctest_item(item: &str, file: &Path) -> String {
+    match item.is_empty() {
+        true => file_name(file),
+        false => item.to_string(),
     }
 }
 

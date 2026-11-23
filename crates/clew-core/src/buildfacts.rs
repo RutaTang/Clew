@@ -75,6 +75,16 @@ pub fn read(
     }
 }
 
+/// The Rust choices a build of the project runs with — its features and
+/// target, as Run and Debug build with them: the user's, else what the
+/// project's `lsp.toml` (`config`) gives rust-analyzer.
+pub fn rust_choices(choices: &LanguageChoices, config: Option<&ProjectLspConfig>) -> RustChoices {
+    let options = config
+        .and_then(|c| c.resolve("rust"))
+        .and_then(|s| s.init_options);
+    effective_rust(choices, options.as_ref())
+}
+
 /// The Rust choices the build runs with: the user's, else what the
 /// project's `lsp.toml` gives rust-analyzer.
 fn effective_rust(choices: &LanguageChoices, options: Option<&Value>) -> RustChoices {

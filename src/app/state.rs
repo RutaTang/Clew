@@ -2441,6 +2441,9 @@ pub struct ProjectSession {
     /// its point in the window — while nothing was shown for it: ⌥ pressed
     /// there shows its peek at once.
     pub hover_point: Option<(usize, usize, usize, f32, f32)>,
+    /// Rust's own sources for the project's toolchain, as rust-analyzer
+    /// wants them ([`crate::app::RustSrc`]).
+    pub rust_src: crate::app::RustSrc,
     /// The gutter line the pointer rests on, and whether its tip is due:
     /// what a breakpoint or a bookmark there says (`ui::gutter_tip`).
     pub gutter_tip: Option<GutterTip>,
@@ -2979,6 +2982,7 @@ impl Default for ProjectSession {
             hover_leave: Default::default(),
             hover_seen: None,
             hover_point: None,
+            rust_src: Default::default(),
             gutter_tip: None,
             gutter_seq: 0,
             context_menu: Default::default(),

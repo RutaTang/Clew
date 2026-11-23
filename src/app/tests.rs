@@ -3939,19 +3939,25 @@ fn a_program_on_path_is_offered_only_if_it_runs() {
     let path = path.as_os_str();
 
     let works = write("bin", "works", &answers("--version"));
-    assert!(runs_here(&works, &["--version"], path));
-    assert!(!runs_here(&works, &["version"], path));
-    assert!(!runs_here(&root.join("bin/missing"), &["--version"], path));
+    assert!(runs_here(&works, &["--version"], path, &[]));
+    assert!(!runs_here(&works, &["version"], path, &[]));
+    assert!(!runs_here(
+        &root.join("bin/missing"),
+        &["--version"],
+        path,
+        &[]
+    ));
     // Run as the server is: on that PATH — a `#!/usr/bin/env node` server
     // finds its `node` there, where Clew's own PATH (an app opened from the
     // Finder) has none — and away from any project.
     write("bin", "fake-node", "#!/bin/sh\nexit 0\n");
     let needs_node = write("bin", "needs-node", "#!/bin/sh\nexec fake-node \"$@\"\n");
-    assert!(runs_here(&needs_node, &["--version"], path));
+    assert!(runs_here(&needs_node, &["--version"], path, &[]));
     assert!(!runs_here(
         &needs_node,
         &["--version"],
-        std::ffi::OsStr::new("/usr/bin:/bin")
+        std::ffi::OsStr::new("/usr/bin:/bin"),
+        &[]
     ));
     let neutral = clew_core::linerpc::neutral_dir();
     let elsewhere = write(
@@ -3963,32 +3969,57 @@ fn a_program_on_path_is_offered_only_if_it_runs() {
         ),
     );
     assert!(
-        runs_here(&elsewhere, &[], path),
+        runs_here(&elsewhere, &[], path, &[]),
         "run from {}",
         neutral.display()
     );
 
     let rust_analyzer = write("bin", "rust-analyzer", &answers("--version"));
-    assert!(worth_offering(&rust_analyzer, path));
+    assert!(worth_offering(&rust_analyzer, path, None));
     let rust_analyzer = write("rustup", "rust-analyzer", shim);
-    assert!(!worth_offering(&rust_analyzer, path), "a shim that fails");
+    assert!(
+        !worth_offering(&rust_analyzer, path, None),
+        "a shim that fails"
+    );
+    // rustup's, for a project that pins a toolchain without it: asked for
+    // that toolchain (by its channel, never installing it), it fails there.
+    let pinned = write(
+        "pins",
+        "rust-analyzer",
+        "#!/bin/sh\n[ \"$RUSTUP_TOOLCHAIN\" = 1.70.0 ] && [ \"$RUSTUP_AUTO_INSTALL\" = 0 ] && exit 1\necho 1.0\n",
+    );
+    let project = root.join("pinned-project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join("rust-toolchain.toml"),
+        "[toolchain]\nchannel = \"1.70.0\"\n",
+    )
+    .unwrap();
+    assert!(worth_offering(&pinned, path, None));
+    assert!(
+        !worth_offering(&pinned, path, Some(&project)),
+        "not for its toolchain"
+    );
     let gopls = write("bin", "gopls", &answers("version"));
     assert!(
-        worth_offering(&gopls, path),
+        worth_offering(&gopls, path, None),
         "gopls is asked `gopls version`"
     );
     let pyright = write("bin", "pyright-langserver", refuses);
     assert!(
-        worth_offering(&pyright, path),
+        worth_offering(&pyright, path, None),
         "no way to ask: offered as found"
     );
     let pyright = write("shims", "pyright-langserver", refuses);
-    assert!(!worth_offering(&pyright, path), "a version manager's shim");
+    assert!(
+        !worth_offering(&pyright, path, None),
+        "a version manager's shim"
+    );
     // npm's taplo answers `--version` and has no language server; the one
     // built with it answers `taplo lsp --help`.
     let taplo = write("npm", "taplo", &answers("--version"));
     assert!(
-        !worth_offering(&taplo, path),
+        !worth_offering(&taplo, path, None),
         "a taplo with no language server"
     );
     let taplo = write(
@@ -3996,7 +4027,7 @@ fn a_program_on_path_is_offered_only_if_it_runs() {
         "taplo",
         "#!/bin/sh\n[ \"$1 $2\" = 'lsp --help' ]\n",
     );
-    assert!(worth_offering(&taplo, path));
+    assert!(worth_offering(&taplo, path, None));
 }
 
 /// Asked to download a server whose own program is on PATH, Clew runs that
@@ -9916,6 +9947,7 @@ fn a_jump_onto_a_type_is_named_in_the_trail() {
     let root = app.proj.project.as_ref().unwrap().root.clone();
     let lib = root.join("src/lib.rs");
     let symbol = |name: &str, kind: &str, line: usize| SymbolEntry {
+        owner: None,
         name: name.into(),
         kind: kind.into(),
         rel: "src/lib.rs".into(),
@@ -18187,6 +18219,7 @@ async fn an_incremental_refine_leaves_the_whole_project_to_its_pass() {
         let file = module(i);
         let symbols = (0..FNS)
             .map(|j| SymbolEntry {
+                owner: None,
                 name: format!("f{j}"),
                 kind: "function".into(),
                 rel: format!("gen/m{i}.rs"),
@@ -18284,6 +18317,7 @@ fn index_more_files(app: &mut App, root: &Path, n: usize) {
         let rel = format!("gen/m{i}.rs");
         let abs = root.join(&rel);
         let entry = SymbolEntry {
+            owner: None,
             name: "f".into(),
             kind: "function".into(),
             rel,
@@ -18574,6 +18608,7 @@ fn an_incremental_refine_plans_what_the_window_computed() {
             let entries = symbols
                 .iter()
                 .map(|&(name, kind, line)| SymbolEntry {
+                    owner: None,
                     name: name.into(),
                     kind: kind.into(),
                     rel: rel.to_string(),
@@ -18783,6 +18818,7 @@ async fn a_refine_pass_that_panics_still_ends() {
     let rel = format!("src/{PANICKING_QUERY_FILE}");
     let file = root.join(&rel);
     let boom = SymbolEntry {
+        owner: None,
         name: "boom".into(),
         kind: "function".into(),
         rel,
@@ -21607,6 +21643,7 @@ fn the_skim_button_shows_whether_the_file_is_skimmed() {
     app.proj.symbol_index_by_file.insert(
         abs.clone(),
         Arc::new(vec![SymbolEntry {
+            owner: None,
             name: "origin".into(),
             kind: "function".into(),
             rel: "src/lib.rs".into(),
@@ -22106,6 +22143,7 @@ fn the_overview_names_every_kind_of_entry_point_capped() {
     let mut app = scanned_app("overview-entries");
     let root = app.proj.project.as_ref().unwrap().root.clone();
     let symbol = |name: &str, rel: &str, entry: Option<index::EntryKind>| SymbolEntry {
+        owner: None,
         name: name.into(),
         kind: "function".into(),
         rel: rel.into(),
@@ -24241,6 +24279,14 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
             language: "rust".into(),
             name: "rust-analyzer",
             program: PathBuf::from("/stale/rust-analyzer"),
+        }),
+        Message::Lsp(LspMsg::RustSrcFound {
+            stamp: s(),
+            found: Some(Err(None)),
+        }),
+        Message::Lsp(LspMsg::RustSrcAdded {
+            stamp: s(),
+            result: Ok(()),
         }),
         Message::Hover(HoverMsg::Dwell {
             stamp: s(),
@@ -29315,6 +29361,7 @@ fn run_swaps_in_only_an_evident_program_start() {
         std::fs::write(root.join(main), "def main():\n    pass\n").unwrap();
     }
     let symbol = |file: &str, name: &str, kind: &str| SymbolEntry {
+        owner: None,
         name: name.into(),
         kind: kind.into(),
         rel: file.into(),
@@ -29375,6 +29422,7 @@ fn run_on_a_module_of_defs_runs_the_projects_main() {
     .unwrap();
     std::fs::write(root.join("pricing.py"), "def price():\n    return 3\n").unwrap();
     let symbol = |file: &str, name: &str, entry| SymbolEntry {
+        owner: None,
         name: name.into(),
         kind: "function".into(),
         rel: file.into(),
@@ -36526,6 +36574,7 @@ fn same_named_functions_agree_on_being_an_entry_point() {
     let root = app.proj.project.as_ref().unwrap().root.clone();
     let abs = root.join("src/handlers.rs");
     let sym = |line: usize, entry: Option<index::EntryKind>| SymbolEntry {
+        owner: None,
         name: "handle".into(),
         kind: "method".into(),
         rel: "src/handlers.rs".into(),
@@ -38501,6 +38550,7 @@ fn skim_keeps_no_more_scroll_than_the_folded_file_has() {
     app.proj.symbol_index_by_file.insert(
         abs.clone(),
         Arc::new(vec![SymbolEntry {
+            owner: None,
             name: "long".into(),
             kind: "function".into(),
             rel: "long.py".into(),
@@ -38535,6 +38585,7 @@ fn the_files_views_take_turns() {
     app.proj.symbol_index_by_file.insert(
         abs.clone(),
         Arc::new(vec![SymbolEntry {
+            owner: None,
             name: "origin".into(),
             kind: "function".into(),
             rel: "src/lib.rs".into(),
@@ -39416,6 +39467,7 @@ fn a_stop_inside_a_function_says_its_line() {
     app.proj.symbol_index_by_file.insert(
         file.clone(),
         std::sync::Arc::new(vec![crate::index::SymbolEntry {
+            owner: None,
             name: "give_back".into(),
             kind: "method".into(),
             rel: "src/lib.rs".into(),

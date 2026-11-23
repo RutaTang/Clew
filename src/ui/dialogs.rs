@@ -795,10 +795,11 @@ pub(crate) fn finder_symbol_rows<'a>(app: &'a App, rows: &mut Vec<Element<'a, Me
 fn symbol_row<'a>(entry: &'a crate::index::SymbolEntry, selected: bool) -> Element<'a, Message> {
     // Where it is, in what the row has left beside its kind and name, cut
     // at the start.
+    let name = entry.shown_name();
     let place_room = FINDER_ROW_INNER_W
         - SYMBOL_KIND_W
         - 2.0 * SYMBOL_ROW_GAP
-        - super::steady::width_of(&entry.name, ts::READING, crate::fonts::UI);
+        - super::steady::width_of(&name, ts::READING, crate::fonts::UI);
     let place = super::steady::elide_start(
         &format!("{}:{}", entry.rel, entry.line),
         ts::SMALL,
@@ -811,7 +812,7 @@ fn symbol_row<'a>(entry: &'a crate::index::SymbolEntry, selected: bool) -> Eleme
                 .size(ts::CAPTION)
                 .color(theme::kind_color(&entry.kind))
                 .width(SYMBOL_KIND_W),
-            text(crate::highlight::in_order(&entry.name)).size(ts::READING),
+            text(crate::highlight::in_order(&name).into_owned()).size(ts::READING),
             text(crate::highlight::in_order(&place).into_owned())
                 .size(ts::SMALL)
                 .color(theme::dim())

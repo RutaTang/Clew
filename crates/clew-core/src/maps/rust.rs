@@ -24,16 +24,81 @@ pub fn maps(corpus: &Corpus) -> Vec<ProjectMap> {
 }
 
 /// A type as an impl names it, its generics dropped (`Vec<T>` → `Vec`,
-/// `&'a mut Foo` → `Foo`).
+/// `&'a mut Foo` → `Foo`): any lifetime is passed over, not only `'_` — an
+/// `impl From<&'a str> for &'a Cfg` drew a type named `'a Cfg`.
 fn type_name(written: &str) -> String {
-    let t = written
-        .trim()
-        .trim_start_matches('&')
-        .trim_start_matches("'_ ")
-        .trim();
-    let t = t.strip_prefix("mut ").unwrap_or(t);
+    let mut t = written.trim();
+    loop {
+        let before = t;
+        t = t.trim_start_matches('&').trim_start();
+        if let Some(rest) = t.strip_prefix('\'') {
+            t = rest
+                .trim_start_matches(|c: char| c == '_' || c.is_alphanumeric())
+                .trim_start();
+        }
+        for prefix in ["mut ", "dyn "] {
+            if let Some(rest) = t.strip_prefix(prefix) {
+                t = rest.trim_start();
+            }
+        }
+        if t == before {
+            break;
+        }
+    }
     let t = t.split('<').next().unwrap_or(t);
     t.rsplit("::").next().unwrap_or(t).trim().to_string()
+}
+
+/// What an attribute derives: `#[derive(A, B)]`'s `A` and `B`, with no
+/// condition; `#[cfg_attr(feature = "serde", derive(Serialize))]`'s
+/// `Serialize`, under its condition.
+fn derives(attribute: &str) -> Vec<(String, bool)> {
+    let inner = attribute
+        .trim()
+        .trim_start_matches("#[")
+        .trim_end_matches(']')
+        .trim();
+    let list = |args: &str| -> Vec<String> {
+        args.trim()
+            .trim_start_matches('(')
+            .trim_end_matches(')')
+            .split(',')
+            .map(type_name)
+            .filter(|d| !d.is_empty())
+            .collect()
+    };
+    if let Some(args) = inner.strip_prefix("derive") {
+        return list(args).into_iter().map(|d| (d, false)).collect();
+    }
+    let Some(args) = inner
+        .strip_prefix("cfg_attr")
+        .map(|a| a.trim().trim_start_matches('(').trim_end_matches(')'))
+    else {
+        return Vec::new();
+    };
+    // The attributes after its condition: split where no bracket is open.
+    let mut parts = Vec::new();
+    let (mut depth, mut start, mut quoted) = (0usize, 0usize, false);
+    for (i, c) in args.char_indices() {
+        match c {
+            '"' => quoted = !quoted,
+            '(' | '[' if !quoted => depth += 1,
+            ')' | ']' if !quoted => depth = depth.saturating_sub(1),
+            ',' if !quoted && depth == 0 => {
+                parts.push(&args[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&args[start..]);
+    parts
+        .into_iter()
+        .skip(1)
+        .filter_map(|a| a.trim().strip_prefix("derive"))
+        .flat_map(list)
+        .map(|d| (d, true))
+        .collect()
 }
 
 fn traits(corpus: &Corpus) -> Option<ProjectMap> {
@@ -71,16 +136,10 @@ fn traits(corpus: &Corpus) -> Option<ProjectMap> {
             );
         }
         for attribute in all_of(root, "attribute_item") {
-            let body = text(attribute, src);
-            let Some(inner) = body
-                .trim_start_matches("#[")
-                .trim_end_matches(']')
-                .trim()
-                .strip_prefix("derive")
-                .map(|r| r.trim().trim_start_matches('(').trim_end_matches(')'))
-            else {
+            let derived = derives(text(attribute, src));
+            if derived.is_empty() {
                 continue;
-            };
+            }
             // The item the attribute is on: the next sibling that is no
             // attribute or comment.
             let mut next = attribute.next_named_sibling();
@@ -104,9 +163,17 @@ fn traits(corpus: &Corpus) -> Option<ProjectMap> {
             let t = text(name, src).to_string();
             let from = map.node("type", &t, &t);
             map.place(from, &source.rel, line(item));
-            for derived in inner.split(',').map(type_name).filter(|d| !d.is_empty()) {
+            for (derived, conditional) in derived {
                 let to = map.node("trait", &derived, &derived);
-                map.edge(from, to, "derive");
+                map.edge(
+                    from,
+                    to,
+                    if conditional {
+                        "derive (cfg)"
+                    } else {
+                        "derive"
+                    },
+                );
             }
         }
     }
@@ -421,6 +488,30 @@ mod tests {
         assert_eq!(area.file, "src/shapes.rs", "the trait where it is defined");
     }
 
+    /// A derive under a condition is one, said so; a lifetime is no part
+    /// of a type's name.
+    #[test]
+    fn derives_under_cfg_attr_and_lifetimes() {
+        let maps = maps(&Corpus::of(&[(
+            "src/lib.rs",
+            "#[cfg_attr(feature = \"serde\", derive(serde::Serialize, Deserialize), allow(x))]\n#[derive(Debug)]\npub struct Cfg;\nimpl<'a> From<&'a str> for &'a Cfg { fn from(_: &str) -> Self { todo!() } }\n",
+        )]));
+        let traits = maps.iter().find(|m| m.id == "rust.traits").unwrap();
+        let got = edges(traits);
+        for want in [
+            e("Cfg", "Serialize", "derive (cfg)"),
+            e("Cfg", "Deserialize", "derive (cfg)"),
+            e("Cfg", "Debug", "derive"),
+            e("Cfg", "From", "impl"),
+        ] {
+            assert!(got.contains(&want), "{want:?} in {got:?}");
+        }
+        assert!(
+            !traits.nodes.iter().any(|n| n.label.contains('\'')),
+            "{got:?}"
+        );
+    }
+
     #[test]
     fn unsafe_code_and_what_it_calls() {
         let maps = maps(&Corpus::of(LIB));
@@ -497,5 +588,7 @@ mod tests {
         let area = api.nodes.iter().find(|n| n.label == "area").unwrap();
         assert_eq!(area.detail, "pub fn area(c: &Circle) -> f64");
         assert_eq!(type_name("&'a mut std::vec::Vec<T>"), "Vec");
+        assert_eq!(type_name("&'a Cfg"), "Cfg");
+        assert_eq!(type_name("&'static dyn Shape"), "Shape");
     }
 }

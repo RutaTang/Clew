@@ -536,13 +536,7 @@ pub fn has_main(source: &str) -> bool {
 }
 
 /// How a run of a Lean file's `main` ended.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RunEnd {
-    /// It ran and exited with this code.
-    Exited(i64),
-    /// It was stopped, and everything it started with it.
-    Stopped,
-}
+pub use crate::spawn::RunEnd;
 
 /// Run the `main` of the Lean file `file` as Lake runs one: `lake env lean
 /// --run <file>` in its Lake project `project`, with the project's
@@ -553,83 +547,17 @@ pub fn run_main(
     lake: &Path,
     project: &Path,
     file: &Path,
-    mut said: impl FnMut(&str, bool),
+    said: impl FnMut(&str, bool),
     cancel: &std::sync::atomic::AtomicBool,
 ) -> Result<RunEnd, String> {
-    use std::io::{BufRead, BufReader};
-    use std::process::Stdio;
-    use std::sync::atomic::Ordering;
-    use std::time::Duration;
     let mut command = crate::spawn::command(lake);
     command
         .args(["env", "lean", "--run"])
         .arg(file)
         .current_dir(project)
-        .env("PATH", crate::linerpc::child_path())
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    // A group of its own: Lean runs under Lake, and stopping one stops both.
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        command.process_group(0);
-    }
-    let mut child = command.spawn().map_err(|e| e.to_string())?;
-    #[cfg(windows)]
-    let _job = crate::procgroup::adopt_scoped(&child);
-    let (lines_tx, lines) = std::sync::mpsc::channel::<(bool, String)>();
-    let readers: Vec<std::thread::JoinHandle<()>> = [
-        child
-            .stdout
-            .take()
-            .map(|s| (false, Box::new(s) as Box<dyn std::io::Read + Send>)),
-        child
-            .stderr
-            .take()
-            .map(|s| (true, Box::new(s) as Box<dyn std::io::Read + Send>)),
-    ]
-    .into_iter()
-    .flatten()
-    .map(|(stderr, stream)| {
-        let tx = lines_tx.clone();
-        std::thread::spawn(move || {
-            for line in BufReader::new(stream).lines().map_while(Result::ok) {
-                if tx.send((stderr, line)).is_err() {
-                    break;
-                }
-            }
-        })
-    })
-    .collect();
-    drop(lines_tx);
-    let status = loop {
-        while let Ok((stderr, line)) = lines.try_recv() {
-            said(&line, stderr);
-        }
-        if cancel.load(Ordering::SeqCst) {
-            crate::procgroup::kill(child.id());
-            let _ = child.kill();
-            let _ = child.wait();
-            return Ok(RunEnd::Stopped);
-        }
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) => {
-                if let Ok((stderr, line)) = lines.recv_timeout(Duration::from_millis(100)) {
-                    said(&line, stderr);
-                }
-            }
-            Err(e) => return Err(e.to_string()),
-        }
-    };
-    for reader in readers {
-        let _ = reader.join();
-    }
-    while let Ok((stderr, line)) = lines.try_recv() {
-        said(&line, stderr);
-    }
-    Ok(RunEnd::Exited(status.code().map_or(-1, i64::from)))
+        .env("PATH", crate::linerpc::child_path());
+    // Lean runs under Lake: stopping one stops both.
+    crate::spawn::run_streaming(command, said, cancel)
 }
 
 /// Where the build of the Mathlib a Lake project at `root` depends on — or

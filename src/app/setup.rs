@@ -227,10 +227,10 @@ impl ServerLook {
                 let server = self.config.resolve_with(language, &self.choices)?;
                 let fetch = match lsp::store::locate_on(&server, self.path.as_deref()) {
                     lsp::store::Located::NeedsDownload { download, .. } => self
-                        .on_path(&server.server_name, download.binary)
+                        .on_path(&server.server_name, download.binary, root)
                         .map_or(Fetch::Download, Fetch::OnPath),
                     lsp::store::Located::NeedsInstall { install, .. } => self
-                        .on_path(&server.server_name, install.binary)
+                        .on_path(&server.server_name, install.binary, root)
                         .map_or_else(|| Fetch::Install(install.tool.to_string()), Fetch::OnPath),
                     lsp::store::Located::Unsupported(_) => return None,
                     // The user's own program, run as found in place of
@@ -276,7 +276,7 @@ impl ServerLook {
     /// when this computer has one worth using, as a first open would offer
     /// it. Not for a server Clew's own install keeps from running the
     /// project's code ([`lsp::langenv::pins`]).
-    fn on_path(&self, server_name: &str, binary: &str) -> Option<PathBuf> {
+    fn on_path(&self, server_name: &str, binary: &str, root: &Path) -> Option<PathBuf> {
         if lsp::langenv::pins(server_name) {
             return None;
         }
@@ -286,7 +286,7 @@ impl ServerLook {
             .clone()
             .unwrap_or_else(clew_core::linerpc::child_path);
         let program = lsp::store::find_in_unresolved(&path, name)?;
-        crate::app::lsp::worth_offering(&program, &path).then_some(program)
+        crate::app::lsp::worth_offering(&program, &path, Some(root)).then_some(program)
     }
 }
 

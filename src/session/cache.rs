@@ -89,7 +89,12 @@ use crate::incremental::Version;
 /// `shop/__init__.py`; an older entry has only the module.
 /// 20: the methods read as attributes (a Python `@property`) are cached with
 /// a file's call sites ([`CachedCalls::accessed`]); an older entry has none.
-pub(crate) const CACHE_VERSION: u32 = 20;
+/// 21: a Rust struct's fields, an enum's variants and a `static` are
+/// symbols of their own (a `static` no longer a constant); a module
+/// declaration keeps its `#[path]`; a receiver is typed by a parameter or a
+/// field; a method keeps its owner ([`CachedSymbol::owner`]). An older entry
+/// has none of these.
+pub(crate) const CACHE_VERSION: u32 = 21;
 
 /// A cached symbol (the index entry minus the paths, which are reconstructed
 /// from the project root + relative path on load).
@@ -106,6 +111,9 @@ pub struct CachedSymbol {
     /// a function execution enters the project through.
     #[serde(default)]
     pub entry: Option<String>,
+    /// The type, class or trait a method belongs to.
+    #[serde(default)]
+    pub owner: Option<String>,
 }
 
 /// A cached raw import (the extraction result, resolved lazily against the live
@@ -263,6 +271,7 @@ mod tests {
             size: 2,
             hash,
             symbols: vec![CachedSymbol {
+                owner: None,
                 name: "foo".into(),
                 kind: "function".into(),
                 line: 3,

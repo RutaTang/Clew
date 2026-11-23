@@ -1189,6 +1189,7 @@ impl App {
                             .symbols
                             .iter()
                             .map(|s| index::SymbolEntry {
+                                owner: None,
                                 name: s.name.clone(),
                                 kind: s.kind.clone(),
                                 rel: fs.rel.clone(),

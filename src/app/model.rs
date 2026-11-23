@@ -1062,6 +1062,9 @@ pub enum TestAt {
     /// A group's tests, by the group's name: a test class's (`TestCart`)
     /// or a test file's (`test_cart.py`).
     Group(String),
+    /// A Rust doc comment's example, by what its run is called (`Doctest
+    /// of add`): run, never debugged — rustdoc builds and runs it itself.
+    Doctest(String),
 }
 
 /// An open right-click navigation menu.

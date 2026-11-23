@@ -3410,6 +3410,7 @@ fn skim_keeps_the_code_in_view() {
         Arc::new(
             (0..120)
                 .map(|i| crate::index::SymbolEntry {
+                    owner: None,
                     name: format!("f{i}"),
                     kind: "function".into(),
                     rel: "src/lib.rs".into(),
@@ -10658,6 +10659,7 @@ fn a_long_entry_puts_its_chain_under_it() {
     );
     let symbol = |name: &str, line: usize, entry: Option<crate::index::EntryKind>| {
         crate::index::SymbolEntry {
+            owner: None,
             name: name.into(),
             kind: "function".into(),
             rel: "src/lib.rs".into(),
@@ -10742,6 +10744,7 @@ fn an_entrys_tag_stays_on_one_line_in_chinese() {
     );
     let symbol = |name: &str, line: usize, entry: Option<crate::index::EntryKind>| {
         crate::index::SymbolEntry {
+            owner: None,
             name: name.into(),
             kind: "function".into(),
             rel: "src/lib.rs".into(),
@@ -10839,6 +10842,7 @@ fn the_call_flow_shows_how_an_entry_point_reaches_the_function() {
     let symbol =
         |name: &str, line: usize, entry: Option<crate::index::EntryKind>, is_test: bool| {
             crate::index::SymbolEntry {
+                owner: None,
                 name: name.into(),
                 kind: "function".into(),
                 rel: "src/lib.rs".into(),
@@ -11027,6 +11031,7 @@ fn the_overlays_list_the_most_changed_files_and_the_entry_points() {
     let symbol =
         |name: &str, line: usize, entry: Option<crate::index::EntryKind>, is_test: bool| {
             crate::index::SymbolEntry {
+                owner: None,
                 name: name.into(),
                 kind: "function".into(),
                 rel: "src/lib.rs".into(),
@@ -12337,6 +12342,7 @@ fn rows_send_the_identity_of_what_they_show() {
 
     // The symbol finder.
     app.proj.symbol_index = Arc::new(vec![crate::index::SymbolEntry {
+        owner: None,
         name: "origin".into(),
         kind: "function".into(),
         rel: "src/lib.rs".into(),

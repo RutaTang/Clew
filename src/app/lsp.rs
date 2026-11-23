@@ -350,6 +350,7 @@ impl App {
         // shell's, asked once and maybe not yet answered), on the PATH a
         // test set for this thread when it set one.
         let path = path_set_here();
+        let root = self.proj.project.as_ref().map(|p| p.root.clone());
         let fetched = provision.clone();
         self.proj.pending_lsp_consent.offer(LspConsent {
             language: language.to_string(),
@@ -369,7 +370,7 @@ impl App {
                 tokio::task::spawn_blocking(move || {
                     let path = path.unwrap_or_else(clew_core::linerpc::child_path);
                     on_path_for(&fetched, Some(&path))
-                        .filter(|program| worth_offering(program, &path))
+                        .filter(|program| worth_offering(program, &path, root.as_deref()))
                 })
                 .await
                 .ok()
@@ -1747,8 +1748,12 @@ impl App {
                     Ok(client) => {
                         // Open every already-loaded document of this language.
                         let open_task = self.open_docs_for_language(&language, &client);
+                        let rust = language == "rust";
                         self.proj.link.lsp.insert(language, LspSlot::Ready(client));
-                        open_task
+                        match rust {
+                            true => Task::batch([open_task, self.look_for_rust_src()]),
+                            false => open_task,
+                        }
                     }
                     Err(e) => {
                         self.status = tr!(
@@ -1757,6 +1762,57 @@ impl App {
                             error = e
                         );
                         self.proj.link.lsp.insert(language, LspSlot::Failed(e));
+                        Task::none()
+                    }
+                }
+            }
+            LspMsg::RustSrcFound { found, .. } => {
+                self.proj.rust_src = match found {
+                    Some(Err(toolchain)) => RustSrc::Missing(toolchain),
+                    Some(Ok(())) | None => RustSrc::Present,
+                };
+                Task::none()
+            }
+            LspMsg::AddRustSrc => {
+                let toolchain = match &self.proj.rust_src {
+                    RustSrc::Missing(t) => t.clone(),
+                    RustSrc::Failed { toolchain, .. } => toolchain.clone(),
+                    _ => return Task::none(),
+                };
+                self.proj.rust_src = RustSrc::Adding(toolchain.clone());
+                let stamp = self.stamp();
+                Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            clew_core::cargorun::add_rust_src(toolchain.as_deref())
+                        })
+                        .await
+                        .unwrap_or_else(|e| Err(e.to_string()))
+                    },
+                    move |result| {
+                        Message::Lsp(LspMsg::RustSrcAdded {
+                            stamp: stamp.clone(),
+                            result,
+                        })
+                    },
+                )
+            }
+            LspMsg::RustSrcAdded { result, .. } => {
+                let toolchain = match &self.proj.rust_src {
+                    RustSrc::Adding(t) => t.clone(),
+                    _ => None,
+                };
+                match result {
+                    Ok(()) => {
+                        self.proj.rust_src = RustSrc::Present;
+                        self.status = tr!(
+                            "Rust's sources were added. rust-analyzer starts again to read them."
+                        )
+                        .into();
+                        self.update(Message::Lsp(LspMsg::Restart("rust".into())))
+                    }
+                    Err(error) => {
+                        self.proj.rust_src = RustSrc::Failed { toolchain, error };
                         Task::none()
                     }
                 }
@@ -1981,11 +2037,86 @@ pub(crate) fn path_name(provision: &LspProvision) -> Option<&'static str> {
 /// one with no way to ask (pyright's server, VS Code's) is offered as found,
 /// unless it is such a shim: those are kept in a `shims` folder (asdf,
 /// mise, pyenv, rbenv, nodenv), and only running it would tell.
-pub(crate) fn worth_offering(program: &std::path::Path, path: &std::ffi::OsStr) -> bool {
+///
+/// rustup's `rust-analyzer` is asked for the toolchain the project at
+/// `project` pins (`rust-toolchain.toml`): it runs that toolchain's there,
+/// and one that has none failed in the project after it was offered.
+/// Asked by its channel, away from the project: a toolchain the project
+/// names by path is its own program, not to be run for it.
+pub(crate) fn worth_offering(
+    program: &std::path::Path,
+    path: &std::ffi::OsStr,
+    project: Option<&std::path::Path>,
+) -> bool {
     let name = program.file_stem().and_then(|n| n.to_str()).unwrap_or("");
+    let pinned = match name {
+        "rust-analyzer" => project.and_then(clew_core::cargorun::pinned_toolchain),
+        _ => None,
+    };
+    let env: Vec<(&str, &str)> = pinned
+        .iter()
+        .flat_map(|t| {
+            [
+                ("RUSTUP_TOOLCHAIN", t.as_str()),
+                ("RUSTUP_AUTO_INSTALL", "0"),
+            ]
+        })
+        .collect();
     match version_args(name) {
-        Some(args) => runs_here(program, args, path),
+        Some(args) => runs_here(program, args, path, &env),
         None => !program.components().any(|c| c.as_os_str() == "shims"),
+    }
+}
+
+/// Rust's own sources (`rust-src`) for the project's toolchain, which
+/// rust-analyzer reads the standard library from: without them `Vec`,
+/// `Option` and the rest are names it cannot follow, and it says so only
+/// in its log.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum RustSrc {
+    /// Not looked at yet (or a project on another host).
+    #[default]
+    Unknown,
+    /// There, or nothing rustup could add them to.
+    Present,
+    /// Missing from this toolchain (`None`: rustup's default).
+    Missing(Option<String>),
+    /// Being added to it.
+    Adding(Option<String>),
+    /// Adding them failed: rustup's word why.
+    Failed {
+        toolchain: Option<String>,
+        error: String,
+    },
+}
+
+impl App {
+    /// Look, off the UI thread, whether the project's toolchain has Rust's
+    /// own sources: once a project, for one on this computer.
+    pub(crate) fn look_for_rust_src(&mut self) -> Task<Message> {
+        if self.connection.is_remote() || self.proj.rust_src != RustSrc::Unknown {
+            return Task::none();
+        }
+        let Some(root) = self.proj.project.as_ref().map(|p| p.root.clone()) else {
+            return Task::none();
+        };
+        // Asked once, whatever the answer.
+        self.proj.rust_src = RustSrc::Present;
+        let stamp = self.stamp();
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || clew_core::cargorun::rust_src(&root))
+                    .await
+                    .ok()
+                    .flatten()
+            },
+            move |found| {
+                Message::Lsp(LspMsg::RustSrcFound {
+                    stamp: stamp.clone(),
+                    found,
+                })
+            },
+        )
     }
 }
 
@@ -2010,12 +2141,18 @@ pub(crate) fn version_args(name: &str) -> Option<&'static [&'static str]> {
 /// exits in success within a few seconds — run as the server would be, on
 /// the PATH it was found on (a `#!/usr/bin/env node` server finds its
 /// `node` there: an app opened from the Finder has none on its own), and
-/// away from any project.
-pub(crate) fn runs_here(program: &std::path::Path, args: &[&str], path: &std::ffi::OsStr) -> bool {
+/// away from any project — with `env` set for it besides.
+pub(crate) fn runs_here(
+    program: &std::path::Path,
+    args: &[&str],
+    path: &std::ffi::OsStr,
+    env: &[(&str, &str)],
+) -> bool {
     use std::process::Stdio;
     use std::time::{Duration, Instant};
     let Ok(mut child) = clew_core::spawn::command(program)
         .args(args)
+        .envs(env.iter().copied())
         .env("PATH", path)
         .current_dir(clew_core::linerpc::neutral_dir())
         .stdin(Stdio::null())

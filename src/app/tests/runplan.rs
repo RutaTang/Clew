@@ -753,3 +753,148 @@ fn a_gutter_play_mark_runs_or_debugs_what_starts_on_its_line() {
     }));
     assert_eq!(app.status, "No program starts here.");
 }
+
+/// A doc comment's example is run alone, as rustdoc runs it: marked ▶ on
+/// the line its code block opens, offered to run and not to debug, and
+/// Debug Test on it runs it, said to run without the debugger. A binary's
+/// examples are no doctests.
+#[test]
+fn a_doc_example_runs_as_a_doctest() {
+    let mut app = scanned_app("runplan-doctest");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    write(&root, "Cargo.toml", MANIFEST);
+    let lib = "/// Twice.\n///\n/// ```\n/// assert_eq!(shapes::twice(2), 4);\n/// ```\npub fn twice(x: i32) -> i32 {\n    x * 2\n}\n";
+    write(&root, "src/lib.rs", lib);
+    write(
+        &root,
+        "src/main.rs",
+        "/// ```\n/// run();\n/// ```\nfn run() {}\nfn main() { run() }\n",
+    );
+    open_synchronously(&mut app, "src/lib.rs", None);
+    let pane = app.proj.active;
+    let v = app.proj.panes[pane].as_ref().unwrap();
+    assert_eq!(app.run_marks(v).into_iter().collect::<Vec<_>>(), [3]);
+    let _ = app.update(Message::Hover(HoverMsg::RunMarkClicked {
+        pane,
+        line: 3,
+        x: 4.0,
+        y: 60.0,
+    }));
+    let menu = app.proj.context_menu.clone().expect("the ▶'s menu");
+    assert_eq!(
+        menu.test,
+        Some(crate::TestAt::Doctest("Doctest of twice".into()))
+    );
+    let _ = app.update(Message::Hover(HoverMsg::ContextMenuClosed));
+    assert_eq!(
+        crate::app::runplan::test_plan_at("rust", &root.join("src/lib.rs"), lib, 4),
+        Some(RunPlan::Doctest {
+            target: clew_core::cargorun::target_of(&root.join("src/lib.rs")).unwrap(),
+            file: root.join("src/lib.rs"),
+            line: 3,
+            item: "twice".into(),
+        })
+    );
+    // Debug Test in it: run, never debugged, and said so.
+    let _ = app.update(Message::Debug(DebugMsg::RunTest {
+        line: Some(4),
+        no_debug: false,
+    }));
+    assert!(
+        matches!(app.debug.plan, Some(RunPlan::Doctest { .. })),
+        "{:?}",
+        app.debug.plan
+    );
+    assert!(app.debug.no_debug);
+    assert!(
+        app.status.starts_with(
+            "A doc example runs without the debugger: Running Doctest of twice with Cargo"
+        ),
+        "{}",
+        app.status
+    );
+    let plan = app.debug.plan.clone().unwrap();
+    assert_eq!(plan.verdict(0).as_deref(), Some("Doctest of twice passed"));
+    assert_eq!(
+        plan.verdict(101).as_deref(),
+        Some("Doctest of twice failed")
+    );
+    // A binary's example: no doctest.
+    let main = "/// ```\n/// run();\n/// ```\nfn run() {}\nfn main() { run() }\n";
+    assert_eq!(
+        crate::app::runplan::test_plan_at("rust", &root.join("src/main.rs"), main, 2),
+        None
+    );
+}
+
+/// A bench's own `main` (`harness = false`) is what its ▶ runs, built as
+/// `cargo bench` builds it.
+#[test]
+fn a_benchs_main_runs_the_bench() {
+    let mut app = scanned_app("runplan-bench");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    write(
+        &root,
+        "Cargo.toml",
+        &format!("{MANIFEST}\n[[bench]]\nname = \"speed\"\nharness = false\n"),
+    );
+    write(&root, "src/lib.rs", "pub fn f() {}\n");
+    write(&root, "benches/speed.rs", "fn main() {}\n");
+    let plan = crate::app::runplan::cargo_plan_for(&root.join("benches/speed.rs")).unwrap();
+    assert!(
+        matches!(&plan, RunPlan::Cargo { target, test: None }
+            if target.kind == clew_core::cargorun::TargetKind::Bench("speed".into())),
+        "{plan:?}"
+    );
+    assert!(plan.builds_tests(), "built as Cargo builds a bench");
+    open_synchronously(&mut app, "benches/speed.rs", None);
+    assert_eq!(
+        app.main_at(app.proj.active, 1).as_deref(),
+        Some("the speed benchmark")
+    );
+}
+
+/// Rust's sources missing from the project's toolchain are offered once
+/// rust-analyzer starts, added on request, and rust-analyzer started again
+/// to read them; a failure keeps rustup's word and the way to try again.
+#[test]
+fn missing_rust_sources_are_added_on_request() {
+    use crate::app::RustSrc;
+    let mut app = scanned_app("runplan-rust-src");
+    app.proj.rust_src = RustSrc::Missing(Some("1.80.0".into()));
+    let _ = app.update(Message::Lsp(crate::LspMsg::AddRustSrc));
+    assert_eq!(app.proj.rust_src, RustSrc::Adding(Some("1.80.0".into())));
+    // Asked again while it adds them: nothing more.
+    let _ = app.update(Message::Lsp(crate::LspMsg::AddRustSrc));
+    assert_eq!(app.proj.rust_src, RustSrc::Adding(Some("1.80.0".into())));
+    let stamp = app.stamp();
+    let _ = app.update(Message::Lsp(crate::LspMsg::RustSrcAdded {
+        stamp: stamp.clone(),
+        result: Err("no network".into()),
+    }));
+    assert_eq!(
+        app.proj.rust_src,
+        RustSrc::Failed {
+            toolchain: Some("1.80.0".into()),
+            error: "no network".into()
+        }
+    );
+    let _ = app.update(Message::Lsp(crate::LspMsg::AddRustSrc));
+    let _ = app.update(Message::Lsp(crate::LspMsg::RustSrcAdded {
+        stamp,
+        result: Ok(()),
+    }));
+    assert_eq!(app.proj.rust_src, RustSrc::Present);
+    assert!(
+        app.status.starts_with("Rust's sources were added."),
+        "{}",
+        app.status
+    );
+    // Looked at once a project.
+    let stamp = app.stamp();
+    let _ = app.update(Message::Lsp(crate::LspMsg::RustSrcFound {
+        stamp,
+        found: Some(Err(None)),
+    }));
+    assert_eq!(app.proj.rust_src, RustSrc::Missing(None));
+}

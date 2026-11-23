@@ -1441,8 +1441,13 @@ fn attr_marks_test(rest: &str) -> bool {
             .skip(1)
             .any(attr_marks_test);
     }
-    // `test`, `test_case`, `wasm_bindgen_test`, `traced_test`, `rstest`.
-    seg == "test" || seg.starts_with("test_") || seg.ends_with("_test") || seg == "rstest"
+    // `test`, `test_case`, `wasm_bindgen_test`, `traced_test`, `rstest`;
+    // quickcheck's `#[quickcheck]`, which makes the function a test.
+    seg == "test"
+        || seg.starts_with("test_")
+        || seg.ends_with("_test")
+        || seg == "rstest"
+        || seg == "quickcheck"
 }
 
 /// What sits between an attribute's first `(` and its matching `)`, or `None`

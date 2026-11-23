@@ -192,7 +192,9 @@ async fn build_with_cargo(
             .await;
         return None;
     };
-    let tests = test.is_some() || matches!(target.kind, TargetKind::Test(_));
+    // A bench is built as a test is (Cargo reports it as one, whatever its
+    // harness).
+    let tests = test.is_some() || matches!(target.kind, TargetKind::Test(_) | TargetKind::Bench(_));
     let features = clew_core::cargorun::Features::from_choices(choices.rust.as_ref());
     let (lines_tx, mut lines) = tokio::sync::mpsc::unbounded_channel::<String>();
     let cancel = std::sync::Arc::new(AtomicBool::new(false));
@@ -272,7 +274,12 @@ async fn build_with_cargo(
         // A test binary's tests run as `cargo test` runs them, in their
         // package's folder; a program as `cargo run` from the project.
         let cwd = if tests { package } else { root.to_path_buf() };
-        return Some((executable, Vec::new(), cwd, env));
+        // A bench runs as `cargo bench` runs it: told it is benchmarking.
+        let args = match target.kind {
+            TargetKind::Bench(_) => vec!["--bench".to_string()],
+            _ => Vec::new(),
+        };
+        return Some((executable, args, cwd, env));
     };
     // The test by the name its binary lists it under: worked out from the
     // code, a test in a module of its own file named through it.
@@ -325,18 +332,26 @@ async fn build_with_cargo(
     }
 }
 
-/// Run a Lean file's `main` (`lake env lean --run`) for run `run`: its
-/// lines into the run's output as they come, then its exit and its end, as
-/// a debugger reports a program's. Stopped with the run.
-async fn run_lean(
+/// Run a program Clew runs without a debugger — a Lean file's `main`, a
+/// doc example through Cargo — as a run of its own: `job` runs it to its
+/// end (blocking, on a thread of its own), each line it writes handed to
+/// the `said` it is given, and stops once the `cancel` it is given is set;
+/// it answers how the program ended, or what to tell the reader of why it
+/// did not run.
+async fn run_plain<F>(
     output: &mut iced::futures::channel::mpsc::Sender<Message>,
     stamp: &Stamp,
     run: u64,
     live: &std::sync::Arc<std::sync::atomic::AtomicU64>,
-    lake: &Path,
-    project: &Path,
-    file: &Path,
-) {
+    job: F,
+) where
+    F: FnOnce(
+            &mut dyn FnMut(&str, bool),
+            &std::sync::atomic::AtomicBool,
+        ) -> Result<clew_core::spawn::RunEnd, String>
+        + Send
+        + 'static,
+{
     use iced::futures::SinkExt;
     use std::sync::atomic::{AtomicBool, Ordering};
     let event = |event: dap::DapEvent| {
@@ -349,22 +364,12 @@ async fn run_lean(
     let (lines_tx, mut lines) = tokio::sync::mpsc::unbounded_channel::<(bool, String)>();
     let cancel = std::sync::Arc::new(AtomicBool::new(false));
     let job = tokio::task::spawn_blocking({
-        let (lake, project, file, cancel) = (
-            lake.to_path_buf(),
-            project.to_path_buf(),
-            file.to_path_buf(),
-            cancel.clone(),
-        );
+        let cancel = cancel.clone();
         move || {
-            clew_core::lean_run_main(
-                &lake,
-                &project,
-                &file,
-                |line, stderr| {
-                    let _ = lines_tx.send((stderr, line.to_string()));
-                },
-                &cancel,
-            )
+            let mut said = |line: &str, stderr: bool| {
+                let _ = lines_tx.send((stderr, line.to_string()));
+            };
+            job(&mut said, &cancel)
         }
     });
     // Running: its tab says so from the start, as a launched program's.
@@ -395,7 +400,8 @@ async fn run_lean(
             done = &mut job => break done,
             _ = tick.tick() => {
                 if live.load(Ordering::SeqCst) != run {
-                    // Stopped: Lean is stopped with it, and nothing more said.
+                    // Stopped: the program is stopped with it, and nothing
+                    // more said.
                     cancel.store(true, Ordering::SeqCst);
                     return;
                 }
@@ -405,30 +411,24 @@ async fn run_lean(
     while let Ok(line) = lines.try_recv() {
         let _ = output.send(said(line)).await;
     }
+    let failed = |error: String| {
+        Message::Debug(DebugMsg::Failed {
+            stamp: stamp.clone(),
+            run,
+            error,
+        })
+    };
     match ended {
-        Ok(Ok(clew_core::LeanRunEnd::Exited(code))) => {
+        Ok(Ok(clew_core::spawn::RunEnd::Exited(code))) => {
             let _ = output.send(event(dap::DapEvent::Exited { code })).await;
             let _ = output.send(event(dap::DapEvent::Terminated)).await;
         }
-        Ok(Ok(clew_core::LeanRunEnd::Stopped)) => {}
-        Ok(Err(e)) => {
-            let error = tr!("Lean could not be started: {error}", error = e);
-            let _ = output
-                .send(Message::Debug(DebugMsg::Failed {
-                    stamp: stamp.clone(),
-                    run,
-                    error,
-                }))
-                .await;
+        Ok(Ok(clew_core::spawn::RunEnd::Stopped)) => {}
+        Ok(Err(error)) => {
+            let _ = output.send(failed(error)).await;
         }
         Err(e) => {
-            let _ = output
-                .send(Message::Debug(DebugMsg::Failed {
-                    stamp: stamp.clone(),
-                    run,
-                    error: e.to_string(),
-                }))
-                .await;
+            let _ = output.send(failed(e.to_string())).await;
         }
     }
 }
@@ -612,6 +612,16 @@ impl App {
         let test = clew_core::runnables::runnable_at(&found, line)?;
         Some(match test.kind {
             RunnableKind::Main => return None,
+            RunnableKind::Doctest => crate::TestAt::Doctest(
+                crate::app::runplan::RunPlan::Doctest {
+                    target: clew_core::cargorun::target_of(&viewer.abs)
+                        .filter(|t| t.kind == clew_core::cargorun::TargetKind::Lib)?,
+                    file: viewer.abs.clone(),
+                    line: test.line,
+                    item: test.name.clone(),
+                }
+                .label(),
+            ),
             RunnableKind::Tests if test.name.is_empty() => crate::TestAt::Group(
                 viewer
                     .abs
@@ -672,7 +682,7 @@ impl App {
             .filter(|r| match r.kind {
                 RunnableKind::Test => !r.name.contains('['),
                 RunnableKind::Tests => !r.name.is_empty(),
-                RunnableKind::Main => true,
+                RunnableKind::Main | RunnableKind::Doctest => true,
             })
             .map(|r| r.line)
             .collect()
@@ -712,6 +722,16 @@ impl App {
             crate::app::runplan::test_plan_at(lang, &viewer.abs, &viewer.source, line)
         });
         match plan {
+            // An example is run, never debugged: rustdoc builds and runs it
+            // itself. Said, and run.
+            Some(plan @ crate::app::runplan::RunPlan::Doctest { .. }) if !no_debug => {
+                let task = self.start_session(true, Some(plan));
+                self.status = tr!(
+                    "A doc example runs without the debugger: {status}",
+                    status = self.status
+                );
+                task
+            }
             Some(plan) => self.start_session(no_debug, Some(plan)),
             None => {
                 self.status = match lang {
@@ -845,6 +865,9 @@ impl App {
         // What the launch file asks of a Python run beyond its program,
         // and what is said of it as the run starts.
         let mut from_file: Option<crate::app::tasks::LaunchExtras> = None;
+        // A native program's environment, from its launch file's `env` and
+        // `envFile`: given to lldb as it is to debugpy.
+        let mut file_env: Vec<(String, String)> = Vec::new();
         let mut file_notes: Vec<String> = Vec::new();
         let (program, args, cwd, lang) = if remote {
             (root.clone(), Vec::new(), root.clone(), None)
@@ -946,6 +969,11 @@ impl App {
             };
             if lang == dap::Lang::Python {
                 from_file = Some(cfg.extras);
+            } else if let Some(env) = cfg.extras.fields.get("env").and_then(|e| e.as_object()) {
+                file_env = env
+                    .iter()
+                    .filter_map(|(name, value)| Some((name.clone(), value.as_str()?.to_string())))
+                    .collect();
             }
             file_notes = cfg.notes;
             (cfg.program, cfg.args, cfg.cwd, Some(lang))
@@ -1070,6 +1098,10 @@ impl App {
             None if matches!(plan, Some(RunPlan::Lean { .. })) => {
                 tr!("Running {file} with Lean…", file = program_name)
             }
+            None if matches!(plan, Some(RunPlan::Doctest { .. })) => tr!(
+                "Running {doctest} with Cargo…",
+                doctest = plan.as_ref().map(RunPlan::label).unwrap_or_default()
+            ),
             None if matches!(
                 plan,
                 Some(RunPlan::Pytest { .. } | RunPlan::Django { .. } | RunPlan::Script { .. })
@@ -1086,7 +1118,7 @@ impl App {
         // No adapter comes to say a Lean run is running: what is said now
         // is its running state, taken down when the program ends — it
         // said "Running Main.lean with Lean…" long after Main.lean exited.
-        if matches!(plan, Some(RunPlan::Lean { .. })) {
+        if matches!(plan, Some(RunPlan::Lean { .. } | RunPlan::Doctest { .. })) {
             self.say_debug_state(self.status.clone());
         }
         // This run's identity: every message the adapter stream produces carries
@@ -1112,8 +1144,14 @@ impl App {
         // only while the adapter may ride it (see below).
         let stamp = self.transport_stamp();
         // The user's choices for the project: a Python program runs under the
-        // interpreter they picked.
-        let choices = self.proj.lang_choices.clone();
+        // interpreter they picked; a Rust one is built with the features
+        // they chose — or, choosing none, those the project's `lsp.toml`
+        // gives rust-analyzer, which the dimming reads too.
+        let mut choices = self.proj.lang_choices.clone();
+        choices.rust = Some(clew_core::buildfacts::rust_choices(
+            &choices,
+            Some(&self.proj.lsp_config),
+        ));
         // A Python program of a project on this computer is run by Clew, at
         // debugpy's asking, so that it has an input: run by debugpy, its
         // input was none, and `input()` ended it at once.
@@ -1334,7 +1372,48 @@ impl App {
                 }) = &plan
                 {
                     // A Lean file's `main`: run by Lean, no debugger.
-                    run_lean(&mut output, &stamp, run, &live, lake, project, file).await;
+                    let (lake, project, file) = (lake.clone(), project.clone(), file.clone());
+                    run_plain(&mut output, &stamp, run, &live, move |said, cancel| {
+                        clew_core::lean_run_main(&lake, &project, &file, said, cancel).map_err(
+                            |e| tr!("Lean could not be started: {error}", error = e).to_string(),
+                        )
+                    })
+                    .await;
+                    return;
+                } else if let Some(crate::app::runplan::RunPlan::Doctest {
+                    target,
+                    file,
+                    line,
+                    ..
+                }) = &plan
+                {
+                    // A doc example: run by rustdoc, through Cargo, no
+                    // debugger.
+                    let (target, file, line) = (target.clone(), file.clone(), *line);
+                    let features =
+                        clew_core::cargorun::Features::from_choices(choices.rust.as_ref());
+                    run_plain(&mut output, &stamp, run, &live, move |said, cancel| {
+                        let Some(cargo) = clew_core::cargorun::find_cargo() else {
+                            return Err(tr!(
+                                "Cargo was not found. Install Rust from rustup.rs, then run again."
+                            )
+                            .to_string());
+                        };
+                        use clew_core::cargorun::DoctestEnd;
+                        match clew_core::cargorun::run_doctest(
+                            &cargo, &target, &features, &file, line, said, cancel,
+                        ) {
+                            Ok(DoctestEnd::Ran(end)) => Ok(end),
+                            Ok(DoctestEnd::NotListed) => Err(tr!(
+                                "rustdoc lists no example at line {line} of {file}: is the file a module of its crate's library?",
+                                line = line,
+                                file = file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+                            )
+                            .to_string()),
+                            Err(e) => Err(tr!("Cargo could not be started: {error}", error = e).to_string()),
+                        }
+                    })
+                    .await;
                     return;
                 } else {
                     let lang = lang.expect("local start_debug always detects the language");
@@ -1588,6 +1667,9 @@ impl App {
                 client.prefer_exception_filters(&exceptions);
                 if let Some(extras) = &from_file {
                     crate::app::tasks::with_launch_file(&mut launch, extras);
+                }
+                if !file_env.is_empty() {
+                    clew_core::cargorun::with_cargo_env(&mut launch, &file_env);
                 }
                 if no_debug {
                     without_debugger(&mut launch);

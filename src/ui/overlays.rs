@@ -124,6 +124,10 @@ pub(crate) fn gutter_words(app: &App, pane: usize, line: usize) -> Option<String
             said.push(match r.kind {
                 RunnableKind::Test => tr!("Run or debug {test}", test = r.name),
                 RunnableKind::Tests => tr!("Run or debug the tests in {name}", name = r.name),
+                RunnableKind::Doctest => match r.name.is_empty() {
+                    true => tr!("Run this example").to_string(),
+                    false => tr!("Run this example of {item}", item = r.name),
+                },
                 // Named without reading the package (this is drawn each
                 // frame): Rust's `main`, a Python block's file.
                 RunnableKind::Main => tr!(
@@ -424,14 +428,16 @@ pub(crate) fn context_menu<'a>(app: &App, menu: &'a crate::ContextMenu) -> Eleme
             if let Some(test) = &menu.test {
                 let line = Some(menu.line + 1);
                 let (run, debug): (std::borrow::Cow<'static, str>, _) = match test {
-                    crate::TestAt::One => (tr!("Run Test").into(), tr!("Debug Test").into()),
+                    // Run only: rustdoc builds and runs an example itself.
+                    crate::TestAt::Doctest(name) => (tr!("Run {test}", test = name).into(), None),
+                    crate::TestAt::One => (tr!("Run Test").into(), Some(tr!("Debug Test").into())),
                     crate::TestAt::Case(name) => (
                         tr!("Run {test}", test = name).into(),
-                        tr!("Debug {test}", test = name).into(),
+                        Some(tr!("Debug {test}", test = name).into()),
                     ),
                     crate::TestAt::Group(name) => (
                         tr!("Run Tests in {name}", name = name).into(),
-                        tr!("Debug Tests in {name}", name = name).into(),
+                        Some(tr!("Debug Tests in {name}", name = name).into()),
                     ),
                 };
                 debugging.push(Row {
@@ -444,16 +450,18 @@ pub(crate) fn context_menu<'a>(app: &App, menu: &'a crate::ContextMenu) -> Eleme
                     able: true,
                     ai: false,
                 });
-                debugging.push(Row {
-                    label: debug,
-                    msg: Message::Debug(DebugMsg::RunTest {
-                        line,
-                        no_debug: false,
-                    }),
-                    keys: Some(app.keymap.chord(crate::keymap::Action::DebugTest).caps()),
-                    able: true,
-                    ai: false,
-                });
+                if let Some(debug) = debug {
+                    debugging.push(Row {
+                        label: debug,
+                        msg: Message::Debug(DebugMsg::RunTest {
+                            line,
+                            no_debug: false,
+                        }),
+                        keys: Some(app.keymap.chord(crate::keymap::Action::DebugTest).caps()),
+                        able: true,
+                        ai: false,
+                    });
+                }
             }
             debugging
         },

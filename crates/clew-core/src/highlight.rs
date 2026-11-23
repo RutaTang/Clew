@@ -510,6 +510,9 @@ const RUST_REFINEMENTS: &str = r##"
 (function_signature_item name: (identifier) @function.definition)
 
 (macro_invocation macro: (identifier) @function.macro "!" @function.macro)
+(macro_invocation
+  macro: (scoped_identifier name: (identifier) @function.macro)
+  "!" @function.macro)
 
 ((scoped_identifier path: (identifier) @module . "::" @module.separator)
  (#match? @module "^[a-z_]"))
@@ -1449,6 +1452,7 @@ mod tests {
             "#[cfg(not(windows))]\n\
              pub fn rel_string(rel: &std::path::Path) -> String {\n\
              \x20   if cfg!(windows) { std::env::var_os(v) } else { PathBuf::from(x) }\n\
+             \x20   tokio::select! { _ = a => {} }\n\
              }\n",
         );
         let kind = |line: usize, text: &str| {
@@ -1471,6 +1475,9 @@ mod tests {
         assert_eq!(kind(2, "cfg"), ["function.macro"]);
         assert_eq!(kind(2, "!"), ["function.macro"]);
         assert_eq!(kind(2, "var_os"), ["function"]);
+        // A macro named by its path is a macro too.
+        assert_eq!(kind(3, "select"), ["function.macro"]);
+        assert_eq!(kind(3, "tokio"), ["module"]);
         // A type's `::` is not a module's.
         assert_eq!(kind(2, "::"), ["module", "module", "punctuation.delimiter"]);
     }

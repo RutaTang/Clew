@@ -327,7 +327,37 @@ pub fn target_of(file: &Path) -> Option<CargoTarget> {
                 _ => None,
             }
         }
-        _ => None,
+        // Below a root the manifest names outside the usual folders —
+        // `[lib] path = "lib.rs"` at the package's top — a module of that
+        // target, from its root's folder: they were in no target, and had
+        // no ▶.
+        // The build script is no module of a target.
+        _ if file
+            == dir.join(
+                value
+                    .get("package")
+                    .and_then(|p| p.get("build")?.as_str())
+                    .unwrap_or("build.rs"),
+            ) =>
+        {
+            None
+        }
+        _ => {
+            let roots = declared("lib")
+                .into_iter()
+                .map(|(_, path)| (TargetKind::Lib, path))
+                .chain(declared("bin").into_iter().map(|(name, path)| {
+                    let name = name.unwrap_or_else(|| stem(&path));
+                    (TargetKind::Bin(name), path)
+                }));
+            roots
+                .filter_map(|(kind, root)| {
+                    let below = parts_below(file, root.parent()?)?;
+                    Some((kind, below))
+                })
+                .min_by_key(|(_, below)| below.len())
+                .and_then(|(kind, below)| target(kind, module_of(&below)))
+        }
     }
 }
 
@@ -879,6 +909,136 @@ pub fn config_build_target(dir: &Path, cargo_home: Option<&Path>) -> Option<Stri
     }
 }
 
+/// Cargo's arguments for the doctests of `target`'s package —
+/// `cargo test --doc`, with the features its build has — then `harness`
+/// for rustdoc's test runner. A package's doctests are its library's.
+pub fn doctest_args(target: &CargoTarget, features: &Features, harness: &[&str]) -> Vec<String> {
+    let mut args: Vec<String> = vec![
+        "test".into(),
+        "--doc".into(),
+        "--manifest-path".into(),
+        target.manifest.to_string_lossy().into_owned(),
+        "--color".into(),
+        "never".into(),
+    ];
+    args.extend(features.args(target));
+    args.push("--".into());
+    args.extend(harness.iter().map(|a| a.to_string()));
+    args
+}
+
+/// Of rustdoc's list of a package's doctests (`--list --format terse`:
+/// `src/lib.rs - add (line 22): test`), the one in the file `rel` (from its
+/// package's folder) whose example opens on 1-based `line`.
+pub fn listed_doctest(list: &str, rel: &str, line: usize) -> Option<String> {
+    let rel = rel.replace('\\', "/");
+    let head = format!("{rel} - ");
+    let tail = format!(" (line {line})");
+    list.lines()
+        .filter_map(|l| l.strip_suffix(": test"))
+        .find(|name| {
+            let name = name.replace('\\', "/");
+            name.starts_with(&head) && name.ends_with(&tail)
+        })
+        .map(str::to_string)
+}
+
+/// What rustdoc's test runner is given to run the one doctest `name` of
+/// the doctests `list`ed: rustdoc splits what it is given at spaces, and a
+/// doctest's name has them, so no filter can be the name, nor `--exact`
+/// meet it. A word of it that is no space's: the item's path (`Thing::new`)
+/// or its line's (`22)`); then, for each other doctest that word reaches
+/// too (an item's second example), `--skip` with a word of that one's that
+/// is not in this one's.
+pub fn doctest_filter(list: &str, name: &str) -> Vec<String> {
+    let names: Vec<&str> = list
+        .lines()
+        .filter_map(|l| l.strip_suffix(": test"))
+        .collect();
+    let path = name
+        .split_once(" - ")
+        .and_then(|(_, rest)| rest.rsplit_once(" (line "))
+        .map(|(path, _)| path)
+        .filter(|p| !p.is_empty() && !p.contains(char::is_whitespace));
+    let line = name.rsplit(' ').next().filter(|w| w.ends_with(')'));
+    let Some(filter) = path.or(line) else {
+        return vec![name.to_string()];
+    };
+    let mut args = vec![filter.to_string()];
+    for other in names.iter().filter(|o| **o != name && o.contains(filter)) {
+        // Its own line's word first: `30)` in `… add (line 30)`.
+        let skip = other.split_whitespace().rev().find(|w| !name.contains(w));
+        if let Some(word) = skip {
+            args.extend(["--skip".to_string(), word.to_string()]);
+        }
+    }
+    args
+}
+
+/// How a run of one doctest ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DoctestEnd {
+    /// Cargo ran to this end: the doctest's run, or a build that failed
+    /// before it.
+    Ran(crate::spawn::RunEnd),
+    /// The package's doctests were listed, and there is none at the line:
+    /// the example is in a binary's file, or the file is no module of the
+    /// library.
+    NotListed,
+}
+
+/// Run the one doctest of the file `file` whose example opens on 1-based
+/// `line`, in the package of `target`, as `cargo test --doc` runs it: its
+/// doctests listed (the library built), the one there found by its name,
+/// then run alone. Each line Cargo and the test write is handed to `said`
+/// with whether it went to stderr. Blocking; stopped once `cancel` is set.
+pub fn run_doctest(
+    cargo: &Path,
+    target: &CargoTarget,
+    features: &Features,
+    file: &Path,
+    line: usize,
+    mut said: impl FnMut(&str, bool),
+    cancel: &AtomicBool,
+) -> Result<DoctestEnd, String> {
+    use crate::spawn::RunEnd;
+    let rel = file
+        .strip_prefix(target.package_dir())
+        .map_err(|_| "the file is not in its package's folder".to_string())?
+        .to_string_lossy()
+        .into_owned();
+    let command = |harness: &[&str]| {
+        let mut command = crate::spawn::command(cargo);
+        command
+            .args(doctest_args(target, features, harness))
+            .current_dir(target.package_dir())
+            .env("PATH", crate::linerpc::child_path());
+        command
+    };
+    let mut list = String::new();
+    let listed = crate::spawn::run_streaming(
+        command(&["--list", "--format", "terse"]),
+        |l, stderr| match stderr {
+            true => said(l, true),
+            false => {
+                list.push_str(l);
+                list.push('\n');
+            }
+        },
+        cancel,
+    )?;
+    if listed != RunEnd::Exited(0) {
+        return Ok(DoctestEnd::Ran(listed));
+    }
+    let Some(name) = listed_doctest(&list, &rel, line) else {
+        return Ok(DoctestEnd::NotListed);
+    };
+    let filter = doctest_filter(&list, &name);
+    let filter: Vec<&str> = filter.iter().map(String::as_str).collect();
+    let ran = crate::spawn::run_streaming(command(&filter), said, cancel)?;
+    Ok(DoctestEnd::Ran(ran))
+}
+
 /// Of a test binary's `--list --format terse` lines (`a::tests::adds:
 /// test`), the test the reader meant: `wanted`, its full name as Clew
 /// worked it out, when listed; else the one test whose name ends in all of
@@ -943,6 +1103,105 @@ pub fn group_args(list: &str, under: &[String], selected: &[String]) -> Vec<Stri
     let mut args = selected.to_vec();
     args.push("--exact".into());
     args
+}
+
+/// The toolchain the project at `dir` pins for rustup — the channel of a
+/// `rust-toolchain` or `rust-toolchain.toml` in it or a folder above, as
+/// rustup reads them (the first where both are) — by its name only: a
+/// toolchain named by `path` is the repository's own program, never run for
+/// it, and so is no channel here.
+pub fn pinned_toolchain(dir: &Path) -> Option<String> {
+    for d in dir.ancestors() {
+        for name in ["rust-toolchain", "rust-toolchain.toml"] {
+            let Some(text) = crate::statefile::read_capped(&d.join(name), 64 * 1024) else {
+                continue;
+            };
+            let channel = match toml::from_str::<toml::Value>(&text) {
+                Ok(v) => v
+                    .get("toolchain")
+                    .and_then(|t| t.get("channel"))
+                    .and_then(|c| c.as_str())
+                    .map(str::to_string),
+                // The old form: the channel alone.
+                Err(_) => text
+                    .lines()
+                    .map(str::trim)
+                    .find(|l| !l.is_empty())
+                    .map(str::to_string),
+            };
+            // The file found decides, a channel named well or not.
+            return channel.filter(|c| {
+                !c.is_empty()
+                    && c.len() <= 64
+                    && c.chars()
+                        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_'))
+            });
+        }
+    }
+    None
+}
+
+/// Whether the toolchain of the project at `dir` has Rust's own sources
+/// (`rust-src`), which rust-analyzer reads the standard library from —
+/// without them `Vec`, `Option` and the rest are names it cannot follow.
+/// `Some(Err(toolchain))` when they are missing and rustup can add them (to
+/// `toolchain`, the project's pinned one, or its default); `Some(Ok(()))`
+/// when they are there; `None` with no rustup toolchain to ask. Never
+/// installs a toolchain to answer. Blocking.
+pub fn rust_src(dir: &Path) -> Option<Result<(), Option<String>>> {
+    let path = crate::linerpc::child_path();
+    crate::lsp::store::find_in_unresolved(&path, "rustup")?;
+    let rustc = crate::lsp::store::find_in_unresolved(&path, "rustc")?;
+    let toolchain = pinned_toolchain(dir);
+    let mut command = crate::spawn::command(&rustc);
+    command
+        .args(["--print", "sysroot"])
+        .current_dir(crate::linerpc::neutral_dir())
+        .env("PATH", &path)
+        .env("RUSTUP_AUTO_INSTALL", "0")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null());
+    if let Some(t) = &toolchain {
+        command.env("RUSTUP_TOOLCHAIN", t);
+    }
+    let out = command.output().ok().filter(|o| o.status.success())?;
+    let sysroot = PathBuf::from(String::from_utf8(out.stdout).ok()?.trim());
+    Some(
+        match sysroot.join("lib/rustlib/src/rust/library").is_dir() {
+            true => Ok(()),
+            false => Err(toolchain),
+        },
+    )
+}
+
+/// Add Rust's own sources to `toolchain` (its default where `None`):
+/// `rustup component add rust-src`. What rustup said why, where it could
+/// not. Blocking: it downloads them.
+pub fn add_rust_src(toolchain: Option<&str>) -> Result<(), String> {
+    let path = crate::linerpc::child_path();
+    let rustup = crate::lsp::store::find_in_unresolved(&path, "rustup")
+        .ok_or_else(|| "rustup was not found".to_string())?;
+    let mut command = crate::spawn::command(&rustup);
+    command
+        .args(["component", "add", "rust-src"])
+        .current_dir(crate::linerpc::neutral_dir())
+        .env("PATH", &path)
+        .stdin(Stdio::null());
+    if let Some(t) = toolchain {
+        command.args(["--toolchain", t]);
+    }
+    let out = command.output().map_err(|e| e.to_string())?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let said = String::from_utf8_lossy(&out.stderr);
+    let why = said
+        .lines()
+        .map(str::trim)
+        .rfind(|l| !l.is_empty())
+        .unwrap_or("rustup failed")
+        .to_string();
+    Err(why)
 }
 
 /// The user's Cargo, on the path a launched program gets — where rustup
@@ -1216,6 +1475,39 @@ mod tests {
 
     /// A file is placed in the target Cargo builds it in, by the manifest's
     /// paths and then Cargo's own layout, with its module there.
+    /// A library rooted outside `src/` (`[lib] path = "lib.rs"`): its
+    /// modules are its, from its root's folder; the build script is none.
+    #[test]
+    fn a_library_rooted_at_the_top_has_its_modules() {
+        let dir = TempDir::new("cargorun-top-lib");
+        let root = dir.path();
+        write(
+            root,
+            "Cargo.toml",
+            "[package]\nname = \"top\"\n\n[lib]\npath = \"lib.rs\"\n",
+        );
+        for rel in [
+            "lib.rs",
+            "util.rs",
+            "net/mod.rs",
+            "net/tcp.rs",
+            "build.rs",
+            "tests/it.rs",
+        ] {
+            write(root, rel, "");
+        }
+        let at = |rel: &str| target_of(&root.join(rel)).map(|t| (t.kind, t.module.join("::")));
+        assert_eq!(at("lib.rs"), Some((TargetKind::Lib, String::new())));
+        assert_eq!(at("util.rs"), Some((TargetKind::Lib, "util".into())));
+        assert_eq!(at("net/mod.rs"), Some((TargetKind::Lib, "net".into())));
+        assert_eq!(at("net/tcp.rs"), Some((TargetKind::Lib, "net::tcp".into())));
+        assert_eq!(at("build.rs"), None);
+        assert_eq!(
+            at("tests/it.rs"),
+            Some((TargetKind::Test("it".into()), String::new()))
+        );
+    }
+
     #[test]
     fn a_file_is_in_the_target_cargo_builds_it_in() {
         let dir = TempDir::new("cargorun-layout");
@@ -1630,6 +1922,42 @@ mod tests {
     /// `[env]` of the Cargo configuration, as Cargo sets it for a program it
     /// runs: the nearest file's entry, Cargo's home's last; a variable
     /// already set kept unless forced; a relative one from its folder.
+    /// A pinned channel is read from either file, the nearest first; a
+    /// toolchain named by a path, or by nothing a channel is, is none.
+    #[test]
+    fn the_projects_pinned_toolchain_is_its_channel() {
+        let dir = TempDir::new("cargorun-toolchain");
+        let root = dir.path();
+        write(
+            root,
+            "rust-toolchain.toml",
+            "[toolchain]\nchannel = \"1.80.0\"\ncomponents = [\"rust-src\"]\n",
+        );
+        write(root, "old/rust-toolchain", "nightly-2024-05-01\n");
+        write(
+            root,
+            "pathed/rust-toolchain.toml",
+            "[toolchain]\npath = \"/tmp/evil\"\n",
+        );
+        write(
+            root,
+            "odd/rust-toolchain.toml",
+            "[toolchain]\nchannel = \"../x y\"\n",
+        );
+        std::fs::create_dir_all(root.join("deep/er")).unwrap();
+        assert_eq!(pinned_toolchain(root).as_deref(), Some("1.80.0"));
+        assert_eq!(
+            pinned_toolchain(&root.join("deep/er")).as_deref(),
+            Some("1.80.0")
+        );
+        assert_eq!(
+            pinned_toolchain(&root.join("old")).as_deref(),
+            Some("nightly-2024-05-01")
+        );
+        assert_eq!(pinned_toolchain(&root.join("pathed")), None);
+        assert_eq!(pinned_toolchain(&root.join("odd")), None);
+    }
+
     #[test]
     fn the_build_target_is_the_nearest_configurations() {
         let dir = TempDir::new("cargorun-build-target");
@@ -1717,6 +2045,121 @@ mod tests {
             ]
         );
         assert_eq!(one_test_args(list, "tests::muls"), None);
+    }
+
+    /// A doctest is found in rustdoc's list by its file and the line its
+    /// example opens on — a module's own too — and by no other's.
+    #[test]
+    fn a_doctest_is_found_by_its_file_and_line() {
+        let list = "src/lib.rs - (line 3): test\nsrc/lib.rs - Thing::new (line 16): test\n\
+                    src/a/b.rs - a::b::G::h (line 4): test\nsrc/lib.rs - add (line 160): test\n";
+        assert_eq!(
+            listed_doctest(list, "src/lib.rs", 3).as_deref(),
+            Some("src/lib.rs - (line 3)")
+        );
+        assert_eq!(
+            listed_doctest(list, "src/lib.rs", 16).as_deref(),
+            Some("src/lib.rs - Thing::new (line 16)")
+        );
+        assert_eq!(
+            listed_doctest(list, "src/a/b.rs", 4).as_deref(),
+            Some("src/a/b.rs - a::b::G::h (line 4)")
+        );
+        assert_eq!(
+            listed_doctest(list, "src/lib.rs", 60),
+            None,
+            "not line 160's"
+        );
+        // Run by a word of its name, skipping the others it reaches.
+        let two = "src/lib.rs - add (line 2): test\nsrc/lib.rs - add (line 9): test\n\
+                   src/lib.rs - add_all (line 20): test\nsrc/lib.rs - (line 1): test\n";
+        assert_eq!(
+            doctest_filter(two, "src/lib.rs - add (line 2)"),
+            ["add", "--skip", "9)", "--skip", "20)"]
+        );
+        assert_eq!(doctest_filter(two, "src/lib.rs - (line 1)"), ["1)"]);
+        assert_eq!(listed_doctest(list, "src/a.rs", 4), None);
+        assert_eq!(
+            listed_doctest(
+                "src\\a\\b.rs - a::b::G::h (line 4): test\n",
+                "src/a/b.rs",
+                4
+            )
+            .as_deref(),
+            Some("src\\a\\b.rs - a::b::G::h (line 4)")
+        );
+    }
+
+    /// With Cargo on this machine: one doctest runs alone, found by where
+    /// its example is; a line with none is said to have none.
+    #[test]
+    fn one_doctest_runs_alone() {
+        let Some(cargo) = find_cargo() else {
+            eprintln!("no cargo here: skipped");
+            return;
+        };
+        let dir = TempDir::new("cargorun-doctest");
+        let root = dir.path();
+        write(
+            root,
+            "Cargo.toml",
+            "[package]\nname = \"dt\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n",
+        );
+        let lib = write(
+            root,
+            "src/lib.rs",
+            "/// Adds.\n/// ```\n/// assert_eq!(dt::add(1, 2), 3);\n/// ```\npub fn add(a: i32, b: i32) -> i32 { a + b }\n\
+             /// Fails.\n/// ```\n/// assert_eq!(1, 2);\n/// ```\n/// ```\n/// assert!(true);\n/// ```\npub fn bad() {}\n",
+        );
+        let target = target_of(&lib).expect("a target");
+        let run = |line: usize| {
+            let mut out = String::new();
+            let end = run_doctest(
+                &cargo,
+                &target,
+                &Features::default(),
+                &lib,
+                line,
+                |l, _| {
+                    out.push_str(l);
+                    out.push('\n');
+                },
+                &AtomicBool::new(false),
+            );
+            (end, out)
+        };
+        let (end, out) = run(2);
+        assert_eq!(
+            end,
+            Ok(DoctestEnd::Ran(crate::spawn::RunEnd::Exited(0))),
+            "{out}"
+        );
+        assert!(
+            out.contains("1 passed") && out.contains("add (line 2)"),
+            "{out}"
+        );
+        let (end, out) = run(7);
+        assert_eq!(
+            end,
+            Ok(DoctestEnd::Ran(crate::spawn::RunEnd::Exited(101))),
+            "{out}"
+        );
+        assert!(
+            out.contains("bad (line 7)") && !out.contains("add (line 2)"),
+            "{out}"
+        );
+        // The same item's other example runs alone.
+        let (end, out) = run(10);
+        assert_eq!(
+            end,
+            Ok(DoctestEnd::Ran(crate::spawn::RunEnd::Exited(0))),
+            "{out}"
+        );
+        assert!(
+            out.contains("1 passed") && !out.contains("bad (line 7)"),
+            "{out}"
+        );
+        assert_eq!(run(5).0, Ok(DoctestEnd::NotListed));
     }
 
     /// With Cargo on this machine: a crate's tests are built, the test
