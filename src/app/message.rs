@@ -2467,6 +2467,9 @@ pub enum WindowMsg {
     ToggleInlineBlame,
     /// Toggle the lines down the code's indentation.
     ToggleIndentGuides,
+    /// Toggle code info showing when the pointer rests on a word
+    /// ([`crate::app::App::peek_on_rest`]).
+    TogglePeekOnRest,
     /// A file picker could not be shown ([`crate::app::tasks::NoDialog`]).
     NoFileDialog,
     /// Open / close the app menu of Windows and Linux (the top bar's ☰).
@@ -3488,6 +3491,7 @@ impl WindowMsg {
             | WindowMsg::ToggleMinimap
             | WindowMsg::ToggleInlineBlame
             | WindowMsg::ToggleIndentGuides
+            | WindowMsg::TogglePeekOnRest
             | WindowMsg::NoFileDialog
             | WindowMsg::ToggleAppMenu
             | WindowMsg::ToggleViewMenu

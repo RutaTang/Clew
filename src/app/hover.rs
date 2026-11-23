@@ -75,9 +75,21 @@ impl App {
             }
             _ => Task::none(),
         };
+        // Info shows when asked for (`peek_on_rest` off): the pointer here
+        // with ⌥ (Alt) held — soon, as asked — and not otherwise; where it
+        // is, kept, for ⌥ pressed now to show it at once.
+        self.proj.hover_point = Some((pane, line, col, x, y));
+        let delay = match (self.peek_on_rest, self.modifiers.alt()) {
+            (_, true) => HOVER_KEY_DELAY,
+            (true, false) => self.peek_delay(std::time::Instant::now()),
+            (false, false) => {
+                // Moving on stops a peek on its way for the spot left.
+                self.proj.hover_gen = self.proj.hover_gen.wrapping_add(1);
+                return leave;
+            }
+        };
         // New token: start a dwell so moving across code doesn't flash
         // tooltips — it shows only if the cursor rests here for a moment.
-        let delay = self.peek_delay(std::time::Instant::now());
         self.proj.hover_gen = self.proj.hover_gen.wrapping_add(1);
         let hover_gen = self.proj.hover_gen;
         let stamp = self.stamp();
@@ -93,6 +105,81 @@ impl App {
             })
         });
         Task::batch([leave, dwell])
+    }
+
+    /// ⌥ (Alt) pressed or let go: pressed with the pointer resting on the
+    /// code, its peek shows at once, as asked. Let go, what is shown stays —
+    /// to be read, and moved into and scrolled — until the pointer leaves it.
+    pub(crate) fn on_alt_changed(&mut self, held: bool) -> Task<Message> {
+        if !held || self.proj.hover_pinned {
+            return Task::none();
+        }
+        let Some((pane, line, col, x, y)) = self.proj.hover_point else {
+            return Task::none();
+        };
+        if self
+            .proj
+            .hover
+            .as_ref()
+            .is_some_and(|h| self.on_peeked(pane, h, line, col))
+        {
+            return Task::none();
+        }
+        self.proj.hover = None;
+        self.proj.hover_leaving = false;
+        self.proj.hover_gen = self.proj.hover_gen.wrapping_add(1);
+        let hover_gen = self.proj.hover_gen;
+        self.on_hover_dwell(hover_gen, pane, line, col, x, y)
+    }
+
+    /// Show Info (⌘K, or `K` in the code): the peek of the word at the
+    /// caret, at once, under its line — or, open, put away.
+    pub(crate) fn toggle_peek_at_caret(&mut self) -> Task<Message> {
+        if self.proj.hover.is_some() {
+            self.invalidate_hover();
+            return Task::none();
+        }
+        let Some((pane, line, col, x, y)) = self.caret_point() else {
+            return Task::none();
+        };
+        self.proj.hover_pinned = false;
+        self.proj.hover_leaving = false;
+        self.proj.hover_gen = self.proj.hover_gen.wrapping_add(1);
+        let hover_gen = self.proj.hover_gen;
+        self.on_hover_dwell(hover_gen, pane, line, col, x, y)
+    }
+
+    /// The caret of the code on screen, as a point under its line in the
+    /// window: its pane, line and column, and where a menu or a peek opened
+    /// from the keys stands. `None` with no caret, or with the code under a
+    /// page (Weak Spots, a doc page) or the large Ask window.
+    fn caret_point(&self) -> Option<(usize, usize, usize, f32, f32)> {
+        if crate::ui::pane_cover(self).is_some() || self.ask_view == crate::AskView::Expanded {
+            return None;
+        }
+        let pane = self.proj.active;
+        let v = self.active_viewer()?;
+        let (line, col) = v.caret?;
+        let panes = crate::ui::panes_rect(self)?;
+        // The pane's half, where the panes are split.
+        let (left, width) = if self.proj.split {
+            let half = panes.width / 2.0;
+            (panes.x + if pane == 1 { half } else { 0.0 }, half)
+        } else {
+            (panes.x, panes.width)
+        };
+        let size = self.font_size;
+        let lh = self.line_height();
+        // The code's gutter and a column of its font, as the view sets
+        // them (`editor::codeview`): close enough to open by the caret, and
+        // kept inside the pane.
+        let gutter = (48.0 + 20.0) * size / 13.0;
+        let column = size * 0.6;
+        let x = left + gutter + col as f32 * column - v.scroll_x;
+        let y = panes.y + (v.row_of(line) + 1) as f32 * lh - v.scroll_y;
+        let x = x.clamp(left, (left + width - 1.0).max(left));
+        let y = y.clamp(panes.y, (panes.y + panes.height - 1.0).max(panes.y));
+        Some((pane, line, col, x, y))
     }
 
     /// How long the pointer rests on a word, at `now`, before its peek
@@ -363,6 +450,7 @@ impl App {
         // Cursor left the code area — drop the peek and cancel any pending
         // dwell (a stale HoverMsg::Dwell will see the bumped gen and no-op).
         // But not if it's inside the tooltip (which overlaps the code).
+        self.proj.hover_point = None;
         if !self.proj.hover_pinned {
             self.proj.hover = None;
             self.proj.hover_leaving = false;
@@ -649,38 +737,16 @@ impl App {
         // Not for code that is not on screen: a page over it (Weak Spots,
         // the statistics, a doc page), or the large Ask window. The menu
         // opened over the page, for a line no one could see.
-        if crate::ui::pane_cover(self).is_some() || self.ask_view == crate::AskView::Expanded {
-            return Task::none();
-        }
-        let pane = self.proj.active;
-        let Some(v) = self.active_viewer() else {
-            return Task::none();
-        };
-        let Some((line, col)) = v.caret else {
+        let Some((pane, line, col, x, y)) = self.caret_point() else {
             return Task::none();
         };
         let Some(panes) = crate::ui::panes_rect(self) else {
             return Task::none();
         };
-        // The pane's half, where the panes are split.
-        let (left, width) = if self.proj.split {
-            let half = panes.width / 2.0;
-            (panes.x + if pane == 1 { half } else { 0.0 }, half)
-        } else {
-            (panes.x, panes.width)
-        };
-        let size = self.font_size;
         let lh = self.line_height();
-        // The code's gutter and a column of its font, as the view sets
-        // them (`editor::codeview`): close enough to open the menu by the
-        // caret, and kept inside the pane.
-        let gutter = (48.0 + 20.0) * size / 13.0;
-        let column = size * 0.6;
-        let x = left + gutter + col as f32 * column - v.scroll_x;
-        let y = panes.y + (v.row_of(line) + 1) as f32 * lh - v.scroll_y;
-        let x = x.clamp(left, (left + width - 1.0).max(left));
-        let y = y.clamp(panes.y, (panes.y + panes.height - 1.0).max(panes.y));
-        let (sx, sy) = (v.scroll_x, v.scroll_y);
+        let Some((sx, sy)) = self.active_viewer().map(|v| (v.scroll_x, v.scroll_y)) else {
+            return Task::none();
+        };
         // In the content's space, as a click's point comes.
         let opened = self.on_context_menu_opened(pane, line, col, x + sx, y + sy);
         // Where its line starts: with no room below it, the menu opens
@@ -821,6 +887,11 @@ impl App {
         }
     }
 }
+
+/// How long the pointer rests on a word with ⌥ (Alt) held before its peek
+/// shows: asked for, at once — but for a pointer sweeping across words, one
+/// a word.
+pub(crate) const HOVER_KEY_DELAY: std::time::Duration = std::time::Duration::from_millis(80);
 
 /// How long the pointer rests on a word before its peek shows: as long as
 /// a tooltip's ([`crate::ui::tip::DELAY`]). At 300 ms a card the size of a

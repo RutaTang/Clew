@@ -35707,6 +35707,8 @@ fn the_peek_and_the_menu_open_at_the_pointer_of_a_scrolled_pane() {
 fn a_peek_goes_a_moment_after_the_pointer_leaves_its_word() {
     let mut app = scanned_app("peek-leaves");
     open_synchronously(&mut app, "src/lib.rs", None);
+    // Info when the pointer rests: each word left starts a wait.
+    app.peek_on_rest = true;
     // Line 2: "pub fn origin() -> Point {", `origin` at 7..13.
     let peek = || HoverState {
         line: 2,
@@ -37877,6 +37879,87 @@ fn debug_suggests_a_launch_config_in_the_projects_language() {
     assert_eq!(app.status, "Building tool with Cargo…");
     // A script project, by the file open.
     assert!(crate::app::tasks::launch_example(&root, Some("ruby")).contains("main.rb"));
+}
+
+/// Code info shows when asked for, as shipped: the pointer resting on a word
+/// opens nothing; with ⌥ (Alt) held it does, and ⌥ pressed over the word
+/// shows it at once; let go of ⌥, it stays to be read. Show Info (⌘K, or `K`
+/// in the code) shows the caret's, and puts it away again; Esc puts it away.
+/// Switched to "Info when the pointer rests", a pause shows it again.
+#[test]
+fn code_info_shows_when_asked_for() {
+    let mut app = scanned_app("info-when-asked");
+    open_synchronously(&mut app, "src/lib.rs", Some(3));
+    // The language server's offer, put away: Esc goes to what is on top.
+    if crate::ui::escape_message(&app).is_some() {
+        let _ = app.update(esc_press());
+    }
+    assert!(crate::ui::escape_message(&app).is_none());
+    assert!(!app.peek_on_rest, "asked for, as shipped");
+    let rest = |app: &mut App| {
+        app.update(Message::Hover(HoverMsg::Requested {
+            pane: 0,
+            line: 2,
+            col: 8,
+            x: 40.0,
+            y: 30.0,
+        }))
+    };
+    // A pause: nothing on its way.
+    let task = rest(&mut app);
+    assert_eq!(task.units(), 0, "no dwell without ⌥");
+    assert!(app.proj.hover.is_none());
+    // ⌥ pressed where the pointer rests: shown at once.
+    let alt = keyboard::Modifiers::ALT;
+    let _ = app.update(Message::Editor(EditorMsg::ModifiersChanged(alt)));
+    assert_eq!(
+        app.proj.hover.as_ref().map(|h| (h.line, h.col)),
+        Some((2, 8))
+    );
+    // Let go: it stays.
+    let _ = app.update(Message::Editor(EditorMsg::ModifiersChanged(
+        keyboard::Modifiers::empty(),
+    )));
+    assert!(app.proj.hover.is_some(), "let go of ⌥, it stays to be read");
+    // Esc puts it away.
+    let _ = app.update(esc_press());
+    assert!(app.proj.hover.is_none());
+    // With ⌥ held, coming onto a word: soon met.
+    let _ = app.update(Message::Hover(HoverMsg::Cleared));
+    let _ = app.update(Message::Editor(EditorMsg::ModifiersChanged(alt)));
+    assert!(app.proj.hover.is_none(), "the pointer is off the code");
+    let task = rest(&mut app);
+    assert_eq!(task.units(), 1, "a dwell, ⌥ held");
+    let _ = app.update(Message::Editor(EditorMsg::ModifiersChanged(
+        keyboard::Modifiers::empty(),
+    )));
+    // Show Info: the caret's word, then put away.
+    app.proj.hover = None;
+    let _ = app.update(Message::Editor(EditorMsg::RunAction(
+        crate::keymap::Action::ShowInfo,
+    )));
+    let caret = app.active_viewer().and_then(|v| v.caret).unwrap();
+    assert_eq!(
+        app.proj.hover.as_ref().map(|h| (h.line, h.col)),
+        Some(caret)
+    );
+    let _ = app.update(Message::Editor(EditorMsg::RunAction(
+        crate::keymap::Action::ShowInfo,
+    )));
+    assert!(app.proj.hover.is_none(), "pressed again, put away");
+    // Vim's `K` in the code: the same.
+    app.code_focused = true;
+    let _ = app.update(key_press(
+        keyboard::Key::Character("K".into()),
+        keyboard::Modifiers::SHIFT,
+    ));
+    assert!(app.proj.hover.is_some(), "K shows it");
+    app.invalidate_hover();
+    // Info when the pointer rests: a pause starts its wait again.
+    let _ = app.update(Message::Window(WindowMsg::TogglePeekOnRest));
+    assert!(app.peek_on_rest);
+    let task = rest(&mut app);
+    assert_eq!(task.units(), 1, "a dwell on a pause");
 }
 
 /// The first peek waits as long as a tooltip, so a pointer crossing the code

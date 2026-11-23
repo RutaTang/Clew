@@ -1432,6 +1432,12 @@ impl App {
                     tr_noop!("View: Show Indent Guides"),
                     Message::Window(WindowMsg::ToggleIndentGuides),
                 ),
+                (
+                    self.peek_on_rest,
+                    tr_noop!("View: Show Code Info Only When Asked"),
+                    tr_noop!("View: Show Code Info When the Pointer Rests"),
+                    Message::Window(WindowMsg::TogglePeekOnRest),
+                ),
             ] {
                 add(toggle(shown, hide, show), None, send(message));
             }

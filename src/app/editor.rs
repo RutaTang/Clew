@@ -2376,12 +2376,16 @@ impl App {
             // A menu click (or a chord the menu owns): the same table the key
             // handler runs, behind the same modal states (`on_menu_action`).
             EditorMsg::RunAction(action) => self.on_menu_action(action),
+            // A modifier pressed or let go leaves the code info as it is —
+            // let go of ⌥, it stays to be read; ⌥ pressed over a word shows
+            // its info at once (`on_alt_changed`).
             EditorMsg::ModifiersChanged(modifiers) => {
+                let alt = (self.modifiers.alt(), modifiers.alt());
                 self.modifiers = modifiers;
-                if !modifiers.command() {
-                    self.invalidate_hover(); // hover is a Cmd-hover affordance
+                match alt {
+                    (false, true) => self.on_alt_changed(true),
+                    _ => Task::none(),
                 }
-                Task::none()
             }
             EditorMsg::FindOpened => self.on_find_opened(),
             EditorMsg::FindQueryChanged(q) => {

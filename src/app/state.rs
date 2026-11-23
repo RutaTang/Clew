@@ -1731,6 +1731,13 @@ pub struct App {
     /// Lines down the code's indentation (the View menu's "Indent guides").
     /// Off as the design has it.
     pub show_indent_guides: bool,
+    /// Code info (the peek: a word's docs, type, diagnostic) shows when the
+    /// pointer rests on a word (the View menu's "Info when the pointer
+    /// rests"). Off as shipped: it shows when asked — the pointer on a word
+    /// with ⌥ (Alt) held, or Show Info (⌘K, `K`) for the word at the caret —
+    /// and a card the size of a crate's docs no longer opens over the code
+    /// wherever the pointer pauses.
+    pub peek_on_rest: bool,
     /// Explain again, by itself, the code a change on disk made new or
     /// different — a few AI calls at a time (Settings → Usage and cost).
     /// Off, the status bar says the explanations are out of date, and
@@ -2430,6 +2437,10 @@ pub struct ProjectSession {
     /// [`HOVER_WARM`]: crate::app::hover::HOVER_WARM
     /// [`App::peek_delay`]: crate::app::App::peek_delay
     pub hover_seen: Option<std::time::Instant>,
+    /// Where the pointer last was over the code — pane, line, column, and
+    /// its point in the window — while nothing was shown for it: ⌥ pressed
+    /// there shows its peek at once.
+    pub hover_point: Option<(usize, usize, usize, f32, f32)>,
     /// The gutter line the pointer rests on, and whether its tip is due:
     /// what a breakpoint or a bookmark there says (`ui::gutter_tip`).
     pub gutter_tip: Option<GutterTip>,
@@ -2967,6 +2978,7 @@ impl Default for ProjectSession {
             hover_leaving: Default::default(),
             hover_leave: Default::default(),
             hover_seen: None,
+            hover_point: None,
             gutter_tip: None,
             gutter_seq: 0,
             context_menu: Default::default(),
