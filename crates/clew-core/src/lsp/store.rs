@@ -320,6 +320,14 @@ impl Identity {
 
 /// Decide how to obtain the binary for `server` without touching the network.
 pub fn locate(server: &EffectiveServer) -> Located {
+    locate_on(server, None)
+}
+
+/// [`locate`], a server the user installed themselves looked for on
+/// `path` — `None` for the search path children get
+/// ([`crate::linerpc::spawn_path`]) — as the look that asks it does: a
+/// setup look given a PATH found Clew's copy missing on the process's.
+pub fn locate_on(server: &EffectiveServer, path: Option<&OsStr>) -> Located {
     // The program the user chose: run as found, on this host. Theirs, kept
     // outside the project, so there is nothing to approve and nothing of the
     // store's to install.
@@ -398,7 +406,10 @@ pub fn locate(server: &EffectiveServer) -> Located {
     // than an install that needs Node. Not where the project pins a version:
     // that one is installed.
     if server.version == spec.version
-        && let Some(path) = already_installed(spec.name)
+        && let Some(path) = match path {
+            Some(path) => already_installed_on(spec.name, path),
+            None => already_installed(spec.name),
+        }
     {
         return Located::Ready(path);
     }
@@ -416,7 +427,10 @@ fn already_installed(server: &str) -> Option<PathBuf> {
     already_installed_on(server, &crate::linerpc::spawn_path()?)
 }
 
-fn already_installed_on(server: &str, path: &OsStr) -> Option<PathBuf> {
+/// [`already_installed`] on `path`: the program of the user's own that
+/// serves as `server` does (`pyright-langserver` or
+/// `basedpyright-langserver` for pyright), as found there.
+pub fn already_installed_on(server: &str, path: &OsStr) -> Option<PathBuf> {
     let names: &[&str] = match server {
         "pyright" => &["pyright-langserver", "basedpyright-langserver"],
         _ => return None,

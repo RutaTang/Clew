@@ -1675,8 +1675,12 @@ pub enum LanguagesMsg {
     Draft(LangField, String),
     /// Use what is typed in the field.
     UseDraft(LangField),
-    /// The language a server program is being chosen for.
+    /// The language a server program is being chosen for: its key, or
+    /// the key of the server beside its main one (`python.also`).
     ServerLanguage(String),
+    /// Whether the server program being chosen runs beside the language's
+    /// main server rather than in its place.
+    ServerBeside(bool),
     /// Pick a file (or, for a compilation database, a folder) for the field
     /// in a dialog — a project on this machine.
     Browse(LangField),
@@ -1743,6 +1747,7 @@ impl LanguagesMsg {
             | LanguagesMsg::Draft(..)
             | LanguagesMsg::UseDraft(..)
             | LanguagesMsg::ServerLanguage(..)
+            | LanguagesMsg::ServerBeside(..)
             | LanguagesMsg::Browse(..) => None,
         }
     }

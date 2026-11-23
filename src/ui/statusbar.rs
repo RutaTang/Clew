@@ -483,16 +483,14 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
             Some(tip) => super::toolbar::tip_at(lsp_button, tip, None, tooltip::Position::Top),
             None => lsp_button.into(),
         });
-        // Diagnostic counts for this file, from the same snapshot.
+        // Diagnostic counts for this file, from the same snapshots: its
+        // language's server and the one run beside it.
         let diags = v
             .lang_key
-            .and_then(|k| match app.proj.link.lsp_snapshots.get(k) {
-                Some(Ok(snapshot)) => Some(snapshot.diagnostics(&v.abs)),
-                _ => None,
-            })
+            .and_then(|k| app.file_diagnostics(k, &v.abs))
             .map(|ds| {
-                let errs = ds.iter().filter(|d| d.severity == 1).count();
-                let warns = ds.iter().filter(|d| d.severity == 2).count();
+                let errs = ds.iter().filter(|(d, _)| d.severity == 1).count();
+                let warns = ds.iter().filter(|(d, _)| d.severity == 2).count();
                 (errs, warns)
             });
         // Said whenever the server can say them, none included, each in a

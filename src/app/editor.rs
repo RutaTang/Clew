@@ -2106,14 +2106,14 @@ impl App {
             return out;
         }
 
-        // Diagnostic underlines (always shown, from the LSP server), read
-        // from this update's snapshot rather than a locked copy per view.
+        // Diagnostic underlines (always shown, from the language's servers),
+        // read from this update's snapshots rather than a locked copy per
+        // view.
         if let Some(lang) = v.lang_key
-            && let Some(LspSlot::Ready(client)) = self.proj.link.lsp.get(lang)
-            && let Some(Ok(snapshot)) = self.proj.link.lsp_snapshots.get(lang)
+            && let Some(diagnostics) = self.file_diagnostics(lang, &v.abs)
         {
-            for d in snapshot.diagnostics(&v.abs) {
-                let (c0, c1) = v.lsp_span(d.line, d.char_start, d.char_end, client.encoding);
+            for (d, encoding) in diagnostics {
+                let (c0, c1) = v.lsp_span(d.line, d.char_start, d.char_end, encoding);
                 out.push(Hl {
                     line: d.line,
                     col0: c0.into(),

@@ -1312,7 +1312,10 @@ impl App {
                         // answers about stays pinned to the text as it was
                         // when the file was first opened.
                         let abs = root.join(rel);
-                        if open.contains(&abs) || self.proj.link.lsp_opened.contains(&abs) {
+                        if open.contains(&abs)
+                            || self.proj.link.lsp_opened.contains(&abs)
+                            || self.proj.link.lsp_opened_also.contains(&abs)
+                        {
                             self.request_file_refresh(rel);
                         }
                     }
@@ -1418,7 +1421,7 @@ impl App {
                         self.status = match languages.first() {
                             Some(lang) => tr!(
                                 "Stopped the {lang} language server because its output was not being read. It restarts on next use.",
-                                lang = crate::app::languages::language_name(lang)
+                                lang = self.server_called(lang)
                             ),
                             None => {
                                 tr!("Stopped a background process because its output was not being read.")
@@ -1456,12 +1459,12 @@ impl App {
                     self.status = match code {
                         Some(c) => tr!(
                             "{language} language server exited (code {code}). It restarts on the next request.",
-                            language = crate::app::languages::language_name(&language),
+                            language = self.server_called(&language),
                             code = c
                         ),
                         None => tr!(
                             "{language} language server exited. It restarts on the next request.",
-                            language = crate::app::languages::language_name(&language)
+                            language = self.server_called(&language)
                         ),
                     };
                 }

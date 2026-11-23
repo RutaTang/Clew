@@ -225,7 +225,7 @@ impl ServerLook {
             .iter()
             .filter_map(|language| {
                 let server = self.config.resolve_with(language, &self.choices)?;
-                let fetch = match lsp::store::locate(&server) {
+                let fetch = match lsp::store::locate_on(&server, self.path.as_deref()) {
                     lsp::store::Located::NeedsDownload { download, .. } => self
                         .on_path(&server.server_name, download.binary)
                         .map_or(Fetch::Download, Fetch::OnPath),
@@ -233,6 +233,16 @@ impl ServerLook {
                         .on_path(&server.server_name, install.binary)
                         .map_or_else(|| Fetch::Install(install.tool.to_string()), Fetch::OnPath),
                     lsp::store::Located::Unsupported(_) => return None,
+                    // The user's own program, run as found in place of
+                    // Clew's copy (pyright installed with pip): said so, and
+                    // set up as theirs, as one a download would replace is.
+                    // The sheet said nothing of Python's server at all.
+                    lsp::store::Located::Ready(found)
+                        if server.chosen.is_none()
+                            && self.users_own(&server.server_name).as_ref() == Some(&found) =>
+                    {
+                        Fetch::OnPath(found)
+                    }
                     lsp::store::Located::Ready(_) | lsp::store::Located::RepoCommand(_) => {
                         Fetch::Nothing
                     }
@@ -249,6 +259,16 @@ impl ServerLook {
             })
             .filter(SetupServer::asks)
             .collect()
+    }
+
+    /// The program of the user's own that Clew runs as found for
+    /// `server_name` rather than installing its copy, on this look's PATH.
+    fn users_own(&self, server_name: &str) -> Option<PathBuf> {
+        let path = self
+            .path
+            .clone()
+            .unwrap_or_else(clew_core::linerpc::child_path);
+        lsp::store::already_installed_on(server_name, &path)
     }
 
     /// The server `server_name`'s own program — `binary` names where it

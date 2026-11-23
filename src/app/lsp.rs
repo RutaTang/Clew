@@ -59,6 +59,31 @@ pub(crate) enum LocalInstall {
 pub(crate) const MAX_LINE_CHIPS: usize = 256;
 pub(crate) const MAX_LINE_CHIP_CHARS: usize = 4096;
 
+/// The end of the key a language's second server goes by in the
+/// language-keyed slots: `python.also` runs beside `python`'s server (a
+/// linter such as ruff beside pyright), is sent the same documents, and
+/// has its diagnostics shown with the main one's. Everything else asked
+/// of a language (definitions, hover, references) stays the main
+/// server's. Its program is the user's choice under that key, so it
+/// starts, restarts and runs remotely as any chosen server does.
+pub(crate) const ALSO: &str = ".also";
+
+/// The key of the server run beside `language`'s main one.
+pub(crate) fn also_key(language: &str) -> String {
+    [language, ALSO].concat()
+}
+
+/// The language a slot's server reads: `python` for `python.also`, and a
+/// language's own key for its main server.
+pub(crate) fn base_language(key: &str) -> &str {
+    key.strip_suffix(ALSO).unwrap_or(key)
+}
+
+/// Whether `key` is the slot of a server run beside a main one.
+pub(crate) fn is_beside(key: &str) -> bool {
+    base_language(key) != key
+}
+
 impl App {
     /// Whether `language`'s server is left "not set up" when it would ask:
     /// the first open left the servers for later, and the reader has not
@@ -157,10 +182,41 @@ impl App {
             })
     }
 
-    /// Ensure a language server is provisioned/started for `language`, and open
-    /// any already-loaded documents once it is ready. Idempotent.
+    /// Whether the user chose a program to run beside `language`'s main
+    /// server.
+    pub(crate) fn has_server_beside(&self, language: &str) -> bool {
+        self.proj
+            .lang_choices
+            .servers
+            .as_ref()
+            .and_then(|servers| servers.get(&also_key(language)))
+            .is_some_and(|choice| !choice.command.trim().is_empty())
+    }
+
+    /// Ensure `language`'s server is provisioned/started, and the one the
+    /// user chose to run beside it, if any; open any already-loaded
+    /// documents in each once it is ready. Idempotent.
     pub(crate) fn ensure_lsp(&mut self, language: &str) -> Task<Message> {
+        let main = self.ensure_one_lsp(language);
+        if is_beside(language) || !self.has_server_beside(language) {
+            return main;
+        }
+        let beside = self.ensure_one_lsp(&also_key(language));
+        Task::batch([main, beside])
+    }
+
+    /// [`App::ensure_lsp`] for one slot: a language's main server, or the
+    /// one beside it.
+    fn ensure_one_lsp(&mut self, language: &str) -> Task<Message> {
         if self.proj.project.is_none() {
+            return Task::none();
+        }
+        // A server beside the main one runs only while it is chosen: one
+        // no longer chosen leaves no slot behind, where resolving it would
+        // have said "no server for this language" of a language that has
+        // one.
+        if is_beside(language) && !self.has_server_beside(base_language(language)) {
+            self.reset_lsp(language);
             return Task::none();
         }
         match self.proj.link.lsp.get(language) {
@@ -240,7 +296,10 @@ impl App {
             );
             return Task::none();
         };
-        let (provision, dest_dir) = match lsp::store::locate(&server) {
+        // Where the user's own program is looked for: the PATH children get
+        // (a test's, for a test that sets one).
+        let (provision, dest_dir) = match lsp::store::locate_on(&server, path_set_here().as_deref())
+        {
             // A store-installed binary: its install consent already covered it.
             // (The `init_options` half of `lsp.toml` is gated in
             // `start_lsp_with`, the one place every start funnels through.)
@@ -885,35 +944,48 @@ impl App {
         self.proj.link.lsp.remove(language);
         self.proj.link.lsp_installs.remove(language);
         self.proj.link.remote_installs.remove(language);
-        self.proj
-            .link
-            .lsp_opened
-            .retain(|p| highlight::detect(p) != Some(language));
+        let base = base_language(language);
+        let opened = match is_beside(language) {
+            true => &mut self.proj.link.lsp_opened_also,
+            false => &mut self.proj.link.lsp_opened,
+        };
+        opened.retain(|p| highlight::detect(p) != Some(base));
         self.next_lsp_gen(language);
         self.proj.link.seen_diag_version.remove(language);
         self.proj.link.seen_inlay_epoch.remove(language);
     }
 
-    /// Send `didOpen` for every loaded document of `language` not yet opened.
+    /// Send `didOpen` for every loaded document of `language` not yet opened
+    /// — `language` a slot's key: the server beside a language's main one
+    /// is sent the language's documents, as the language they are in.
     pub(crate) fn open_docs_for_language(
         &mut self,
         language: &str,
         client: &lsp::client::LspClient,
     ) -> Task<Message> {
+        let base = base_language(language);
+        let beside = is_beside(language);
         let docs: Vec<(PathBuf, Arc<String>)> = self
             .proj
             .panes
             .iter()
             .flatten()
-            .filter(|v| v.lang_key == Some(language))
+            .filter(|v| v.lang_key == Some(base))
             .map(|v| (v.abs.clone(), v.source.clone()))
             .collect();
         let mut tasks = Vec::new();
         for (path, source) in docs {
-            if self.proj.link.lsp_opened.insert(path.clone()) {
-                client.did_open(&path, language, 1, &source);
+            let opened = match beside {
+                true => &mut self.proj.link.lsp_opened_also,
+                false => &mut self.proj.link.lsp_opened,
+            };
+            if opened.insert(path.clone()) {
+                client.did_open(&path, base, 1, &source);
             }
-            tasks.push(self.inlay_request(&path, client));
+            // Inlay hints are the main server's to give.
+            if !beside {
+                tasks.push(self.inlay_request(&path, client));
+            }
         }
         Task::batch(tasks)
     }
@@ -934,14 +1006,45 @@ impl App {
         let Some(lang) = highlight::detect(path) else {
             return;
         };
-        if !self.proj.link.lsp_opened.contains(path) {
-            return;
+        // The main server, and the one beside it: each holds its own copy.
+        for (key, opened) in [
+            (lang.to_string(), &self.proj.link.lsp_opened),
+            (also_key(lang), &self.proj.link.lsp_opened_also),
+        ] {
+            if !opened.contains(path) {
+                continue;
+            }
+            let Some(LspSlot::Ready(client)) = self.proj.link.lsp.get(&key) else {
+                continue;
+            };
+            self.lsp_doc_rev += 1;
+            client.did_change(path, self.lsp_doc_rev, source);
         }
-        let Some(LspSlot::Ready(client)) = self.proj.link.lsp.get(lang) else {
-            return;
-        };
-        self.lsp_doc_rev += 1;
-        client.did_change(path, self.lsp_doc_rev, source);
+    }
+
+    /// The diagnostics of `path`, a `language` file, from every server that
+    /// reads it — its main one and the one beside it — each with the
+    /// position encoding its server counts columns in; `None` while no
+    /// server of the language can say (none ready, or its state unread).
+    pub(crate) fn file_diagnostics(
+        &self,
+        language: &str,
+        path: &Path,
+    ) -> Option<Vec<(&lsp::client::Diag, lsp::client::PositionEncoding)>> {
+        let mut said = None;
+        for key in [language.to_string(), also_key(language)] {
+            if let Some(LspSlot::Ready(client)) = self.proj.link.lsp.get(&key)
+                && let Some(Ok(snapshot)) = self.proj.link.lsp_snapshots.get(&key)
+            {
+                said.get_or_insert_with(Vec::new).extend(
+                    snapshot
+                        .diagnostics(path)
+                        .iter()
+                        .map(|d| (d, client.encoding)),
+                );
+            }
+        }
+        said
     }
 
     /// The user allowed the consent question `number`, if it is the one
@@ -1640,7 +1743,7 @@ impl App {
                     Err(e) => {
                         self.status = tr!(
                             "{language} server failed: {error}",
-                            language = crate::app::languages::language_name(&language),
+                            language = self.server_called(&language),
                             error = e
                         );
                         self.proj.link.lsp.insert(language, LspSlot::Failed(e));
@@ -1715,14 +1818,14 @@ impl App {
                     Ok(exe) => {
                         self.status = tr!(
                             "{language} server installed",
-                            language = crate::app::languages::language_name(&language)
+                            language = self.server_called(&language)
                         );
                         Task::batch([self.start_lsp_with(&language, exe), look])
                     }
                     Err(e) => {
                         self.status = tr!(
                             "{language} server download failed: {error}",
-                            language = crate::app::languages::language_name(&language),
+                            language = self.server_called(&language),
                             error = e
                         );
                         self.proj.link.lsp.insert(language, LspSlot::Failed(e));

@@ -3258,6 +3258,9 @@ pub struct ProjectLink {
     pub lsp_log: Option<LspLogTail>,
     /// Documents already sent to a server via didOpen.
     pub lsp_opened: HashSet<PathBuf>,
+    /// Documents already sent to the server run beside their language's
+    /// main one (`python.also`, see [`crate::app::lsp::ALSO`]).
+    pub lsp_opened_also: HashSet<PathBuf>,
     /// The Lake project the Lean server was started in
     /// ([`clew_core::lake_root`]): a Lean file of another has it started
     /// again there.
@@ -3355,6 +3358,9 @@ pub struct LanguageDrafts {
     /// The language a server program is being chosen for; `None` until
     /// one is picked.
     pub server_language: Option<String>,
+    /// Whether the program is to run beside the language's main server
+    /// (a linter such as ruff beside pyright) rather than in its place.
+    pub server_beside: bool,
     pub server_command: String,
     pub server_args: String,
 }

@@ -493,23 +493,17 @@ impl App {
     pub(crate) fn diagnostic_at(&self, pane: usize, line: usize, col: usize) -> Option<String> {
         let v = self.proj.panes.get(pane)?.as_ref()?;
         let lang = v.lang_key?;
-        let LspSlot::Ready(client) = self.proj.link.lsp.get(lang)? else {
-            return None;
-        };
-        let Some(Ok(snapshot)) = self.proj.link.lsp_snapshots.get(lang) else {
-            return None;
-        };
-        snapshot
-            .diagnostics(&v.abs)
-            .iter()
-            .filter(|d| d.line == line)
-            .filter(|d| {
-                let (c0, c1) = v.lsp_span(d.line, d.char_start, d.char_end, client.encoding);
+        // The language's server and the one run beside it alike.
+        self.file_diagnostics(lang, &v.abs)?
+            .into_iter()
+            .filter(|(d, _)| d.line == line)
+            .filter(|(d, encoding)| {
+                let (c0, c1) = v.lsp_span(d.line, d.char_start, d.char_end, *encoding);
                 (c0..c1).contains(&viewer::Col(col))
             })
             // Severity 1 is error (most severe) → lowest number sorts first.
-            .min_by_key(|d| d.severity)
-            .map(|d| {
+            .min_by_key(|(d, _)| d.severity)
+            .map(|(d, _)| {
                 // The server's message as it sent it, under our label, and
                 // who said it under what code (`rustc(E0308)`): what to look
                 // it up by.

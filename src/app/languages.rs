@@ -24,6 +24,17 @@ pub(crate) fn language_name(key: &str) -> &str {
     clew_core::highlight::lang_name(key).unwrap_or(key)
 }
 
+/// What a list of the language servers calls a slot's server, for its
+/// key: the language ("Python") for its main server, "Python, second
+/// server" for the one run beside it (`python.also`).
+pub(crate) fn slot_label(key: &str) -> String {
+    let language = language_name(crate::app::lsp::base_language(key));
+    match crate::app::lsp::is_beside(key) {
+        true => tr!("{language}, second server", language = language),
+        false => language.to_string(),
+    }
+}
+
 /// Languages by name, in a list ("C++, Rust").
 pub(crate) fn language_names<S: AsRef<str>>(keys: &[S]) -> String {
     keys.iter()
@@ -33,6 +44,28 @@ pub(crate) fn language_names<S: AsRef<str>>(keys: &[S]) -> String {
 }
 
 impl App {
+    /// What a sentence about a slot's server calls it, before "server":
+    /// its language ("Python") for a language's main server; for the one
+    /// beside it, the program the user chose ("ruff"), which is how they
+    /// know it.
+    pub(crate) fn server_called(&self, key: &str) -> String {
+        if !crate::app::lsp::is_beside(key) {
+            return language_name(key).to_string();
+        }
+        self.proj
+            .lang_choices
+            .servers
+            .as_ref()
+            .and_then(|servers| servers.get(key))
+            .and_then(|choice| {
+                Path::new(choice.command.trim())
+                    .file_stem()
+                    .map(|stem| stem.to_string_lossy().into_owned())
+            })
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| slot_label(key))
+    }
+
     /// The languages Settings → Language servers lists, each with its
     /// server: those the project's code is written in, those given a server
     /// program of the user's own, and any other of the project's whose
@@ -144,16 +177,26 @@ impl App {
                 Task::none()
             }
             LanguagesMsg::UseDraft(field) => self.use_draft(field),
-            LanguagesMsg::ServerLanguage(language) => {
+            LanguagesMsg::ServerLanguage(key) => {
+                // A second server's key (its Edit) says so; a language picked
+                // keeps the form's "beside" as it is.
+                let beside =
+                    crate::app::lsp::is_beside(&key) || self.proj.lang_drafts.server_beside;
+                let language = crate::app::lsp::base_language(&key).to_string();
+                let slot = match beside {
+                    true => crate::app::lsp::also_key(&language),
+                    false => language.clone(),
+                };
                 // The program already chosen for it, to edit.
                 let chosen = self
                     .proj
                     .lang_choices
                     .servers
                     .as_ref()
-                    .and_then(|s| s.get(&language))
+                    .and_then(|s| s.get(&slot))
                     .cloned();
                 let drafts = &mut self.proj.lang_drafts;
+                drafts.server_beside = beside;
                 drafts.server_command = chosen
                     .as_ref()
                     .map(|c| c.command.clone())
@@ -163,6 +206,11 @@ impl App {
                     .map(|args| join_args(&args))
                     .unwrap_or_default();
                 drafts.server_language = Some(language);
+                Task::none()
+            }
+            // What is typed stays: it is the same program, run another way.
+            LanguagesMsg::ServerBeside(beside) => {
+                self.proj.lang_drafts.server_beside = beside;
                 Task::none()
             }
             LanguagesMsg::Browse(field) => {
@@ -279,6 +327,10 @@ impl App {
                     self.status = tr!("Pick the language the server program is for").into();
                     return Task::none();
                 };
+                let language = match self.proj.lang_drafts.server_beside {
+                    true => crate::app::lsp::also_key(&language),
+                    false => language,
+                };
                 let servers = next.servers.get_or_insert_with(Default::default);
                 let command = self.proj.lang_drafts.server_command.trim().to_string();
                 if command.is_empty() {
@@ -296,6 +348,7 @@ impl App {
                 self.proj.lang_drafts.server_command.clear();
                 self.proj.lang_drafts.server_args.clear();
                 self.proj.lang_drafts.server_language = None;
+                self.proj.lang_drafts.server_beside = false;
                 return self.choose(next);
             }
         }
@@ -402,6 +455,16 @@ impl App {
         for language in changed {
             if self.proj.link.lsp.contains_key(&language) {
                 tasks.push(self.update_lsp(LspMsg::Restart(language)));
+            } else if crate::app::lsp::is_beside(&language)
+                && self
+                    .proj
+                    .link
+                    .lsp
+                    .contains_key(crate::app::lsp::base_language(&language))
+            {
+                // A second server newly chosen for a language whose main
+                // one runs: started now, beside it, not at the next open.
+                tasks.push(self.ensure_lsp(&language));
             }
         }
         // What is in effect now, for the view the choice was made in (it is

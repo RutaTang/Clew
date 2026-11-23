@@ -17,7 +17,7 @@ To analyze code well, Clew tailors its support to each language's characteristic
 - **PHP** — the PHP version intelephense reads the code as (the lowest one `composer.json` allows first).
 - **C#** — the solution csharp-ls opens: the `.sln` and `.slnx` files at the project's root and a folder down.
 - **Ruby, Erlang and Haskell** — the Ruby LSP of one of your Rubies (rbenv's, chruby's, asdf's, mise's, RVM's; the project's `.ruby-version` first), and the ELP and Haskell language server (ghcup's, Stack's, Cabal's) to run, or the ones on your `PATH`.
-- **Any language** — a server program of your own: another build of Clew's server, another server, or one for a language Clew has none for. A server that builds the project still asks before it does.
+- **Any language** — a server program of your own: another build of Clew's server, another server, or one for a language Clew has none for. A server that builds the project still asks before it does. With **Run beside the language's server** on, the program runs as a second server next to the language's own (ruff beside pyright, say): it is sent the same files, and its warnings show with the first server's — underlined, counted in the status bar and said on hover — while definitions, references and hover docs stay the first server's.
 
 Everything is found by reading files — nothing is run — and, for a remote project, on its host. The choices are kept in Clew's own data for this project on this machine, never written into the project, win over its `lsp.toml`, and reach the editor's language servers, the debugger and Ask's code tools alike.
 

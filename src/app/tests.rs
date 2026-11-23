@@ -43832,3 +43832,302 @@ fn settings_say_whether_plugins_can_be_built_and_offer_the_fix() {
     assert!(says(&app, "Rust 1.95.0 is ready"));
     assert!(!says(&app, "Clew's own Rust"));
 }
+
+/// Choices with `program` run beside Python's main server (`python.also`).
+fn python_beside(program: &str) -> clew_protocol::LanguageChoices {
+    clew_protocol::LanguageChoices {
+        servers: Some(
+            [(
+                crate::app::lsp::also_key("python"),
+                clew_protocol::ServerChoice {
+                    command: program.into(),
+                    args: None,
+                },
+            )]
+            .into_iter()
+            .collect(),
+        ),
+        ..Default::default()
+    }
+}
+
+/// A publishDiagnostics for `path`: one diagnostic on `line`, columns
+/// `from..to`, of `severity`, said by `source` under `code`.
+fn published(
+    path: &Path,
+    line: u64,
+    (from, to): (u64, u64),
+    severity: u64,
+    (source, code): (&str, &str),
+) -> serde_json::Value {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/publishDiagnostics",
+        "params": {
+            "uri": lsp::client::path_to_uri(path),
+            "diagnostics": [{
+                "range": {
+                    "start": {"line": line, "character": from},
+                    "end": {"line": line, "character": to}
+                },
+                "severity": severity,
+                "source": source,
+                "code": code,
+                "message": "said"
+            }]
+        }
+    })
+}
+
+/// A server run beside Python's main one (ruff beside pyright) is sent the
+/// open files as Python, as the main one is, and keeps its own record of
+/// them: a document opened in one server was never sent to the other.
+#[tokio::test]
+async fn a_server_beside_the_main_one_is_sent_the_files_as_their_language() {
+    let mut app = scanned_app("lsp-beside-open");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    std::fs::write(root.join("app.py"), "import os\nx = 1\n").unwrap();
+    open_synchronously(&mut app, "app.py", None);
+    let file = root.join("app.py");
+    app.proj.lang_choices = python_beside("ruff");
+    let (main, main_wire) = recording_lsp_client(&root).await;
+    let (beside, beside_wire) = recording_lsp_client(&root).await;
+    app.proj
+        .link
+        .lsp
+        .insert("python".into(), LspSlot::Ready(main));
+    app.proj
+        .link
+        .lsp
+        .insert("python.also".into(), LspSlot::Ready(beside));
+
+    let _ = app.ensure_lsp("python");
+
+    for wire in [&main_wire, &beside_wire] {
+        let seen = wire_containing(wire, "textDocument/didOpen").await;
+        assert!(
+            seen.contains("\"languageId\":\"python\""),
+            "sent as Python, not as the slot's key: {seen:?}"
+        );
+    }
+    assert!(app.proj.link.lsp_opened.contains(&file));
+    assert!(app.proj.link.lsp_opened_also.contains(&file));
+
+    // Changed on disk: both servers' copies follow.
+    app.resync_open_doc(&file, "import os\nx = 2  # changed\n");
+    for wire in [&main_wire, &beside_wire] {
+        let seen = wire_containing(wire, "textDocument/didChange").await;
+        assert!(seen.contains("changed"), "{seen:?}");
+    }
+
+    // Restarting the one beside forgets its documents only.
+    app.reset_lsp("python.also");
+    assert!(app.proj.link.lsp_opened.contains(&file));
+    assert!(!app.proj.link.lsp_opened_also.contains(&file));
+    assert!(matches!(
+        app.proj.link.lsp.get("python"),
+        Some(LspSlot::Ready(_))
+    ));
+}
+
+/// What the server beside the main one finds is shown with what the main
+/// one finds: counted in the status bar, underlined, and said on hover,
+/// each at the columns its own server counts in.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_server_beside_the_main_one_adds_its_diagnostics() {
+    let mut app = scanned_app("lsp-beside-diags");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    std::fs::write(root.join("app.py"), "import os\nx = undefined\n").unwrap();
+    open_synchronously(&mut app, "app.py", None);
+    let file = root.join("app.py");
+    app.proj.lang_choices = python_beside("ruff");
+    let (main, main_server) = stub_lsp_server(&root, StubAnswers::Nothing).await;
+    let (beside, beside_server) = stub_lsp_server(&root, StubAnswers::Nothing).await;
+    app.proj
+        .link
+        .lsp
+        .insert("python".into(), LspSlot::Ready(main.clone()));
+    app.proj
+        .link
+        .lsp
+        .insert("python.also".into(), LspSlot::Ready(beside.clone()));
+    let before = (
+        main.snapshot().unwrap().diag_version,
+        beside.snapshot().unwrap().diag_version,
+    );
+    main_server
+        .notify
+        .send(published(
+            &file,
+            1,
+            (4, 13),
+            1,
+            ("Pyright", "reportUndefinedVariable"),
+        ))
+        .unwrap();
+    beside_server
+        .notify
+        .send(published(&file, 0, (7, 9), 2, ("Ruff", "F401")))
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while main.snapshot().unwrap().diag_version == before.0
+        || beside.snapshot().unwrap().diag_version == before.1
+    {
+        assert!(std::time::Instant::now() < deadline, "never published");
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    app.sync_lsp_snapshots();
+
+    let said = app.file_diagnostics("python", &file).expect("both read");
+    assert_eq!(said.len(), 2, "the main server's and the one beside it");
+
+    let pane = app.proj.active;
+    let v = app.proj.panes[pane].as_ref().unwrap();
+    let marks = app.code_highlights(pane, v);
+    let underlined = |line: usize, kind: fn(&codeview::HlKind) -> bool| {
+        marks.iter().any(|h| h.line == line && kind(&h.kind))
+    };
+    assert!(underlined(0, |k| matches!(k, codeview::HlKind::DiagWarn)));
+    assert!(underlined(1, |k| matches!(k, codeview::HlKind::DiagError)));
+
+    let hover = app
+        .diagnostic_at(pane, 0, 8)
+        .expect("ruff's warning on hover");
+    assert!(hover.contains("Ruff(F401)"), "{hover:?}");
+    let hover = app
+        .diagnostic_at(pane, 1, 6)
+        .expect("pyright's error on hover");
+    assert!(hover.contains("reportUndefinedVariable"), "{hover:?}");
+
+    // With the one beside gone, the main server's alone.
+    app.reset_lsp("python.also");
+    app.sync_lsp_snapshots();
+    assert_eq!(app.file_diagnostics("python", &file).unwrap().len(), 1);
+}
+
+/// Chosen in Settings while Python's server runs, a program to run beside
+/// it starts then; no longer chosen, it stops and leaves no slot that would
+/// read "no server for this language" in the list.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_server_beside_the_main_one_starts_and_stops_with_its_choice() {
+    let mut app = scanned_app("lsp-beside-choice");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let (main, _wire) = recording_lsp_client(&root).await;
+    app.proj
+        .link
+        .lsp
+        .insert("python".into(), LspSlot::Ready(main));
+    // Any program that is there: it is started, not run, in a test.
+    let program = std::path::PathBuf::from("/bin/cat");
+    let _ = app.update(Message::Languages(LanguagesMsg::Choose(Box::new(
+        python_beside(&program.to_string_lossy()),
+    ))));
+    assert!(
+        matches!(
+            app.proj.link.lsp.get("python.also"),
+            Some(LspSlot::Starting)
+        ),
+        "started beside the running server, not at the next file opened"
+    );
+
+    let _ = app.update(Message::Languages(LanguagesMsg::Choose(Box::default())));
+    assert!(!app.proj.link.lsp.contains_key("python.also"));
+    assert!(matches!(
+        app.proj.link.lsp.get("python"),
+        Some(LspSlot::Ready(_))
+    ));
+}
+
+/// The form for a server program says whether it runs beside the
+/// language's server or in its place, and Use files it under the key that
+/// says which; Edit on a second server's row brings it back as it was.
+#[test]
+fn the_server_program_form_files_a_second_server_beside_the_main_one() {
+    let mut app = scanned_app("lsp-beside-form");
+    let _ = app.update(Message::Languages(LanguagesMsg::ServerLanguage(
+        "python".into(),
+    )));
+    let _ = app.update(Message::Languages(LanguagesMsg::Draft(
+        crate::LangField::ServerCommand,
+        "ruff".into(),
+    )));
+    // Turned on after the program is typed: what is typed stays.
+    let _ = app.update(Message::Languages(LanguagesMsg::ServerBeside(true)));
+    assert_eq!(app.proj.lang_drafts.server_command, "ruff");
+    let _ = app.update(Message::Languages(LanguagesMsg::UseDraft(
+        crate::LangField::ServerCommand,
+    )));
+    let servers = app.proj.lang_choices.servers.clone().unwrap_or_default();
+    assert!(servers.contains_key("python.also"), "{servers:?}");
+    assert!(
+        !servers.contains_key("python"),
+        "beside pyright, not in its place"
+    );
+    assert!(!app.proj.lang_drafts.server_beside, "the form starts over");
+
+    let _ = app.update(Message::Languages(LanguagesMsg::ServerLanguage(
+        "python.also".into(),
+    )));
+    let drafts = &app.proj.lang_drafts;
+    assert_eq!(drafts.server_language.as_deref(), Some("python"));
+    assert!(drafts.server_beside);
+    assert_eq!(drafts.server_command, "ruff");
+    assert_eq!(
+        crate::app::languages::slot_label("python.also"),
+        "Python, second server"
+    );
+    assert_eq!(app.server_called("python.also"), "ruff");
+    assert_eq!(app.server_called("python"), "Python");
+}
+
+/// Live: a real `ruff server`, run beside Python's main server as Settings
+/// runs it (`ruff` with Clew's known arguments), is sent an open file and
+/// says what it finds there — pushed, since Clew asks for no pulls — and
+/// that shows with the file's other diagnostics. Needs `ruff` on the PATH:
+/// `cargo test -- --ignored a_real_ruff_beside`.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ruff on the PATH"]
+async fn a_real_ruff_beside_the_main_server_reports_an_unused_import() {
+    let mut app = scanned_app("lsp-beside-ruff-live");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    std::fs::write(root.join("app.py"), "import os\n\nx = 1\n").unwrap();
+    open_synchronously(&mut app, "app.py", None);
+    let file = root.join("app.py");
+    app.proj.lang_choices = python_beside("ruff");
+    let server = app
+        .effective_server("python.also")
+        .expect("the choice resolves");
+    assert_eq!(server.args, ["server"], "ruff serves as `ruff server`");
+    let exe = match lsp::store::locate(&server) {
+        lsp::store::Located::Ready(exe) => exe,
+        other => panic!("ruff is run as found: {other:?}"),
+    };
+    let ruff = lsp::client::LspClient::start(&exe, &server.args, &root, None)
+        .await
+        .expect("ruff starts");
+    app.proj
+        .link
+        .lsp
+        .insert("python.also".into(), LspSlot::Ready(ruff.clone()));
+    let _ = app.ensure_lsp("python.also");
+    assert!(app.proj.link.lsp_opened_also.contains(&file));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        app.sync_lsp_snapshots();
+        if let Some(said) = app.file_diagnostics("python", &file)
+            && let Some((d, _)) = said.first()
+        {
+            assert_eq!(d.line, 0, "{:?}", d.message);
+            assert!(
+                d.origin().is_some_and(|o| o.contains("F401")),
+                "{:?}",
+                d.origin()
+            );
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "ruff never said");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    ruff.stop();
+}
