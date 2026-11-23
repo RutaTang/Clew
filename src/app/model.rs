@@ -821,6 +821,10 @@ pub struct DebugSession {
     /// sessions are opened. The whole address, not a port: the adapter may
     /// listen on `[::1]` as well as on `127.0.0.1`.
     pub addr: Option<std::net::SocketAddr>,
+    /// The program runs with an input Clew holds (the adapter had Clew run
+    /// it: debugpy's programs): what is typed in the run's input line is
+    /// sent to it.
+    pub takes_input: bool,
 }
 
 /// A parsed `.clew/launch.json`: what to run and (optionally) which adapter.

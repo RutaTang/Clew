@@ -1983,6 +1983,10 @@ pub enum DebugMsg {
     BpConditionRemove,
     /// The add-watch input changed.
     WatchInput(String),
+    /// What is typed for the running program changed.
+    ProgramInput(String),
+    /// Send what is typed to the running program, as a line.
+    ProgramInputSent,
     /// Add the current input as a watch expression.
     WatchAdd,
     /// Remove a watch expression by identity (its text), from both the watch
@@ -3232,6 +3236,8 @@ impl DebugMsg {
             | DebugMsg::BpConditionCancel
             | DebugMsg::BpConditionRemove
             | DebugMsg::WatchInput(..)
+            | DebugMsg::ProgramInput(..)
+            | DebugMsg::ProgramInputSent
             | DebugMsg::WatchAdd
             | DebugMsg::WatchRemoveExpr(..)
             | DebugMsg::ToggleVar(..)

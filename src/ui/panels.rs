@@ -788,10 +788,12 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
     // Program output.
     let mut out_rows: Vec<Element<'_, Message>> = Vec::new();
     for (cat, txt) in &session.output {
-        let color = if cat == "stderr" {
-            theme::danger()
-        } else {
-            theme::fg()
+        // What the reader typed for the program, set apart from what it
+        // printed.
+        let color = match cat.as_str() {
+            "stderr" => theme::danger(),
+            "stdin" => theme::accent(),
+            _ => theme::fg(),
         };
         // In the code's font, so a program's columns line up, and wrapped:
         // a long line was cut at the column's edge.
@@ -917,7 +919,27 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
             bottom: 0.0,
             left: 6.0,
         });
-    let output: Element<'_, Message> = column![heading, output_col(out_rows), foot]
+    // The program's input, while it runs and reads one: typed here, sent
+    // as a line with Return.
+    let input: Option<Element<'_, Message>> =
+        (session.takes_input && session.status != DebugStatus::Terminated).then(|| {
+            let said = tr!("Input for the program");
+            container(super::jump::field_named(
+                text_input(said, &app.debug.program_input)
+                    .style(theme::input)
+                    .on_input(|v| Message::Debug(DebugMsg::ProgramInput(v)))
+                    .on_submit(Message::Debug(DebugMsg::ProgramInputSent))
+                    .font(crate::fonts::CODE)
+                    .size(ts::SMALL)
+                    .padding(4),
+                said,
+            ))
+            .padding([2, 6])
+            .into()
+        });
+    let output: Element<'_, Message> = column![heading, output_col(out_rows)]
+        .push(input)
+        .push(foot)
         .height(Fill)
         .into();
     let panels = if output_only {

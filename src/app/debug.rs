@@ -93,6 +93,22 @@ fn take_exceptions(mut launch: serde_json::Value) -> (serde_json::Value, Vec<Str
     (launch, wanted)
 }
 
+/// A Python `launch` body asking debugpy to have Clew run the program
+/// (`runInTerminal`), so that it has an input. Its output, written to a
+/// pipe, is written as it comes (`PYTHONUNBUFFERED`): a prompt printed
+/// before an `input()` showed only after the answer was typed.
+fn in_clews_console(launch: &mut serde_json::Value) {
+    let Some(body) = launch.as_object_mut() else {
+        return;
+    };
+    body.insert("console".into(), serde_json::json!("integratedTerminal"));
+    let env = body.entry("env").or_insert_with(|| serde_json::json!({}));
+    if let Some(env) = env.as_object_mut() {
+        env.entry("PYTHONUNBUFFERED")
+            .or_insert_with(|| serde_json::json!("1"));
+    }
+}
+
 /// A `launch` body for a run without the debugger: DAP's `noDebug`, which
 /// every adapter that knows it takes as "run it, stop at nothing" — and no
 /// stop at the entry either, for one that does not. The breakpoints are
@@ -606,6 +622,29 @@ impl App {
         }
     }
 
+    /// Send the line typed in the run's input to the program, and show it
+    /// in its output where the program reads it: a program's input is no
+    /// terminal's, so nothing else echoes it.
+    fn send_program_input(&mut self) -> Task<Message> {
+        let Some(session) = self.debug.session.as_mut() else {
+            return Task::none();
+        };
+        let line = format!("{}\n", self.debug.program_input);
+        let sent = session.takes_input
+            && session.status != DebugStatus::Terminated
+            && session
+                .client
+                .as_ref()
+                .is_some_and(|client| client.send_input(&line));
+        if sent {
+            push_debug_output(session, "stdin".into(), line);
+            self.debug.program_input.clear();
+        } else {
+            self.status = tr!("The program has ended, so it takes no more input.").into();
+        }
+        Task::none()
+    }
+
     /// Whether a run or debug session is still going — running, paused or
     /// starting — while the bottom panel is hidden: what the status bar's
     /// session chip says, and what Run and Debug show again first.
@@ -800,6 +839,7 @@ impl App {
             args: args.clone(),
             cwd: cwd.clone(),
             addr: None,
+            takes_input: false,
         });
         self.show_bottom = true;
         self.debug.no_debug = no_debug;
@@ -912,6 +952,10 @@ impl App {
         // The user's choices for the project: a Python program runs under the
         // interpreter they picked.
         let choices = self.proj.lang_choices.clone();
+        // A Python program of a project on this computer is run by Clew, at
+        // debugpy's asking, so that it has an input: run by debugpy, its
+        // input was none, and `input()` ended it at once.
+        let hosts_program = !remote && matches!(lang, Some(dap::Lang::Python));
 
         let stream = iced::stream::channel(
             64,
@@ -1268,6 +1312,9 @@ impl App {
                 if cancelled(&live) {
                     return; // stopped while the adapter was starting
                 }
+                if hosts_program {
+                    client.run_programs_here();
+                }
                 // initialize() can hang forever on a wedged adapter, and the
                 // run-counter checkpoints only run BETWEEN awaits — so race
                 // it against the Stop signal and a hard timeout. Without
@@ -1342,6 +1389,9 @@ impl App {
                 client.prefer_exception_filters(&exceptions);
                 if no_debug {
                     without_debugger(&mut launch);
+                }
+                if hosts_program {
+                    in_clews_console(&mut launch);
                 }
                 if let Some(text) = notice {
                     let _ = output
@@ -1566,6 +1616,7 @@ impl App {
             args: s.args.clone(),
             cwd: s.cwd.clone(),
             addr: None,
+            takes_input: false,
         });
         // The teardown itself is shared with the project switch, which used to
         // carry its own copy of it (see `stop_debug_session`).
@@ -2294,6 +2345,12 @@ impl App {
             dap::DapEvent::Output(o) if is_formatter_noise(&o.text) => Task::none(),
             dap::DapEvent::Output(o) => {
                 push_debug_output(session, o.category, o.text);
+                Task::none()
+            }
+            // The program runs with an input Clew holds: the run's input
+            // line shows.
+            dap::DapEvent::TakesInput => {
+                session.takes_input = true;
                 Task::none()
             }
             // Its code said once, beside the run's name — the output said
@@ -3458,6 +3515,11 @@ impl App {
                 self.debug.watch_input = s;
                 Task::none()
             }
+            DebugMsg::ProgramInput(s) => {
+                self.debug.program_input = s;
+                Task::none()
+            }
+            DebugMsg::ProgramInputSent => self.send_program_input(),
             DebugMsg::WatchAdd => {
                 let expr = self.debug.watch_input.trim().to_string();
                 if expr.is_empty() {
@@ -3822,6 +3884,28 @@ mod tests {
         assert!(launch.get("initCommands").is_some());
     }
 
+    /// A local Python program is run by Clew, so that it has an input, and
+    /// writes its output as it comes; an environment the launch sets is
+    /// kept, its own buffering choice included.
+    #[test]
+    fn a_local_python_program_is_run_in_clews_console() {
+        let mut launch = serde_json::json!({
+            "program": "/p/app.py",
+            "console": "internalConsole",
+            "env": { "PYTHONDONTWRITEBYTECODE": "1" },
+        });
+        in_clews_console(&mut launch);
+        assert_eq!(launch["console"], "integratedTerminal");
+        assert_eq!(launch["env"]["PYTHONUNBUFFERED"], "1");
+        assert_eq!(launch["env"]["PYTHONDONTWRITEBYTECODE"], "1");
+        let mut own = serde_json::json!({ "env": { "PYTHONUNBUFFERED": "0" } });
+        in_clews_console(&mut own);
+        assert_eq!(own["env"]["PYTHONUNBUFFERED"], "0");
+        let mut bare = serde_json::json!({ "program": "/p/app.py" });
+        in_clews_console(&mut bare);
+        assert_eq!(bare["env"]["PYTHONUNBUFFERED"], "1");
+    }
+
     /// lldb's Python tracebacks from Rust's formatters are not the
     /// program's output; the program's own traceback, and other text, are.
     #[test]
@@ -3878,6 +3962,7 @@ mod tests {
             args: Vec::new(),
             cwd: PathBuf::from("/tmp"),
             addr: None,
+            takes_input: false,
         }
     }
 

@@ -5044,6 +5044,7 @@ fn a_run_tab_holds_its_close_button() {
         args: Vec::new(),
         cwd: PathBuf::from("/p"),
         addr: None,
+        takes_input: false,
     });
     app.debug.tab = 1;
     app.run_shown = Some(RunTab::Real(1));
@@ -5135,6 +5136,7 @@ fn the_panel_has_a_tab_for_each_run() {
         args: Vec::new(),
         cwd: PathBuf::from("/p"),
         addr: None,
+        takes_input: false,
     };
     app.debug.session = Some(session(crate::DebugStatus::Running));
     app.debug.tab = 1;
@@ -9243,6 +9245,7 @@ fn paused_debug_session() -> crate::DebugSession {
         args: Vec::new(),
         cwd: PathBuf::from("/p"),
         addr: None,
+        takes_input: false,
     }
 }
 
@@ -11428,6 +11431,7 @@ fn a_plain_runs_panel_is_its_output_and_how_it_ended() {
         args: Vec::new(),
         cwd: root.clone(),
         addr: None,
+        takes_input: false,
     };
     let stops = |app: &App| {
         pressing(|| super::debug_panel(app), "Stop")
@@ -11573,6 +11577,7 @@ fn a_call_stack_frames_line_number_fits_its_column() {
             args: Vec::new(),
             cwd: root.clone(),
             addr: None,
+            takes_input: false,
         });
         app.show_bottom = true;
         let size = Size::new(width, 900.0);
@@ -11910,6 +11915,7 @@ fn the_last_runs_trace_is_offered_as_a_walkthrough_and_listed_on_the_call_graph(
         args: Vec::new(),
         cwd: root.clone(),
         addr: None,
+        takes_input: false,
     });
     assert_eq!(super::trace_count(&app), "No stops traced");
     app.debug.session = None;
@@ -13993,6 +13999,7 @@ fn no_line_of_a_runs_output_is_under_the_ask_pill() {
         args: Vec::new(),
         cwd: root.clone(),
         addr: None,
+        takes_input: false,
     });
     app.show_bottom = true;
     app.ask_view = crate::AskView::Hidden;
@@ -14040,6 +14047,7 @@ fn a_runs_output_is_shown_at_its_end() {
         args: Vec::new(),
         cwd: root.clone(),
         addr: None,
+        takes_input: false,
     });
     app.show_bottom = true;
     app.ask_view = crate::AskView::Hidden;
@@ -22787,6 +22795,7 @@ fn walk_this_run_is_never_cut_whatever_the_width() {
         args: Vec::new(),
         cwd: root.clone(),
         addr: None,
+        takes_input: false,
     });
     app.debug.hover_safe = false;
     app.debug.trace = vec![crate::TraceStop {
@@ -22845,6 +22854,7 @@ fn the_debug_header_keeps_walk_this_run_beside_the_ask_card() {
         args: Vec::new(),
         cwd: root.clone(),
         addr: None,
+        takes_input: false,
     });
     app.debug.trace = vec![crate::TraceStop {
         reason: "breakpoint".into(),
@@ -22905,6 +22915,7 @@ fn the_debug_controls_share_the_headers_row_in_every_language() {
         args: Vec::new(),
         cwd: root.clone(),
         addr: None,
+        takes_input: false,
     });
     app.debug.trace = (0..4)
         .map(|_| crate::TraceStop {
@@ -22973,6 +22984,7 @@ fn the_debug_columns_keep_clear_of_the_ask_card() {
         args: Vec::new(),
         cwd: root.clone(),
         addr: None,
+        takes_input: false,
     });
     app.show_bottom = true;
     crate::fonts::load();
@@ -23124,6 +23136,7 @@ fn the_debug_notes_cut_sentence_is_whole_in_its_tip_and_gone_when_it_says_nothin
         args: Vec::new(),
         cwd: root.clone(),
         addr: None,
+        takes_input: false,
     });
     app.debug.ran_for = Some("pricing.py".into());
     crate::app::tests::isolated_data_dir();
@@ -23199,6 +23212,7 @@ fn the_debug_note_is_whole_in_french_where_there_is_room() {
         args: Vec::new(),
         cwd: root.clone(),
         addr: None,
+        takes_input: false,
     });
     app.debug.ran_for = Some("pricing.py".into());
     app.debug.trace = vec![crate::TraceStop {
@@ -23261,6 +23275,7 @@ fn a_narrow_debug_header_keeps_its_trace_and_walk_this_run() {
         args: Vec::new(),
         cwd: root.clone(),
         addr: None,
+        takes_input: false,
     });
     app.debug.ran_for = Some("pricing.py".into());
     app.debug.trace = vec![crate::TraceStop {
@@ -23301,4 +23316,41 @@ fn a_narrow_debug_header_keeps_its_trace_and_walk_this_run() {
             "{width}: in the panel: {note:?}"
         );
     }
+}
+
+/// A run whose program takes an input has a line for it under its output;
+/// what is typed there is the program's input. A program that does not
+/// read one, or has ended, has no such line.
+#[test]
+fn a_run_that_reads_input_has_an_input_line() {
+    use iced_test::selector::Candidate;
+    let mut app = reader_app();
+    let mut session = paused_debug_session();
+    session.status = crate::DebugStatus::Running;
+    session.output = vec![("stdout".into(), "Name: ".into())];
+    app.debug.no_debug = true;
+    app.debug.session = Some(session);
+    let field = |app: &App| {
+        sim_elem(super::debug_panel(app))
+            .find(|c: Candidate<'_>| match c {
+                Candidate::TextInput { visible_bounds, .. } => visible_bounds,
+                _ => None,
+            })
+            .ok()
+    };
+    assert!(field(&app).is_none(), "no input to type into yet");
+    app.debug.session.as_mut().unwrap().takes_input = true;
+    let at = field(&app).expect("an input line");
+    let mut sim = sim_elem(super::debug_panel(&app));
+    sim.point_at(at.center());
+    let _ = sim.simulate(iced_test::simulator::click());
+    let _ = sim.typewrite("A");
+    let sent = sent_by(sim);
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Debug(DebugMsg::ProgramInput(q)) if q == "A")),
+        "{sent:?}"
+    );
+    app.debug.session.as_mut().unwrap().status = crate::DebugStatus::Terminated;
+    assert!(field(&app).is_none(), "an ended program reads nothing");
 }

@@ -316,6 +316,9 @@ pub enum DapEvent {
     },
     /// The debug session ended.
     Terminated,
+    /// The program runs with an input Clew holds ([`super::DapClient::send_input`]):
+    /// what is typed for it can be sent.
+    TakesInput,
     /// The adapter asked clew to start a CHILD debug session (js-debug's
     /// multi-session model) with the given launch configuration.
     StartDebugging(Value),

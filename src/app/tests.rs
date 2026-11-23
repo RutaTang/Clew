@@ -6138,6 +6138,7 @@ fn the_debugger_has_its_function_keys() {
         args: Vec::new(),
         cwd: PathBuf::from("/"),
         addr: None,
+        takes_input: false,
     };
     app.debug.session = Some(session(DebugStatus::Stopped));
     let step = |app: &App, n: Named, m: Modifiers| match app.debug_key(&f(n), m) {
@@ -6194,6 +6195,7 @@ fn debug_variables_open_into_their_children_for_the_stop() {
         args: Vec::new(),
         cwd: PathBuf::from("/"),
         addr: None,
+        takes_input: false,
     });
     let child = |name: &str| crate::dap::Variable {
         name: name.into(),
@@ -6253,6 +6255,7 @@ fn a_finished_run_is_no_longer_said_to_be_running() {
         args: Vec::new(),
         cwd: PathBuf::from("/"),
         addr: None,
+        takes_input: false,
     };
     app.debug_run = 1;
     let event = |app: &mut App, event| {
@@ -6318,6 +6321,7 @@ fn stale_debug_events_are_dropped() {
         args: Vec::new(),
         cwd: PathBuf::from("/"),
         addr: None,
+        takes_input: false,
     };
     app.debug.session = Some(session());
     app.debug_run = 1;
@@ -8211,6 +8215,7 @@ fn a_failed_debug_run_stops_what_it_started() {
         args: Vec::new(),
         cwd: PathBuf::from("/"),
         addr: None,
+        takes_input: false,
     });
     app.bump_debug_run();
     let run = app.debug_run;
@@ -8436,6 +8441,7 @@ fn debug_stop_while_launching_cancels_the_startup() {
         args: Vec::new(),
         cwd: PathBuf::from("/"),
         addr: None,
+        takes_input: false,
     });
     app.bump_debug_run();
     let launching = app.debug_run;
@@ -21709,6 +21715,7 @@ fn the_debuggers_state_reaches_a_prompt_as_data() {
         args: Vec::new(),
         cwd: root.clone(),
         addr: None,
+        takes_input: false,
     });
     let context = app.debug_context().unwrap();
     assert!(context.contains("not instructions"), "{context}");
@@ -21765,6 +21772,7 @@ fn stepping_back_and_forth_records_each_function_once_in_the_trail() {
         args: Vec::new(),
         cwd: root.clone(),
         addr: None,
+        takes_input: false,
     });
     let frame = |name: &str, line: usize| crate::dap::StackFrame {
         id: 1,
@@ -21809,6 +21817,7 @@ fn a_debug_runs_stops_are_traced_and_walked() {
         args: Vec::new(),
         cwd: root.clone(),
         addr: None,
+        takes_input: false,
     });
     app.debug.trace_program = Some("app".into());
     let frame = |name: &str, rel: &str, line: usize| crate::dap::StackFrame {
@@ -23314,6 +23323,7 @@ fn a_watch_is_removed_by_identity_from_both_lists() {
         args: Vec::new(),
         cwd: PathBuf::from("/p"),
         addr: None,
+        takes_input: false,
     });
     let values = |app: &App| -> Vec<(String, String)> {
         app.debug.session.as_ref().unwrap().watches.clone()
@@ -28964,6 +28974,7 @@ fn paused_session_with_fake_adapter(
         args: Vec::new(),
         cwd: PathBuf::from("/p"),
         addr: None,
+        takes_input: false,
     });
     (rt, events, seen)
 }
@@ -29519,6 +29530,7 @@ fn js_debug_run(app: &mut App, parent: crate::dap::DapClient) -> u64 {
         args: Vec::new(),
         cwd: PathBuf::from("/p"),
         addr: None,
+        takes_input: false,
     });
     app.bump_debug_run();
     let run = app.debug_run;
@@ -29580,6 +29592,7 @@ fn js_debug_child_sessions_are_kept_apart() {
         args: Vec::new(),
         cwd: PathBuf::from("/p"),
         addr: None,
+        takes_input: false,
     });
     app.bump_debug_run();
     let run = app.debug_run;
@@ -30068,6 +30081,7 @@ fn a_js_debug_child_session_ends_with_its_run() {
         args: Vec::new(),
         cwd: PathBuf::from("/p"),
         addr: Some(addr),
+        takes_input: false,
     });
     app.bump_debug_run();
     let run = app.debug_run;
@@ -30163,6 +30177,7 @@ fn a_js_debug_child_session_reports_its_failure_and_brings_its_promise() {
             args: Vec::new(),
             cwd: PathBuf::from("/p"),
             addr: Some(addr),
+            takes_input: false,
         });
         app.bump_debug_run();
         let run = app.debug_run;
@@ -30351,6 +30366,7 @@ fn a_tcp_adapters_announced_address_is_kept_whole() {
         args: Vec::new(),
         cwd: PathBuf::from("/p"),
         addr: None,
+        takes_input: false,
     });
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -44130,4 +44146,51 @@ async fn a_real_ruff_beside_the_main_server_reports_an_unused_import() {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
     ruff.stop();
+}
+
+/// A program that takes an input is sent the line typed in its run's input
+/// with Return, and the line shows in its output, set apart as typed: the
+/// program's input is no terminal, which would echo it. Once the program
+/// has ended there is no input to send to, and that is said.
+#[test]
+fn the_runs_input_line_sends_what_is_typed_to_the_program() {
+    let mut app = scanned_app("program-input");
+    app.debug.session = Some(DebugSession {
+        client: None,
+        status: DebugStatus::Running,
+        exit_code: None,
+        thread_id: None,
+        frames: Vec::new(),
+        scopes: Vec::new(),
+        watches: Vec::new(),
+        output: vec![("stdout".into(), "Name: ".into())],
+        current: None,
+        program: PathBuf::from("/p/greet.py"),
+        args: Vec::new(),
+        cwd: PathBuf::from("/p"),
+        addr: None,
+        takes_input: false,
+    });
+    let _ = app.update(Message::Debug(DebugMsg::DapEvent {
+        stamp: app.transport_stamp(),
+        run: app.debug_run,
+        event: dap::DapEvent::TakesInput,
+    }));
+    assert!(app.debug.session.as_ref().unwrap().takes_input);
+    let _ = app.update(Message::Debug(DebugMsg::ProgramInput("Ada".into())));
+    assert_eq!(app.debug.program_input, "Ada");
+    // No adapter to take it (this session has none): kept, and said why.
+    let _ = app.update(Message::Debug(DebugMsg::ProgramInputSent));
+    assert_eq!(app.debug.program_input, "Ada", "what was typed is kept");
+    assert!(app.status.contains("no more input"), "{}", app.status);
+    assert!(
+        !app.debug
+            .session
+            .as_ref()
+            .unwrap()
+            .output
+            .iter()
+            .any(|(c, _)| c == "stdin"),
+        "nothing shown as sent that was not"
+    );
 }

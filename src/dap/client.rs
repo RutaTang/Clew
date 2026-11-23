@@ -104,6 +104,120 @@ pub struct DapClient {
     /// Every exception filter the adapter offers, on by default or not: what
     /// a launch may ask for instead ([`Self::prefer_exception_filters`]).
     offered_filters: Arc<std::sync::Mutex<Vec<String>>>,
+    /// The programs the adapter asks Clew to run for it (`runInTerminal`),
+    /// and the input of the one running: see [`ProgramHost`].
+    programs: Arc<ProgramHost>,
+}
+
+/// The programs a debug adapter asks Clew to run for it (DAP's
+/// `runInTerminal`): debugpy's way of giving a program an input. Run with
+/// its output in the console as its own, its input from the run's input
+/// line, and ended with the session.
+#[derive(Debug, Default)]
+struct ProgramHost {
+    /// Whether this session's programs may run on this computer: only a
+    /// session on this computer's project — a remote host's adapter asks
+    /// for a program of that host, which Clew has no business running
+    /// here. Said in `initialize`, so an adapter asks only when it may.
+    allowed: std::sync::atomic::AtomicBool,
+    /// Where what is typed for the running program goes, while it runs.
+    input: std::sync::Mutex<Option<mpsc::UnboundedSender<Vec<u8>>>>,
+    /// The programs run, reaped when the session ends.
+    children: std::sync::Mutex<Vec<Child>>,
+}
+
+impl ProgramHost {
+    /// Run the program `arguments` (a `runInTerminal` request's) names, on
+    /// this computer: its output into `sink` as the program's, its input
+    /// open to [`DapClient::send_input`]. Its process id, or why not.
+    fn run(&self, arguments: &Value, sink: &EventSink) -> Result<u32, String> {
+        let argv: Vec<&str> = arguments
+            .get("args")
+            .and_then(Value::as_array)
+            .map(|args| args.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        let Some((program, args)) = argv.split_first() else {
+            return Err("no program to run".into());
+        };
+        let mut command = clew_core::spawn::tokio_command(program);
+        command
+            .args(args)
+            // As the adapter's own: only the absolute entries of `PATH`.
+            .env("PATH", clew_core::linerpc::child_path())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
+        if let Some(cwd) = arguments.get("cwd").and_then(Value::as_str)
+            && !cwd.is_empty()
+        {
+            command.current_dir(cwd);
+        }
+        // What the launch sets, on top of what Clew runs with; `null`
+        // takes a variable away.
+        if let Some(env) = arguments.get("env").and_then(Value::as_object) {
+            for (name, value) in env {
+                match value {
+                    Value::String(value) => {
+                        command.env(name, value);
+                    }
+                    Value::Null => {
+                        command.env_remove(name);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        #[cfg(unix)]
+        command.process_group(0);
+        let mut child = command
+            .spawn()
+            .map_err(|e| format!("could not run {program}: {e}"))?;
+        #[cfg(windows)]
+        clew_core::procgroup::adopt_tokio(&child);
+        let pid = child.id().unwrap_or(0);
+        if let Some(out) = child.stdout.take() {
+            tokio::spawn(forward_output(Box::new(out), "stdout", sink.sharing()));
+        }
+        if let Some(err) = child.stderr.take() {
+            tokio::spawn(forward_output(Box::new(err), "stderr", sink.sharing()));
+        }
+        if let Some(mut stdin) = child.stdin.take() {
+            let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
+            tokio::spawn(async move {
+                use tokio::io::AsyncWriteExt as _;
+                while let Some(bytes) = rx.recv().await {
+                    if stdin.write_all(&bytes).await.is_err() || stdin.flush().await.is_err() {
+                        break;
+                    }
+                }
+            });
+            if let Ok(mut input) = self.input.lock() {
+                *input = Some(tx);
+            }
+        }
+        if let Ok(mut children) = self.children.lock() {
+            children.push(child);
+        }
+        Ok(pid)
+    }
+
+    /// End what was run: its input closed, each program given `grace` to
+    /// end by itself (the adapter ends it as its session ends), then
+    /// killed with what it started.
+    async fn end(&self, grace: Duration) {
+        if let Ok(mut input) = self.input.lock() {
+            *input = None;
+        }
+        let children = self
+            .children
+            .lock()
+            .map(|mut children| std::mem::take(&mut *children))
+            .unwrap_or_default();
+        for child in children {
+            framing::reap(child, grace, cfg!(unix)).await;
+        }
+    }
 }
 
 /// A local pytest's assertion rewriting adds to a test (`@py_assert1`,
@@ -309,7 +423,16 @@ impl DapClient {
         for (stream, category) in outputs {
             tokio::spawn(forward_output(stream, category, sink.sharing()));
         }
-        tokio::spawn(run_session(writer, mailbox, incoming, child, sink, grace));
+        let programs = Arc::new(ProgramHost::default());
+        tokio::spawn(run_session(
+            writer,
+            mailbox,
+            incoming,
+            child,
+            sink,
+            grace,
+            programs.clone(),
+        ));
         let client = DapClient {
             rpc,
             addr,
@@ -317,6 +440,7 @@ impl DapClient {
             disconnect: Default::default(),
             exception_filters: Default::default(),
             offered_filters: Default::default(),
+            programs,
         };
         (client, events)
     }
@@ -366,9 +490,31 @@ impl DapClient {
             })
     }
 
+    /// Let the adapter have its programs run on this computer, with an input
+    /// ([`Self::send_input`]): asked before [`Self::initialize`], which says
+    /// so. Only for a session of a project on this computer.
+    pub fn run_programs_here(&self) {
+        self.programs.allowed.store(true, Ordering::SeqCst);
+    }
+
+    /// Send `text` to the input of the program Clew runs for the adapter.
+    /// Whether there is one to take it.
+    pub fn send_input(&self, text: &str) -> bool {
+        self.programs
+            .input
+            .lock()
+            .ok()
+            .and_then(|input| input.as_ref().map(|tx| tx.send(text.as_bytes().to_vec())))
+            .is_some_and(|sent| sent.is_ok())
+    }
+
     pub async fn initialize(&self) -> Result<Value, String> {
+        let runs_programs = self.programs.allowed.load(Ordering::SeqCst);
         let capabilities = self
-            .request("initialize", initialize_args(crate::i18n::current()))
+            .request(
+                "initialize",
+                initialize_args(crate::i18n::current(), runs_programs),
+            )
             .await?;
         if let Ok(mut filters) = self.exception_filters.lock() {
             *filters = super::proto::default_exception_filters(&capabilities);
@@ -701,11 +847,11 @@ const MAX_PENDING_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
 /// The `initialize` request's arguments. `lang`, the reader's, is named as
 /// the `locale` when it is not English, so an adapter that translates its
 /// messages answers in it.
-fn initialize_args(lang: crate::i18n::Lang) -> Value {
+fn initialize_args(lang: crate::i18n::Lang, runs_programs: bool) -> Value {
     let mut args = json!({
         "adapterID": "clew", "clientID": "clew", "clientName": "clew",
         "linesStartAt1": true, "columnsStartAt1": true, "pathFormat": "path",
-        "supportsRunInTerminalRequest": false,
+        "supportsRunInTerminalRequest": runs_programs,
     });
     if let Some(tag) = lang.server_locale() {
         args["locale"] = json!(tag);
@@ -868,6 +1014,7 @@ fn truncate_chunk(text: String) -> String {
 /// ("reverse") requests.
 struct DapWire {
     events: EventSink,
+    programs: Arc<ProgramHost>,
 }
 
 impl DapWire {
@@ -911,6 +1058,21 @@ impl DapWire {
                 return Handled::Close;
             }
             response["success"] = json!(true);
+        } else if command == "runInTerminal" && self.programs.allowed.load(Ordering::SeqCst) {
+            let arguments = value.get("arguments").cloned().unwrap_or(Value::Null);
+            match self.programs.run(&arguments, &self.events) {
+                Ok(pid) => {
+                    response["success"] = json!(true);
+                    response["body"] = json!({ "processId": pid });
+                    if self.events.send(DapEvent::TakesInput).is_err() {
+                        return Handled::Close;
+                    }
+                }
+                Err(message) => {
+                    response["success"] = json!(false);
+                    response["message"] = json!(message);
+                }
+            }
         } else {
             response["success"] = json!(false);
             // `message` is optional and, when present, a string: the old
@@ -1018,10 +1180,19 @@ async fn run_session<W>(
     child: Option<Child>,
     events: EventSink,
     grace: Duration,
+    programs: Arc<ProgramHost>,
 ) where
     W: tokio::io::AsyncWrite + Unpin,
 {
-    let ended = framing::run(writer, DapWire { events }, mailbox, incoming).await;
+    let wire = DapWire {
+        events,
+        programs: programs.clone(),
+    };
+    let ended = framing::run(writer, wire, mailbox, incoming).await;
+    // A program Clew ran for the adapter has, by the session's end,
+    // ended or been ended by it: given the time a program takes to write
+    // out what it holds, it goes with the session.
+    programs.end(DEBUGGEE_EXIT_GRACE).await;
     if let Some(child) = child {
         framing::reap(child, grace, cfg!(unix)).await;
     }
@@ -1470,6 +1641,89 @@ mod tests {
             }
             other => panic!("expected the child-session request, got {other:?}"),
         }
+    }
+
+    /// A program the adapter asks Clew to run (`runInTerminal`) runs here
+    /// once the session may run programs here: told so in `initialize`, it
+    /// is run with an input, what is sent to that input reaches it, its
+    /// output comes as the program's, and its process id answers the
+    /// request. Before then it is declined, as a remote session's is.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_program_the_adapter_asks_for_runs_here_with_an_input() {
+        let (client, mut events, mut adapter) = manual_adapter().await;
+        assert!(!client.send_input("early\n"), "no program runs yet");
+        client.run_programs_here();
+        let init = tokio::spawn({
+            let client = client.clone();
+            async move { client.initialize().await }
+        });
+        let asked = adapter.next().await;
+        assert_eq!(asked["command"], "initialize");
+        assert_eq!(asked["arguments"]["supportsRunInTerminalRequest"], true);
+        adapter
+            .send(
+                json!({"seq": 1, "type": "response", "request_seq": asked["seq"],
+                         "command": "initialize", "success": true, "body": {}}),
+            )
+            .await;
+        init.await.unwrap().unwrap();
+
+        let dir = clew_core::testutil::TempDir::new("dap-run-in-terminal");
+        adapter
+            .send(json!({"seq": 100, "type": "request", "command": "runInTerminal",
+                         "arguments": {
+                             "kind": "integrated",
+                             "cwd": dir.path().to_string_lossy(),
+                             "args": ["/bin/sh", "-c",
+                                      "printf 'Name: '; read name; echo \"hello $name from $(basename \"$PWD\") $GREETING\""],
+                             "env": {"GREETING": "there", "CLEW_UNSET_ME": null}
+                         }}))
+            .await;
+        let answer = adapter.next().await;
+        assert_eq!(answer["request_seq"], 100);
+        assert_eq!(answer["success"], true, "{answer}");
+        assert!(
+            answer["body"]["processId"]
+                .as_u64()
+                .is_some_and(|pid| pid > 0)
+        );
+
+        let mut printed = String::new();
+        let mut takes_input = false;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while !printed.contains("hello") {
+            let event = tokio::time::timeout_at(deadline, events.recv())
+                .await
+                .expect("the program never answered");
+            match event {
+                Some(DapEvent::TakesInput) => {
+                    takes_input = true;
+                    assert!(client.send_input("Ada\n"));
+                }
+                Some(DapEvent::Output(o)) => {
+                    assert_eq!(o.category, "stdout");
+                    printed.push_str(&o.text);
+                }
+                Some(_) => {}
+                None => panic!("the session ended"),
+            }
+        }
+        assert!(takes_input);
+        let dir_name = dir
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert!(
+            printed.starts_with("Name: "),
+            "the prompt comes before the answer: {printed:?}"
+        );
+        assert!(
+            printed.contains(&format!("hello Ada from {dir_name} there")),
+            "{printed:?}"
+        );
     }
 
     /// A session is asked to disconnect once, however many of its handles
@@ -2330,6 +2584,84 @@ mod tests {
         assert!(!names.iter().any(|n| n.starts_with("@py_")), "{names:?}");
     }
 
+    /// A Python program reading its input, run by real debugpy as Clew runs
+    /// a local one (`console: integratedTerminal`, Clew running it): its
+    /// prompt shows, what is sent reaches its `input()`, and it goes on.
+    /// Run by debugpy itself, it had no input and ended with an EOFError.
+    /// Needs `python3` and debugpy (its own or Clew's).
+    #[tokio::test]
+    #[ignore = "needs python3 and debugpy; run explicitly"]
+    async fn a_python_program_reads_what_is_typed_for_it() {
+        let dir = clew_core::testutil::TempDir::new("dap-python-input");
+        let script = dir.join("greet.py");
+        std::fs::write(
+            &script,
+            "name = input('Name: ')\nprint(f'hello {name}')\nprint(input('Again: ') * 2)\n",
+        )
+        .unwrap();
+        let spec = match clew_core::debugadapter::resolve(
+            "python",
+            &script.to_string_lossy(),
+            &[],
+            &dir,
+            &dir,
+            &Default::default(),
+            None,
+        ) {
+            Ok(clew_core::debugadapter::Resolution::Ready(spec)) => spec,
+            other => panic!("{other:?}"),
+        };
+        let mut launch = spec.launch.clone();
+        launch["console"] = json!("integratedTerminal");
+        launch["env"]["PYTHONUNBUFFERED"] = json!("1");
+        let (client, mut events) =
+            DapClient::start(&spec.command, &spec.args, &dir, Transport::Stdio)
+                .await
+                .expect("debugpy started");
+        client.run_programs_here();
+        client.initialize().await.expect("initialized");
+        let launched = client.launch(launch);
+        tokio::pin!(launched);
+        let mut printed = String::new();
+        let mut configured = false;
+        let mut launch_answered = false;
+        let mut answered = 0;
+        loop {
+            let event = tokio::select! {
+                event = events.recv() => event,
+                answer = &mut launched, if !launch_answered => {
+                    launch_answered = true;
+                    assert_eq!(answer, Ok(()));
+                    continue;
+                }
+                _ = tokio::time::sleep(Duration::from_secs(60)) => panic!("no event in time: {printed:?}"),
+            };
+            match event {
+                Some(DapEvent::Initialized) if !configured => {
+                    configured = true;
+                    client.configuration_done().await.unwrap();
+                }
+                Some(DapEvent::Output(o)) if o.category == "stdout" => {
+                    printed.push_str(&o.text);
+                    // Each prompt answered as it shows.
+                    if printed.ends_with("Name: ") && answered == 0 {
+                        answered = 1;
+                        assert!(client.send_input("Ada\n"));
+                    } else if printed.ends_with("Again: ") && answered == 1 {
+                        answered = 2;
+                        assert!(client.send_input("ab\n"));
+                    }
+                }
+                Some(DapEvent::Terminated) | None => break,
+                Some(_) => {}
+            }
+        }
+        assert_eq!(answered, 2, "{printed:?}");
+        assert!(printed.contains("hello Ada"), "{printed:?}");
+        assert!(printed.contains("abab"), "{printed:?}");
+        assert!(!printed.contains("EOFError"), "{printed:?}");
+    }
+
     /// F9: a TCP adapter is reached at the port it announced — not at one
     /// guessed in advance — and the session is wired over that socket.
     #[tokio::test]
@@ -2598,9 +2930,9 @@ mod tests {
     /// one that translates answers in it.
     #[test]
     fn initialize_names_the_readers_language() {
-        assert!(initialize_args(Lang::En).get("locale").is_none());
-        assert_eq!(initialize_args(Lang::Ja)["locale"], "ja");
-        assert_eq!(initialize_args(Lang::Zh)["locale"], "zh-cn");
-        assert_eq!(initialize_args(Lang::Fr)["adapterID"], "clew");
+        assert!(initialize_args(Lang::En, false).get("locale").is_none());
+        assert_eq!(initialize_args(Lang::Ja, false)["locale"], "ja");
+        assert_eq!(initialize_args(Lang::Zh, false)["locale"], "zh-cn");
+        assert_eq!(initialize_args(Lang::Fr, false)["adapterID"], "clew");
     }
 }

@@ -573,6 +573,7 @@ fn paused_program() -> DebugSession {
         args: Vec::new(),
         cwd: PathBuf::from("/"),
         addr: None,
+        takes_input: false,
     }
 }
 
@@ -1762,6 +1763,7 @@ fn the_debugger_is_driven_by_voice() {
         args: Vec::new(),
         cwd: PathBuf::from("/"),
         addr: None,
+        takes_input: false,
     });
     for (said, title) in [
         ("Step over.", "Debug: Step Over"),
@@ -1965,6 +1967,7 @@ fn every_command_runs_when_its_name_is_said() {
         args: Vec::new(),
         cwd: PathBuf::from("/"),
         addr: None,
+        takes_input: false,
     });
     for lang in Lang::ALL {
         with_lang(lang, || {

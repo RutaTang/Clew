@@ -560,6 +560,7 @@ fn a_parked_fake_runs_failure_raises_no_notice_for_another_run() {
         args: Vec::new(),
         cwd: PathBuf::from("/"),
         addr: None,
+        takes_input: false,
     });
     app.debug.tab = app.next_run_tab();
     menu_at(&mut app, 3);

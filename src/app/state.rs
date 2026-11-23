@@ -232,6 +232,9 @@ pub struct DebugState {
     pub watches: Vec<String>,
     /// The add-watch input box.
     pub watch_input: String,
+    /// What is being typed for the running program's input (see
+    /// [`DebugSession::takes_input`]).
+    pub program_input: String,
     /// The functions this run has stopped in, by file and name: entering
     /// one for the first time records one reading-trail entry — not one per
     /// line step, nor one each time it is entered again (stepping between

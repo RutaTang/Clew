@@ -189,6 +189,7 @@ impl PaletteCommand {
                 Message::Debug(
                     DebugMsg::ToggleVar(_)
                     | DebugMsg::WatchInput(_)
+                    | DebugMsg::ProgramInput(_)
                     | DebugMsg::BpConditionInput(_)
                     | DebugMsg::BpConditionCancel,
                 )
