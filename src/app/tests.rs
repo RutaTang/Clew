@@ -44194,3 +44194,119 @@ fn the_runs_input_line_sends_what_is_typed_to_the_program() {
         "nothing shown as sent that was not"
     );
 }
+
+/// A Python launch file is read as VS Code's are: a `module` to run in
+/// place of a program (Python's, with no `type`), `${workspaceFolder}`,
+/// `${file}` and `${env:…}` in its strings, its `env` over its
+/// `envFile`'s, debugpy's own fields kept — and nothing Clew decides
+/// itself (`console`) or that it will not do (`sudo`).
+#[test]
+fn a_python_launch_file_is_read_as_vs_codes_are() {
+    use crate::app::tasks::parse_launch_config;
+    let root = test_dir("launch-python-fields");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+        root.join(".env"),
+        "# the app's\nexport GREETING='hi there'\nNAME=\"Ada\\nL\"\nPORT=8000 # local\nURL=http://${HOST}:${PORT}\nHOST=ignored\n",
+    )
+    .unwrap();
+    let text = r#"{
+        "module": "shop.cli",
+        "args": ["--root", "${workspaceFolder}", "${fileBasename}"],
+        "cwd": "${workspaceFolder}/web",
+        "env": {"PORT": "9000", "DEBUG": 1, "BAD": {"x": 1}},
+        "envFile": "${workspaceFolder}/.env",
+        "justMyCode": false,
+        "django": true,
+        "console": "internalConsole",
+        "sudo": true
+    }"#;
+    let file = root.join("shop/cli.py");
+    let cfg = parse_launch_config(&root, text, Some(&file), true).unwrap();
+    assert_eq!(cfg.extras.module.as_deref(), Some("shop.cli"));
+    assert_eq!(cfg.type_hint.as_deref(), Some("python"));
+    assert_eq!(
+        cfg.program,
+        root.join("web/shop.cli"),
+        "named for its module"
+    );
+    assert_eq!(cfg.cwd, root.join("web"));
+    assert_eq!(
+        cfg.args,
+        ["--root", root.to_str().unwrap(), "cli.py"],
+        "variables in its arguments"
+    );
+    let fields = &cfg.extras.fields;
+    assert_eq!(fields["justMyCode"], false);
+    assert_eq!(fields["django"], true);
+    assert!(!fields.contains_key("console"), "Clew runs the program");
+    assert!(!fields.contains_key("sudo"));
+    let env = fields["env"].as_object().unwrap();
+    assert_eq!(env["GREETING"], "hi there");
+    assert_eq!(env["NAME"], "Ada\nL");
+    assert_eq!(env["PORT"], "9000", "the file's env over its envFile's");
+    assert_eq!(
+        env["URL"], "http://:8000",
+        "an earlier variable, or nothing"
+    );
+    assert_eq!(env["DEBUG"], "1", "every variable a string");
+    assert!(!env.contains_key("BAD"));
+    assert!(cfg.notes.is_empty(), "{:?}", cfg.notes);
+
+    // A remote project's envFile is not read here, and it is said.
+    let remote = parse_launch_config(&root, text, None, false).unwrap();
+    let env = remote.extras.fields["env"].as_object().unwrap();
+    assert!(!env.contains_key("GREETING"));
+    assert_eq!(remote.notes.len(), 1, "{:?}", remote.notes);
+    // One not there is said, and the run goes on.
+    let missing = parse_launch_config(
+        &root,
+        r#"{"program": "app.py", "envFile": "missing.env"}"#,
+        None,
+        true,
+    )
+    .unwrap();
+    assert!(
+        missing.notes[0].contains("missing.env"),
+        "{:?}",
+        missing.notes
+    );
+    assert!(missing.extras.module.is_none());
+    // Neither a program nor a module: what to write.
+    let err = parse_launch_config(&root, r#"{"args": []}"#, None, true)
+        .err()
+        .unwrap();
+    assert!(err.contains("module"), "{err}");
+}
+
+/// A launch file's fields go into debugpy's launch over Clew's own: its
+/// module in place of the program, its environment added to Clew's, its
+/// `justMyCode` over the one Clew picked.
+#[test]
+fn a_launch_files_fields_go_into_the_python_launch() {
+    let mut launch = serde_json::json!({
+        "program": "/p/shop/cli.py",
+        "justMyCode": false,
+        "env": {"PYTHONDONTWRITEBYTECODE": "1", "PYTHONPATH": "/p/src"},
+    });
+    let mut fields = serde_json::Map::new();
+    fields.insert("justMyCode".into(), serde_json::json!(true));
+    fields.insert(
+        "env".into(),
+        serde_json::json!({"PYTHONPATH": "/x", "MODE": "dev"}),
+    );
+    crate::app::tasks::with_launch_file(
+        &mut launch,
+        &crate::app::tasks::LaunchExtras {
+            module: Some("shop.cli".into()),
+            fields,
+        },
+    );
+    assert!(launch.get("program").is_none());
+    assert_eq!(launch["module"], "shop.cli");
+    assert_eq!(launch["justMyCode"], true);
+    assert_eq!(launch["env"]["PYTHONDONTWRITEBYTECODE"], "1");
+    assert_eq!(launch["env"]["PYTHONPATH"], "/x", "the file's over Clew's");
+    assert_eq!(launch["env"]["MODE"], "dev");
+}

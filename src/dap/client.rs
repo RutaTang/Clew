@@ -2662,6 +2662,77 @@ mod tests {
         assert!(!printed.contains("EOFError"), "{printed:?}");
     }
 
+    /// A launch file's `module` and `env`, put into real debugpy's launch as
+    /// Clew puts them: the module runs as `python -m` does (its package's
+    /// relative import works) and sees the variables. Needs `python3` and
+    /// debugpy (its own or Clew's).
+    #[tokio::test]
+    #[ignore = "needs python3 and debugpy; run explicitly"]
+    async fn a_launch_files_module_runs_with_its_environment() {
+        let dir = clew_core::testutil::TempDir::new("dap-python-module");
+        std::fs::create_dir_all(dir.join("shop")).unwrap();
+        std::fs::write(dir.join("shop/__init__.py"), "").unwrap();
+        std::fs::write(dir.join("shop/names.py"), "WHO = 'module'\n").unwrap();
+        std::fs::write(
+            dir.join("shop/cli.py"),
+            "import os\nfrom .names import WHO\nprint(f'{WHO} {os.environ[\"GREETING\"]}')\n",
+        )
+        .unwrap();
+        let cfg = crate::app::tasks::parse_launch_config(
+            &dir,
+            r#"{"module": "shop.cli", "env": {"GREETING": "hello"}}"#,
+            None,
+            true,
+        )
+        .unwrap();
+        let spec = match clew_core::debugadapter::resolve(
+            "python",
+            &cfg.program.to_string_lossy(),
+            &cfg.args,
+            &dir,
+            &cfg.cwd,
+            &Default::default(),
+            None,
+        ) {
+            Ok(clew_core::debugadapter::Resolution::Ready(spec)) => spec,
+            other => panic!("{other:?}"),
+        };
+        let mut launch = spec.launch.clone();
+        crate::app::tasks::with_launch_file(&mut launch, &cfg.extras);
+        let (client, mut events) =
+            DapClient::start(&spec.command, &spec.args, &dir, Transport::Stdio)
+                .await
+                .expect("debugpy started");
+        client.initialize().await.expect("initialized");
+        let launched = client.launch(launch);
+        tokio::pin!(launched);
+        let mut printed = String::new();
+        let (mut configured, mut launch_answered) = (false, false);
+        loop {
+            let event = tokio::select! {
+                event = events.recv() => event,
+                answer = &mut launched, if !launch_answered => {
+                    launch_answered = true;
+                    assert_eq!(answer, Ok(()));
+                    continue;
+                }
+                _ = tokio::time::sleep(Duration::from_secs(60)) => panic!("no event in time: {printed:?}"),
+            };
+            match event {
+                Some(DapEvent::Initialized) if !configured => {
+                    configured = true;
+                    client.configuration_done().await.unwrap();
+                }
+                Some(DapEvent::Output(o)) if o.category == "stdout" || o.category == "stderr" => {
+                    printed.push_str(&o.text);
+                }
+                Some(DapEvent::Terminated) | None => break,
+                Some(_) => {}
+            }
+        }
+        assert!(printed.contains("module hello"), "{printed:?}");
+    }
+
     /// F9: a TCP adapter is reached at the port it announced — not at one
     /// guessed in advance — and the session is wired over that socket.
     #[tokio::test]

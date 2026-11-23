@@ -297,7 +297,7 @@ mod tests {
         )
         .unwrap();
 
-        let cfg = crate::app::tasks::read_launch_config(&root).unwrap();
+        let cfg = crate::app::tasks::read_launch_config(&root, None).unwrap();
         assert_eq!(cfg.cwd, root.join("tools"));
         let lang = Lang::detect(cfg.type_hint.as_deref(), &cfg.program).unwrap();
         let resolved = resolve(

@@ -713,12 +713,18 @@ impl App {
             .into();
             return Task::none();
         }
+        // The file being read, for the `${file}` a launch file may name.
+        let reading_file = self.active_viewer().map(|v| v.abs.clone());
+        // What the launch file asks of a Python run beyond its program,
+        // and what is said of it as the run starts.
+        let mut from_file: Option<crate::app::tasks::LaunchExtras> = None;
+        let mut file_notes: Vec<String> = Vec::new();
         let (program, args, cwd, lang) = if remote {
             (root.clone(), Vec::new(), root.clone(), None)
         } else if let Some(plan) = &plan {
             plan.launch(&root)
         } else {
-            let cfg = match read_launch_config(&root) {
+            let cfg = match read_launch_config(&root, reading_file.as_deref()) {
                 Ok(cfg) => cfg,
                 // No launch.json: a script open in the active pane is run as
                 // it is, as editors do — Debug on a Python file only told the
@@ -728,12 +734,7 @@ impl App {
                     if !root.join(".clew").join("launch.json").exists()
                         && let Some(script) = self.debuggable_script() =>
                 {
-                    crate::app::model::LaunchConfig {
-                        program: script,
-                        args: Vec::new(),
-                        cwd: root.clone(),
-                        type_hint: None,
-                    }
+                    crate::app::model::LaunchConfig::script(script, root.clone())
                 }
                 // None at all: one for this project, in its language —
                 // or, a library crate, that it has nothing to run: a
@@ -793,7 +794,8 @@ impl App {
                     return Task::none();
                 }
             };
-            if !cfg.program.exists() {
+            // A module is found by Python, not at a path.
+            if cfg.extras.module.is_none() && !cfg.program.exists() {
                 self.status = tr!(
                     "Program not found at {path}. Build it first.",
                     path = cfg.program.display()
@@ -808,6 +810,10 @@ impl App {
                 );
                 return Task::none();
             };
+            if lang == dap::Lang::Python {
+                from_file = Some(cfg.extras);
+            }
+            file_notes = cfg.notes;
             (cfg.program, cfg.args, cfg.cwd, Some(lang))
         };
         // What the run is called, as a path: its tab and the status line
@@ -841,6 +847,11 @@ impl App {
             addr: None,
             takes_input: false,
         });
+        if let Some(session) = self.debug.session.as_mut() {
+            for note in file_notes {
+                push_debug_output(session, "console".into(), format!("{note}\n"));
+            }
+        }
         self.show_bottom = true;
         self.debug.no_debug = no_debug;
         self.debug.plan = plan.clone();
@@ -1036,19 +1047,20 @@ impl App {
                             return;
                         }
                     };
-                    let cfg = match parse_launch_config(&root, &text) {
-                        Ok(cfg) => cfg,
-                        Err(e) => {
-                            let _ = output
-                                .send(Message::Debug(DebugMsg::Failed {
-                                    stamp: stamp.clone(),
-                                    run,
-                                    error: e,
-                                }))
-                                .await;
-                            return;
-                        }
-                    };
+                    let cfg =
+                        match parse_launch_config(&root, &text, reading_file.as_deref(), false) {
+                            Ok(cfg) => cfg,
+                            Err(e) => {
+                                let _ = output
+                                    .send(Message::Debug(DebugMsg::Failed {
+                                        stamp: stamp.clone(),
+                                        run,
+                                        error: e,
+                                    }))
+                                    .await;
+                                return;
+                            }
+                        };
                     let Some(lang) = dap::Lang::detect(cfg.type_hint.as_deref(), &cfg.program)
                     else {
                         let error = tr!(
@@ -1064,6 +1076,21 @@ impl App {
                             .await;
                         return;
                     };
+                    if lang == dap::Lang::Python {
+                        from_file = Some(cfg.extras.clone());
+                    }
+                    for note in &cfg.notes {
+                        let _ = output
+                            .send(Message::Debug(DebugMsg::DapEvent {
+                                stamp: stamp.clone(),
+                                run,
+                                event: dap::DapEvent::Output(dap::proto::Output {
+                                    category: "console".into(),
+                                    text: format!("{note}\n"),
+                                }),
+                            }))
+                            .await;
+                    }
                     if cancelled(&live) {
                         return; // stopped before anything was spawned
                     }
@@ -1387,6 +1414,9 @@ impl App {
                 let (launch, notice) = take_notice(launch);
                 let (mut launch, exceptions) = take_exceptions(launch);
                 client.prefer_exception_filters(&exceptions);
+                if let Some(extras) = &from_file {
+                    crate::app::tasks::with_launch_file(&mut launch, extras);
+                }
                 if no_debug {
                     without_debugger(&mut launch);
                 }

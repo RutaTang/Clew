@@ -834,6 +834,25 @@ pub(crate) struct LaunchConfig {
     pub(crate) cwd: PathBuf,
     /// Optional `"type"` hint (rust/python/go/dart/node) — else inferred.
     pub(crate) type_hint: Option<String>,
+    /// What the file asks of a Python run beyond its program.
+    pub(crate) extras: crate::app::tasks::LaunchExtras,
+    /// What is said in the run's output about the file as it starts: an
+    /// `envFile` not found, or not read for a remote project.
+    pub(crate) notes: Vec<String>,
+}
+
+impl LaunchConfig {
+    /// A script run as it is, with nothing a launch file asks.
+    pub(crate) fn script(program: PathBuf, cwd: PathBuf) -> Self {
+        LaunchConfig {
+            program,
+            args: Vec::new(),
+            cwd,
+            type_hint: None,
+            extras: Default::default(),
+            notes: Vec::new(),
+        }
+    }
 }
 
 /// The kind of LSP navigation request.
