@@ -11246,6 +11246,28 @@ fn the_maps_overlay_lists_a_maps_nodes_by_kind() {
     assert!(shows(&mut sim, "GET /users"));
     drop(sim);
     assert!(super::map_picker(&app).is_some());
+    // As wide whichever graph is picked, in every language: as wide as the
+    // one picked, it moved the search field beside it at each pick.
+    crate::fonts::load();
+    for lang in crate::i18n::Lang::ALL {
+        crate::i18n::with_lang(lang, || {
+            let mut beside = Vec::new();
+            for id in ["sql.schema", "routes"] {
+                app.proj.maps_selected = Some(id.into());
+                let mut sim = sim_elem(
+                    iced::widget::row![
+                        super::map_picker(&app).unwrap(),
+                        iced::widget::text("beside")
+                    ]
+                    .spacing(8)
+                    .into(),
+                );
+                beside.push(text_at(&mut sim, |t| t == "beside", 0).unwrap().x);
+            }
+            assert_eq!(beside[0], beside[1], "{lang:?}: the picker's width");
+        });
+    }
+    app.proj.maps_selected = Some("routes".into());
     // Each map by its name alone: a count beside one (where its nodes were
     // all of one kind) read as if the others had nothing in them (L18),
     // and a route and its handler are not two routes (L4).
