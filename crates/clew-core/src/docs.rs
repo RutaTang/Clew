@@ -953,13 +953,35 @@ fn rest_role_at(s: &str) -> Option<(String, usize)> {
         .find(|&(_, c)| c == '`')
         .map(|(i, _)| i)?;
     let target = &target_part[..target_end];
-    let shown = if let Some(t) = target.strip_prefix('~') {
+    let role = &after_first[..close];
+    let role = role.rsplit(':').next().unwrap_or(role);
+    // `:ref:`the guide <guide>``: the words, not the label.
+    let (target, titled) = match target.rsplit_once('<').filter(|(_, l)| l.ends_with('>')) {
+        Some((title, _)) if !title.trim().is_empty() => (title.trim(), true),
+        _ => (target, false),
+    };
+    let shown = if titled {
+        target
+    } else if let Some(t) = target.strip_prefix('~') {
         t.rsplit(['.', ':']).next().unwrap_or(t)
     } else {
         target.strip_prefix('.').unwrap_or(target)
     };
+    let shown = match role {
+        _ if titled => shown.to_string(),
+        "pep" => format!("PEP {shown}"),
+        "rfc" => format!("RFC {shown}"),
+        "issue" | "pr" | "gh" => format!("#{shown}"),
+        "ref" | "doc" | "term" | "abbr" | "dfn" | "title" | "emphasis" | "strong" => {
+            shown.to_string()
+        }
+        // `func`, `class`, `meth`, `attr`, `data`, `exc`, `obj`, `mod`,
+        // `const`, `kbd`, `file`, `envvar`, …: names and things typed.
+        _ if !shown.contains('`') => format!("`{shown}`"),
+        _ => shown.to_string(),
+    };
     // leading ':' (1) + name + ":`" (2) + target + closing '`' (1)
-    Some((shown.to_string(), 1 + close + 2 + target_end + 1))
+    Some((shown, 1 + close + 2 + target_end + 1))
 }
 
 /// Most lines a def/class header may span. A real one, however wrapped, is a
@@ -1117,7 +1139,8 @@ const NUMPY_SECTIONS: &[&str] = &[
 /// a code block and Sphinx's fields as one run-on paragraph. Prose is left
 /// as it is.
 pub fn python_doc_markdown(doc: &str) -> String {
-    let lines: Vec<&str> = doc.lines().collect();
+    let rest = rest_blocks(&doc.lines().collect::<Vec<_>>());
+    let lines: Vec<&str> = rest.iter().map(String::as_str).collect();
     let mut out: Vec<String> = Vec::new();
     let mut i = 0;
     while i < lines.len() {
@@ -1195,6 +1218,205 @@ pub fn python_doc_markdown(doc: &str) -> String {
         text = text.replace("\n\n\n", "\n\n");
     }
     text.trim().to_string()
+}
+
+/// Most lines a reST directive's body may span: a docstring's note is a
+/// paragraph or two, an example a screenful.
+const MAX_DIRECTIVE_LINES: usize = 400;
+
+/// reStructuredText's block markup as Markdown, ahead of the sections:
+/// an admonition (`.. note::`, `.. warning::`, `.. seealso::`, …) as a
+/// quote headed with its kind, `.. versionadded::`/`versionchanged::`/
+/// `deprecated::` as an italic line with what it says, `.. code-block::`
+/// (and `code`, `sourcecode`, `doctest`) and a paragraph ending `::` as a
+/// fenced block of code, a hyperlink as a Markdown link. A comment or a
+/// target (`.. _name:`) is dropped; any other directive keeps its text.
+/// As written, these showed as `.. note::` lines and indented runs the
+/// Markdown read as unhighlighted code.
+fn rest_blocks(lines: &[&str]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut i = 0;
+    // A directive's or literal block's body: the lines after `at` indented
+    // past `indent`, blank ones among them; returned dedented, and the
+    // index after it.
+    let body = |at: usize, indent: usize| -> (Vec<String>, usize) {
+        let mut end = at + 1;
+        while end < lines.len()
+            && end - at <= MAX_DIRECTIVE_LINES
+            && (lines[end].trim().is_empty() || indent_of(lines[end]) > indent)
+        {
+            end += 1;
+        }
+        let mut last = end;
+        while last > at + 1 && lines[last - 1].trim().is_empty() {
+            last -= 1;
+        }
+        (dedent_lines(&lines[at + 1..last]), end)
+    };
+    let fence = |out: &mut Vec<String>, language: &str, code: &[String]| {
+        if out.last().is_some_and(|l| !l.trim().is_empty()) {
+            out.push(String::new());
+        }
+        out.push(format!("```{language}"));
+        let skip = code.iter().take_while(|l| l.trim().is_empty()).count();
+        out.extend(code[skip..].iter().cloned());
+        out.push("```".to_string());
+        out.push(String::new());
+    };
+    while i < lines.len() {
+        let line = lines[i];
+        let indent = indent_of(line);
+        let head = line.trim();
+        // Only markup at the left edge: an indented one is inside a
+        // section's body, which reads its own (`prose_and_code`).
+        if let Some(directive) = head.strip_prefix(".. ").filter(|_| indent == 0) {
+            let (mut text, end) = body(i, indent);
+            i = end;
+            let Some((name, args)) = directive.split_once("::") else {
+                // `.. _target:` and `.. a comment`: nothing to read.
+                continue;
+            };
+            let (name, args) = (name.trim(), args.trim());
+            // A directive's options (`:linenos:`) open its body.
+            let options = text
+                .iter()
+                .take_while(|l| l.trim_start().starts_with(':') && !l.trim().is_empty())
+                .count();
+            text.drain(..options);
+            let blank = text.iter().take_while(|l| l.trim().is_empty()).count();
+            text.drain(..blank);
+            let prose = || {
+                text.iter()
+                    .map(|l| l.trim())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            };
+            let label = match name {
+                "note" => Some("Note"),
+                "warning" => Some("Warning"),
+                "tip" => Some("Tip"),
+                "hint" => Some("Hint"),
+                "important" => Some("Important"),
+                "caution" => Some("Caution"),
+                "danger" => Some("Danger"),
+                "attention" => Some("Attention"),
+                "error" => Some("Error"),
+                "seealso" => Some("See also"),
+                "admonition" => Some(args),
+                _ => None,
+            };
+            if out.last().is_some_and(|l| !l.trim().is_empty()) {
+                out.push(String::new());
+            }
+            match (name, label) {
+                (_, Some(label)) => {
+                    let lead = match name {
+                        "admonition" => String::new(),
+                        _ => args.to_string(),
+                    };
+                    let mut said: Vec<String> = Vec::new();
+                    if !lead.is_empty() {
+                        said.push(lead);
+                    }
+                    said.extend(text.iter().map(|l| l.trim().to_string()));
+                    let mut first = true;
+                    for line in said {
+                        out.push(match (first, line.is_empty()) {
+                            (true, _) => format!("> **{label}:** {line}").trim_end().to_string(),
+                            (false, true) => ">".to_string(),
+                            (false, false) => format!("> {line}"),
+                        });
+                        first = false;
+                    }
+                    if first {
+                        out.push(format!("> **{label}**"));
+                    }
+                    out.push(String::new());
+                }
+                ("versionadded" | "versionchanged" | "deprecated", _) => {
+                    let (version, inline) =
+                        args.split_once(char::is_whitespace).unwrap_or((args, ""));
+                    let what = match name {
+                        "versionadded" => "New in version",
+                        "versionchanged" => "Changed in version",
+                        _ => "Deprecated since version",
+                    };
+                    let said = [inline.trim().to_string(), prose()]
+                        .into_iter()
+                        .filter(|p| !p.is_empty())
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    out.push(match said.is_empty() {
+                        true => format!("*{what} {version}.*"),
+                        false => format!("*{what} {version}:* {said}"),
+                    });
+                    out.push(String::new());
+                }
+                ("code-block" | "code" | "sourcecode" | "doctest" | "testcode", _) => {
+                    let language = match (name, args) {
+                        ("doctest" | "testcode", _) | (_, "") | (_, "pycon") => "python",
+                        (_, language) => language,
+                    };
+                    fence(&mut out, language, &text);
+                }
+                _ => out.extend(text),
+            }
+            continue;
+        }
+        // `Example::` or a lone `::`: a literal block, Python's code.
+        if indent == 0 && head.ends_with("::") && lines.get(i + 1).is_some() {
+            let (code, end) = body(i, indent);
+            if !code.iter().all(|l| l.trim().is_empty()) {
+                let intro = head.trim_end_matches(':').trim_end();
+                if !intro.is_empty() {
+                    out.push(format!("{}{intro}:", " ".repeat(indent)));
+                }
+                fence(&mut out, "python", &code);
+                i = end;
+                continue;
+            }
+        }
+        out.push(rest_links(line));
+        i += 1;
+    }
+    out
+}
+
+/// reST hyperlinks as Markdown's: `` `text <url>`_ `` as `[text](url)`,
+/// a bare reference (`` `text`_ ``) as its text.
+fn rest_links(line: &str) -> String {
+    if !line.contains("`_") {
+        return line.to_string();
+    }
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    while let Some(open) = rest.find('`') {
+        let after = &rest[open + 1..];
+        let Some(close) = after.find('`') else {
+            break;
+        };
+        let inner = &after[..close];
+        let tail = &after[close + 1..];
+        if tail.starts_with('_') {
+            let skip = if tail.starts_with("__") { 2 } else { 1 };
+            out.push_str(&rest[..open]);
+            match inner.rsplit_once('<').filter(|(_, u)| u.ends_with('>')) {
+                Some((text, url)) => {
+                    out.push_str(&format!("[{}]({})", text.trim(), url.trim_end_matches('>')));
+                }
+                None => out.push_str(inner),
+            }
+            rest = &tail[skip..];
+        } else {
+            out.push_str(&rest[..open + 1 + close + 1]);
+            rest = tail;
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// A line's leading whitespace, in chars.
@@ -1762,23 +1984,109 @@ mod tests {
             clean_doc_text("See {@macro foo} here", Lang::Dart),
             "See  here"
         );
-        // reST roles simplified to their target, honoring ~ and leading dot.
+        // reST roles as their target, honoring ~ and leading dot: a name in
+        // code, a cross-reference's words as words.
         assert_eq!(
             clean_doc_text("A :class:`Request` object", Lang::Python),
-            "A Request object"
+            "A `Request` object"
         );
         assert_eq!(
             clean_doc_text("uses :py:class:`Foo`", Lang::Python),
-            "uses Foo"
+            "uses `Foo`"
         );
         assert_eq!(
             clean_doc_text("call :meth:`~scrapy.Request.replace`", Lang::Python),
-            "call replace"
+            "call `replace`"
+        );
+        assert_eq!(
+            clean_doc_text("see :ref:`the guide <guide>` and :pep:`8`", Lang::Python),
+            "see the guide and PEP 8"
+        );
+        assert_eq!(
+            clean_doc_text(":doc:`/tutorial`, :issue:`42`", Lang::Python),
+            "/tutorial, #42"
         );
         // Plain colons (not a role) are untouched.
         assert_eq!(
             clean_doc_text("note: this is fine", Lang::Python),
             "note: this is fine"
+        );
+    }
+
+    /// reST's block markup as Markdown: an admonition as a quote headed with
+    /// its kind, a version note as an italic line, a code block and a `::`
+    /// paragraph's block as fenced code, a hyperlink as a link; a comment and
+    /// a target dropped.
+    #[test]
+    fn python_rest_directives_render_as_markdown() {
+        let doc = "\
+Register a URL rule.
+
+.. _rules:
+
+.. note::
+   Endpoints default to the
+   view's name.
+
+   Two paragraphs.
+
+.. versionchanged:: 2.0
+    The ``provide_automatic_options`` default moved.
+
+.. versionadded:: 0.7
+
+.. code-block:: python
+   :linenos:
+
+   app.add_url_rule(\"/\", view_func=index)
+
+Use it like this::
+
+    @app.route(\"/\")
+    def index():
+        return \"Hi\"
+
+.. this is a comment
+   that spans two lines
+
+See `the docs <https://flask.palletsprojects.com/>`_ and `Rules`_.
+";
+        let md = python_doc_markdown(doc);
+        let want = "\
+Register a URL rule.
+
+> **Note:** Endpoints default to the
+> view's name.
+>
+> Two paragraphs.
+
+*Changed in version 2.0:* The ``provide_automatic_options`` default moved.
+
+*New in version 0.7.*
+
+```python
+app.add_url_rule(\"/\", view_func=index)
+```
+
+Use it like this:
+
+```python
+@app.route(\"/\")
+def index():
+    return \"Hi\"
+```
+
+See [the docs](https://flask.palletsprojects.com/) and Rules.";
+        assert_eq!(md, want);
+        // A seealso with its text on the directive's own line, and a titled
+        // admonition.
+        assert_eq!(
+            python_doc_markdown(".. seealso:: :func:`url_for`\n"),
+            "> **See also:** :func:`url_for`"
+        );
+        assert_eq!(
+            python_doc_markdown(".. admonition:: Thread safety\n\n   Not safe.\n"),
+            "> **Thread safety:** Not safe."
         );
     }
 
@@ -2538,7 +2846,7 @@ mod markup_tests {
         assert_eq!(out, s);
         let bound = COLONS * (MAX_ROLE_NAME + 1 + MAX_ROLE_TARGET);
         assert!(scanned <= bound, "scanned {scanned} chars (bound {bound})");
-        assert_eq!(rest_role_at(":x:`y`"), Some(("y".to_string(), 6)));
+        assert_eq!(rest_role_at(":x:`y`"), Some(("`y`".to_string(), 6)));
         assert_eq!(rest_role_at("::`y`"), None);
     }
 }
