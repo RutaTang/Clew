@@ -147,6 +147,20 @@ pub enum Glyph {
     Plus,
     /// Less of something: the code's text a size smaller.
     Minus,
+    // The debugger's controls, drawn as the IDEs draw them, so a reader
+    // who has stepped through code elsewhere knows them on sight.
+    /// A bar and a play: run on to the next stop.
+    Continue,
+    /// An arc over a line's dot: run the line, calls and all.
+    StepOver,
+    /// An arrow down to the dot: into the call on the line.
+    StepInto,
+    /// An arrow up from the dot: out to the caller.
+    StepOut,
+    /// The step over's arc, turned back: the step before.
+    StepBack,
+    /// One arrow round, back to its start: run it again from the top.
+    Restart,
 }
 
 /// The window buttons Clew draws on Windows and Linux. Their own family:
@@ -346,6 +360,27 @@ fn body(g: Glyph) -> &'static str {
              <rect x='13.5' y='6' width='3' height='12' rx='1'/>"
         }
         Play => "<path d='M8.5 5.5 L18 12 L8.5 18.5 Z'/>",
+        Continue => "<path d='M6 5.5 V18.5'/><path d='M10.5 5.5 L19.5 12 L10.5 18.5 Z'/>",
+        StepOver => {
+            "<path d='M4.5 13.5 A7 7 0 0 1 18.5 13.5'/><path d='M15.5 10.5 L18.5 13.5 L21.5 10.5'/>\
+             <circle cx='11.5' cy='19' r='2' fill='STROKE' stroke='none'/>"
+        }
+        StepInto => {
+            "<path d='M12 3.5 V13.5'/><path d='M8 9.5 L12 13.5 L16 9.5'/>\
+             <circle cx='12' cy='19' r='2' fill='STROKE' stroke='none'/>"
+        }
+        StepOut => {
+            "<path d='M12 14 V4'/><path d='M8 8 L12 4 L16 8'/>\
+             <circle cx='12' cy='19' r='2' fill='STROKE' stroke='none'/>"
+        }
+        StepBack => {
+            "<path d='M19.5 13.5 A7 7 0 0 0 5.5 13.5'/><path d='M2.5 10.5 L5.5 13.5 L8.5 10.5'/>\
+             <circle cx='12.5' cy='19' r='2' fill='STROKE' stroke='none'/>"
+        }
+        // Refresh's first arrow alone: once round, back to the start.
+        Restart => {
+            "<path d='M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8'/><path d='M3 3v5h5'/>"
+        }
         Book => "<path d='M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20'/>",
         Prompt => "<path d='m5 7 5 5-5 5'/><path d='M12.5 17H19'/>",
         Dictionary => {

@@ -259,6 +259,17 @@ pub(crate) fn control<'a>(
     b.into()
 }
 
+/// The hairline between a header's words and its stepping controls, as the
+/// real debugger's header has it.
+fn rule<'a>() -> Element<'a, Message> {
+    container(space().width(1).height(16))
+        .style(|_: &iced::Theme| iced::widget::container::Style {
+            background: Some(theme::hairline().into()),
+            ..Default::default()
+        })
+        .into()
+}
+
 /// A column's heading.
 pub(crate) fn heading<'a>(words: &'a str) -> Element<'a, Message> {
     text(words).size(ts::CAPTION).color(theme::dim()).into()
@@ -310,7 +321,13 @@ pub(crate) fn fake_panel(app: &App) -> Element<'_, Message> {
                 container(lead(&w.target.name, tr!("working it out…").to_string()))
                     .width(Fill)
                     .clip(true),
-                control(tr!("■ Stop"), Message::Fake(FakeMsg::Stop), true),
+                super::panels::step_control(
+                    Glyph::Stop,
+                    tr!("Stop"),
+                    None,
+                    Message::Fake(FakeMsg::Stop),
+                    None
+                ),
             ]
             .spacing(8)
             .align_y(iced::Center);
@@ -366,47 +383,48 @@ pub(crate) fn fake_panel(app: &App) -> Element<'_, Message> {
                 tr!("step {n} of {total}", n = sim.at + 1, total = total).to_string()
             };
             let live = !sim.ended;
+            // The real debugger's controls, drawn as it draws them and in
+            // its order — then what only a worked-out run can do: a step
+            // back, and back to its start.
+            let ended = (!live).then_some(tr!("The run has ended"));
+            let step = |glyph, name, cmd, why_not| {
+                super::panels::step_control(
+                    glyph,
+                    name,
+                    None,
+                    Message::Fake(FakeMsg::Step(cmd)),
+                    why_not,
+                )
+            };
+            let steps = row![
+                step(Glyph::Continue, tr!("Continue"), SimCmd::Continue, ended),
+                step(Glyph::StepOver, tr!("Step over"), SimCmd::Over, ended),
+                step(Glyph::StepInto, tr!("Step into"), SimCmd::Into, ended),
+                step(Glyph::StepOut, tr!("Step out"), SimCmd::Out, ended),
+                step(
+                    Glyph::StepBack,
+                    tr!("Step back"),
+                    SimCmd::Back,
+                    (!sim.ended && sim.at == 0).then_some(tr!("This is the first step")),
+                ),
+                step(Glyph::Restart, tr!("Start over"), SimCmd::Restart, None),
+            ]
+            .spacing(super::panels::CONTROL_GAP)
+            .align_y(iced::Center);
             let controls = row![
-                control(
-                    tr!("↺ Restart"),
-                    Message::Fake(FakeMsg::Step(SimCmd::Restart)),
-                    true
-                ),
-                control(
-                    tr!("◀ Back"),
-                    Message::Fake(FakeMsg::Step(SimCmd::Back)),
-                    sim.ended || sim.at > 0
-                ),
-                control(
-                    tr!("↪ Over"),
-                    Message::Fake(FakeMsg::Step(SimCmd::Over)),
-                    live
-                ),
-                control(
-                    tr!("↓ In"),
-                    Message::Fake(FakeMsg::Step(SimCmd::Into)),
-                    live
-                ),
-                control(
-                    tr!("↑ Out"),
-                    Message::Fake(FakeMsg::Step(SimCmd::Out)),
-                    live
-                ),
-                control(
-                    tr!("▶ Continue"),
-                    Message::Fake(FakeMsg::Step(SimCmd::Continue)),
-                    live
-                ),
                 control(tr!("Ask why"), Message::Fake(FakeMsg::AskWhy), live),
                 edit(),
                 close(),
             ]
-            .spacing(4);
+            .spacing(4)
+            .align_y(iced::Center);
             let header = row![
                 container(lead(&sim.target.name, status))
                     .width(Fill)
                     .clip(true),
-                controls
+                controls,
+                rule(),
+                steps,
             ]
             .spacing(8)
             .align_y(iced::Center);
@@ -427,7 +445,7 @@ fn sim_columns(sim: &Sim) -> Element<'_, Message> {
     let step = trace.steps.get(sim.at);
 
     // The stack: each frame's line, innermost first; a click goes there.
-    let mut stack: Vec<Element<'_, Message>> = vec![heading(tr!("CALL STACK"))];
+    let mut stack: Vec<Element<'_, Message>> = vec![super::panels::stack_heading()];
     for at in trace.stack(sim.at) {
         let s = &trace.steps[at];
         let name = if s.function.is_empty() {
@@ -451,7 +469,7 @@ fn sim_columns(sim: &Sim) -> Element<'_, Message> {
             )
             .style(theme::list_row(at == sim.at))
             .width(Fill)
-            .padding([1, 6])
+            .padding([1.0, super::panels::STACK_ROW_PAD_X])
             .on_press(super::heard::said(&name, Message::Fake(FakeMsg::Goto(at))))
             .into(),
         );

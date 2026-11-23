@@ -1071,7 +1071,7 @@ mod tests {
     use super::*;
     use std::collections::{BTreeMap, BTreeSet};
 
-    /// A control's label led by a symbol — "▶ Continue" — has it in the
+    /// A control's label led by a symbol — "▶ Next" — has it in the
     /// interface font itself, in every language: "⤼ Over", "⤒ Out",
     /// "⟲ Start" and "⏭ End" were in none of the bundled faces, so each
     /// machine drew them in whatever font it had (boxes where it had none),

@@ -11352,10 +11352,8 @@ fn a_plain_runs_panel_is_its_output_and_how_it_ended() {
         addr: None,
     };
     let stops = |app: &App| {
-        let mut sim = sim_elem(super::debug_panel(app));
-        let _ = sim.click("■ Stop");
-        sent_by(sim)
-            .into_iter()
+        pressing(|| super::debug_panel(app), "Stop")
+            .iter()
             .any(|m| matches!(m, Message::Debug(DebugMsg::Stop)))
     };
     app.debug.no_debug = true;
@@ -11365,7 +11363,7 @@ fn a_plain_runs_panel_is_its_output_and_how_it_ended() {
         assert!(shows(&mut sim, "Run"));
         assert!(shows(&mut sim, "Sencha    37.50"));
         assert!(!shows(&mut sim, "CALL STACK"));
-        assert!(!shows(&mut sim, "▶ Continue"));
+        assert!(pressing(|| super::debug_panel(&app), "Continue").is_empty());
     }
     assert!(stops(&app), "a running program can be stopped");
     app.debug.session = Some(session(crate::DebugStatus::Terminated, Some(0)));
@@ -11398,7 +11396,11 @@ fn a_plain_runs_panel_is_its_output_and_how_it_ended() {
         let mut sim = sim_elem(super::debug_panel(&app));
         assert!(shows(&mut sim, "Debug"));
         assert!(shows(&mut sim, "terminated"));
-        assert!(shows(&mut sim, "↻ Debug Again"));
+        assert!(
+            pressing(|| super::debug_panel(&app), "Debug again")
+                .iter()
+                .any(|m| matches!(m, Message::Debug(DebugMsg::Again)))
+        );
         assert!(!shows(&mut sim, "CALL STACK"));
     }
     assert!(!stops(&app));
@@ -11807,9 +11809,14 @@ fn the_last_runs_trace_is_offered_as_a_walkthrough_and_listed_on_the_call_graph(
     let root = app.proj.project.as_ref().unwrap().root.clone();
     assert_eq!(super::scope_label("@trace app"), "Debug run (app)");
     assert_eq!(super::scope_label("@trace"), "Debug run");
-    let mut sim = sim_elem(super::trace_control(&app));
-    assert!(shows(&mut sim, "No stops traced yet"));
-    drop(sim);
+    // With no stops, Walk this run is there, faded, and can do nothing:
+    // its tip says why.
+    assert_eq!(super::trace_count(&app), "No stops traced yet");
+    assert!(shows(
+        &mut sim_elem(super::trace_control(&app)),
+        "Walk this run"
+    ));
+    assert!(pressing(|| super::trace_control(&app), "Walk this run").is_empty());
     // A run that ended without stopping has no stops, not "yet".
     app.debug.session = Some(crate::DebugSession {
         client: None,
@@ -11826,10 +11833,7 @@ fn the_last_runs_trace_is_offered_as_a_walkthrough_and_listed_on_the_call_graph(
         cwd: root.clone(),
         addr: None,
     });
-    let mut sim = sim_elem(super::trace_control(&app));
-    assert!(shows(&mut sim, "No stops traced"));
-    assert!(!shows(&mut sim, "No stops traced yet"));
-    drop(sim);
+    assert_eq!(super::trace_count(&app), "No stops traced");
     app.debug.session = None;
     let frame = |name: &str, line: usize| crate::TraceFrame {
         name: name.into(),
@@ -11851,8 +11855,10 @@ fn the_last_runs_trace_is_offered_as_a_walkthrough_and_listed_on_the_call_graph(
         },
     ];
     app.debug.trace_rev += 1;
+    assert_eq!(super::trace_count(&app), "3 stops traced");
+    // Said where Walk this run's tip is, not on the header's row.
     let mut sim = sim_elem(super::trace_control(&app));
-    assert!(shows(&mut sim, "3 stops traced"));
+    assert!(!shows(&mut sim, "3 stops traced"));
     let _ = sim.click("Walk this run");
     let sent: Vec<Message> = sent_by(sim).into_iter().collect();
     assert!(
@@ -13523,6 +13529,17 @@ fn the_model_field_offers_the_models_the_key_can_call() {
     let _ = app.update(Message::Settings(SettingsMsg::Discard));
     let _ = app.update(Message::Settings(SettingsMsg::Close));
     assert_eq!(app.settings.models, ModelList::Unasked);
+}
+
+/// What pressing the control named `name` in what `build` draws sends:
+/// nothing for one that can do nothing now, nor for one not drawn. For a
+/// control drawn as its glyph alone, named only where the pointer rests.
+fn pressing<'a>(build: impl FnOnce() -> Element<'a, Message>, name: &str) -> Vec<Message> {
+    crate::ui::heard::gather_of(build)
+        .into_iter()
+        .filter(|t| t.title == name)
+        .map(|t| t.message)
+        .collect()
 }
 
 /// What a press of the text size control named `said` sends, as `app`
@@ -19517,13 +19534,13 @@ fn the_fake_debug_panel_shows_the_trace_and_steps_it() {
     assert!(shows(&mut sim, "value is set"));
     assert!(shows(&mut sim, "7"));
     assert!(shows(&mut sim, "nothing is called"));
-    let over = click(sim_of(&app), "↪ Over");
+    let over = pressing(|| super::view(&app), "Step over");
     assert!(
         over.iter()
             .any(|m| matches!(m, Message::Fake(crate::FakeMsg::Step(crate::SimCmd::Over)))),
         "{over:?}"
     );
-    let back = click(sim_of(&app), "◀ Back");
+    let back = pressing(|| super::view(&app), "Step back");
     assert!(
         back.iter()
             .any(|m| matches!(m, Message::Fake(crate::FakeMsg::Step(crate::SimCmd::Back)))),
@@ -22773,14 +22790,80 @@ fn the_debug_header_keeps_walk_this_run_beside_the_ask_card() {
     let mut sim = sim_sized(&app, size);
     let walk = text_at(&mut sim, |t| t == "Walk this run", 0).expect("Walk this run");
     assert!(walk.width > 20.0, "drawn whole: {walk:?}");
+    assert_eq!(super::trace_count(&app), "1 stop traced", "the trace");
+    drop(sim);
     assert!(
-        text_at(&mut sim, |t| t == "1 stop traced", 0).is_some(),
-        "the trace"
-    );
-    assert!(
-        text_at(&mut sim, |t| t.contains("Debug Again"), 0).is_some(),
+        !pressing(|| super::view(&app), "Debug again").is_empty(),
         "the controls"
     );
+}
+
+/// A paused run's controls — Continue, the three steps, Stop — are their
+/// glyphs alone, named where the pointer rests, and stand on the header's
+/// own row beside what it says, in every language at a laptop's width:
+/// read as words ("▶ 继续", "↪ 单步跳过"), they took a row of their own
+/// under it, the stack and the variables a row further down.
+#[test]
+fn the_debug_controls_share_the_headers_row_in_every_language() {
+    let mut app = reader_app();
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    app.debug.session = Some(crate::DebugSession {
+        client: None,
+        status: crate::DebugStatus::Stopped,
+        exit_code: None,
+        thread_id: None,
+        frames: vec![crate::dap::StackFrame {
+            id: 1,
+            name: "main".into(),
+            path: Some(root.join("main.py")),
+            line: 15,
+            column: 1,
+        }],
+        scopes: Vec::new(),
+        watches: Vec::new(),
+        output: Vec::new(),
+        current: Some((root.join("main.py"), 15)),
+        program: root.join("main.py"),
+        args: Vec::new(),
+        cwd: root.clone(),
+        addr: None,
+    });
+    app.debug.trace = (0..4)
+        .map(|_| crate::TraceStop {
+            reason: "breakpoint".into(),
+            frames: Vec::new(),
+        })
+        .collect();
+    app.debug.trace_rev += 1;
+    app.show_bottom = true;
+    crate::fonts::load();
+    let size = Size::new(1366.0, 860.0);
+    app.window_width = size.width;
+    app.window_height = size.height;
+    for lang in crate::i18n::Lang::ALL {
+        crate::i18n::with_lang(lang, || {
+            for name in ["Continue", "Step over", "Step into", "Step out", "Stop"] {
+                assert_eq!(
+                    pressing(|| super::view(&app), name).len(),
+                    1,
+                    "{lang:?}: {name}"
+                );
+            }
+            let mut sim = sim_sized(&app, size);
+            for words in ["▶", "↪", "■"] {
+                assert!(
+                    text_at(&mut sim, |t| t.starts_with(words), 0).is_none(),
+                    "{lang:?}: a control read as words, {words}…"
+                );
+            }
+            let title = text_at(&mut sim, |t| t == crate::tr!("Debug"), 0).expect("the title");
+            let stack = text_at(&mut sim, |t| t == crate::tr!("CALL STACK"), 0).expect("the stack");
+            assert!(
+                stack.y - title.y < 45.0,
+                "{lang:?}: the columns a row down, under the controls: {title:?} {stack:?}"
+            );
+        });
+    }
 }
 
 /// The Ask card in the corner sits beside the debugger's columns, not
@@ -23120,9 +23203,8 @@ fn a_narrow_debug_header_keeps_its_trace_and_walk_this_run() {
             Size::new(width, 260.0),
             super::debug_panel(&app),
         );
-        let count = text_at(&mut sim, |t| t == "1 stop traced", 0).expect("the trace's count");
-        assert!(count.height < 20.0, "{width}: on one line: {count:?}");
         let walk = text_at(&mut sim, |t| t == "Walk this run", 0).expect("Walk this run");
+        assert!(walk.height < 20.0, "{width}: on one line: {walk:?}");
         assert!(
             walk.x + walk.width <= width,
             "{width}: in the panel: {walk:?}"
