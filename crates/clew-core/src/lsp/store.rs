@@ -1186,7 +1186,7 @@ mod tests {
             let payload = b"#!/bin/sh\necho fake-server\n";
             let gz = gzip(payload);
             let dl = download(&gz, Archive::Gzip, "rust-analyzer");
-            let dest = dir.join("servers/rust-analyzer/2026-07-13");
+            let dest = dir.join("servers/rust-analyzer/2026-11-23");
             let installed = install_bytes(&gz, &dl, &dest, &store(dir), archive::BUDGET).unwrap();
             assert_eq!(installed, dest.join("rust-analyzer"));
             assert_eq!(std::fs::read(&installed).unwrap(), payload);
@@ -1202,7 +1202,7 @@ mod tests {
                 .flatten()
                 .map(|e| e.file_name())
                 .collect();
-            assert_eq!(leftovers, vec![std::ffi::OsString::from("2026-07-13")]);
+            assert_eq!(leftovers, vec![std::ffi::OsString::from("2026-11-23")]);
         });
     }
 
@@ -1390,7 +1390,7 @@ mod tests {
         let server = EffectiveServer {
             language: "rust".into(),
             server_name: "rust-analyzer".into(),
-            version: "2026-07-13".into(),
+            version: "2026-11-23".into(),
             args: Vec::new(),
             command: Some(PathBuf::from("tools/ra")),
             init_options: None,
@@ -2093,7 +2093,7 @@ mod tests {
             // Nor collide with the store's own scratch names.
             assert!(server_dir("rust-analyzer", ".tmp-x").is_none());
             // A normal name/version still resolves under the store.
-            let ok = server_dir("rust-analyzer", "2026-07-13").expect("normal path");
+            let ok = server_dir("rust-analyzer", "2026-11-23").expect("normal path");
             assert!(ok.starts_with(dir.join("servers")));
 
             // …and the containment guard rejects anything outside the store
@@ -2148,8 +2148,8 @@ mod tests {
         with_store("override", |dir| {
             assert_eq!(data_root().as_deref(), Some(dir));
             assert_eq!(
-                server_dir("rust-analyzer", "2026-07-13"),
-                Some(dir.join("servers/rust-analyzer/2026-07-13"))
+                server_dir("rust-analyzer", "2026-11-23"),
+                Some(dir.join("servers/rust-analyzer/2026-11-23"))
             );
         });
     }

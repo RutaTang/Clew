@@ -20,7 +20,7 @@ use super::registry;
 /// ```toml
 /// [rust]
 /// server = "rust-analyzer"
-/// version = "2026-07-13"
+/// version = "2026-11-23"
 /// enabled = true
 /// command = "/usr/local/bin/rust-analyzer"  # escape hatch, bypasses the store
 ///
@@ -369,7 +369,7 @@ mod tests {
         let cfg = ProjectLspConfig::default();
         let eff = cfg.resolve("rust").unwrap();
         assert_eq!(eff.server_name, "rust-analyzer");
-        assert_eq!(eff.version, "2026-07-13");
+        assert_eq!(eff.version, "2026-11-23");
         assert!(eff.command.is_none());
         assert!(eff.init_options.is_none());
         assert!(cfg.resolve("cobol").is_none());
