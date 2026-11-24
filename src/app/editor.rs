@@ -620,9 +620,17 @@ impl App {
         // What the History view waits for this file to open for.
         let after = self.after_history_open(&abs);
         let content = self.content_tasks(abs, source, lang_key);
+        // A SQL file's names peek and go to their definitions from the
+        // project's schema: read it now, if it is not.
+        let schema = match lang_key {
+            Some("sql") => self.ensure_maps(),
+            _ => Task::none(),
+        };
         // Symbols arrive later via `Highlighted`; follow_caret there resolves the
         // enclosing function. Here it shows the file until then.
-        self.follow_caret(Task::batch([scroll, lsp_task, content, tour, after]))
+        self.follow_caret(Task::batch([
+            scroll, lsp_task, content, tour, after, schema,
+        ]))
     }
 
     /// Off-thread re-highlight + git-info tasks for a file's current source,
@@ -930,7 +938,12 @@ impl App {
         self.request_git_info(git_rel, abs.clone());
         // What the History view waits for this file to open for.
         let after = self.after_history_open(&abs);
-        self.follow_caret(Task::batch([scroll, lsp_task, after]))
+        // A SQL file's names peek from the project's schema: read it now.
+        let schema = match lang_key {
+            Some("sql") => self.ensure_maps(),
+            _ => Task::none(),
+        };
+        self.follow_caret(Task::batch([scroll, lsp_task, after, schema]))
     }
 
     /// Rough pixel height of one rendered notebook cell, for scroll estimation.
