@@ -918,3 +918,49 @@ fn live_a_projects_findings() {
         println!("{:?} {} {}:{}", f.issue, f.table, f.rel, f.line);
     }
 }
+
+/// A Prisma schema is the database's tables; Prisma's own SQL migrations
+/// beside it keep their history, and make no second schema.
+#[test]
+fn a_prisma_schema_stands_for_its_migrations() {
+    let corpus = Corpus::of(&[
+        (
+            "prisma/schema.prisma",
+            "model User {\n  id    Int    @id @default(autoincrement())\n  email String @unique\n  posts Post[]\n}\n\nmodel Post {\n  id       Int  @id\n  author   User @relation(fields: [authorId], references: [id])\n  authorId Int\n}\n",
+        ),
+        (
+            "prisma/migrations/20240101000000_init/migration.sql",
+            "CREATE TABLE \"User\" (\"id\" SERIAL NOT NULL, \"email\" TEXT NOT NULL, CONSTRAINT \"User_pkey\" PRIMARY KEY (\"id\"));\n",
+        ),
+        (
+            "prisma/migrations/20240201000000_posts/migration.sql",
+            "CREATE TABLE \"Post\" (\"id\" INTEGER NOT NULL, \"authorId\" INTEGER NOT NULL, CONSTRAINT \"Post_pkey\" PRIMARY KEY (\"id\"));\n",
+        ),
+    ]);
+    let built = maps(&corpus);
+    let ids: Vec<&str> = built.iter().map(|m| m.id.as_str()).collect();
+    assert_eq!(ids, ["sql.schema", "sql.history"]);
+    let schema = map(&built, "sql.schema");
+    assert_eq!(
+        node(schema, "User").1.file,
+        "prisma/schema.prisma",
+        "the models, not the SQL"
+    );
+    assert_eq!(
+        columns(schema, "User"),
+        [
+            "id Int [key] [not null] [identity]",
+            "email String [not null] [unique]"
+        ]
+    );
+    assert_eq!(joins(schema), ["Post.authorId → User.id"]);
+    // A project with Prisma alone.
+    let only = maps(&Corpus::of(&[(
+        "schema.prisma",
+        "model Tag {\n  id Int @id\n}\n",
+    )]));
+    assert_eq!(
+        columns(map(&only, "sql.schema"), "Tag"),
+        ["id Int [key] [not null]"]
+    );
+}

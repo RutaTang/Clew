@@ -176,6 +176,7 @@ fn wanted_without_language(rel: &str) -> bool {
         || name == "pnpm-workspace.yaml"
         || name == "go.mod"
         || name.ends_with(".lean")
+        || name.ends_with(".prisma")
 }
 
 /// Every map of `files` (under `root`), none empty.

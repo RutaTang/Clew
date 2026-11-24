@@ -89,6 +89,12 @@ pub(crate) fn dotted_at(
     Some((before, word, after))
 }
 
+/// Whether a file is a schema's own — SQL, or a Prisma schema — where
+/// every name is looked up in the project's schema.
+pub(crate) fn is_schema_file(lang_key: Option<&str>, path: &std::path::Path) -> bool {
+    lang_key == Some("sql") || path.extension().is_some_and(|e| e == "prisma")
+}
+
 /// Whether a line of code reads as SQL: a statement's words on it.
 pub(crate) fn reads_as_sql(line: &str) -> bool {
     let lower = line.to_ascii_lowercase();
@@ -224,7 +230,7 @@ impl App {
     /// What the word at `(line, col)` of `pane` names in the schema.
     pub(crate) fn schema_hit(&self, pane: usize, line: usize, col: usize) -> Option<SchemaHit> {
         let v = self.proj.panes.get(pane)?.as_ref()?;
-        let sql = v.lang_key == Some("sql");
+        let sql = is_schema_file(v.lang_key, &v.abs);
         let text = v.source_line(line)?;
         if !sql && !reads_as_sql(text) {
             return None;

@@ -30,6 +30,7 @@ use crate::highlight::Lang;
 pub(crate) mod ddl;
 mod files;
 mod lex;
+mod prisma;
 mod rails;
 mod schema;
 #[cfg(test)]
@@ -52,6 +53,35 @@ pub(crate) fn schemas(corpus: &Corpus) -> Vec<(files::Database, Schema)> {
             (db, schema)
         })
         .collect();
+    // A Prisma schema: the database its models make. Prisma's own SQL
+    // migrations beside it make the same tables, by their columns' names
+    // alone: the models stand for them (and the migrations keep their
+    // history).
+    let prisma: Vec<&Source> = corpus
+        .files
+        .iter()
+        .filter(|s| prisma::is_prisma(s) && !crate::weakspots::is_test_path(&s.rel))
+        .collect();
+    if let Some((root, schema)) = prisma::schema(&prisma) {
+        let migrations = match root.is_empty() {
+            true => "migrations".to_string(),
+            false => format!("{root}/migrations"),
+        };
+        let theirs = |db: &files::Database| {
+            db.root == migrations
+                || (db.root.is_empty() && db.changes.iter().all(|c| c.rel.starts_with(&migrations)))
+        };
+        match out.iter_mut().find(|(db, _)| theirs(db)) {
+            Some((_, s)) => *s = schema,
+            None => out.push((
+                files::Database {
+                    root: prisma.first().map_or(root, |s| s.rel.clone()),
+                    changes: Vec::new(),
+                },
+                schema,
+            )),
+        }
+    }
     out.sort_by(|a, b| {
         (b.1.tables.len() + b.1.views.len())
             .cmp(&(a.1.tables.len() + a.1.views.len()))

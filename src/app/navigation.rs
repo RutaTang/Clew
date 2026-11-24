@@ -370,7 +370,7 @@ impl App {
             .panes
             .get(pane)
             .and_then(Option::as_ref)
-            .is_some_and(|v| v.lang_key == Some("sql"));
+            .is_some_and(|v| crate::app::schemainfo::is_schema_file(v.lang_key, &v.abs));
         self.proj.goto_schema = None;
         if let Some((abs, at)) = schema.clone() {
             let ready = self

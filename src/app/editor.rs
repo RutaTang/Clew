@@ -619,13 +619,13 @@ impl App {
         let tour = self.tour_file_loaded(&abs);
         // What the History view waits for this file to open for.
         let after = self.after_history_open(&abs);
-        let content = self.content_tasks(abs, source, lang_key);
         // A SQL file's names peek and go to their definitions from the
         // project's schema: read it now, if it is not.
-        let schema = match lang_key {
-            Some("sql") => self.ensure_maps(),
-            _ => Task::none(),
+        let schema = match crate::app::schemainfo::is_schema_file(lang_key, &abs) {
+            true => self.ensure_maps(),
+            false => Task::none(),
         };
+        let content = self.content_tasks(abs, source, lang_key);
         // Symbols arrive later via `Highlighted`; follow_caret there resolves the
         // enclosing function. Here it shows the file until then.
         self.follow_caret(Task::batch([
@@ -939,9 +939,9 @@ impl App {
         // What the History view waits for this file to open for.
         let after = self.after_history_open(&abs);
         // A SQL file's names peek from the project's schema: read it now.
-        let schema = match lang_key {
-            Some("sql") => self.ensure_maps(),
-            _ => Task::none(),
+        let schema = match crate::app::schemainfo::is_schema_file(lang_key, &abs) {
+            true => self.ensure_maps(),
+            false => Task::none(),
         };
         self.follow_caret(Task::batch([scroll, lsp_task, after, schema]))
     }
