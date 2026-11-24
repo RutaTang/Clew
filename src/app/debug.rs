@@ -433,6 +433,95 @@ async fn run_plain<F>(
     }
 }
 
+/// A task started on a remote project's host ([`App::remote_run`]): its
+/// output's stream, the input whose closing stops it, and its end.
+pub(crate) struct RemoteRun {
+    pub(crate) stdin: tokio::io::DuplexStream,
+    pub(crate) stdout: tokio::io::DuplexStream,
+    pub(crate) end: tokio::sync::oneshot::Receiver<Option<i32>>,
+}
+
+/// Show a task run on a remote project's host as a run of its own, as
+/// [`run_plain`] shows one run here: each line it writes, and how it
+/// ended — or, ended with no code, the reason it gave for not running.
+/// Stopped, it is stopped there.
+async fn run_remote(
+    output: &mut iced::futures::channel::mpsc::Sender<Message>,
+    stamp: &Stamp,
+    run: u64,
+    live: &std::sync::Arc<std::sync::atomic::AtomicU64>,
+    remote: RemoteRun,
+) {
+    use iced::futures::SinkExt;
+    use std::sync::atomic::Ordering;
+    use tokio::io::AsyncBufReadExt;
+    let event = |event: dap::DapEvent| {
+        Message::Debug(DebugMsg::DapEvent {
+            stamp: stamp.clone(),
+            run,
+            event,
+        })
+    };
+    let RemoteRun { stdin, stdout, end } = remote;
+    let _ = output
+        .send(event(dap::DapEvent::Continued {
+            thread_id: None,
+            all_threads: true,
+        }))
+        .await;
+    let mut lines = tokio::io::BufReader::new(stdout).lines();
+    let mut last = String::new();
+    let mut tick = tokio::time::interval(std::time::Duration::from_millis(150));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            line = lines.next_line() => match line {
+                Ok(Some(line)) => {
+                    last.clone_from(&line);
+                    let _ = output
+                        .send(event(dap::DapEvent::Output(dap::proto::Output {
+                            category: "stdout".into(),
+                            text: format!("{line}\n"),
+                        })))
+                        .await;
+                }
+                Ok(None) | Err(_) => break,
+            },
+            _ = tick.tick() => {
+                if live.load(Ordering::SeqCst) != run {
+                    // Stopped: its input closed, which stops it there.
+                    drop(stdin);
+                    return;
+                }
+            }
+        }
+    }
+    drop(stdin);
+    match end.await {
+        Ok(Some(code)) => {
+            let _ = output
+                .send(event(dap::DapEvent::Exited {
+                    code: i64::from(code),
+                }))
+                .await;
+            let _ = output.send(event(dap::DapEvent::Terminated)).await;
+        }
+        _ => {
+            let error = match last.trim() {
+                "" => tr!("The task did not run on the remote host.").to_string(),
+                why => why.to_string(),
+            };
+            let _ = output
+                .send(Message::Debug(DebugMsg::Failed {
+                    stamp: stamp.clone(),
+                    run,
+                    error,
+                }))
+                .await;
+        }
+    }
+}
+
 /// The most children one variable shows: a list of a million is read a
 /// screenful at a time by no one.
 pub(crate) const MAX_VAR_CHILDREN: usize = 300;
@@ -488,6 +577,24 @@ impl App {
             .into();
             return Task::none();
         }
+        // A remote project's Lean is on its host: run there.
+        if self.connection.is_remote() {
+            let Some(rel) = self.project_rel(&file) else {
+                return Task::none();
+            };
+            let name = file
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            return self.start_session(
+                true,
+                Some(crate::app::runplan::RunPlan::Remote {
+                    task: clew_protocol::ProjectTask::LeanMain { file: rel },
+                    name,
+                    tests: None,
+                }),
+            );
+        }
         let lake = match self
             .effective_server("lean")
             .map(|server| clew_core::lsp::store::locate(&server))
@@ -512,12 +619,67 @@ impl App {
         )
     }
 
+    /// Start `task` on the remote project's host (`RunTask`): its output
+    /// fed to the stream returned, its end told as it exits.
+    pub(crate) fn remote_run(
+        &mut self,
+        task: clew_protocol::ProjectTask,
+    ) -> Result<RemoteRun, String> {
+        let Some(tx) = self.server.tx().cloned() else {
+            return Err(tr!("not connected to the remote server").into());
+        };
+        let proc = self.next_proc_id;
+        self.next_proc_id += 1;
+        let request = clew_protocol::Request::RunTask {
+            proc,
+            task,
+            choices: self.proj.lang_choices.clone(),
+        };
+        let (stdin, stdout, feed) = crate::app::tasks::proxy_streams_spawning(
+            &tx,
+            &self.next_req_id,
+            proc,
+            request,
+            None::<std::future::Ready<()>>,
+        );
+        self.server.proc_feeds.insert(proc, feed);
+        let (end_tx, end) = tokio::sync::oneshot::channel();
+        self.server.task_ends.insert(proc, end_tx);
+        Ok(RemoteRun { stdin, stdout, end })
+    }
+
+    /// `abs`, a file of the project open, relative to it, `/`-separated:
+    /// what a remote task names it by.
+    pub(crate) fn project_rel(&self, abs: &Path) -> Option<String> {
+        let root = &self.proj.project.as_ref()?.root;
+        Some(
+            abs.strip_prefix(root)
+                .ok()?
+                .to_string_lossy()
+                .replace('\\', "/"),
+        )
+    }
+
     /// Build the Lake project of the Lean file read, or run its tests, in
     /// the run panel: Lake's own output, and how it ended.
     fn start_lake_task(&mut self, task: crate::app::runplan::LakeTask) -> Task<Message> {
+        use crate::app::runplan::LakeTask;
+        // A remote project's: by Lake on its host, in the Lake project of
+        // the Lean file read.
         if self.connection.is_remote() {
-            self.status = tr!("Lake runs only for a project on this computer.").into();
-            return Task::none();
+            let Some(rel) = self.lean_file().and_then(|f| self.project_rel(&f)) else {
+                self.status = tr!("Open a Lean file of the project first.").into();
+                return Task::none();
+            };
+            let test = task == LakeTask::Test;
+            return self.start_session(
+                true,
+                Some(crate::app::runplan::RunPlan::Remote {
+                    task: clew_protocol::ProjectTask::Lake { file: rel, test },
+                    name: ["lake", task.args()[0]].join(" "),
+                    tests: test.then_some(true),
+                }),
+            );
         }
         let Some(root) = self.proj.project.as_ref().map(|p| p.root.clone()) else {
             return Task::none();
@@ -639,13 +801,24 @@ impl App {
         let lang = viewer
             .lang_key
             .filter(|l| matches!(*l, "rust" | "python"))?;
-        if self.connection.is_remote() && lang != "python" {
-            return None;
-        }
+        let remote = self.connection.is_remote();
         let found = clew_core::runnables::runnables(lang, &viewer.source);
         let test = clew_core::runnables::runnable_at(&found, line)?;
         Some(match test.kind {
             RunnableKind::Main => return None,
+            // A remote project's Rust is built on its host: what the menu
+            // names it by, read from the file here.
+            RunnableKind::Doctest if remote => crate::TestAt::Doctest(tr!(
+                "Doctest of {item}",
+                item = match test.name.is_empty() {
+                    true => viewer
+                        .abs
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                    false => test.name.clone(),
+                }
+            )),
             RunnableKind::Doctest => crate::TestAt::Doctest(
                 crate::app::runplan::RunPlan::Doctest {
                     target: clew_core::cargorun::target_of(&viewer.abs)
@@ -684,8 +857,14 @@ impl App {
         let found = viewer.runnables();
         clew_core::runnables::runnable_at(&found, line).filter(|r| r.kind == RunnableKind::Main)?;
         match viewer.lang_key? {
-            // Run by Lake on this computer, the file its program.
-            "lean" if !self.connection.is_remote() => viewer
+            // Run by Lake, the file its program — on this computer, or on a
+            // remote project's host; a remote project's Rust program, built
+            // there, called by its file.
+            "lean" => viewer
+                .abs
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned()),
+            "rust" if self.connection.is_remote() => viewer
                 .abs
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned()),
@@ -711,9 +890,7 @@ impl App {
         use clew_core::runnables::RunnableKind;
         let found = v.runnables();
         if found.is_empty()
-            || (v.lang_key == Some("rust")
-                && (self.connection.is_remote() || !v.in_cargo_package()))
-            || (v.lang_key == Some("lean") && self.connection.is_remote())
+            || (v.lang_key == Some("rust") && !self.connection.is_remote() && !v.in_cargo_package())
         {
             return std::collections::HashSet::new();
         }
@@ -738,6 +915,37 @@ impl App {
             .is_some_and(|v| v.lang_key == Some("lean"))
         {
             return self.start_lean_run(no_debug);
+        }
+        // A remote project's Rust program: built and run on its host, with
+        // no debugger there.
+        if self.connection.is_remote()
+            && let Some(v) = self.active_viewer().filter(|v| v.lang_key == Some("rust"))
+        {
+            let (abs, name) = (
+                v.abs.clone(),
+                v.abs
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+            );
+            let Some(rel) = self.project_rel(&abs) else {
+                return Task::none();
+            };
+            let task = self.start_session(
+                true,
+                Some(crate::app::runplan::RunPlan::Remote {
+                    task: clew_protocol::ProjectTask::RustMain { file: rel },
+                    name,
+                    tests: None,
+                }),
+            );
+            if !no_debug {
+                self.status = tr!(
+                    "A remote project's program runs without the debugger: {status}",
+                    status = self.status
+                );
+            }
+            return task;
         }
         let plan = self
             .active_viewer()
@@ -765,6 +973,61 @@ impl App {
             return Task::none();
         };
         let lang = viewer.lang_key;
+        // A remote project's Rust tests: built and run on its host, with no
+        // debugger there; named, and told one from a group, from the file.
+        if self.connection.is_remote() && lang == Some("rust") {
+            use clew_core::runnables::{RunnableKind, runnable_at, runnables};
+            let found = runnables("rust", &viewer.source);
+            let Some(test) = runnable_at(&found, line).filter(|r| {
+                matches!(
+                    r.kind,
+                    RunnableKind::Test | RunnableKind::Tests | RunnableKind::Doctest
+                )
+            }) else {
+                self.status =
+                    tr!("No test here. Put the cursor in a test function to run it.").into();
+                return Task::none();
+            };
+            let file_name = viewer
+                .abs
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let (name, tests) = match test.kind {
+                RunnableKind::Doctest => (
+                    tr!(
+                        "Doctest of {item}",
+                        item = if test.name.is_empty() {
+                            file_name.clone()
+                        } else {
+                            test.name.clone()
+                        }
+                    ),
+                    Some(false),
+                ),
+                RunnableKind::Tests if test.name.is_empty() => (file_name, Some(true)),
+                RunnableKind::Tests => (test.name.clone(), Some(true)),
+                _ => (test.name.clone(), Some(false)),
+            };
+            let Some(rel) = self.project_rel(&viewer.abs.clone()) else {
+                return Task::none();
+            };
+            let task = self.start_session(
+                true,
+                Some(crate::app::runplan::RunPlan::Remote {
+                    task: clew_protocol::ProjectTask::RustTest { file: rel, line },
+                    name,
+                    tests,
+                }),
+            );
+            if !no_debug {
+                self.status = tr!(
+                    "A remote project's tests run without the debugger: {status}",
+                    status = self.status
+                );
+            }
+            return task;
+        }
         let plan = lang.and_then(|lang| {
             crate::app::runplan::test_plan_at(lang, &viewer.abs, &viewer.source, line)
         });
@@ -900,7 +1163,11 @@ impl App {
             }
             _ => None,
         };
-        if remote && plan.is_some() && remote_test.is_none() {
+        if remote
+            && plan.is_some()
+            && remote_test.is_none()
+            && !matches!(plan, Some(RunPlan::Remote { .. }))
+        {
             self.status = tr!(
                 "Rust tests run on projects on this computer. In a remote project, run them through a program named in .clew/launch.json."
             )
@@ -1163,6 +1430,10 @@ impl App {
                     test = plan.as_ref().map(RunPlan::label).unwrap_or_default()
                 )
             }
+            None if matches!(plan, Some(RunPlan::Remote { .. })) => tr!(
+                "Running {test} on the remote host…",
+                test = plan.as_ref().map(RunPlan::label).unwrap_or_default()
+            ),
             None if no_debug => tr!("Starting the program on the remote host…").into(),
             None => tr!("Starting debugger on the remote host…").into(),
         };
@@ -1171,10 +1442,21 @@ impl App {
         // said "Running Main.lean with Lean…" long after Main.lean exited.
         if matches!(
             plan,
-            Some(RunPlan::Lean { .. } | RunPlan::Lake { .. } | RunPlan::Doctest { .. })
+            Some(
+                RunPlan::Lean { .. }
+                    | RunPlan::Lake { .. }
+                    | RunPlan::Remote { .. }
+                    | RunPlan::Doctest { .. }
+            )
         ) {
             self.say_debug_state(self.status.clone());
         }
+        // A task of a remote project's: started on its host now, its output
+        // shown by the run's stream.
+        let remote_run = match &plan {
+            Some(RunPlan::Remote { task, .. }) => Some(self.remote_run(task.clone())),
+            _ => None,
+        };
         // This run's identity: every message the adapter stream produces carries
         // it, so a late event from a previous run can't land on this session.
         self.bump_debug_run();
@@ -1232,6 +1514,23 @@ impl App {
                 //           (`SpawnAdapter`), and its reply carries the
                 //           launch config built with remote paths. Nothing
                 //           on this machine is read or probed.
+                if let Some(remote_run) = remote_run {
+                    match remote_run {
+                        Ok(remote_run) => {
+                            run_remote(&mut output, &stamp, run, &live, remote_run).await;
+                        }
+                        Err(error) => {
+                            let _ = output
+                                .send(Message::Debug(DebugMsg::Failed {
+                                    stamp: stamp.clone(),
+                                    run,
+                                    error,
+                                }))
+                                .await;
+                        }
+                    }
+                    return;
+                }
                 let (started, launch, addr, proxied) = if remote {
                     let Some(tx) = server_tx.clone() else {
                         let _ = output

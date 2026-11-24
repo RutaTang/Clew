@@ -70,6 +70,9 @@ pub struct ServerLink {
     /// language -> its live server-spawned proc handle, so a restart can kill the
     /// old process before starting a new one.
     pub lsp_procs: HashMap<String, u64>,
+    /// proc handle -> who waits for a task's end (`RunTask`): told its exit
+    /// code as it exits.
+    pub task_ends: HashMap<u64, tokio::sync::oneshot::Sender<Option<i32>>>,
     /// Request id of the in-flight `ListDir` for the Connect modal's folder
     /// picker. Only the newest listing may paint the browser: two quick
     /// clicks used to let a slower earlier reply overwrite the newer one.
@@ -1433,6 +1436,10 @@ impl App {
                 }
             }
             Event::ProcessExited { proc, code } => {
+                // A task's end, to whoever waits for it.
+                if let Some(end) = self.server.task_ends.remove(&proc) {
+                    let _ = end.send(code);
+                }
                 // Dropping the feed closes the bridge, so the LspClient sees EOF.
                 self.server.proc_feeds.remove(&proc);
                 // Only a proc STILL mapped to a language is that language's live

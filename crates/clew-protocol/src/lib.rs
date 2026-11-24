@@ -155,7 +155,7 @@ pub use payload::*;
 ///
 /// v30: [`PythonEnvKind::Hatch`] and [`PythonEnvKind::Pdm`]: a project's
 /// Hatch environment, and the interpreter PDM records for it.
-pub const PROTOCOL_VERSION: u32 = 31;
+pub const PROTOCOL_VERSION: u32 = 32;
 
 /// A hash of this crate's source as a token stream — comments and whitespace
 /// removed — computed at build time (see `build.rs`). Carried in `Hello` /
@@ -807,10 +807,17 @@ pub enum Request {
     /// `choices` are the user's for the project's languages: a server program
     /// they chose for `language` runs instead of clew's
     /// ([`LanguageChoices::servers`]).
+    ///
+    /// `folder` is where in the project it runs, when not at the project's
+    /// root: Lean's server in the Lake project of the file read (a
+    /// repository's proofs in a folder of their own), where its imports of
+    /// its own project resolve. Confined to the project; refused when not
+    /// a folder of it.
     SpawnLsp {
         proc: u64,
         language: String,
         choices: LanguageChoices,
+        folder: Option<Rel>,
     },
     /// Resolve AND spawn the debug adapter for `lang` (a client `Lang` slug:
     /// "native", "python", "dart", …) on this host — where the debuggee
@@ -990,6 +997,20 @@ pub enum Request {
     /// reading files only. The client dims the code these leave out as it
     /// is read. Reply: `BuildFacts`.
     BuildFacts { choices: LanguageChoices },
+    /// Run a task of the project's on this host ([`ProjectTask`]): resolved
+    /// here — the program, its arguments, the folder it runs in — from what
+    /// the task is, never from a command line. Proxied under `proc` as
+    /// `SpawnProcess` is: what it writes, stdout and stderr together, comes
+    /// as `ProcessOutput` lines; it ends in exactly one `ProcessExited`,
+    /// with its exit code — `None` when it never ran, the reason written as
+    /// its output — and `ProcessKill` stops it, with everything it started.
+    /// Never answered. What it runs runs the project's own code (its
+    /// build, its lakefile), as the language servers that build it do.
+    RunTask {
+        proc: u64,
+        task: ProjectTask,
+        choices: LanguageChoices,
+    },
     /// The project's maps ([`ProjectMap`]) — its database schema, routes,
     /// supervision trees and the like — read from its files on this host.
     /// Reply: `ProjectMaps`.
@@ -1514,6 +1535,27 @@ impl Event {
             message: message.into(),
         }
     }
+}
+
+/// A task of the project's that [`Request::RunTask`] runs where the project
+/// is. Each names a file of the project, relative to its root; what runs
+/// is worked out from it on that host.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProjectTask {
+    /// A Lean file's `main`, as Run runs it: what it imports built, then
+    /// `lake env lean --run` in its Lake project.
+    LeanMain { file: Rel },
+    /// `lake build`, or `lake test` (`test`), in the Lake project of `file`.
+    Lake { file: Rel, test: bool },
+    /// `lake exe cache get` in the Lake project of `file`: Mathlib's build
+    /// cache.
+    MathlibCache { file: Rel },
+    /// The program `file` is a source of, built by Cargo and run: its
+    /// binary's, or its package's one program for a library's file.
+    RustMain { file: Rel },
+    /// The test, or the tests, at 1-based `line` of `file`, built by Cargo
+    /// and run as Run Test runs them; a doc example, by rustdoc.
+    RustTest { file: Rel, line: usize },
 }
 
 /// What the user chose for one project's languages, in Settings, where clew

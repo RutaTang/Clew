@@ -851,6 +851,14 @@ impl App {
                 .unwrap_or_else(|| root.clone());
             self.proj.link.lean_root = Some(lake.clone());
             lake
+        } else if language == "lean" {
+            // A remote project's files are on its host: its Lake project is
+            // read from its listing, and the server started there.
+            let lake = self
+                .remote_lake_folder()
+                .map_or_else(|| root.clone(), |f| root.join(f));
+            self.proj.link.lean_root = Some(lake.clone());
+            lake
         } else {
             root
         };
@@ -889,6 +897,10 @@ impl App {
                     proc,
                     language: lang.clone(),
                     choices: self.proj.lang_choices.clone(),
+                    folder: match lang.as_str() {
+                        "lean" => self.remote_lake_folder(),
+                        _ => None,
+                    },
                 }
             } else {
                 clew_protocol::Request::SpawnProcess {

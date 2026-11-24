@@ -300,6 +300,10 @@ pub struct Server {
     /// provisioning task can register the process it spawned after its
     /// download finished off the request loop.
     procs: SharedProcs,
+    /// The tasks running for the client (`RunTask`), by handle: what stops
+    /// each — set by a `ProcessKill` of the handle, and as every process is
+    /// stopped (a shutdown, another project opened).
+    task_stops: Arc<Mutex<HashMap<u64, Arc<AtomicBool>>>>,
     /// Backpressure for the bulk producers — proxied stdout, trees, symbol
     /// snapshots (see [`OutputBudget`]).
     out_budget: Arc<OutputBudget>,
@@ -367,6 +371,7 @@ impl Server {
             _watcher: Arc::new(Mutex::new(None)),
             open_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             procs: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            task_stops: Arc::new(Mutex::new(HashMap::new())),
             out_budget: OutputBudget::new(),
             spawn_policy,
             state_jobs,
@@ -430,6 +435,18 @@ impl Server {
     /// client waiting forever (and leaking its pending-request entry).
     /// (Boxed refusal: `Event` is large, and clippy rightly objects to fat
     /// `Err` variants on a hot call.)
+    /// Stop every task running for the client (`RunTask`).
+    fn stop_tasks(&self) {
+        for (_, stop) in self
+            .task_stops
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .drain()
+        {
+            stop.store(true, Ordering::SeqCst);
+        }
+    }
+
     fn root_or_refuse(&self) -> Result<PathBuf, Box<Event>> {
         self.root
             .clone()
@@ -479,6 +496,7 @@ impl Server {
     pub async fn shutdown(&mut self) {
         self.stop_ai_work(|_| true);
         self.install_stop.store(true, Ordering::Relaxed);
+        self.stop_tasks();
         for (proc, p) in self.procs.lock().await.drain() {
             kill_removed(&self.out, proc, p);
         }
@@ -596,6 +614,7 @@ impl Server {
                 self.root = Some(root.clone());
                 *self.files.lock().unwrap_or_else(PoisonError::into_inner) = None;
                 *self._watcher.lock().unwrap_or_else(PoisonError::into_inner) = None;
+                self.stop_tasks();
                 for (proc, p) in self.procs.lock().await.drain() {
                     kill_removed(&self.out, proc, p);
                 }
@@ -1034,6 +1053,83 @@ impl Server {
             }
             // The project's maps — its schema, routes, supervision trees —
             // read where the files are. Off the loop: every file is read.
+            // A task of the project's (`ProjectTask`), worked out and run
+            // here: its lines streamed under `proc`, its end one
+            // `ProcessExited`. Registered as a proc with no child, so that
+            // `ProcessKill` stops it as it stops a spawned one.
+            Request::RunTask {
+                proc,
+                task,
+                choices,
+            } => {
+                let root = match self.root_or_refuse() {
+                    Ok(root) => root,
+                    Err(refusal) => return Some(*refusal),
+                };
+                let out = self.out.clone();
+                let procs = self.procs.clone();
+                let (_input, generation) = register_proc(&self.procs, proc).await;
+                let cancel = Arc::new(AtomicBool::new(false));
+                // A handle used again stops the task it named.
+                let replaced = self
+                    .task_stops
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(proc, cancel.clone());
+                if let Some(old) = replaced {
+                    old.store(true, Ordering::SeqCst);
+                }
+                let stops = self.task_stops.clone();
+                let _ = out.send(ServerMessage::Notification {
+                    event: Event::ProcessStarted { proc },
+                });
+                tokio::spawn(async move {
+                    let said_out = out.clone();
+                    let ran_cancel = cancel.clone();
+                    let ran = tokio::task::spawn_blocking(move || {
+                        let mut said = |line: &str, _stderr: bool| {
+                            let mut data = line.as_bytes().to_vec();
+                            data.truncate(clew_protocol::MAX_PROCESS_CHUNK - 1);
+                            data.push(b'\n');
+                            let _ = said_out.send(ServerMessage::Notification {
+                                event: Event::ProcessOutput { proc, data },
+                            });
+                        };
+                        clew_core::tasks::run(&root, &task, &choices, &mut said, &ran_cancel)
+                    })
+                    .await
+                    .unwrap_or_else(|_| Err("the task stopped unexpectedly".into()));
+                    {
+                        let mut stops = stops.lock().unwrap_or_else(PoisonError::into_inner);
+                        if stops.get(&proc).is_some_and(|s| Arc::ptr_eq(s, &cancel)) {
+                            stops.remove(&proc);
+                        }
+                    }
+                    let code = match ran {
+                        Ok(clew_core::spawn::RunEnd::Exited(code)) => {
+                            Some(i32::try_from(code).unwrap_or(-1))
+                        }
+                        Ok(clew_core::spawn::RunEnd::Stopped) => None,
+                        Err(why) => {
+                            let mut data = why.into_bytes();
+                            data.truncate(clew_protocol::MAX_PROCESS_CHUNK - 1);
+                            data.push(b'\n');
+                            let _ = out.send(ServerMessage::Notification {
+                                event: Event::ProcessOutput { proc, data },
+                            });
+                            None
+                        }
+                    };
+                    // Ended on its own: its one exit said here. Stopped by a
+                    // kill, the kill said it.
+                    if failed_spawn_is_ours(&procs, proc, generation).await {
+                        let _ = out.send(ServerMessage::Notification {
+                            event: Event::ProcessExited { proc, code },
+                        });
+                    }
+                });
+                None
+            }
             Request::ProjectMaps => {
                 let root = match self.root_or_refuse() {
                     Ok(root) => root,
@@ -1416,10 +1512,23 @@ impl Server {
                 proc,
                 language,
                 choices,
+                folder,
             } => {
                 let root = match self.root_or_refuse() {
                     Ok(root) => root,
                     Err(refusal) => return Some(*refusal),
+                };
+                // Where in the project it runs: a folder of it, or its root.
+                let cwd_dir = match folder.as_deref().filter(|f| !f.is_empty()) {
+                    None => root.clone(),
+                    Some(folder) => match clew_core::confine::confine(&root, folder) {
+                        Ok(dir) if dir.is_dir() => dir,
+                        _ => {
+                            return Some(refused(format!(
+                                "refused to start a language server in {folder:?}: not a folder of the project"
+                            )));
+                        }
+                    },
                 };
                 let out = self.out.clone();
                 let procs = self.procs.clone();
@@ -1448,7 +1557,7 @@ impl Server {
                     });
                     match resolved {
                         Ok((exe, args)) => {
-                            let cwd = Some(root.to_string_lossy().into_owned());
+                            let cwd = Some(cwd_dir.to_string_lossy().into_owned());
                             if let Spawned::Failed(event) = spawn_registered(
                                 &out,
                                 &procs,
@@ -1627,6 +1736,14 @@ impl Server {
                 }
             }
             Request::ProcessKill { proc } => {
+                if let Some(stop) = self
+                    .task_stops
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .remove(&proc)
+                {
+                    stop.store(true, Ordering::SeqCst);
+                }
                 let removed = self.procs.lock().await.remove(&proc);
                 if let Some(p) = removed {
                     kill_removed(&self.out, proc, p);

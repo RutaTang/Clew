@@ -44599,6 +44599,148 @@ fn a_launch_files_fields_go_into_the_python_launch() {
     assert_eq!(launch["env"]["MODE"], "dev");
 }
 
+/// A remote project's Lean `main`, Lake's build and a Rust test run on its
+/// host: each a `RunTask` naming the file relative to the project — never
+/// a command line — and no launch file is read; the Rust ▶ offers no
+/// Debug there. Remote projects used to be told none of this ran.
+#[test]
+fn a_remote_projects_lean_and_rust_run_on_its_host() {
+    use clew_protocol::{ProjectTask, Request};
+    let (mut app, root, mut rx) = remote_app("remote-run-tasks");
+    let open = |app: &mut App, rel: &str, lang: &'static str, source: &str| {
+        let lines = crate::highlight::plain_lines(source);
+        app.proj.panes[0] = Some(crate::viewer::Viewer::new(
+            root.join(rel),
+            rel.into(),
+            Some(lang),
+            Arc::new(source.to_string()),
+            lines,
+        ));
+        app.proj.active = 0;
+    };
+    let asked = |rx: &mut tokio::sync::mpsc::Receiver<clew_protocol::ClientMessage>| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no task was asked for"
+            );
+            match rx.try_recv() {
+                Ok(msg) => match msg.request {
+                    Request::RunTask { task, .. } => break task,
+                    Request::ReadState { rel, .. } if rel == "launch.json" => {
+                        panic!("a task needs no launch file")
+                    }
+                    _ => {}
+                },
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(5)),
+            }
+        }
+    };
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let _guard = rt.enter();
+    open(
+        &mut app,
+        "proofs/Main.lean",
+        "lean",
+        "def main : IO Unit := pure ()\n",
+    );
+    let _ = app.update(Message::Debug(DebugMsg::RunMain {
+        line: 1,
+        no_debug: true,
+    }));
+    assert_eq!(
+        asked(&mut rx),
+        ProjectTask::LeanMain {
+            file: "proofs/Main.lean".into()
+        }
+    );
+    assert!(app.status.contains("remote"), "{}", app.status);
+    let _ = app.update(Message::Debug(DebugMsg::RunLake(
+        crate::app::runplan::LakeTask::Build,
+    )));
+    assert_eq!(
+        asked(&mut rx),
+        ProjectTask::Lake {
+            file: "proofs/Main.lean".into(),
+            test: false
+        }
+    );
+    open(
+        &mut app,
+        "src/lib.rs",
+        "rust",
+        "pub fn a() {}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn adds() {}\n}\n",
+    );
+    let pane = app.proj.active;
+    let v = app.proj.panes[pane].as_ref().unwrap();
+    assert!(app.run_marks(v).contains(&6), "the test's ▶ is there");
+    let _ = app.update(Message::Debug(DebugMsg::RunTest {
+        line: Some(6),
+        no_debug: false,
+    }));
+    assert_eq!(
+        asked(&mut rx),
+        ProjectTask::RustTest {
+            file: "src/lib.rs".into(),
+            line: 6
+        }
+    );
+    assert!(
+        app.status.contains("without the debugger"),
+        "{}",
+        app.status
+    );
+    assert_eq!(
+        app.debug.plan.as_ref().and_then(|p| p.verdict(0)),
+        Some("Test adds passed".into())
+    );
+}
+
+/// What a remote task writes comes through its stream, line by line, and
+/// its exit code to whoever waits for its end.
+#[test]
+fn a_remote_tasks_output_and_end_reach_the_run() {
+    use tokio::io::AsyncBufReadExt;
+    let (mut app, _root, _rx) = remote_app("remote-task-stream");
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let _guard = rt.enter();
+    let proc = app.next_proc_id;
+    let remote = app
+        .remote_run(clew_protocol::ProjectTask::LeanMain {
+            file: "Main.lean".into(),
+        })
+        .expect("started");
+    let _ = app.handle_server_event(clew_protocol::Event::ProcessOutput {
+        proc,
+        data: b"two is 2\n".to_vec(),
+    });
+    let _ = app.handle_server_event(clew_protocol::Event::ProcessExited {
+        proc,
+        code: Some(0),
+    });
+    let crate::app::debug::RemoteRun { stdout, end, .. } = remote;
+    let (lines, code) = rt.block_on(async move {
+        let mut lines = tokio::io::BufReader::new(stdout).lines();
+        let mut got = Vec::new();
+        while let Ok(Some(line)) = lines.next_line().await {
+            got.push(line);
+        }
+        (got, end.await.ok().flatten())
+    });
+    assert_eq!(lines, ["two is 2"]);
+    assert_eq!(code, Some(0));
+    assert!(app.server.task_ends.is_empty());
+}
+
 /// Run Test on a Python test of a remote project runs it there: no launch
 /// file is read, and the server is asked for Python's adapter on the test's
 /// file with its pytest node id — which it runs under pytest, on the host.

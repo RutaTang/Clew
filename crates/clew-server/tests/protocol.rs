@@ -1109,6 +1109,168 @@ async fn spawn_adapter_refuses_what_it_cannot_serve_and_ends_the_stream() {
     }
 }
 
+/// `RunTask` runs a task of the project's where the project lives: what it
+/// writes streamed under its `proc`, its exit code its one `ProcessExited`;
+/// one that cannot run says why as its output and exits with no code; a
+/// file outside the project runs nothing; and `ProcessKill` stops a task
+/// still running.
+#[cfg(unix)]
+#[tokio::test]
+async fn run_task_runs_the_projects_task_where_it_lives() {
+    use std::os::unix::fs::PermissionsExt;
+    let (mut server, mut rx) = server();
+    let root = temp_project("run-task");
+    std::fs::write(root.join("Main.lean"), "def main : IO Unit := pure ()\n").unwrap();
+    std::fs::write(root.join("lakefile.toml"), "name = \"demo\"\n").unwrap();
+    open_project(&mut server, &mut rx, 1, &root).await;
+    // A `lake` of the project's choosing, run as the task's.
+    let lake = root.join("fake-lake");
+    std::fs::write(&lake, "#!/bin/sh\necho \"lake $*\"\nexit 3\n").unwrap();
+    std::fs::set_permissions(&lake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut servers = std::collections::BTreeMap::new();
+    servers.insert(
+        "lean".to_string(),
+        clew_protocol::ServerChoice {
+            command: lake.to_string_lossy().into_owned(),
+            args: None,
+        },
+    );
+    let choices = clew_protocol::LanguageChoices {
+        servers: Some(servers),
+        ..Default::default()
+    };
+    let run = |proc: u64, task: clew_protocol::ProjectTask, choices| Request::RunTask {
+        proc,
+        task,
+        choices,
+    };
+    async fn ended(rx: &mut Rx, proc: u64) -> (String, Option<i32>) {
+        let mut said = String::new();
+        let code = wait_for(rx, "the task's end", WAIT, |msg| match msg {
+            ServerMessage::Notification {
+                event: Event::ProcessOutput { proc: p, data },
+                ..
+            } if p == proc => {
+                said.push_str(&String::from_utf8_lossy(&data));
+                None
+            }
+            ServerMessage::Notification {
+                event: Event::ProcessExited { proc: p, code },
+                ..
+            } if p == proc => Some(code),
+            _ => None,
+        })
+        .await;
+        (said, code)
+    }
+    assert!(
+        server
+            .handle(
+                2,
+                run(
+                    5,
+                    clew_protocol::ProjectTask::Lake {
+                        file: "Main.lean".into(),
+                        test: true,
+                    },
+                    choices.clone(),
+                ),
+            )
+            .await
+            .is_none()
+    );
+    let (said, code) = ended(&mut rx, 5).await;
+    assert_eq!(code, Some(3), "{said}");
+    assert!(said.contains("lake test"), "{said}");
+    // Outside the project: nothing runs, and it says so.
+    assert!(
+        server
+            .handle(
+                3,
+                run(
+                    6,
+                    clew_protocol::ProjectTask::LeanMain {
+                        file: "../outside.lean".into(),
+                    },
+                    choices.clone(),
+                ),
+            )
+            .await
+            .is_none()
+    );
+    let (said, code) = ended(&mut rx, 6).await;
+    assert_eq!(code, None);
+    assert!(!said.is_empty(), "the reason said");
+    // A task still running is stopped by a kill.
+    std::fs::write(&lake, "#!/bin/sh\necho started\nsleep 30\n").unwrap();
+    assert!(
+        server
+            .handle(
+                4,
+                run(
+                    7,
+                    clew_protocol::ProjectTask::Lake {
+                        file: "Main.lean".into(),
+                        test: false,
+                    },
+                    choices,
+                ),
+            )
+            .await
+            .is_none()
+    );
+    wait_for(&mut rx, "the task to start", WAIT, |msg| match msg {
+        ServerMessage::Notification {
+            event: Event::ProcessOutput { proc: 7, .. },
+            ..
+        } => Some(()),
+        _ => None,
+    })
+    .await;
+    let started = std::time::Instant::now();
+    assert!(
+        server
+            .handle(5, Request::ProcessKill { proc: 7 })
+            .await
+            .is_none()
+    );
+    let (_, code) = ended(&mut rx, 7).await;
+    assert_eq!(code, None);
+    assert!(started.elapsed() < Duration::from_secs(10));
+}
+
+/// A language server is started in a folder of the project when asked —
+/// Lean's in its Lake project — and never outside it, nor in a file.
+#[tokio::test]
+async fn spawn_lsp_runs_only_in_a_folder_of_the_project() {
+    let (mut server, mut rx) = server();
+    let root = temp_project("spawn-lsp-folder");
+    std::fs::create_dir_all(root.join("proofs")).unwrap();
+    std::fs::write(
+        root.join("proofs/Main.lean"),
+        "def main : IO Unit := pure ()\n",
+    )
+    .unwrap();
+    open_project(&mut server, &mut rx, 1, &root).await;
+    for folder in ["../elsewhere", "proofs/Main.lean", "/tmp"] {
+        let reply = server
+            .handle(
+                2,
+                Request::SpawnLsp {
+                    proc: 4,
+                    language: "lean".into(),
+                    choices: Default::default(),
+                    folder: Some(folder.into()),
+                },
+            )
+            .await;
+        assert!(
+            matches!(&reply, Some(Event::Error { code: ErrorCode::Refused, message }) if message.contains("not a folder")),
+            "{folder}: {reply:?}"
+        );
+    }
+}
+
 // -- project state -------------------------------------------------------------
 
 /// Project state (`<root>/.clew/*`) reads and writes happen where the
@@ -2166,6 +2328,7 @@ async fn repo_lsp_command_needs_a_pushed_approval() {
                     proc: 7,
                     language: "rust".into(),
                     choices: Default::default(),
+                    folder: None,
                 },
             )
             .await
@@ -2218,6 +2381,7 @@ async fn repo_lsp_command_needs_a_pushed_approval() {
                     proc: 9,
                     language: "rust".into(),
                     choices: Default::default(),
+                    folder: None,
                 },
             )
             .await
@@ -2247,6 +2411,7 @@ async fn repo_lsp_command_needs_a_pushed_approval() {
                 proc: 8,
                 language: "rust".into(),
                 choices: Default::default(),
+                folder: None,
             },
         )
         .await;
@@ -2273,6 +2438,7 @@ async fn repo_lsp_command_needs_a_pushed_approval() {
                     proc: 9,
                     language: "rust".into(),
                     choices: Default::default(),
+                    folder: None,
                 },
             )
             .await
@@ -2297,6 +2463,7 @@ async fn spawn_lsp_for_a_language_without_a_server_is_answered() {
         proc: 11,
         language: "klingon".into(),
         choices: Default::default(),
+        folder: None,
     };
     assert!(server.handle(2, spawn).await.is_none());
     let (mut exited, mut reply) = (false, None);
@@ -2344,6 +2511,7 @@ async fn spawn_lsp_never_installs_without_consent() {
                     proc: 7,
                     language: "rust".into(),
                     choices: Default::default(),
+                    folder: None,
                 },
             )
             .await
@@ -2711,6 +2879,7 @@ async fn input_pipelined_behind_spawn_lsp_reaches_the_child() {
                     proc: 11,
                     language: "rust".into(),
                     choices: Default::default(),
+                    folder: None,
                 },
             )
             .await

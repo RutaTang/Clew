@@ -62,6 +62,16 @@ pub enum RunPlan {
         /// The item it documents (`add`); empty for a module's own.
         item: String,
     },
+    /// A task run where a remote project is, by its clew-server
+    /// (`RunTask`): a Lean `main`, Lake's build or tests, a Rust program or
+    /// test. No debugger: its output and how it ended.
+    Remote {
+        task: clew_protocol::ProjectTask,
+        /// What the run is called: the file, the test, the Lake task.
+        name: String,
+        /// For tests: whether a group's (`true`) or one test's.
+        tests: Option<bool>,
+    },
     /// A Lake project built, or its tests run (`lake build`, `lake test`):
     /// no debugger, its output and how it ended.
     Lake {
@@ -121,16 +131,7 @@ pub struct CargoTest {
 }
 
 /// Which tests of a test binary a run runs.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CargoTests {
-    /// One test, by its name as worked out from the code
-    /// (`parser::tests::adds`).
-    One(String),
-    /// A group: the tests named one of these or below it — a module
-    /// (`parser::tests`), a test at its file's root — every test of the
-    /// target where there are none.
-    Under(Vec<String>),
-}
+pub use clew_core::cargorun::CargoTests;
 
 impl RunPlan {
     /// What the run is called: its tab, the status line.
@@ -153,6 +154,7 @@ impl RunPlan {
                 .unwrap_or_default(),
             // As it is typed: `lake build`, `lake test`.
             RunPlan::Lake { task, .. } => ["lake", task.args()[0]].join(" "),
+            RunPlan::Remote { name, .. } => name.clone(),
         }
     }
 
@@ -167,6 +169,7 @@ impl RunPlan {
             | RunPlan::Script { .. }
             | RunPlan::Lean { .. }
             | RunPlan::Lake { .. }
+            | RunPlan::Remote { .. }
             | RunPlan::Doctest { .. } => None,
         }
     }
@@ -178,6 +181,19 @@ impl RunPlan {
     /// said it had. A group's run says the same of its tests. `None` for
     /// a run of anything but tests.
     pub(crate) fn verdict(&self, code: i64) -> Option<String> {
+        if let RunPlan::Remote {
+            name,
+            tests: Some(group),
+            ..
+        } = self
+        {
+            return Some(match (group, code) {
+                (true, 0) => tr!("Tests in {name} passed", name = name),
+                (true, _) => tr!("Some tests in {name} failed", name = name),
+                (false, 0) => tr!("Test {name} passed", name = name),
+                (false, _) => tr!("Test {name} failed", name = name),
+            });
+        }
         if let RunPlan::Lake {
             project,
             task: LakeTask::Test,
@@ -255,6 +271,7 @@ impl RunPlan {
             | RunPlan::Script { .. }
             | RunPlan::Lean { .. }
             | RunPlan::Lake { .. }
+            | RunPlan::Remote { .. }
             | RunPlan::Doctest { .. } => false,
         }
     }
@@ -304,6 +321,7 @@ impl RunPlan {
             RunPlan::Lean { file, project, .. } => {
                 (file.clone(), Vec::new(), project.clone(), None)
             }
+            RunPlan::Remote { .. } => (root.to_path_buf(), Vec::new(), root.to_path_buf(), None),
             RunPlan::Lake { project, task, .. } => (
                 project.clone(),
                 task.args().iter().map(|a| a.to_string()).collect(),
@@ -334,6 +352,7 @@ impl RunPlan {
                 file.parent().map(Path::to_path_buf).unwrap_or_default()
             }
             RunPlan::Lake { project, .. } => project.clone(),
+            RunPlan::Remote { .. } => PathBuf::new(),
         };
         beside.join(self.label())
     }
@@ -409,41 +428,9 @@ pub(crate) fn test_plan_at(lang: &str, file: &Path, source: &str, line: usize) -
             })
         }
         "rust" => {
-            let target = clew_core::cargorun::target_of(file)?;
-            let runs = match (test.kind, test.name.is_empty()) {
-                (RunnableKind::Test, _) => {
-                    CargoTests::One(target.test_path(&test.scopes, &test.name))
-                }
-                (_, false) => CargoTests::Under(vec![target.test_path(&test.scopes, &test.name)]),
-                // A file's tests: its module's; a test target's root file
-                // holds every test of it; a library's or a program's root,
-                // its own modules' and tests' — not the crate's every test.
-                (_, true) if !target.module.is_empty() => {
-                    CargoTests::Under(vec![target.module.join("::")])
-                }
-                (_, true) if matches!(target.kind, TargetKind::Test(_)) => {
-                    CargoTests::Under(Vec::new())
-                }
-                (_, true) => CargoTests::Under(
-                    found
-                        .iter()
-                        .filter(|r| {
-                            r.scopes.is_empty()
-                                && !r.name.is_empty()
-                                && matches!(r.kind, RunnableKind::Test | RunnableKind::Tests)
-                        })
-                        .map(|r| r.name.clone())
-                        .collect(),
-                ),
-            };
+            let (target, runs, name) = clew_core::cargorun::tests_at(file, source, line)?;
             Some(RunPlan::Cargo {
-                test: Some(CargoTest {
-                    runs,
-                    name: match test.name.is_empty() {
-                        true => file_name(file),
-                        false => test.name.clone(),
-                    },
-                }),
+                test: Some(CargoTest { runs, name }),
                 target,
             })
         }

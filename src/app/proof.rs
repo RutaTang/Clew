@@ -362,6 +362,22 @@ impl App {
             .is_some_and(|v| v.lang_key == Some("lean"))
     }
 
+    /// The folder, relative to the project, of the Lake project of the
+    /// Lean file read, in a remote project: read from its listing, its
+    /// files being on its host. `None` for the project's own, or no Lean
+    /// file read.
+    pub(crate) fn remote_lake_folder(&self) -> Option<String> {
+        let project = self.proj.project.as_ref()?;
+        let file = self.lean_file()?;
+        let rel = file
+            .strip_prefix(&project.root)
+            .ok()?
+            .to_string_lossy()
+            .replace('\\', "/");
+        let folder = clew_core::lake_folder_in(project.files.iter().map(|f| f.rel.as_str()), &rel);
+        (!folder.is_empty()).then_some(folder)
+    }
+
     /// The Lean file being read: the active one, else any open.
     pub(crate) fn lean_file(&self) -> Option<PathBuf> {
         self.active_viewer()
@@ -381,13 +397,21 @@ impl App {
     /// imports resolve (a repository's proofs and its extracted code are
     /// often two). `None` while it is where it should be.
     fn sync_lean_root(&mut self) -> Option<Task<Message>> {
-        if self.connection.is_remote() || !self.reading_lean() {
+        if !self.reading_lean() {
             return None;
         }
         if !matches!(self.proj.link.lsp.get("lean"), Some(LspSlot::Ready(_))) {
             return None;
         }
-        let lake = self.lake_of_lean_file()?;
+        let lake = match self.connection.is_remote() {
+            // Read from the project's listing: its files are on its host.
+            true => {
+                let root = self.proj.project.as_ref()?.root.clone();
+                self.remote_lake_folder()
+                    .map_or_else(|| root.clone(), |folder| root.join(folder))
+            }
+            false => self.lake_of_lean_file()?,
+        };
         let started = self.proj.link.lean_root.as_ref()?;
         if *started == lake {
             return None;
@@ -463,8 +487,19 @@ impl App {
         // never offered the cache: Lean built all of Mathlib, for hours.
         if self.reading_lean() && !matches!(self.proj.mathlib, MathlibCache::Getting(_)) {
             if self.connection.is_remote() {
+                // Its build is on its host, not looked at from here: one
+                // whose file imports Mathlib may get the cache, from the
+                // palette.
                 if self.proj.mathlib == MathlibCache::Unknown {
-                    self.proj.mathlib = MathlibCache::Ready;
+                    let mathlib = self.active_viewer().is_some_and(|v| {
+                        clew_core::lean_header_imports(&v.source)
+                            .iter()
+                            .any(|m| m == "Mathlib" || m.starts_with("Mathlib."))
+                    });
+                    self.proj.mathlib = match mathlib {
+                        true => MathlibCache::Built,
+                        false => MathlibCache::Ready,
+                    };
                 }
             } else if let Some(lake) = self.lake_of_lean_file()
                 && self.proj.mathlib_root.as_ref() != Some(&lake)
@@ -576,8 +611,11 @@ impl App {
     /// Mathlib, for hours, with nothing said of it.
     fn on_get_mathlib_cache(&mut self) -> Task<Message> {
         use iced::futures::channel::mpsc;
-        if matches!(self.proj.mathlib, MathlibCache::Getting(_)) || self.connection.is_remote() {
+        if matches!(self.proj.mathlib, MathlibCache::Getting(_)) {
             return Task::none();
+        }
+        if self.connection.is_remote() {
+            return self.get_remote_mathlib_cache();
         }
         // In the Lake project whose Mathlib is missing: `lake exe cache get`
         // in a folder with no lakefile finds no Mathlib to get.
@@ -620,6 +658,72 @@ impl App {
             let _ = tx.unbounded_send(Message::Proof(ProofMsg::MathlibGot { stamp, result }));
         });
         Task::run(rx, std::convert::identity)
+    }
+
+    /// Get Mathlib's build cache where a remote project is: `lake exe cache
+    /// get` run on its host (`RunTask`), in the Lake project of the Lean
+    /// file read, said on the Goals' card as it goes.
+    fn get_remote_mathlib_cache(&mut self) -> Task<Message> {
+        let Some(rel) = self.lean_file().and_then(|f| self.project_rel(&f)) else {
+            self.status = tr!("Open a Lean file of the project first.").into();
+            return Task::none();
+        };
+        let remote = match self.remote_run(clew_protocol::ProjectTask::MathlibCache { file: rel }) {
+            Ok(remote) => remote,
+            Err(error) => {
+                self.status = error;
+                return Task::none();
+            }
+        };
+        self.proj.mathlib = MathlibCache::Getting(String::new());
+        self.reset_lsp("lean");
+        self.proj.lean_goals = None;
+        let stamp = self.stamp();
+        let stream = iced::stream::channel(
+            16,
+            move |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
+                use iced::futures::SinkExt;
+                use tokio::io::AsyncBufReadExt;
+                let crate::app::debug::RemoteRun { stdin, stdout, end } = remote;
+                let mut lines = tokio::io::BufReader::new(stdout).lines();
+                let mut last = String::new();
+                let mut passed = std::time::Instant::now() - MATHLIB_SAID_EVERY;
+                while let Ok(Some(line)) = lines.next_line().await {
+                    // Progress is redrawn with `\r`: its last state.
+                    let line = line
+                        .rsplit('\r')
+                        .next()
+                        .unwrap_or_default()
+                        .trim()
+                        .to_string();
+                    if line.is_empty() {
+                        continue;
+                    }
+                    last.clone_from(&line);
+                    if passed.elapsed() >= MATHLIB_SAID_EVERY {
+                        passed = std::time::Instant::now();
+                        let _ = output
+                            .send(Message::Proof(ProofMsg::MathlibSaid {
+                                stamp: stamp.clone(),
+                                line,
+                            }))
+                            .await;
+                    }
+                }
+                drop(stdin);
+                let result = match end.await {
+                    Ok(Some(0)) => Ok(()),
+                    _ if last.is_empty() => {
+                        Err(tr!("lake exe cache get failed on the remote host.").into())
+                    }
+                    _ => Err(last),
+                };
+                let _ = output
+                    .send(Message::Proof(ProofMsg::MathlibGot { stamp, result }))
+                    .await;
+            },
+        );
+        Task::run(stream, std::convert::identity)
     }
 
     /// `lake exe cache get` ended: Mathlib's build is looked for again, and

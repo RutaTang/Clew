@@ -1227,6 +1227,63 @@ pub enum BuildError {
     NoProgram,
 }
 
+/// Which tests of a test binary a run runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CargoTests {
+    /// One test, by its name as worked out from the code
+    /// (`parser::tests::adds`).
+    One(String),
+    /// A group: the tests named one of these or below it — a module
+    /// (`parser::tests`), a test at its file's root — every test of the
+    /// target where there are none.
+    Under(Vec<String>),
+}
+
+/// The tests Run Test runs from 1-based `line` of the Rust file `file`
+/// (its text `source`): its target, which of its tests, and what the run
+/// is called (the test's name, its module's, or the file's). `None` where
+/// the line is in no test, or the file in no Cargo package; a doc example
+/// is rustdoc's (see [`run_doctest`]).
+pub fn tests_at(
+    file: &Path,
+    source: &str,
+    line: usize,
+) -> Option<(CargoTarget, CargoTests, String)> {
+    use crate::runnables::{RunnableKind, runnable_at, runnables};
+    let found = runnables("rust", source);
+    let test = runnable_at(&found, line)
+        .filter(|r| matches!(r.kind, RunnableKind::Test | RunnableKind::Tests))?;
+    let target = target_of(file)?;
+    let runs = match (test.kind, test.name.is_empty()) {
+        (RunnableKind::Test, _) => CargoTests::One(target.test_path(&test.scopes, &test.name)),
+        (_, false) => CargoTests::Under(vec![target.test_path(&test.scopes, &test.name)]),
+        // A file's tests: its module's; a test target's root file holds
+        // every test of it; a library's or a program's root, its own
+        // modules' and tests' — not the crate's every test.
+        (_, true) if !target.module.is_empty() => CargoTests::Under(vec![target.module.join("::")]),
+        (_, true) if matches!(target.kind, TargetKind::Test(_)) => CargoTests::Under(Vec::new()),
+        (_, true) => CargoTests::Under(
+            found
+                .iter()
+                .filter(|r| {
+                    r.scopes.is_empty()
+                        && !r.name.is_empty()
+                        && matches!(r.kind, RunnableKind::Test | RunnableKind::Tests)
+                })
+                .map(|r| r.name.clone())
+                .collect(),
+        ),
+    };
+    let name = match test.name.is_empty() {
+        true => file
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        false => test.name.clone(),
+    };
+    Some((target, runs, name))
+}
+
 /// A program Cargo built, to run as Cargo runs it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Built {

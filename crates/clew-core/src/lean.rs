@@ -912,6 +912,32 @@ pub fn lake_root(root: &Path, file: &Path) -> Option<PathBuf> {
     )
 }
 
+/// [`lake_root`] read from a project's listing — `rels`, its files'
+/// paths relative to it, `/`-separated — instead of the disk: the folder of
+/// the Lake project the file `file` (relative too) belongs to, relative,
+/// `""` for the project's own. A remote project's, whose files are not on
+/// this computer.
+pub fn lake_folder_in<'a>(rels: impl IntoIterator<Item = &'a str>, file: &str) -> String {
+    let lakes: std::collections::HashSet<&str> = rels
+        .into_iter()
+        .filter_map(|rel| {
+            let (dir, name) = rel.rsplit_once('/').unwrap_or(("", rel));
+            matches!(name, "lakefile.lean" | "lakefile.toml").then_some(dir)
+        })
+        .collect();
+    let parts: Vec<&str> = file.split('/').collect();
+    // A dependency's file is the project's holding its checkout.
+    let end = parts
+        .iter()
+        .position(|p| matches!(*p, ".lake" | "lake-packages"))
+        .unwrap_or(parts.len().saturating_sub(1));
+    (0..=end)
+        .rev()
+        .map(|n| parts[..n].join("/"))
+        .find(|dir| lakes.contains(dir.as_str()))
+        .unwrap_or_default()
+}
+
 /// The Lake project the folder `root` is in, when `root` has no lakefile
 /// of its own and a folder above it has one (short of the home folder):
 /// opened, a folder of a Lake project's sources has Lean find none of its
@@ -1168,7 +1194,7 @@ pub fn run_lake(
 
 /// The modules a Lean file's header imports (`import A.B`, `public import
 /// C`, `import all D`, several to a line), in order.
-pub(crate) fn header_imports(source: &str) -> Vec<String> {
+pub fn header_imports(source: &str) -> Vec<String> {
     let mut out = Vec::new();
     for range in commands(source) {
         let command = &source[range];
@@ -1914,6 +1940,27 @@ mod tests {
         at("lakefile.lean");
         assert_eq!(lake_root(&inner, &loose), Some(inner.clone()));
         assert_eq!(lake_root(&root, &loose), Some(root.clone()));
+        // Read from a listing as from the disk.
+        let rels = [
+            "verification/lakefile.lean",
+            "verification/extracted/lakefile.toml",
+            "verification/Proofs/Trust.lean",
+            "lakefile.lean",
+        ];
+        assert_eq!(
+            lake_folder_in(rels, "verification/Proofs/Trust.lean"),
+            "verification"
+        );
+        assert_eq!(
+            lake_folder_in(rels, "verification/extracted/Gen/Funs.lean"),
+            "verification/extracted"
+        );
+        assert_eq!(
+            lake_folder_in(rels, "verification/.lake/packages/m/M.lean"),
+            "verification"
+        );
+        assert_eq!(lake_folder_in(rels, "scratch/Try.lean"), "");
+        assert_eq!(lake_folder_in(["a/B.lean"], "a/B.lean"), "");
         // Which is said: the folder opened is in the project above it.
         assert_eq!(lake_project_above(&inner), Some(root.clone()));
         assert_eq!(lake_project_above(&root), None, "its own lakefile");
