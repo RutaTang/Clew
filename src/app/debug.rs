@@ -507,9 +507,10 @@ async fn run_remote(
             let _ = output.send(event(dap::DapEvent::Terminated)).await;
         }
         _ => {
+            // In the reader's language where it is a message Clew knows.
             let error = match last.trim() {
                 "" => tr!("The task did not run on the remote host.").to_string(),
-                why => why.to_string(),
+                why => crate::i18n::message(why),
             };
             let _ = output
                 .send(Message::Debug(DebugMsg::Failed {

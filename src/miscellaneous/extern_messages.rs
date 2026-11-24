@@ -797,6 +797,17 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!(
         "{who} endpoint redirected to {location}, which Clew didn't follow to keep the API key safe. Set the Base URL in Settings to the real endpoint"
     ),
+    tr_noop!("Built the tests of {name}, but couldn't list them."),
+    tr_noop!("Cargo built, and reported no program to run."),
+    tr_noop!("Cargo could not be started: {why}"),
+    tr_noop!("The build failed."),
+    tr_noop!("When built, there are no tests in {name}."),
+    tr_noop!("When built, there is no test named {name}."),
+    tr_noop!("refused to start a language server in {folder}: not a folder of the project"),
+    tr_noop!("rustdoc lists no doc example there."),
+    tr_noop!("the task stopped unexpectedly"),
+    tr_noop!("{arg1} has several programs ({arg2}), and no default-run to say which to run."),
+    tr_noop!("{arg1} is a library, with no program to run."),
 ];
 
 /// Parts the code puts into those messages (why a connection timed out,
