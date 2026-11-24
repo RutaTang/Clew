@@ -337,6 +337,7 @@ fn project_map(
                 file: n.at.as_ref().map(|at| at.path.clone()).unwrap_or_default(),
                 line: n.at.map_or(0, |at| at.line as usize),
                 detail: n.detail,
+                fields: Vec::new(),
             })
             .collect(),
         edges: graph
@@ -346,6 +347,7 @@ fn project_map(
                 from: e.from as usize,
                 to: e.to as usize,
                 label: e.label,
+                fields: Vec::new(),
             })
             .collect(),
     }

@@ -11411,6 +11411,7 @@ fn the_maps_overlay_lists_a_maps_nodes_by_kind() {
             file: file.into(),
             line,
             detail: detail.into(),
+            fields: Vec::new(),
         };
     app.proj.maps = Arc::new(vec![
         clew_protocol::ProjectMap {
@@ -11431,6 +11432,7 @@ fn the_maps_overlay_lists_a_maps_nodes_by_kind() {
                 from: 0,
                 to: 1,
                 label: "user_id".into(),
+                fields: Vec::new(),
             }],
         },
         clew_protocol::ProjectMap {
@@ -11495,6 +11497,7 @@ fn the_maps_overlay_lists_a_maps_nodes_by_kind() {
         from: 0,
         to: 1,
         label: "handled by".into(),
+        fields: Vec::new(),
     });
     assert_eq!(super::MapChoice::of(&routes).to_string(), "Routes");
     // From the graph: a node opens where it is defined; one defined nowhere,

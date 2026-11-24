@@ -377,10 +377,17 @@ pub struct ProjectMap {
 }
 
 impl ProjectMap {
-    /// Whether every edge names a node there is.
+    /// Whether every edge names a node there is, and every field it joins
+    /// a field its nodes have.
     pub fn is_well_formed(&self) -> bool {
         let n = self.nodes.len();
-        self.edges.iter().all(|e| e.from < n && e.to < n)
+        self.edges.iter().all(|e| {
+            e.from < n
+                && e.to < n
+                && e.fields.iter().all(|&(a, b)| {
+                    a < self.nodes[e.from].fields.len() && b < self.nodes[e.to].fields.len()
+                })
+        })
     }
 }
 
@@ -398,6 +405,41 @@ pub struct MapNode {
     /// 1-based line in `file`; 0 when there is none.
     pub line: usize,
     pub detail: String,
+    /// Its fields, in order — a table's columns — for a node that has
+    /// them: a map whose nodes have fields is drawn as cards that list them.
+    pub fields: Vec<MapField>,
+}
+
+/// One field of a [`MapNode`]: a table's column, and what the schema says
+/// of it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MapField {
+    pub name: String,
+    /// Its type as written (`varchar(100)`, `text[]`); empty when unknown.
+    pub ty: String,
+    /// Part of its node's primary key.
+    pub key: bool,
+    /// May hold no value (SQL's `NULL`).
+    pub nullable: bool,
+    /// Unique on its own.
+    pub unique: bool,
+    /// A value the database makes for it: an identity column, `serial`,
+    /// `AUTO_INCREMENT`.
+    pub identity: bool,
+    /// Computed from the other fields (`default` holds the expression).
+    pub generated: bool,
+    /// The first field of an index (or a key), so a lookup by it is quick.
+    pub indexed: bool,
+    /// Its default value, or what it is generated from, as written; empty
+    /// for none.
+    pub default: String,
+    /// What a comment on it says.
+    pub doc: String,
+    /// Its file, relative to the project root: empty when it is the node's
+    /// own (a column added by a later migration has another).
+    pub file: Rel,
+    /// 1-based line in its file; 0 when there is none.
+    pub line: usize,
 }
 
 /// How one node relates to another: an arrow `from` → `to`, saying what it
@@ -407,6 +449,10 @@ pub struct MapEdge {
     pub from: usize,
     pub to: usize,
     pub label: String,
+    /// The fields it joins, each `(field of from, field of to)` by index —
+    /// a foreign key's columns and the ones they reference; empty for an
+    /// arrow between whole nodes.
+    pub fields: Vec<(usize, usize)>,
 }
 
 // -- the project call graph ---------------------------------------------------

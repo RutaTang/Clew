@@ -17,7 +17,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use clew_protocol::{MapEdge, MapNode, ProjectMap};
+use clew_protocol::{MapEdge, MapField, MapNode, ProjectMap};
 use tree_sitter::{Node, Tree};
 
 use crate::fs_scan::FileEntry;
@@ -277,6 +277,13 @@ impl MapBuilder {
         }
     }
 
+    /// The node `at`'s fields, replaced.
+    pub fn fields(&mut self, at: Option<usize>, fields: Vec<MapField>) {
+        if let Some(node) = at.and_then(|at| self.map.nodes.get_mut(at)) {
+            node.fields = fields;
+        }
+    }
+
     /// The node `at`, as it is now.
     pub fn get(&self, at: usize) -> Option<&MapNode> {
         self.map.nodes.get(at)
@@ -284,14 +291,36 @@ impl MapBuilder {
 
     /// An arrow `from` → `to`, once.
     pub fn edge(&mut self, from: Option<usize>, to: Option<usize>, label: &str) {
+        self.edge_joining(from, to, label, Vec::new());
+    }
+
+    /// An arrow `from` → `to` joining `fields` (each `(from's, to's)`, by
+    /// index), once; a pair naming a field its node does not have is left
+    /// out.
+    pub fn edge_joining(
+        &mut self,
+        from: Option<usize>,
+        to: Option<usize>,
+        label: &str,
+        fields: Vec<(usize, usize)>,
+    ) {
         let (Some(from), Some(to)) = (from, to) else {
             return;
         };
+        let (n_from, n_to) = (
+            self.map.nodes[from].fields.len(),
+            self.map.nodes[to].fields.len(),
+        );
+        let fields = fields
+            .into_iter()
+            .filter(|&(a, b)| a < n_from && b < n_to)
+            .collect();
         if self.edges.insert((from, to, label.to_string())) {
             self.map.edges.push(MapEdge {
                 from,
                 to,
                 label: label.into(),
+                fields,
             });
         }
     }

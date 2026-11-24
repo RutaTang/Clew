@@ -17808,12 +17808,14 @@ fn a_remote_projects_maps_are_read_on_its_host_and_checked() {
                 file: "app.py".into(),
                 line: 3,
                 detail: String::new(),
+                fields: Vec::new(),
             },
         ],
         edges: vec![clew_protocol::MapEdge {
             from: 0,
             to: 1,
             label: "handled by".into(),
+            fields: Vec::new(),
         }],
     };
     let mut bad = good.clone();
