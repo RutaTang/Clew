@@ -203,7 +203,7 @@ pub(crate) const MAP_DESCRIPTIONS: &[&str] = &[
         "each module and an arrow to each item it makes pub (not pub(crate)), and to what it re-exports with pub use"
     ),
     tr_noop!(
-        "a node per table and view, as the migrations leave them, with an arrow for each foreign key (labelled by its columns) and for what each view reads"
+        "a card per table and view, as the migrations leave them, listing its columns, with a line from each foreign key's columns to the ones they reference"
     ),
     tr_noop!(
         "each migration in the order it runs, what it changes in its detail, and an arrow to each table it creates, alters or drops"

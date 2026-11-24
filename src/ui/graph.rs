@@ -22,6 +22,7 @@ const GRAPH_SEARCH_W: f32 = 190.0 + 72.0 + 2.0 * (14.0 + 12.0) + 3.0 * 2.0;
 pub(crate) fn graph_modal_frame<'a>(
     title: &'a str,
     graph_mode: bool,
+    tables: bool,
     graph_3d: bool,
     graph_spin: bool,
     graph_heat: bool,
@@ -73,10 +74,10 @@ pub(crate) fn graph_modal_frame<'a>(
     let mut map_controls: Vec<Element<'a, Message>> = Vec::new();
     // In 2D its place is kept, empty: gone, the controls after it moved
     // 36 px — "Find in the graph" jumped under the pointer at each switch.
-    if graph_mode && !graph_3d {
+    if graph_mode && !graph_3d && !tables {
         map_controls.push(space().width(Length::Fixed(16.0 + 16.0)).into());
     }
-    if graph_mode && graph_3d {
+    if graph_mode && graph_3d && !tables {
         map_controls.push(if graph_spin {
             icon_btn(
                 Glyph::Pause,
@@ -97,6 +98,9 @@ pub(crate) fn graph_modal_frame<'a>(
             tr!("Fit the graph"),
             Message::Graph(GraphMsg::FitView),
         ));
+    }
+    // A map of tables lies flat, and its cards are no files to heat.
+    if graph_mode && !tables {
         map_controls.push(pair(
             ("2D".to_string(), !graph_3d),
             ("3D".to_string(), graph_3d),
@@ -152,7 +156,14 @@ pub(crate) fn graph_modal_frame<'a>(
         let fixed_w = seg(tr!("Graph")) + seg(tr!("List")) + 2.0 + HEADER_GAP + icon;
         let lead_w =
             measure(title, ts::TITLE) + extra.as_ref().map_or(0.0, |(_, w)| w + HEADER_GAP);
-        let map_w = if graph_mode {
+        let map_w = if graph_mode && tables {
+            let search = if search.is_some() {
+                GRAPH_SEARCH_W + HEADER_GAP
+            } else {
+                0.0
+            };
+            search + icon + HEADER_GAP
+        } else if graph_mode {
             let spin = icon + HEADER_GAP;
             let search = if search.is_some() {
                 GRAPH_SEARCH_W + HEADER_GAP
@@ -366,9 +377,15 @@ pub(crate) fn project_graph_modal(app: &App, overlay: crate::Overlay) -> Element
     );
     let search = app.graph_mode.then(|| graph_search_field(app));
     let extra = extra.map(|extra| (extra, graph_extra_w(app, overlay)));
+    let tables = overlay == crate::Overlay::ProjectMaps
+        && app
+            .selected_map_index()
+            .and_then(|at| app.proj.maps.get(at))
+            .is_some_and(super::schema::is_tables);
     graph_modal_frame(
         title,
         app.graph_mode,
+        tables,
         app.graph_3d,
         app.graph_spin,
         app.graph_heat,
@@ -710,6 +727,14 @@ pub(crate) fn hidden_graph_note(app: &App) -> Option<Element<'static, Message>> 
 /// The node-link map: a force-directed canvas plus a legend.
 pub(crate) fn graph_map_view(app: &App) -> Element<'_, Message> {
     let overlay = app.proj.overlay;
+    // A map of tables is drawn as tables.
+    if overlay == Some(crate::Overlay::ProjectMaps)
+        && let Some(at) = app.selected_map_index()
+        && let Some(map) = app.proj.maps.get(at)
+        && super::schema::is_tables(map)
+    {
+        return super::schema::schema_view(app, map, at);
+    }
     let hint = |msg: &str| {
         container(text(msg.to_string()).size(ts::BODY).color(theme::dim()))
             .padding(8)
@@ -741,6 +766,9 @@ pub(crate) fn graph_map_view(app: &App) -> Element<'_, Message> {
         // Its answer, as a command's is: not "could not be built" — nor
         // "Indexing the project…", said over it while Clew indexed.
         said
+    } else if overlay == Some(crate::Overlay::ProjectMaps) && app.proj.maps_building {
+        // Not "Nothing to show." while they are still being read.
+        tr!("Reading the project's graphs…")
     } else if app.proj.project_calls.building {
         tr!("Building call graph…")
     } else if app.scanning || app.proj.indexing {
@@ -3367,6 +3395,52 @@ pub(crate) fn map_text(english: &str) -> String {
         )
         .to_string();
     }
+    // What a table has besides its columns (`clew_core::maps::sql`): the
+    // words in the reader's language, the SQL as written.
+    match english {
+        "row level security" => return tr!("row level security").to_string(),
+        "materialized" => return tr!("materialized").to_string(),
+        _ => {}
+    }
+    if let Some(index) = english.strip_prefix("unique index ") {
+        return tr!("unique index {index}", index = index).to_string();
+    }
+    if let Some(index) = english.strip_prefix("index ") {
+        return tr!("index {index}", index = index).to_string();
+    }
+    if let Some(columns) = english
+        .strip_prefix("primary key (")
+        .and_then(|c| c.strip_suffix(')'))
+    {
+        return tr!("primary key ({columns})", columns = columns).to_string();
+    }
+    if let Some(columns) = english
+        .strip_prefix("unique (")
+        .and_then(|c| c.strip_suffix(')'))
+    {
+        return tr!("unique ({columns})", columns = columns).to_string();
+    }
+    if let Some(expression) = english
+        .strip_prefix("check (")
+        .and_then(|c| c.strip_suffix(')'))
+    {
+        return tr!("check ({expression})", expression = expression).to_string();
+    }
+    if let Some((name, rule)) = english
+        .strip_prefix("policy ")
+        .and_then(|p| p.split_once(": "))
+    {
+        return tr!("policy {name}: {rule}", name = name, rule = rule).to_string();
+    }
+    if let Some((name, when)) = english
+        .strip_prefix("trigger ")
+        .and_then(|p| p.split_once(": "))
+    {
+        return tr!("trigger {name}: {when}", name = name, when = when).to_string();
+    }
+    if let Some(tables) = english.strip_prefix("made from ") {
+        return tr!("made from {tables}", tables = tables).to_string();
+    }
     // A column's line: `id serial · primary key → users`.
     match english.split_once(" (primary key)") {
         Some((column, rest)) => format!("{column} ({}){rest}", tr!("primary key")),
@@ -3495,7 +3569,16 @@ impl MapChoice {
 impl std::fmt::Display for MapChoice {
     fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // The title, from clew-core, in the reader's language.
-        write!(out, "{}", crate::i18n::lookup(&self.title))
+        write!(out, "{}", map_title(&self.title))
+    }
+}
+
+/// A map's title in the reader's language: `Database schema · db/tenant`,
+/// one of several databases', has its folder kept as written.
+pub(crate) fn map_title(title: &str) -> String {
+    match title.split_once(" · ") {
+        Some((what, whose)) => format!("{} · {whose}", crate::i18n::lookup(what)),
+        None => crate::i18n::lookup(title).to_string(),
     }
 }
 
@@ -3522,6 +3605,37 @@ pub(crate) fn map_picker(app: &App) -> Option<Element<'_, Message>> {
             .into(),
         ),
     }
+}
+
+/// A field of a map's node as the list says it: `id uuid · primary key ·
+/// not null`.
+fn field_line(f: &clew_protocol::MapField) -> String {
+    let mut line = format!("  {} {}", f.name, f.ty).trim_end().to_string();
+    let mut marks: Vec<&str> = Vec::new();
+    if f.key {
+        marks.push(tr!("primary key"));
+    }
+    if f.identity {
+        marks.push(tr!("identity"));
+    }
+    if f.unique {
+        marks.push(tr!("unique"));
+    }
+    if f.generated {
+        marks.push(tr!("generated"));
+    }
+    if !f.nullable && !f.ty.is_empty() {
+        marks.push(tr!("not null"));
+    }
+    for mark in marks {
+        line.push_str(" · ");
+        line.push_str(mark);
+    }
+    if !f.default.is_empty() {
+        line.push_str(" = ");
+        line.push_str(&f.default);
+    }
+    line
 }
 
 /// The most nodes the Maps overlay lists (the graph shows them all).
@@ -3555,7 +3669,7 @@ pub(crate) fn project_maps_body(app: &App) -> Element<'_, Message> {
     let mut rows: Vec<Element<'_, Message>> = vec![
         text(format!(
             "{}, {}, {}",
-            crate::i18n::lookup(&map.title),
+            map_title(&map.title),
             trn!("1 node", "{n} nodes", map.nodes.len()),
             trn!("1 arrow", "{n} arrows", map.edges.len())
         ))
@@ -3653,12 +3767,18 @@ pub(crate) fn project_maps_body(app: &App) -> Element<'_, Message> {
                 ));
             }
             rows.push(button.into());
-            let mut lines: Vec<String> = n
-                .detail
-                .lines()
-                .take(12)
-                .map(|l| format!("  {}", map_text(l)))
-                .collect();
+            // A table's columns, each with what the schema says of it, then
+            // what else the node has.
+            let mut lines: Vec<String> = n.fields.iter().take(60).map(field_line).collect();
+            if n.fields.len() > 60 {
+                lines.push("  …".into());
+            }
+            lines.extend(
+                n.detail
+                    .lines()
+                    .take(12)
+                    .map(|l| format!("  {}", map_text(l))),
+            );
             if n.detail.lines().count() > 12 {
                 lines.push("  …".into());
             }

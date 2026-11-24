@@ -277,6 +277,11 @@ impl MapBuilder {
         }
     }
 
+    /// The map named for whose it is: `Database schema · db/tenant`.
+    pub fn title_for(&mut self, whose: &str) {
+        self.map.title = format!("{} · {whose}", self.map.title);
+    }
+
     /// The node `at`'s fields, replaced.
     pub fn fields(&mut self, at: Option<usize>, fields: Vec<MapField>) {
         if let Some(node) = at.and_then(|at| self.map.nodes.get_mut(at)) {

@@ -5,6 +5,7 @@ pub mod graphlayout;
 pub mod imports;
 pub mod index;
 pub mod projectcalls;
+pub mod schemalayout;
 pub mod structure;
 pub mod tree;
 pub mod typegraph;

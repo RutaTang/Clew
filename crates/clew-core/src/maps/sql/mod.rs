@@ -68,20 +68,13 @@ pub fn maps(corpus: &Corpus) -> Vec<ProjectMap> {
         .collect();
     // With several databases, each map says whose it is.
     let several = shown.len() > 1;
-    let name = |id: &str, title: &str, root: &str| -> (String, String) {
-        match several {
-            true => (format!("{id}:{root}"), format!("{title} · {root}")),
-            false => (id.to_string(), title.to_string()),
-        }
-    };
+    let whose = |db: &files::Database| several.then(|| db.root.clone());
     let mut out = Vec::new();
     for (db, schema) in &shown {
-        let (id, title) = name("sql.schema", "Database schema", &db.root);
-        out.extend(schema_map(schema, &id, &title));
+        out.extend(schema_map(schema, whose(db).as_deref()));
     }
     for (db, _) in &shown {
-        let (id, title) = name("sql.history", "Schema history", &db.root);
-        out.extend(history_map(&db.changes, &id, &title));
+        out.extend(history_map(&db.changes, whose(db).as_deref()));
     }
     let all: Vec<&Changes> = databases.iter().flat_map(|(db, _)| &db.changes).collect();
     out.extend(lineage_map(&all));
@@ -202,15 +195,27 @@ fn table_detail(table: &Table) -> Vec<String> {
     out
 }
 
-fn schema_map(schema: &Schema, id: &str, title: &str) -> Option<ProjectMap> {
+/// A map's id, for one of several databases (`whose`) or the one.
+fn map_id(id: &str, whose: Option<&str>) -> String {
+    match whose {
+        Some(root) => format!("{id}:{root}"),
+        None => id.to_string(),
+    }
+}
+
+fn schema_map(schema: &Schema, whose: Option<&str>) -> Option<ProjectMap> {
     if schema.tables.is_empty() && schema.views.is_empty() {
         return None;
     }
+    let id = map_id("sql.schema", whose);
     let mut map = MapBuilder::new(
-        id,
-        title,
+        &id,
+        "Database schema",
         "a card per table and view, as the migrations leave them, listing its columns, with a line from each foreign key's columns to the ones they reference",
     );
+    if let Some(root) = whose {
+        map.title_for(root);
+    }
     for (k, table) in &schema.tables {
         let at = map.node("table", k, &table.name.label());
         map.place(at, &table.file, table.line);
@@ -521,7 +526,7 @@ fn describe_other(op: &Op) -> Option<String> {
     }
 }
 
-fn history_map(migrations: &[Changes], id: &str, title: &str) -> Option<ProjectMap> {
+fn history_map(migrations: &[Changes], whose: Option<&str>) -> Option<ProjectMap> {
     let ddl: Vec<&Changes> = migrations
         .iter()
         .filter(|c| {
@@ -533,11 +538,15 @@ fn history_map(migrations: &[Changes], id: &str, title: &str) -> Option<ProjectM
     if ddl.len() < 2 {
         return None;
     }
+    let id = map_id("sql.history", whose);
     let mut map = MapBuilder::new(
-        id,
-        title,
+        &id,
+        "Schema history",
         "each migration in the order it runs, what it changes in its detail, and an arrow to each table it creates, alters or drops",
     );
+    if let Some(root) = whose {
+        map.title_for(root);
+    }
     let mut previous = None;
     for changes in ddl {
         let step = map.node(

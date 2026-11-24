@@ -17776,15 +17776,13 @@ fn the_maps_overlay_reads_a_local_projects_maps_when_they_are_stale() {
         "sql.lineage"
     );
     let schema = &app.proj.maps[0];
-    assert_eq!(
-        schema
-            .nodes
-            .iter()
-            .find(|n| n.label == "users")
-            .unwrap()
-            .detail,
-        "id int (primary key)\nemail text"
-    );
+    let users = schema.nodes.iter().find(|n| n.label == "users").unwrap();
+    let columns: Vec<(&str, &str, bool)> = users
+        .fields
+        .iter()
+        .map(|f| (f.name.as_str(), f.ty.as_str(), f.key))
+        .collect();
+    assert_eq!(columns, [("id", "int", true), ("email", "text", false)]);
 }
 
 /// A remote project's maps are read on its host; a map whose arrows name

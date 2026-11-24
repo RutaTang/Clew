@@ -10522,6 +10522,7 @@ fn the_maps_header_says_its_views_in_words() {
         super::graph::graph_modal_frame(
             "Call Graph",
             true,
+            false,
             app.graph_3d,
             false,
             false,
@@ -17569,6 +17570,7 @@ fn the_heat_toggle_keeps_its_width() {
         let frame = super::graph_modal_frame(
             "Import Graph",
             true,
+            false,
             false,
             false,
             on,

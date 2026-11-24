@@ -89,6 +89,7 @@ pub(crate) use graph::*;
 mod graph_labels;
 mod history;
 mod memo;
+mod schema;
 pub use memo::ViewMemo;
 pub(crate) use memo::{CallsSummary, DocsGroup, DocsKey, ImportRanks, RankedFile};
 mod notebook;

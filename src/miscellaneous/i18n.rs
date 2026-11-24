@@ -1459,20 +1459,40 @@ mod tests {
         // gives them to `MapBuilder::new`.
         let core = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("crates/clew-core/src");
         let mut maps = 0;
+        let mut sources = Vec::new();
         for entry in std::fs::read_dir(core.join("maps")).unwrap().flatten() {
-            let text = std::fs::read_to_string(entry.path()).unwrap();
+            match entry.path().is_dir() {
+                // A map's module of its own (`maps/sql/`).
+                true => sources.extend(
+                    std::fs::read_dir(entry.path())
+                        .unwrap()
+                        .flatten()
+                        .map(|e| e.path()),
+                ),
+                false => sources.push(entry.path()),
+            }
+        }
+        for path in sources {
+            let text = std::fs::read_to_string(path).unwrap();
             let text = text.split("#[cfg(test)]").next().unwrap();
             for call in text.split("MapBuilder::new(").skip(1) {
                 let mut rest = call;
                 for field in 0..3 {
-                    let Some(open) = rest.trim_start().strip_prefix('"') else {
-                        break;
-                    };
-                    let (value, after) = literal(open).expect("a string");
-                    if field > 0 {
-                        written.push(value);
+                    let trimmed = rest.trim_start();
+                    match trimmed.strip_prefix('"') {
+                        Some(open) => {
+                            let (value, after) = literal(open).expect("a string");
+                            if field > 0 {
+                                written.push(value);
+                            }
+                            rest = after.trim_start().strip_prefix(',').unwrap_or(after);
+                        }
+                        // An argument worked out (one database's map id).
+                        None => match trimmed.split_once(',') {
+                            Some((_, after)) => rest = after,
+                            None => break,
+                        },
                     }
-                    rest = after.trim_start().strip_prefix(',').unwrap_or(after);
                 }
                 maps += 1;
             }
