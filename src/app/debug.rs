@@ -523,6 +523,143 @@ async fn run_remote(
     }
 }
 
+/// What [`remote_debug_task`] asks the host for.
+struct RemoteDebugAsk<'a> {
+    tx: &'a crate::backend::server::RequestTx,
+    next_id: &'a std::sync::Arc<std::sync::atomic::AtomicU64>,
+    ai: &'a crate::app::rpc::AiClient,
+    /// The adapter's handle.
+    proc: u64,
+    /// The build's handle: Cargo's lines.
+    build: u64,
+    task: clew_protocol::ProjectTask,
+    choices: clew_protocol::LanguageChoices,
+}
+
+/// A Rust program debugged on a remote project's host: the adapter's
+/// streams, and the launch request built there for what was built.
+struct RemoteDebug {
+    stdin: tokio::io::DuplexStream,
+    stdout: tokio::io::DuplexStream,
+    launch: serde_json::Value,
+}
+
+/// Build a remote project's Rust program or test on its host and start
+/// lldb-dap on it there (`DebugTask`): Cargo's lines shown in the run as
+/// they come; `None` — said why — when it was stopped, or did not build or
+/// start.
+async fn remote_debug_task(
+    output: &mut iced::futures::channel::mpsc::Sender<Message>,
+    stamp: &Stamp,
+    run: u64,
+    live: &std::sync::Arc<std::sync::atomic::AtomicU64>,
+    ask: RemoteDebugAsk<'_>,
+) -> Option<RemoteDebug> {
+    use iced::futures::SinkExt;
+    use std::sync::atomic::Ordering;
+    use tokio::io::AsyncBufReadExt;
+    let failed = |error: String| {
+        Message::Debug(DebugMsg::Failed {
+            stamp: stamp.clone(),
+            run,
+            error,
+        })
+    };
+    // Cargo's lines: their own feed, read into the run's output. Its input
+    // held while it builds: let go, its bridge stops the build.
+    let (build_in, build_out, build_feed) =
+        crate::app::tasks::proxy_streams(ask.tx, ask.next_id, ask.build);
+    let _ = output
+        .send(Message::Server(ServerMsg::RegisterProcFeed {
+            stamp: stamp.clone(),
+            proc: ask.build,
+            feed: build_feed,
+        }))
+        .await;
+    let mut said = output.clone();
+    let said_stamp = stamp.clone();
+    let lines = tokio::spawn(async move {
+        let _held = build_in;
+        let mut lines = tokio::io::BufReader::new(build_out).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            let _ = said
+                .send(Message::Debug(DebugMsg::DapEvent {
+                    stamp: said_stamp.clone(),
+                    run,
+                    event: dap::DapEvent::Output(dap::proto::Output {
+                        category: "console".into(),
+                        text: format!("{line}\n"),
+                    }),
+                }))
+                .await;
+        }
+    });
+    // The adapter's streams, its feed in place before it can answer.
+    let (stdin, stdout, feed) = crate::app::tasks::proxy_streams(ask.tx, ask.next_id, ask.proc);
+    let _ = output
+        .send(Message::Server(ServerMsg::RegisterProcFeed {
+            stamp: stamp.clone(),
+            proc: ask.proc,
+            feed,
+        }))
+        .await;
+    let request = ask.ai.request(clew_protocol::Request::DebugTask {
+        proc: ask.proc,
+        build: ask.build,
+        task: ask.task,
+        choices: ask.choices,
+    });
+    tokio::pin!(request);
+    let mut tick = tokio::time::interval(std::time::Duration::from_millis(150));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let reply = loop {
+        tokio::select! {
+            reply = &mut request => break reply,
+            _ = tick.tick() => {
+                if live.load(Ordering::SeqCst) != run {
+                    // Stopped while it built: letting go of both stops it.
+                    lines.abort();
+                    return None;
+                }
+            }
+        }
+    };
+    // What Cargo said is all said before the session goes on.
+    let _ = lines.await;
+    match reply {
+        Ok(clew_protocol::Event::AdapterSpawned { launch, .. }) => {
+            match serde_json::from_str::<serde_json::Value>(&launch) {
+                Ok(launch) => Some(RemoteDebug {
+                    stdin,
+                    stdout,
+                    launch,
+                }),
+                Err(e) => {
+                    let error = tr!("invalid launch configuration: {error}", error = e);
+                    let _ = output.send(failed(error)).await;
+                    None
+                }
+            }
+        }
+        Ok(clew_protocol::Event::Error { message, .. }) => {
+            let _ = output.send(failed(crate::i18n::message(&message))).await;
+            None
+        }
+        Ok(other) => {
+            let error = tr!(
+                "unexpected SpawnAdapter reply: {reply}",
+                reply = format!("{other:?}")
+            );
+            let _ = output.send(failed(error)).await;
+            None
+        }
+        Err(e) => {
+            let _ = output.send(failed(e)).await;
+            None
+        }
+    }
+}
+
 /// The most children one variable shows: a list of a million is read a
 /// screenful at a time by no one.
 pub(crate) const MAX_VAR_CHILDREN: usize = 300;
@@ -917,8 +1054,8 @@ impl App {
         {
             return self.start_lean_run(no_debug);
         }
-        // A remote project's Rust program: built and run on its host, with
-        // no debugger there.
+        // A remote project's Rust program: built, and run or debugged, on
+        // its host.
         if self.connection.is_remote()
             && let Some(v) = self.active_viewer().filter(|v| v.lang_key == Some("rust"))
         {
@@ -932,21 +1069,14 @@ impl App {
             let Some(rel) = self.project_rel(&abs) else {
                 return Task::none();
             };
-            let task = self.start_session(
-                true,
+            return self.start_session(
+                no_debug,
                 Some(crate::app::runplan::RunPlan::Remote {
                     task: clew_protocol::ProjectTask::RustMain { file: rel },
                     name,
                     tests: None,
                 }),
             );
-            if !no_debug {
-                self.status = tr!(
-                    "A remote project's program runs without the debugger: {status}",
-                    status = self.status
-                );
-            }
-            return task;
         }
         let plan = self
             .active_viewer()
@@ -974,8 +1104,9 @@ impl App {
             return Task::none();
         };
         let lang = viewer.lang_key;
-        // A remote project's Rust tests: built and run on its host, with no
-        // debugger there; named, and told one from a group, from the file.
+        // A remote project's Rust tests: built, and run or debugged, on its
+        // host; named, and told one from a group, from the file. A doc
+        // example is rustdoc's, with no debugger.
         if self.connection.is_remote() && lang == Some("rust") {
             use clew_core::runnables::{RunnableKind, runnable_at, runnables};
             let found = runnables("rust", &viewer.source);
@@ -1013,17 +1144,18 @@ impl App {
             let Some(rel) = self.project_rel(&viewer.abs.clone()) else {
                 return Task::none();
             };
+            let doctest = test.kind == RunnableKind::Doctest;
             let task = self.start_session(
-                true,
+                no_debug || doctest,
                 Some(crate::app::runplan::RunPlan::Remote {
                     task: clew_protocol::ProjectTask::RustTest { file: rel, line },
                     name,
                     tests,
                 }),
             );
-            if !no_debug {
+            if doctest && !no_debug {
                 self.status = tr!(
-                    "A remote project's tests run without the debugger: {status}",
+                    "A doc example runs without the debugger: {status}",
                     status = self.status
                 );
             }
@@ -1431,7 +1563,7 @@ impl App {
                     test = plan.as_ref().map(RunPlan::label).unwrap_or_default()
                 )
             }
-            None if matches!(plan, Some(RunPlan::Remote { .. })) => tr!(
+            None if no_debug && matches!(plan, Some(RunPlan::Remote { .. })) => tr!(
                 "Running {test} on the remote host…",
                 test = plan.as_ref().map(RunPlan::label).unwrap_or_default()
             ),
@@ -1443,19 +1575,33 @@ impl App {
         // said "Running Main.lean with Lean…" long after Main.lean exited.
         if matches!(
             plan,
-            Some(
-                RunPlan::Lean { .. }
-                    | RunPlan::Lake { .. }
-                    | RunPlan::Remote { .. }
-                    | RunPlan::Doctest { .. }
-            )
-        ) {
+            Some(RunPlan::Lean { .. } | RunPlan::Lake { .. } | RunPlan::Doctest { .. })
+        ) || (no_debug && matches!(plan, Some(RunPlan::Remote { .. })))
+        {
             self.say_debug_state(self.status.clone());
         }
-        // A task of a remote project's: started on its host now, its output
-        // shown by the run's stream.
+        // A remote project's Rust program or test, debugged: built on its
+        // host and debugged there (`DebugTask`), Cargo's lines under a
+        // handle of their own.
+        let remote_debug = match &plan {
+            Some(RunPlan::Remote {
+                task:
+                    task @ (clew_protocol::ProjectTask::RustMain { .. }
+                    | clew_protocol::ProjectTask::RustTest { .. }),
+                ..
+            }) if !no_debug => {
+                let build = self.next_proc_id;
+                self.next_proc_id += 1;
+                Some((task.clone(), build))
+            }
+            _ => None,
+        };
+        // A task of a remote project's, run: started on its host now, its
+        // output shown by the run's stream.
         let remote_run = match &plan {
-            Some(RunPlan::Remote { task, .. }) => Some(self.remote_run(task.clone())),
+            Some(RunPlan::Remote { task, .. }) if remote_debug.is_none() => {
+                Some(self.remote_run(task.clone()))
+            }
             _ => None,
         };
         // This run's identity: every message the adapter stream produces carries
@@ -1532,7 +1678,47 @@ impl App {
                     }
                     return;
                 }
-                let (started, launch, addr, proxied) = if remote {
+                let (started, launch, addr, proxied) = if let (true, Some((task, build))) =
+                    (remote, remote_debug.clone())
+                {
+                    // A Rust program or test of the project's: built there
+                    // and debugged there, with no launch file.
+                    let Some(tx) = server_tx.clone() else {
+                        let _ = output
+                            .send(Message::Debug(DebugMsg::Failed {
+                                stamp: stamp.clone(),
+                                run,
+                                error: tr!("not connected to the remote server").into(),
+                            }))
+                            .await;
+                        return;
+                    };
+                    let Some(debug) = remote_debug_task(
+                        &mut output,
+                        &stamp,
+                        run,
+                        &live,
+                        RemoteDebugAsk {
+                            tx: &tx,
+                            next_id: &next_id,
+                            ai: &ai,
+                            proc,
+                            build,
+                            task,
+                            choices: choices.clone(),
+                        },
+                    )
+                    .await
+                    else {
+                        return;
+                    };
+                    (
+                        dap::DapClient::connect(debug.stdin, debug.stdout).await,
+                        debug.launch,
+                        None,
+                        true,
+                    )
+                } else if remote {
                     let Some(tx) = server_tx.clone() else {
                         let _ = output
                             .send(Message::Debug(DebugMsg::Failed {

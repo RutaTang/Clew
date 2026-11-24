@@ -1239,6 +1239,143 @@ async fn run_task_runs_the_projects_task_where_it_lives() {
     assert!(started.elapsed() < Duration::from_secs(10));
 }
 
+/// `DebugTask` debugs only a Rust task: another is refused, the build's
+/// stream and the adapter's both ended.
+#[tokio::test]
+async fn debug_task_refuses_what_is_no_rust_program() {
+    let (mut server, mut rx) = server();
+    let root = temp_project("debug-task-refused");
+    std::fs::write(root.join("Main.lean"), "def main : IO Unit := pure ()\n").unwrap();
+    open_project(&mut server, &mut rx, 1, &root).await;
+    assert!(
+        server
+            .handle(
+                2,
+                Request::DebugTask {
+                    proc: 8,
+                    build: 9,
+                    task: clew_protocol::ProjectTask::LeanMain {
+                        file: "Main.lean".into(),
+                    },
+                    choices: Default::default(),
+                },
+            )
+            .await
+            .is_none()
+    );
+    let (mut adapter, mut build, mut refused) = (false, false, false);
+    while !(adapter && build && refused) {
+        wait_for(
+            &mut rx,
+            "the refusal and both ends",
+            WAIT,
+            |msg| match msg {
+                ServerMessage::Notification {
+                    event:
+                        Event::ProcessExited {
+                            proc: 8,
+                            code: None,
+                        },
+                    ..
+                } => {
+                    adapter = true;
+                    Some(())
+                }
+                ServerMessage::Notification {
+                    event:
+                        Event::ProcessExited {
+                            proc: 9,
+                            code: None,
+                        },
+                    ..
+                } => {
+                    build = true;
+                    Some(())
+                }
+                ServerMessage::Reply {
+                    id: 2,
+                    event: Event::Error { message, .. },
+                    ..
+                } => {
+                    assert!(message.contains("Rust"), "{message}");
+                    refused = true;
+                    Some(())
+                }
+                _ => None,
+            },
+        )
+        .await;
+    }
+}
+
+/// A Rust test debugged where the project lives: built by Cargo there,
+/// its lines streamed under `build`, then lldb-dap started on the test
+/// binary, the launch request naming the test, its package's folder and
+/// Cargo's variables. Needs cargo and lldb-dap (`CLEW_TEST_LLDB_DAP` set).
+#[tokio::test]
+#[ignore = "builds with Cargo and starts lldb-dap (CLEW_TEST_LLDB_DAP=1); run explicitly"]
+async fn live_debug_task_builds_and_starts_lldb_on_the_test() {
+    let (mut server, mut rx) = server();
+    let root = temp_project("debug-task-live");
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"shapes\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src/lib.rs"),
+        "pub fn area(x: u32) -> u32 { x * x }\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn squares() {\n        assert_eq!(super::area(3), 9);\n    }\n}\n",
+    )
+    .unwrap();
+    open_project(&mut server, &mut rx, 1, &root).await;
+    assert!(
+        server
+            .handle(
+                2,
+                Request::DebugTask {
+                    proc: 8,
+                    build: 9,
+                    task: clew_protocol::ProjectTask::RustTest {
+                        file: "src/lib.rs".into(),
+                        line: 6,
+                    },
+                    choices: Default::default(),
+                },
+            )
+            .await
+            .is_none()
+    );
+    let mut built = None;
+    let launch = loop {
+        let msg = wait_for(&mut rx, "the adapter", Duration::from_secs(300), Some).await;
+        match msg {
+            ServerMessage::Notification {
+                event: Event::ProcessExited { proc: 9, code },
+                ..
+            } => built = Some(code),
+            ServerMessage::Reply {
+                id: 2,
+                event: Event::AdapterSpawned { proc: 8, launch },
+                ..
+            } => break launch,
+            ServerMessage::Reply { id: 2, event, .. } => panic!("{event:?}"),
+            _ => {}
+        }
+    };
+    assert_eq!(built, Some(Some(0)), "built first");
+    let launch: serde_json::Value = serde_json::from_str(&launch).unwrap();
+    let text = launch.to_string();
+    assert!(text.contains("squares"), "{text}");
+    assert!(text.contains("CARGO_MANIFEST_DIR"), "{text}");
+    assert!(
+        server
+            .handle(3, Request::ProcessKill { proc: 8 })
+            .await
+            .is_none()
+    );
+}
+
 /// A language server is started in a folder of the project when asked —
 /// Lean's in its Lake project — and never outside it, nor in a file.
 #[tokio::test]

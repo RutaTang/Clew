@@ -808,6 +808,10 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("the task stopped unexpectedly"),
     tr_noop!("{arg1} has several programs ({arg2}), and no default-run to say which to run."),
     tr_noop!("{arg1} is a library, with no program to run."),
+    tr_noop!("A doc example is run by rustdoc, with no debugger."),
+    tr_noop!("Only a Rust program or test is debugged here."),
+    tr_noop!("resolving the native adapter failed"),
+    tr_noop!("the build stopped unexpectedly"),
 ];
 
 /// Parts the code puts into those messages (why a connection timed out,

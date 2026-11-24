@@ -1703,6 +1703,20 @@ pub fn resolve_stdio(
     choices: &clew_protocol::LanguageChoices,
     bridge: Option<&Path>,
 ) -> Result<StdioAdapter, String> {
+    resolve_stdio_in(lang, program, args, root, root, choices, bridge)
+}
+
+/// [`resolve_stdio`] for a program run in `cwd`, a folder of the project
+/// at `root`: a Rust test's package, as `cargo test` runs it there.
+pub fn resolve_stdio_in(
+    lang: &str,
+    program: &str,
+    args: &[String],
+    root: &Path,
+    cwd: &Path,
+    choices: &clew_protocol::LanguageChoices,
+    bridge: Option<&Path>,
+) -> Result<StdioAdapter, String> {
     let tcp_refusal = || {
         format!(
             "the {lang} debug adapter speaks DAP over a TCP port on this host, \
@@ -1734,7 +1748,7 @@ pub fn resolve_stdio(
             launch: spec.launch.to_string(),
         });
     }
-    match resolve(lang, program, args, root, root, choices, bridge)
+    match resolve(lang, program, args, root, cwd, choices, bridge)
         .map_err(|e| format!("on the remote host: {e}"))?
     {
         Resolution::Ready(spec) => match (spec.transport, bridge) {

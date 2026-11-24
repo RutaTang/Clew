@@ -1130,6 +1130,164 @@ impl Server {
                 });
                 None
             }
+            // A Rust task's program built here, then debugged here: the
+            // build's lines under `build`, the adapter under `proc`, as
+            // `SpawnAdapter` spawns one. A kill of either handle stops the
+            // build.
+            Request::DebugTask {
+                proc,
+                build,
+                task,
+                choices,
+            } => {
+                let root = match self.root_or_refuse() {
+                    Ok(root) => root,
+                    Err(refusal) => return Some(*refusal),
+                };
+                let out = self.out.clone();
+                let procs = self.procs.clone();
+                let budget = self.out_budget.clone();
+                // The adapter's queue first: the client pipelines its DAP
+                // traffic behind this request.
+                let (input_rx, generation) = register_proc(&self.procs, proc).await;
+                let (_build_input, build_generation) = register_proc(&self.procs, build).await;
+                let cancel = Arc::new(AtomicBool::new(false));
+                {
+                    let mut stops = self
+                        .task_stops
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner);
+                    for handle in [proc, build] {
+                        if let Some(old) = stops.insert(handle, cancel.clone()) {
+                            old.store(true, Ordering::SeqCst);
+                        }
+                    }
+                }
+                let stops = self.task_stops.clone();
+                let _ = out.send(ServerMessage::Notification {
+                    event: Event::ProcessStarted { proc: build },
+                });
+                tokio::spawn(async move {
+                    let line = move |out: &UnboundedSender<ServerMessage>, text: &str| {
+                        let mut data = text.as_bytes().to_vec();
+                        data.truncate(clew_protocol::MAX_PROCESS_CHUNK - 1);
+                        data.push(b'\n');
+                        let _ = out.send(ServerMessage::Notification {
+                            event: Event::ProcessOutput { proc: build, data },
+                        });
+                    };
+                    let (build_root, build_cancel, said_out) =
+                        (root.clone(), cancel.clone(), out.clone());
+                    let built = tokio::task::spawn_blocking(move || {
+                        let mut said = |text: &str, _stderr: bool| line(&said_out, text);
+                        clew_core::tasks::build_rust(
+                            &build_root,
+                            &task,
+                            &choices,
+                            &mut said,
+                            &build_cancel,
+                        )
+                        .map(|built| (built, choices))
+                    })
+                    .await
+                    .unwrap_or_else(|_| Err("the build stopped unexpectedly".into()));
+                    {
+                        let mut stops = stops.lock().unwrap_or_else(PoisonError::into_inner);
+                        for handle in [proc, build] {
+                            if stops.get(&handle).is_some_and(|s| Arc::ptr_eq(s, &cancel)) {
+                                stops.remove(&handle);
+                            }
+                        }
+                    }
+                    let (code, failure) = match &built {
+                        Ok((Some(_), _)) => (Some(0), None),
+                        Ok((None, _)) => (None, Some("the build was stopped".to_string())),
+                        Err(why) => (None, Some(why.clone())),
+                    };
+                    if let Some(why) = &failure {
+                        line(&out, why);
+                    }
+                    if failed_spawn_is_ours(&procs, build, build_generation).await {
+                        let _ = out.send(ServerMessage::Notification {
+                            event: Event::ProcessExited { proc: build, code },
+                        });
+                    }
+                    let (target, choices) = match built {
+                        Ok((Some(target), choices)) => (target, choices),
+                        _ => {
+                            if failed_spawn_is_ours(&procs, proc, generation).await {
+                                let _ = out.send(ServerMessage::Notification {
+                                    event: Event::ProcessExited { proc, code: None },
+                                });
+                            }
+                            let why = failure.unwrap_or_default();
+                            Self::reply(&out, id, failed(why));
+                            return;
+                        }
+                    };
+                    // lldb-dap on what was built, in the folder it runs in,
+                    // with the variables Cargo sets for it.
+                    let resolve_root = root.clone();
+                    let resolved = tokio::task::spawn_blocking(move || {
+                        let bridge = std::env::current_exe().ok();
+                        clew_core::debugadapter::resolve_stdio_in(
+                            "native",
+                            &target.program.to_string_lossy(),
+                            &target.args,
+                            &resolve_root,
+                            &target.cwd,
+                            &choices,
+                            bridge.as_deref(),
+                        )
+                        .and_then(|adapter| {
+                            let mut launch: serde_json::Value =
+                                serde_json::from_str(&adapter.launch).map_err(|e| e.to_string())?;
+                            clew_core::cargorun::with_cargo_env(&mut launch, &target.env);
+                            Ok((adapter, launch.to_string()))
+                        })
+                    })
+                    .await
+                    .unwrap_or_else(|_| Err("resolving the native adapter failed".into()));
+                    match resolved {
+                        Ok((adapter, launch)) => {
+                            let cwd = Some(root.to_string_lossy().into_owned());
+                            match spawn_registered(
+                                &out,
+                                &procs,
+                                budget,
+                                proc,
+                                adapter.command.to_string_lossy().into_owned(),
+                                adapter.args,
+                                cwd,
+                                input_rx,
+                                generation,
+                                crate::process::clean_path(),
+                            )
+                            .await
+                            {
+                                Spawned::Started => {
+                                    Self::reply(&out, id, Event::AdapterSpawned { proc, launch })
+                                }
+                                Spawned::Failed(event) => Self::reply(&out, id, event),
+                                Spawned::Cancelled => Self::reply(
+                                    &out,
+                                    id,
+                                    failed("the debug adapter was stopped while starting"),
+                                ),
+                            }
+                        }
+                        Err(message) => {
+                            if failed_spawn_is_ours(&procs, proc, generation).await {
+                                let _ = out.send(ServerMessage::Notification {
+                                    event: Event::ProcessExited { proc, code: None },
+                                });
+                            }
+                            Self::reply(&out, id, failed(message));
+                        }
+                    }
+                });
+                None
+            }
             Request::ProjectMaps => {
                 let root = match self.root_or_refuse() {
                     Ok(root) => root,

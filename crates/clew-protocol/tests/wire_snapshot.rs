@@ -219,6 +219,7 @@ fn request_index(r: &Request) -> usize {
         Request::ProjectMaps => 31,
         Request::ExpandMacro { .. } => 32,
         Request::RunTask { .. } => 33,
+        Request::DebugTask { .. } => 34,
     }
 }
 
@@ -1227,6 +1228,15 @@ fn request_samples() -> Vec<Request> {
                 choices: choices(),
             }),
     );
+    samples.push(Request::DebugTask {
+        proc: 6,
+        build: 7,
+        task: ProjectTask::RustTest {
+            file: "src/lib.rs".into(),
+            line: 12,
+        },
+        choices: choices(),
+    });
     samples
 }
 
@@ -2123,6 +2133,22 @@ fn only_the_pinned_fields_may_be_left_out() {
         "request.BuildFacts.choices.servers.python.args",
         "request.BuildFacts.choices.typescript",
         "request.BuildFacts.choices.zig",
+        "request.DebugTask.choices.c",
+        "request.DebugTask.choices.c.compile_commands",
+        "request.DebugTask.choices.csharp",
+        "request.DebugTask.choices.go",
+        "request.DebugTask.choices.go.goarch",
+        "request.DebugTask.choices.go.goos",
+        "request.DebugTask.choices.java",
+        "request.DebugTask.choices.php",
+        "request.DebugTask.choices.python",
+        "request.DebugTask.choices.rust",
+        "request.DebugTask.choices.rust.target",
+        "request.DebugTask.choices.servers",
+        "request.DebugTask.choices.servers.lean.args",
+        "request.DebugTask.choices.servers.python.args",
+        "request.DebugTask.choices.typescript",
+        "request.DebugTask.choices.zig",
         "request.EditState.merge.edit.Patch.insert",
         "request.Git.op.Log.author",
         "request.Git.op.Log.grep",

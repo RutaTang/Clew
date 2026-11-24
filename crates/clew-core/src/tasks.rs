@@ -80,6 +80,49 @@ fn cargo() -> Result<PathBuf, String> {
         .ok_or_else(|| "Cargo was not found here. Install Rust from rustup.rs.".to_string())
 }
 
+/// A Rust program built to run, or to debug: the executable, its
+/// arguments, the folder it runs in, and the variables Cargo sets for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Built {
+    pub program: PathBuf,
+    pub args: Vec<String>,
+    pub cwd: PathBuf,
+    pub env: Vec<(String, String)>,
+}
+
+/// Build what a Rust task runs — `RustMain`'s program, `RustTest`'s tests
+/// (not a doc example: rustdoc runs those, with no debugger) — for the
+/// debugger to start: Cargo's lines said as they come; `None` when
+/// stopped. `Err` for another task, or what kept it from being built.
+pub fn build_rust(
+    root: &Path,
+    task: &ProjectTask,
+    choices: &LanguageChoices,
+    said: &mut dyn FnMut(&str, bool),
+    cancel: &AtomicBool,
+) -> Result<Option<Built>, String> {
+    let (rel, line) = match task {
+        ProjectTask::RustMain { file } => (file, None),
+        ProjectTask::RustTest { file, line } => (file, Some(*line)),
+        _ => return Err("Only a Rust program or test is debugged here.".to_string()),
+    };
+    let file = crate::confine::confine(root, rel).map_err(|e| format!("{rel}: {e}"))?;
+    match line {
+        None => main_built(root, &file, choices, said, cancel),
+        Some(line) => {
+            let source = crate::statefile::read_capped(&file, 8 << 20)
+                .ok_or_else(|| "The file could not be read.".to_string())?;
+            let found = crate::runnables::runnables("rust", &source);
+            if crate::runnables::runnable_at(&found, line)
+                .is_some_and(|r| r.kind == crate::runnables::RunnableKind::Doctest)
+            {
+                return Err("A doc example is run by rustdoc, with no debugger.".to_string());
+            }
+            tests_built(&file, &source, line, choices, said, cancel)
+        }
+    }
+}
+
 /// The program `file` is a source of, built and run as `cargo run` runs
 /// it, from the project's folder: its binary's (an example's, a test's, a
 /// bench's own `main`), or — a library's file — its package's one program.
@@ -90,6 +133,20 @@ fn rust_main(
     said: &mut dyn FnMut(&str, bool),
     cancel: &AtomicBool,
 ) -> Result<RunEnd, String> {
+    match main_built(root, file, choices, said, cancel)? {
+        Some(built) => run_built(&built, said, cancel),
+        None => Ok(RunEnd::Stopped),
+    }
+}
+
+/// [`rust_main`]'s program, built.
+fn main_built(
+    root: &Path,
+    file: &Path,
+    choices: &LanguageChoices,
+    said: &mut dyn FnMut(&str, bool),
+    cancel: &AtomicBool,
+) -> Result<Option<Built>, String> {
     let cargo = cargo()?;
     let target =
         cargorun::target_of(file).ok_or_else(|| "This file is in no Cargo package.".to_string())?;
@@ -117,14 +174,19 @@ fn rust_main(
     };
     let features = Features::from_choices(choices.rust.as_ref());
     let Some(built) = build(&cargo, &target, false, &features, said, cancel)? else {
-        return Ok(RunEnd::Stopped);
+        return Ok(None);
     };
     // A bench runs as `cargo bench` runs it: told it is benchmarking.
-    let args: &[&str] = match target.kind {
-        TargetKind::Bench(_) => &["--bench"],
-        _ => &[],
+    let args = match target.kind {
+        TargetKind::Bench(_) => vec!["--bench".to_string()],
+        _ => Vec::new(),
     };
-    run_built(&built, args, root, said, cancel)
+    Ok(Some(Built {
+        program: built.executable,
+        args,
+        cwd: root.to_path_buf(),
+        env: built.env,
+    }))
 }
 
 /// The test, or the tests, at 1-based `line` of `file`, built and run as
@@ -154,10 +216,27 @@ fn rust_test(
             }
         };
     }
-    let (target, runs, name) = cargorun::tests_at(file, &source, line)
+    match tests_built(file, &source, line, choices, said, cancel)? {
+        Some(built) => run_built(&built, said, cancel),
+        None => Ok(RunEnd::Stopped),
+    }
+}
+
+/// [`rust_test`]'s tests, built, with the arguments that pick them.
+fn tests_built(
+    file: &Path,
+    source: &str,
+    line: usize,
+    choices: &LanguageChoices,
+    said: &mut dyn FnMut(&str, bool),
+    cancel: &AtomicBool,
+) -> Result<Option<Built>, String> {
+    let cargo = cargo()?;
+    let features = Features::from_choices(choices.rust.as_ref());
+    let (target, runs, name) = cargorun::tests_at(file, source, line)
         .ok_or_else(|| "No test here. Put the cursor in a test function to run it.".to_string())?;
     let Some(built) = build(&cargo, &target, true, &features, said, cancel)? else {
-        return Ok(RunEnd::Stopped);
+        return Ok(None);
     };
     let package = target.package_dir().to_path_buf();
     let list = cargorun::list_tests(&built.executable, &package, &built.env)
@@ -173,8 +252,12 @@ fn rust_test(
             cargorun::group_args(&list, under, &selected)
         }
     };
-    let args: Vec<&str> = args.iter().map(String::as_str).collect();
-    run_built(&built, &args, &package, said, cancel)
+    Ok(Some(Built {
+        program: built.executable,
+        args,
+        cwd: package,
+        env: built.env,
+    }))
 }
 
 /// Build `target` with `cargo` (its tests, `test`), Cargo's lines said as
@@ -198,19 +281,17 @@ fn build(
     }
 }
 
-/// Run what Cargo built, with `args`, in `cwd`, with the variables Cargo
-/// sets for it.
+/// Run what Cargo built, with its arguments, in its folder, with the
+/// variables Cargo sets for it.
 fn run_built(
-    built: &cargorun::Built,
-    args: &[&str],
-    cwd: &Path,
+    built: &Built,
     said: &mut dyn FnMut(&str, bool),
     cancel: &AtomicBool,
 ) -> Result<RunEnd, String> {
-    let mut command = crate::spawn::command(&built.executable);
+    let mut command = crate::spawn::command(&built.program);
     command
-        .args(args)
-        .current_dir(cwd)
+        .args(&built.args)
+        .current_dir(&built.cwd)
         .envs(built.env.iter().map(|(k, v)| (k, v)));
     crate::spawn::run_streaming(command, said, cancel)
 }
@@ -327,6 +408,53 @@ mod tests {
         });
         assert_eq!(end, Ok(RunEnd::Exited(101)), "{lines:?}");
         assert!(lines.iter().any(|l| l.contains("1 failed")), "{lines:?}");
+        // Built for the debugger: the test binary, the one test picked, in
+        // its package's folder, with Cargo's variables.
+        let built = build_rust(
+            &root,
+            &ProjectTask::RustTest {
+                file: "src/lib.rs".into(),
+                line: 6,
+            },
+            &LanguageChoices::default(),
+            &mut |_, _| {},
+            &AtomicBool::new(false),
+        )
+        .unwrap()
+        .expect("built");
+        assert!(built.program.is_file(), "{built:?}");
+        assert!(
+            built.args.iter().any(|a| a.contains("squares")),
+            "{built:?}"
+        );
+        assert!(
+            built.env.iter().any(|(k, _)| k == "CARGO_MANIFEST_DIR"),
+            "{built:?}"
+        );
+        let main = build_rust(
+            &root,
+            &ProjectTask::RustMain {
+                file: "src/main.rs".into(),
+            },
+            &LanguageChoices::default(),
+            &mut |_, _| {},
+            &AtomicBool::new(false),
+        )
+        .unwrap()
+        .expect("built");
+        assert_eq!(main.cwd, root);
+        assert!(
+            build_rust(
+                &root,
+                &ProjectTask::LeanMain {
+                    file: "src/main.rs".into()
+                },
+                &LanguageChoices::default(),
+                &mut |_, _| {},
+                &AtomicBool::new(false),
+            )
+            .is_err()
+        );
     }
 
     /// A Lean `main` importing its project runs through the real Lake

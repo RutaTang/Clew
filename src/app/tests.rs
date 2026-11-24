@@ -44601,8 +44601,9 @@ fn a_launch_files_fields_go_into_the_python_launch() {
 
 /// A remote project's Lean `main`, Lake's build and a Rust test run on its
 /// host: each a `RunTask` naming the file relative to the project — never
-/// a command line — and no launch file is read; the Rust ▶ offers no
-/// Debug there. Remote projects used to be told none of this ran.
+/// a command line — and no launch file is read; a Rust test debugged is
+/// built and debugged there (`DebugTask`). Remote projects used to be told
+/// none of this ran.
 #[test]
 fn a_remote_projects_lean_and_rust_run_on_its_host() {
     use clew_protocol::{ProjectTask, Request};
@@ -44627,7 +44628,8 @@ fn a_remote_projects_lean_and_rust_run_on_its_host() {
             );
             match rx.try_recv() {
                 Ok(msg) => match msg.request {
-                    Request::RunTask { task, .. } => break task,
+                    Request::RunTask { task, .. } => break (task, false),
+                    Request::DebugTask { task, .. } => break (task, true),
                     Request::ReadState { rel, .. } if rel == "launch.json" => {
                         panic!("a task needs no launch file")
                     }
@@ -44655,9 +44657,12 @@ fn a_remote_projects_lean_and_rust_run_on_its_host() {
     }));
     assert_eq!(
         asked(&mut rx),
-        ProjectTask::LeanMain {
-            file: "proofs/Main.lean".into()
-        }
+        (
+            ProjectTask::LeanMain {
+                file: "proofs/Main.lean".into()
+            },
+            false
+        )
     );
     assert!(app.status.contains("remote"), "{}", app.status);
     let _ = app.update(Message::Debug(DebugMsg::RunLake(
@@ -44665,10 +44670,13 @@ fn a_remote_projects_lean_and_rust_run_on_its_host() {
     )));
     assert_eq!(
         asked(&mut rx),
-        ProjectTask::Lake {
-            file: "proofs/Main.lean".into(),
-            test: false
-        }
+        (
+            ProjectTask::Lake {
+                file: "proofs/Main.lean".into(),
+                test: false
+            },
+            false
+        )
     );
     open(
         &mut app,
@@ -44681,20 +44689,42 @@ fn a_remote_projects_lean_and_rust_run_on_its_host() {
     assert!(app.run_marks(v).contains(&6), "the test's ▶ is there");
     let _ = app.update(Message::Debug(DebugMsg::RunTest {
         line: Some(6),
-        no_debug: false,
+        no_debug: true,
     }));
     assert_eq!(
         asked(&mut rx),
-        ProjectTask::RustTest {
-            file: "src/lib.rs".into(),
-            line: 6
+        (
+            ProjectTask::RustTest {
+                file: "src/lib.rs".into(),
+                line: 6
+            },
+            false
+        )
+    );
+    // Debugged: the session's own stream asks the host to build and debug.
+    let start = app.update(Message::Debug(DebugMsg::RunTest {
+        line: Some(6),
+        no_debug: false,
+    }));
+    let session = rt.spawn(async move {
+        use iced::futures::StreamExt;
+        if let Some(actions) = iced_test::runtime::task::into_stream(start) {
+            actions.for_each(|_| std::future::ready(())).await;
         }
+    });
+    assert_eq!(
+        asked(&mut rx),
+        (
+            ProjectTask::RustTest {
+                file: "src/lib.rs".into(),
+                line: 6
+            },
+            true
+        ),
+        "debugged there"
     );
-    assert!(
-        app.status.contains("without the debugger"),
-        "{}",
-        app.status
-    );
+    session.abort();
+    assert!(app.status.contains("debugger"), "{}", app.status);
     assert_eq!(
         app.debug.plan.as_ref().and_then(|p| p.verdict(0)),
         Some("Test adds passed".into())

@@ -45,6 +45,9 @@ pub(crate) fn reply_wait(request: &clew_protocol::Request) -> std::time::Duratio
     use clew_protocol::Request;
     match request {
         Request::Chat { .. } | Request::Embed { .. } => std::time::Duration::from_secs(600),
+        // A Rust program built before it is debugged: Cargo takes what a
+        // build takes, and Stop ends it sooner.
+        Request::DebugTask { .. } => std::time::Duration::from_secs(3600),
         Request::Git { .. }
         | Request::ProjectCalls { .. }
         | Request::ProjectMaps

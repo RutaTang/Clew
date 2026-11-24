@@ -651,19 +651,13 @@ impl App {
         if main.is_none() && test.is_none() {
             return Task::none();
         }
-        // Lean has no debugger, nor is one run on a remote project's host
-        // for a Rust program built there.
-        let remote = self.connection.is_remote();
+        // Lean has no debugger.
         let debug = self
             .proj
             .panes
             .get(pane)
             .and_then(Option::as_ref)
-            .is_none_or(|v| match v.lang_key {
-                Some("lean") => false,
-                Some("rust") => !remote,
-                _ => true,
-            });
+            .is_none_or(|v| v.lang_key != Some("lean"));
         self.proj.tree_menu = None;
         self.proj.gutter_tip = None;
         self.proj.context_menu = Some(ContextMenu {

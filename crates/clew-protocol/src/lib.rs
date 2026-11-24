@@ -1011,6 +1011,21 @@ pub enum Request {
         task: ProjectTask,
         choices: LanguageChoices,
     },
+    /// Build a Rust task's program on this host and start the debugger on
+    /// it there — `RustMain`'s program, `RustTest`'s tests; any other task
+    /// is refused. Built as `RunTask` builds it: Cargo's lines come as
+    /// `ProcessOutput` under `build`, which ends in its `ProcessExited`
+    /// (code 0 once built). Then lldb-dap is spawned under `proc` and
+    /// proxied as `SpawnAdapter`'s is. Reply: `AdapterSpawned`, its launch
+    /// request built for the program — its arguments, the folder it runs
+    /// in, the variables Cargo sets for it — with this host's paths; a
+    /// failure replies `Error`, and `proc` ends in `ProcessExited`.
+    DebugTask {
+        proc: u64,
+        build: u64,
+        task: ProjectTask,
+        choices: LanguageChoices,
+    },
     /// The project's maps ([`ProjectMap`]) — its database schema, routes,
     /// supervision trees and the like — read from its files on this host.
     /// Reply: `ProjectMaps`.
