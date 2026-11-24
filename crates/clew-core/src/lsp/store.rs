@@ -1748,7 +1748,7 @@ mod tests {
         let tool = super::testing::script(
             &dir.join("forker"),
             &format!(
-                "echo $$ > '{}'; for _ in $(seq 300); do sleep 30 & done; wait",
+                "PATH=/usr/bin:/bin; echo $$ > '{}'; for _ in $(seq 300); do sleep 30 & done; wait",
                 group.display()
             ),
         );

@@ -25,6 +25,19 @@ pub fn run(
     said: &mut dyn FnMut(&str, bool),
     cancel: &AtomicBool,
 ) -> Result<RunEnd, String> {
+    let search = crate::linerpc::search_path().unwrap_or_default();
+    run_with(root, task, choices, said, cancel, &search)
+}
+
+/// [`run`], Lean's `lake` looked for on `search`.
+fn run_with(
+    root: &Path,
+    task: &ProjectTask,
+    choices: &LanguageChoices,
+    said: &mut dyn FnMut(&str, bool),
+    cancel: &AtomicBool,
+    search: &std::ffi::OsStr,
+) -> Result<RunEnd, String> {
     let rel = match task {
         ProjectTask::LeanMain { file }
         | ProjectTask::Lake { file, .. }
@@ -35,16 +48,16 @@ pub fn run(
     let file = crate::confine::confine(root, rel).map_err(|e| format!("{rel}: {e}"))?;
     match task {
         ProjectTask::LeanMain { .. } => {
-            let (lake, project) = lake_project(root, &file, choices)?;
+            let (lake, project) = lake_project(root, &file, choices, search)?;
             crate::lean::run_main(&lake, &project, &file, said, cancel)
         }
         ProjectTask::Lake { test, .. } => {
-            let (lake, project) = lake_project(root, &file, choices)?;
+            let (lake, project) = lake_project(root, &file, choices, search)?;
             let args: &[&str] = if *test { &["test"] } else { &["build"] };
             crate::lean::run_lake(&lake, &project, args, said, cancel)
         }
         ProjectTask::MathlibCache { .. } => {
-            let (lake, project) = lake_project(root, &file, choices)?;
+            let (lake, project) = lake_project(root, &file, choices, search)?;
             crate::lean::run_lake(&lake, &project, &["exe", "cache", "get"], said, cancel)
         }
         ProjectTask::RustMain { .. } => rust_main(root, &file, choices, said, cancel),
@@ -59,6 +72,7 @@ fn lake_project(
     root: &Path,
     file: &Path,
     choices: &LanguageChoices,
+    search: &std::ffi::OsStr,
 ) -> Result<(PathBuf, PathBuf), String> {
     let chosen = choices
         .servers
@@ -67,7 +81,7 @@ fn lake_project(
         .filter(|choice| choice.args.is_none());
     let lake = match chosen {
         Some(choice) => crate::lsp::store::find_program(&choice.command)?,
-        None => crate::lsp::store::find_on_path_unresolved("lake")
+        None => crate::lsp::store::find_in_unresolved(search, "lake")
             .ok_or_else(|| "Lean's lake wasn't found here. Install Lean with elan.".to_string())?,
     };
     let project = crate::lean::lake_root(root, file).unwrap_or_else(|| root.to_path_buf());
@@ -329,11 +343,10 @@ mod tests {
         let root = dir.to_path_buf();
         std::fs::write(root.join("Main.lean"), "def main : IO Unit := pure ()\n").unwrap();
         std::fs::write(root.join("loose.rs"), "fn main() {}\n").unwrap();
-        let _no_lean = crate::testutil::EnvVars::new()
-            .set("ELAN_HOME", root.join("no-elan"))
-            .set("PATH", root.join("no-bin"));
+        // No Lean on the search path. (The process's own PATH is left as it
+        // is: other tests run programs by it meanwhile.)
         let mut said = |_: &str, _: bool| {};
-        let lean = run(
+        let lean = run_with(
             &root,
             &ProjectTask::LeanMain {
                 file: "Main.lean".into(),
@@ -341,6 +354,7 @@ mod tests {
             &LanguageChoices::default(),
             &mut said,
             &AtomicBool::new(false),
+            std::ffi::OsStr::new(""),
         );
         assert!(lean.as_ref().is_err_and(|e| e.contains("lake")), "{lean:?}");
         let rust = run(

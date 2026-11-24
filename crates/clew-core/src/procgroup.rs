@@ -336,7 +336,7 @@ mod tests {
             // Records itself, then starts helpers back to back: a bounded
             // number of them, whatever becomes of the kill.
             let mut leader = group(
-                "echo $$ > \"$1\"; for _ in $(seq 300); do sleep 30 & done; wait",
+                "PATH=/usr/bin:/bin; echo $$ > \"$1\"; for _ in $(seq 300); do sleep 30 & done; wait",
                 &record,
             );
             let pgid = recorded(&record);
