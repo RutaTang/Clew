@@ -2435,7 +2435,7 @@ pub struct ProjectSession {
     /// less ([`App::peek_delay`]).
     ///
     /// [`HOVER_WARM`]: crate::app::hover::HOVER_WARM
-    /// [`App::peek_delay`]: crate::app::App::peek_delay
+    /// [`App::peek_delay`]: crate::App::peek_delay
     pub hover_seen: Option<std::time::Instant>,
     /// Where the pointer last was over the code — pane, line, column, and
     /// its point in the window — while nothing was shown for it: ⌥ pressed

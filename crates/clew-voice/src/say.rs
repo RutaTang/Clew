@@ -1063,7 +1063,7 @@ fn is_pictograph(c: char) -> bool {
 /// `text` (as [`speakable`] says it) cut into sentences: at a full stop, a
 /// question or an exclamation mark that ends one, at the end of a line, and
 /// a long one at its commas. The first, if long, is cut at its first pause
-/// that leaves words that stand alone ([`first_clause`]): a voice slower
+/// that leaves words that stand alone (`first_clause`): a voice slower
 /// than speech holds a sentence until enough of it is made, and a long
 /// first one was silence for seconds before an answer was heard — the
 /// clause is said while the rest is still being written and made.

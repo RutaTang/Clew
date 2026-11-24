@@ -2487,7 +2487,7 @@ pub enum WindowMsg {
     /// Toggle the lines down the code's indentation.
     ToggleIndentGuides,
     /// Toggle code info showing when the pointer rests on a word
-    /// ([`crate::app::App::peek_on_rest`]).
+    /// ([`crate::App::peek_on_rest`]).
     TogglePeekOnRest,
     /// A file picker could not be shown ([`crate::app::tasks::NoDialog`]).
     NoFileDialog,
