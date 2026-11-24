@@ -107,6 +107,8 @@ pub(crate) struct Index {
     pub partial: bool,
     /// Its access method when not the default B-tree (`gin`, `fulltext`).
     pub method: Option<String>,
+    /// Built `CONCURRENTLY`: without holding writes to its table.
+    pub concurrent: bool,
     pub file: String,
     pub line: usize,
 }
@@ -771,6 +773,7 @@ impl Parser<'_> {
                     unique: false,
                     partial: false,
                     method,
+                    concurrent: false,
                     file: String::new(),
                     line,
                 })
@@ -1101,6 +1104,7 @@ impl Parser<'_> {
 
     fn create_index(&self, i: usize, unique: bool, modifiers: &[Token]) -> Option<Op> {
         let line = self.line(0);
+        let concurrent = self.is_word(i, "CONCURRENTLY");
         let mut i = self.skip(i, &["CONCURRENTLY", "IF", "NOT", "EXISTS"]);
         let mut name = None;
         if !self.is_word(i, "ON") {
@@ -1136,6 +1140,7 @@ impl Parser<'_> {
                 unique,
                 partial,
                 method,
+                concurrent,
                 file: String::new(),
                 line,
             },

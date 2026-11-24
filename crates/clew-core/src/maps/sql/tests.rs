@@ -1,5 +1,6 @@
 use clew_protocol::{MapField, MapNode};
 
+use super::Issue;
 use super::*;
 
 fn map<'a>(maps: &'a [ProjectMap], id: &str) -> &'a ProjectMap {
@@ -834,5 +835,86 @@ fn live_every_map_over_a_project_in_time() {
         let started = std::time::Instant::now();
         let n = extract(&corpus).len();
         println!("{name}: {n} maps in {:?}", started.elapsed());
+    }
+}
+
+/// What a schema and its migrations ask a reader to look at: a migration's
+/// change to a table an earlier one made that drops data, fails on rows or
+/// holds writes; a table with no primary key; row-level security off where
+/// the schema's other tables have it; a foreign key no index leads with.
+#[test]
+fn findings_name_what_a_reader_should_look_at() {
+    let corpus = Corpus::of(&[
+        (
+            "db/migrations/0001.sql",
+            "CREATE TABLE users (id uuid PRIMARY KEY, email text);\nCREATE TABLE posts (id uuid PRIMARY KEY, author_id uuid REFERENCES users(id), body text);\nCREATE TABLE logs (msg text, at timestamptz);\nALTER TABLE users ENABLE ROW LEVEL SECURITY;\n",
+        ),
+        (
+            "db/migrations/0002.sql",
+            "ALTER TABLE posts ADD COLUMN title text NOT NULL;\nALTER TABLE posts DROP COLUMN body;\nCREATE INDEX posts_title ON posts (title);\nCREATE TABLE tags (id int PRIMARY KEY, name text NOT NULL, post_id uuid REFERENCES posts);\nALTER TABLE tags ADD COLUMN slug text NOT NULL;\nCREATE INDEX tags_name ON tags (name);\nALTER TABLE posts ADD COLUMN views int NOT NULL DEFAULT 0;\n",
+        ),
+        (
+            "db/migrations/0003.sql",
+            "CREATE INDEX CONCURRENTLY posts_author ON posts (author_id);\nALTER TABLE users ALTER COLUMN email TYPE varchar(320);\nDROP TABLE logs;\n",
+        ),
+        ("test/fixtures/drop.sql", "DROP TABLE users;\n"),
+    ]);
+    let mut got: Vec<(String, usize, String, Issue)> = findings(&corpus)
+        .into_iter()
+        .map(|f| (f.rel, f.line, f.table, f.issue))
+        .collect();
+    got.sort_by(|a, b| (&a.0, a.1, &a.2).cmp(&(&b.0, b.1, &b.2)));
+    let m1 = "db/migrations/0001.sql".to_string();
+    let m2 = "db/migrations/0002.sql".to_string();
+    let m3 = "db/migrations/0003.sql".to_string();
+    assert_eq!(
+        got,
+        [
+            (
+                m1.clone(),
+                2,
+                "posts".to_string(),
+                Issue::RowLevelSecurityOff
+            ),
+            (m2.clone(), 1, "posts".into(), Issue::NotNullWithoutDefault),
+            (m2.clone(), 2, "posts".into(), Issue::DropsData),
+            (m2.clone(), 3, "posts".into(), Issue::LocksTable),
+            (m2.clone(), 4, "tags".into(), Issue::UnindexedForeignKey),
+            (m2, 4, "tags".into(), Issue::RowLevelSecurityOff),
+            (m3.clone(), 2, "users".into(), Issue::LocksTable),
+            (m3, 3, "logs".into(), Issue::DropsData),
+        ],
+        "a table made in the same file is new (tags), a default makes NOT NULL safe, CONCURRENTLY holds nothing, a test's SQL is no migration"
+    );
+    // As weak spots: a spot per table of a file, its reasons together.
+    let files: Vec<(String, String)> = corpus
+        .files
+        .iter()
+        .map(|s| (s.rel.clone(), s.text.clone()))
+        .collect();
+    let spots = crate::weakspots::schema_spots(&files);
+    let posts = spots
+        .iter()
+        .find(|s| s.rel == "db/migrations/0002.sql" && s.name == "posts")
+        .expect("posts in 0002");
+    assert_eq!((posts.line, posts.end_line, posts.score), (1, 3, 3 + 3 + 2));
+}
+
+#[test]
+fn a_schema_with_every_table_keyed_and_indexed_has_no_findings() {
+    let corpus = Corpus::of(&[(
+        "schema.sql",
+        "CREATE TABLE a (id int PRIMARY KEY);\nCREATE TABLE b (id int PRIMARY KEY, a_id int REFERENCES a(id));\nCREATE INDEX b_a ON b (a_id);\n",
+    )]);
+    assert_eq!(findings(&corpus), []);
+}
+
+#[test]
+#[ignore = "prints a project's findings (CLEW_TEST_SQL_PROJECT=path)"]
+fn live_a_projects_findings() {
+    let root = std::path::PathBuf::from(std::env::var("CLEW_TEST_SQL_PROJECT").unwrap());
+    let corpus = Corpus::read(&crate::fs_scan::scan(root).files);
+    for f in findings(&corpus) {
+        println!("{:?} {} {}:{}", f.issue, f.table, f.rel, f.line);
     }
 }

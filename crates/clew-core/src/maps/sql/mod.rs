@@ -739,3 +739,182 @@ fn looks_like_sql(line: &str) -> bool {
         .iter()
         .any(|k| upper.contains(k))
 }
+
+// -- findings -----------------------------------------------------------------------
+
+/// What a database's schema, or one of its migrations, asks a reader to
+/// look at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Finding {
+    pub rel: String,
+    pub line: usize,
+    /// The table it is about.
+    pub table: String,
+    pub issue: Issue,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Issue {
+    /// A table with columns and no primary key: no row of it can be named.
+    NoPrimaryKey,
+    /// A foreign key whose columns lead no index: a join on it, and a
+    /// delete in the table it references, reads the whole table
+    /// (PostgreSQL makes none for it).
+    UnindexedForeignKey,
+    /// Row-level security off on a table of a schema whose other tables
+    /// have it on.
+    RowLevelSecurityOff,
+    /// A migration that drops a table or a column an earlier one made: its
+    /// data is gone.
+    DropsData,
+    /// A migration that adds a `NOT NULL` column with no default to a table
+    /// an earlier one made: it fails on a table with rows.
+    NotNullWithoutDefault,
+    /// A migration that holds writes to a table an earlier one made while
+    /// it works: an index built without `CONCURRENTLY`, a column's type
+    /// changed (PostgreSQL).
+    LocksTable,
+}
+
+/// Whether a database's SQL is PostgreSQL's: its row-level security,
+/// enums, types or `CONCURRENTLY`.
+fn is_postgres(changes: &[Changes]) -> bool {
+    const TYPES: &[&str] = &[
+        "timestamptz",
+        "jsonb",
+        "bytea",
+        "bigserial",
+        "serial",
+        "tsvector",
+        "inet",
+        "citext",
+    ];
+    changes.iter().flat_map(|c| &c.ops).any(|(op, _)| match op {
+        Op::CreatePolicy { .. } | Op::CreateEnum { .. } | Op::SearchPath(_) => true,
+        Op::CreateIndex { index, .. } => {
+            index.concurrent
+                || index
+                    .method
+                    .as_deref()
+                    .is_some_and(|m| matches!(m, "gin" | "gist" | "brin"))
+        }
+        Op::CreateTable { columns, .. } => columns
+            .iter()
+            .any(|c| TYPES.contains(&c.ty.as_str()) || c.ty.ends_with("[]")),
+        Op::AlterTable { actions, .. } => actions
+            .iter()
+            .any(|a| matches!(a, Action::RowLevelSecurity(_))),
+        _ => false,
+    })
+}
+
+/// What the project's databases ask a reader to look at: each schema as
+/// its migrations leave it, and each migration that changes a table an
+/// earlier one made. A test's SQL is left out.
+pub fn findings(corpus: &Corpus) -> Vec<Finding> {
+    let mut out = Vec::new();
+    for db in files::databases(corpus) {
+        let postgres = is_postgres(&db.changes);
+        let mut schema = Schema::default();
+        for changes in &db.changes {
+            let rel = changes.rel.as_str();
+            if !crate::weakspots::is_test_path(rel) {
+                let before: BTreeSet<String> = schema.tables.keys().cloned().collect();
+                let mut search: Option<String> = None;
+                let mut note = |line: usize, table: &QName, issue: Issue| {
+                    out.push(Finding {
+                        rel: rel.to_string(),
+                        line,
+                        table: table.label(),
+                        issue,
+                    });
+                };
+                for (op, line) in &changes.ops {
+                    let existing = |name: &QName, search: &Option<String>| {
+                        schema
+                            .table_key(name, search.as_deref())
+                            .filter(|k| before.contains(k))
+                    };
+                    match op {
+                        Op::SearchPath(s) => search = s.clone(),
+                        Op::AlterTable { table, actions } if existing(table, &search).is_some() => {
+                            for a in actions {
+                                match a {
+                                    Action::DropColumn(_) => note(*line, table, Issue::DropsData),
+                                    Action::AddColumn { column, .. }
+                                        if column.not_null
+                                            && column.default.is_none()
+                                            && !column.identity
+                                            && column.generated.is_none() =>
+                                    {
+                                        note(
+                                            column.line.max(*line),
+                                            table,
+                                            Issue::NotNullWithoutDefault,
+                                        )
+                                    }
+                                    Action::AlterColumn {
+                                        change: Change::Type(_),
+                                        ..
+                                    } if postgres => note(*line, table, Issue::LocksTable),
+                                    _ => {}
+                                }
+                            }
+                        }
+                        Op::DropTable(names) => {
+                            for name in names {
+                                if existing(name, &search).is_some() {
+                                    note(*line, name, Issue::DropsData);
+                                }
+                            }
+                        }
+                        Op::CreateIndex { table, index }
+                            if postgres
+                                && !index.concurrent
+                                && existing(table, &search).is_some() =>
+                        {
+                            note(*line, table, Issue::LocksTable)
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            schema.apply(changes);
+        }
+        // The schema as they leave it.
+        let secured: BTreeSet<Option<String>> = schema
+            .tables
+            .values()
+            .filter(|t| t.rls)
+            .map(|t| t.name.schema.as_ref().map(|s| s.to_lowercase()))
+            .collect();
+        for t in schema.tables.values() {
+            if crate::weakspots::is_test_path(&t.file) || t.columns.is_empty() {
+                continue;
+            }
+            let at = |issue: Issue, rel: &str, line: usize| Finding {
+                rel: rel.to_string(),
+                line,
+                table: t.name.label(),
+                issue,
+            };
+            if t.primary_key().is_empty() && t.derived_from.is_empty() {
+                out.push(at(Issue::NoPrimaryKey, &t.file, t.line));
+            }
+            if postgres {
+                for c in &t.constraints {
+                    if let Kind::ForeignKey(fk) = &c.kind
+                        && fk.columns.first().is_some_and(|col| !t.is_indexed(col))
+                    {
+                        let rel = if c.file.is_empty() { &t.file } else { &c.file };
+                        out.push(at(Issue::UnindexedForeignKey, rel, c.line.max(1)));
+                    }
+                }
+            }
+            if !t.rls && secured.contains(&t.name.schema.as_ref().map(|s| s.to_lowercase())) {
+                out.push(at(Issue::RowLevelSecurityOff, &t.file, t.line));
+            }
+        }
+    }
+    out
+}

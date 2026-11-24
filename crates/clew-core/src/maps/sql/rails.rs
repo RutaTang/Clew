@@ -174,6 +174,7 @@ fn index(args: &str, line: usize) -> Index {
         unique: ruby_literal(args, "unique").as_deref() == Some("true"),
         partial: find_option(args, "where").is_some(),
         method: ruby_option(args, "using").filter(|m| m != "btree"),
+        concurrent: ruby_option(args, "algorithm").as_deref() == Some("concurrently"),
         file: String::new(),
         line,
     }

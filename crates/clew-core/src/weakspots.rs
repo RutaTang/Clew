@@ -74,6 +74,18 @@ pub enum Risk {
     /// A proof left unfinished: Lean's `sorry` or `admit`. What it states
     /// is not proved, and everything proved from it rests on it.
     Sorry,
+    /// A table with no primary key (see [`crate::maps::sql::Issue`]).
+    NoPrimaryKey,
+    /// A foreign key no index leads with.
+    UnindexedKey,
+    /// Row-level security off where the schema's other tables have it on.
+    RlsOff,
+    /// A migration dropping a table or column an earlier one made.
+    DropsData,
+    /// A `NOT NULL` column added to an existing table with no default.
+    NotNullNoDefault,
+    /// A migration holding writes to an existing table while it works.
+    LocksTable,
 }
 
 impl Risk {
@@ -84,6 +96,10 @@ impl Risk {
             Risk::Panic | Risk::CatchAll => 2,
             Risk::Unsafe | Risk::RawHtml => 3,
             Risk::Eval | Risk::Shell | Risk::UnboundedCopy | Risk::Deserialize | Risk::Sorry => 4,
+            Risk::UnindexedKey => 1,
+            Risk::LocksTable => 2,
+            Risk::NoPrimaryKey | Risk::DropsData | Risk::NotNullNoDefault => 3,
+            Risk::RlsOff => 4,
         }
     }
 }
@@ -149,6 +165,66 @@ fn risks(lang: Lang) -> &'static [(&'static str, Risk)] {
         Lang::Java => &[("Runtime.getRuntime().exec(", Risk::Shell)],
         _ => &[],
     }
+}
+
+/// The weak spots of a project's databases, from its SQL files and Rails'
+/// `db/` (each `(rel, text)`): a spot per table of a file, its reasons what
+/// the schema and the migrations say of it (see
+/// [`crate::maps::sql::findings`]).
+pub fn schema_spots(files: &[(String, String)]) -> Vec<Spot> {
+    use crate::maps::sql::Issue;
+    let pairs: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(r, t)| (r.as_str(), t.as_str()))
+        .collect();
+    let corpus = crate::maps::Corpus::of(&pairs);
+    let mut spots: Vec<Spot> = Vec::new();
+    for f in crate::maps::sql::findings(&corpus) {
+        let risk = match f.issue {
+            Issue::NoPrimaryKey => Risk::NoPrimaryKey,
+            Issue::UnindexedForeignKey => Risk::UnindexedKey,
+            Issue::RowLevelSecurityOff => Risk::RlsOff,
+            Issue::DropsData => Risk::DropsData,
+            Issue::NotNullWithoutDefault => Risk::NotNullNoDefault,
+            Issue::LocksTable => Risk::LocksTable,
+        };
+        let at = spots
+            .iter()
+            .position(|s| s.rel == f.rel && s.name == f.table);
+        let spot = match at {
+            Some(i) => &mut spots[i],
+            None => {
+                spots.push(Spot {
+                    rel: f.rel.clone(),
+                    name: f.table.clone(),
+                    line: f.line,
+                    end_line: f.line,
+                    score: 0,
+                    reasons: Vec::new(),
+                });
+                spots.last_mut().expect("just pushed")
+            }
+        };
+        spot.line = spot.line.min(f.line);
+        spot.end_line = spot.end_line.max(f.line);
+        let count = spot.reasons.iter_mut().find_map(|r| match r {
+            Reason::Risky(k, n) if *k == risk => Some(n),
+            _ => None,
+        });
+        match count {
+            Some(n) => {
+                if *n < COUNT_CAP {
+                    *n += 1;
+                    spot.score += risk.weight();
+                }
+            }
+            None => {
+                spot.reasons.push(Reason::Risky(risk, 1));
+                spot.score += risk.weight();
+            }
+        }
+    }
+    spots
 }
 
 /// Whether a path is a test's: its findings are not the project's weak
