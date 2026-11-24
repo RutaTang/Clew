@@ -300,6 +300,10 @@ pub struct Server {
     /// provisioning task can register the process it spawned after its
     /// download finished off the request loop.
     procs: SharedProcs,
+    /// The tasks running for the client (`RunTask`), by handle: what stops
+    /// each — set by a `ProcessKill` of the handle, and as every process is
+    /// stopped (a shutdown, another project opened).
+    task_stops: Arc<Mutex<HashMap<u64, Arc<AtomicBool>>>>,
     /// Backpressure for the bulk producers — proxied stdout, trees, symbol
     /// snapshots (see [`OutputBudget`]).
     out_budget: Arc<OutputBudget>,
@@ -367,6 +371,7 @@ impl Server {
             _watcher: Arc::new(Mutex::new(None)),
             open_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             procs: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            task_stops: Arc::new(Mutex::new(HashMap::new())),
             out_budget: OutputBudget::new(),
             spawn_policy,
             state_jobs,
@@ -430,6 +435,18 @@ impl Server {
     /// client waiting forever (and leaking its pending-request entry).
     /// (Boxed refusal: `Event` is large, and clippy rightly objects to fat
     /// `Err` variants on a hot call.)
+    /// Stop every task running for the client (`RunTask`).
+    fn stop_tasks(&self) {
+        for (_, stop) in self
+            .task_stops
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .drain()
+        {
+            stop.store(true, Ordering::SeqCst);
+        }
+    }
+
     fn root_or_refuse(&self) -> Result<PathBuf, Box<Event>> {
         self.root
             .clone()
@@ -479,6 +496,7 @@ impl Server {
     pub async fn shutdown(&mut self) {
         self.stop_ai_work(|_| true);
         self.install_stop.store(true, Ordering::Relaxed);
+        self.stop_tasks();
         for (proc, p) in self.procs.lock().await.drain() {
             kill_removed(&self.out, proc, p);
         }
@@ -596,6 +614,7 @@ impl Server {
                 self.root = Some(root.clone());
                 *self.files.lock().unwrap_or_else(PoisonError::into_inner) = None;
                 *self._watcher.lock().unwrap_or_else(PoisonError::into_inner) = None;
+                self.stop_tasks();
                 for (proc, p) in self.procs.lock().await.drain() {
                     kill_removed(&self.out, proc, p);
                 }
@@ -1034,6 +1053,241 @@ impl Server {
             }
             // The project's maps — its schema, routes, supervision trees —
             // read where the files are. Off the loop: every file is read.
+            // A task of the project's (`ProjectTask`), worked out and run
+            // here: its lines streamed under `proc`, its end one
+            // `ProcessExited`. Registered as a proc with no child, so that
+            // `ProcessKill` stops it as it stops a spawned one.
+            Request::RunTask {
+                proc,
+                task,
+                choices,
+            } => {
+                let root = match self.root_or_refuse() {
+                    Ok(root) => root,
+                    Err(refusal) => return Some(*refusal),
+                };
+                let out = self.out.clone();
+                let procs = self.procs.clone();
+                let (_input, generation) = register_proc(&self.procs, proc).await;
+                let cancel = Arc::new(AtomicBool::new(false));
+                // A handle used again stops the task it named.
+                let replaced = self
+                    .task_stops
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(proc, cancel.clone());
+                if let Some(old) = replaced {
+                    old.store(true, Ordering::SeqCst);
+                }
+                let stops = self.task_stops.clone();
+                let _ = out.send(ServerMessage::Notification {
+                    event: Event::ProcessStarted { proc },
+                });
+                tokio::spawn(async move {
+                    let said_out = out.clone();
+                    let ran_cancel = cancel.clone();
+                    let ran = tokio::task::spawn_blocking(move || {
+                        let mut said = |line: &str, _stderr: bool| {
+                            let mut data = line.as_bytes().to_vec();
+                            data.truncate(clew_protocol::MAX_PROCESS_CHUNK - 1);
+                            data.push(b'\n');
+                            let _ = said_out.send(ServerMessage::Notification {
+                                event: Event::ProcessOutput { proc, data },
+                            });
+                        };
+                        clew_core::tasks::run(&root, &task, &choices, &mut said, &ran_cancel)
+                    })
+                    .await
+                    .unwrap_or_else(|_| Err("the task stopped unexpectedly".into()));
+                    {
+                        let mut stops = stops.lock().unwrap_or_else(PoisonError::into_inner);
+                        if stops.get(&proc).is_some_and(|s| Arc::ptr_eq(s, &cancel)) {
+                            stops.remove(&proc);
+                        }
+                    }
+                    let code = match ran {
+                        Ok(clew_core::spawn::RunEnd::Exited(code)) => {
+                            Some(i32::try_from(code).unwrap_or(-1))
+                        }
+                        Ok(clew_core::spawn::RunEnd::Stopped) => None,
+                        Err(why) => {
+                            let mut data = why.into_bytes();
+                            data.truncate(clew_protocol::MAX_PROCESS_CHUNK - 1);
+                            data.push(b'\n');
+                            let _ = out.send(ServerMessage::Notification {
+                                event: Event::ProcessOutput { proc, data },
+                            });
+                            None
+                        }
+                    };
+                    // Ended on its own: its one exit said here. Stopped by a
+                    // kill, the kill said it.
+                    if failed_spawn_is_ours(&procs, proc, generation).await {
+                        let _ = out.send(ServerMessage::Notification {
+                            event: Event::ProcessExited { proc, code },
+                        });
+                    }
+                });
+                None
+            }
+            // A Rust task's program built here, then debugged here: the
+            // build's lines under `build`, the adapter under `proc`, as
+            // `SpawnAdapter` spawns one. A kill of either handle stops the
+            // build.
+            Request::DebugTask {
+                proc,
+                build,
+                task,
+                choices,
+            } => {
+                let root = match self.root_or_refuse() {
+                    Ok(root) => root,
+                    Err(refusal) => return Some(*refusal),
+                };
+                let out = self.out.clone();
+                let procs = self.procs.clone();
+                let budget = self.out_budget.clone();
+                // The adapter's queue first: the client pipelines its DAP
+                // traffic behind this request.
+                let (input_rx, generation) = register_proc(&self.procs, proc).await;
+                let (_build_input, build_generation) = register_proc(&self.procs, build).await;
+                let cancel = Arc::new(AtomicBool::new(false));
+                {
+                    let mut stops = self
+                        .task_stops
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner);
+                    for handle in [proc, build] {
+                        if let Some(old) = stops.insert(handle, cancel.clone()) {
+                            old.store(true, Ordering::SeqCst);
+                        }
+                    }
+                }
+                let stops = self.task_stops.clone();
+                let _ = out.send(ServerMessage::Notification {
+                    event: Event::ProcessStarted { proc: build },
+                });
+                tokio::spawn(async move {
+                    let line = move |out: &UnboundedSender<ServerMessage>, text: &str| {
+                        let mut data = text.as_bytes().to_vec();
+                        data.truncate(clew_protocol::MAX_PROCESS_CHUNK - 1);
+                        data.push(b'\n');
+                        let _ = out.send(ServerMessage::Notification {
+                            event: Event::ProcessOutput { proc: build, data },
+                        });
+                    };
+                    let (build_root, build_cancel, said_out) =
+                        (root.clone(), cancel.clone(), out.clone());
+                    let built = tokio::task::spawn_blocking(move || {
+                        let mut said = |text: &str, _stderr: bool| line(&said_out, text);
+                        clew_core::tasks::build_rust(
+                            &build_root,
+                            &task,
+                            &choices,
+                            &mut said,
+                            &build_cancel,
+                        )
+                        .map(|built| (built, choices))
+                    })
+                    .await
+                    .unwrap_or_else(|_| Err("the build stopped unexpectedly".into()));
+                    {
+                        let mut stops = stops.lock().unwrap_or_else(PoisonError::into_inner);
+                        for handle in [proc, build] {
+                            if stops.get(&handle).is_some_and(|s| Arc::ptr_eq(s, &cancel)) {
+                                stops.remove(&handle);
+                            }
+                        }
+                    }
+                    let (code, failure) = match &built {
+                        Ok((Some(_), _)) => (Some(0), None),
+                        Ok((None, _)) => (None, Some("the build was stopped".to_string())),
+                        Err(why) => (None, Some(why.clone())),
+                    };
+                    if let Some(why) = &failure {
+                        line(&out, why);
+                    }
+                    if failed_spawn_is_ours(&procs, build, build_generation).await {
+                        let _ = out.send(ServerMessage::Notification {
+                            event: Event::ProcessExited { proc: build, code },
+                        });
+                    }
+                    let (target, choices) = match built {
+                        Ok((Some(target), choices)) => (target, choices),
+                        _ => {
+                            if failed_spawn_is_ours(&procs, proc, generation).await {
+                                let _ = out.send(ServerMessage::Notification {
+                                    event: Event::ProcessExited { proc, code: None },
+                                });
+                            }
+                            let why = failure.unwrap_or_default();
+                            Self::reply(&out, id, failed(why));
+                            return;
+                        }
+                    };
+                    // lldb-dap on what was built, in the folder it runs in,
+                    // with the variables Cargo sets for it.
+                    let resolve_root = root.clone();
+                    let resolved = tokio::task::spawn_blocking(move || {
+                        let bridge = std::env::current_exe().ok();
+                        clew_core::debugadapter::resolve_stdio_in(
+                            "native",
+                            &target.program.to_string_lossy(),
+                            &target.args,
+                            &resolve_root,
+                            &target.cwd,
+                            &choices,
+                            bridge.as_deref(),
+                        )
+                        .and_then(|adapter| {
+                            let mut launch: serde_json::Value =
+                                serde_json::from_str(&adapter.launch).map_err(|e| e.to_string())?;
+                            clew_core::cargorun::with_cargo_env(&mut launch, &target.env);
+                            Ok((adapter, launch.to_string()))
+                        })
+                    })
+                    .await
+                    .unwrap_or_else(|_| Err("resolving the native adapter failed".into()));
+                    match resolved {
+                        Ok((adapter, launch)) => {
+                            let cwd = Some(root.to_string_lossy().into_owned());
+                            match spawn_registered(
+                                &out,
+                                &procs,
+                                budget,
+                                proc,
+                                adapter.command.to_string_lossy().into_owned(),
+                                adapter.args,
+                                cwd,
+                                input_rx,
+                                generation,
+                                crate::process::clean_path(),
+                            )
+                            .await
+                            {
+                                Spawned::Started => {
+                                    Self::reply(&out, id, Event::AdapterSpawned { proc, launch })
+                                }
+                                Spawned::Failed(event) => Self::reply(&out, id, event),
+                                Spawned::Cancelled => Self::reply(
+                                    &out,
+                                    id,
+                                    failed("the debug adapter was stopped while starting"),
+                                ),
+                            }
+                        }
+                        Err(message) => {
+                            if failed_spawn_is_ours(&procs, proc, generation).await {
+                                let _ = out.send(ServerMessage::Notification {
+                                    event: Event::ProcessExited { proc, code: None },
+                                });
+                            }
+                            Self::reply(&out, id, failed(message));
+                        }
+                    }
+                });
+                None
+            }
             Request::ProjectMaps => {
                 let root = match self.root_or_refuse() {
                     Ok(root) => root,
@@ -1416,10 +1670,23 @@ impl Server {
                 proc,
                 language,
                 choices,
+                folder,
             } => {
                 let root = match self.root_or_refuse() {
                     Ok(root) => root,
                     Err(refusal) => return Some(*refusal),
+                };
+                // Where in the project it runs: a folder of it, or its root.
+                let cwd_dir = match folder.as_deref().filter(|f| !f.is_empty()) {
+                    None => root.clone(),
+                    Some(folder) => match clew_core::confine::confine(&root, folder) {
+                        Ok(dir) if dir.is_dir() => dir,
+                        _ => {
+                            return Some(refused(format!(
+                                "refused to start a language server in {folder:?}: not a folder of the project"
+                            )));
+                        }
+                    },
                 };
                 let out = self.out.clone();
                 let procs = self.procs.clone();
@@ -1448,7 +1715,7 @@ impl Server {
                     });
                     match resolved {
                         Ok((exe, args)) => {
-                            let cwd = Some(root.to_string_lossy().into_owned());
+                            let cwd = Some(cwd_dir.to_string_lossy().into_owned());
                             if let Spawned::Failed(event) = spawn_registered(
                                 &out,
                                 &procs,
@@ -1627,6 +1894,14 @@ impl Server {
                 }
             }
             Request::ProcessKill { proc } => {
+                if let Some(stop) = self
+                    .task_stops
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .remove(&proc)
+                {
+                    stop.store(true, Ordering::SeqCst);
+                }
                 let removed = self.procs.lock().await.remove(&proc);
                 if let Some(p) = removed {
                     kill_removed(&self.out, proc, p);

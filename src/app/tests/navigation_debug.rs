@@ -175,6 +175,7 @@ fn control_session(
         args: Vec::new(),
         cwd: PathBuf::from("/p"),
         addr: None,
+        takes_input: false,
     });
     (rt, events, seen)
 }

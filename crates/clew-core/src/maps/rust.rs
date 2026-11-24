@@ -24,16 +24,81 @@ pub fn maps(corpus: &Corpus) -> Vec<ProjectMap> {
 }
 
 /// A type as an impl names it, its generics dropped (`Vec<T>` → `Vec`,
-/// `&'a mut Foo` → `Foo`).
+/// `&'a mut Foo` → `Foo`): any lifetime is passed over, not only `'_` — an
+/// `impl From<&'a str> for &'a Cfg` drew a type named `'a Cfg`.
 fn type_name(written: &str) -> String {
-    let t = written
-        .trim()
-        .trim_start_matches('&')
-        .trim_start_matches("'_ ")
-        .trim();
-    let t = t.strip_prefix("mut ").unwrap_or(t);
+    let mut t = written.trim();
+    loop {
+        let before = t;
+        t = t.trim_start_matches('&').trim_start();
+        if let Some(rest) = t.strip_prefix('\'') {
+            t = rest
+                .trim_start_matches(|c: char| c == '_' || c.is_alphanumeric())
+                .trim_start();
+        }
+        for prefix in ["mut ", "dyn "] {
+            if let Some(rest) = t.strip_prefix(prefix) {
+                t = rest.trim_start();
+            }
+        }
+        if t == before {
+            break;
+        }
+    }
     let t = t.split('<').next().unwrap_or(t);
     t.rsplit("::").next().unwrap_or(t).trim().to_string()
+}
+
+/// What an attribute derives: `#[derive(A, B)]`'s `A` and `B`, with no
+/// condition; `#[cfg_attr(feature = "serde", derive(Serialize))]`'s
+/// `Serialize`, under its condition.
+fn derives(attribute: &str) -> Vec<(String, bool)> {
+    let inner = attribute
+        .trim()
+        .trim_start_matches("#[")
+        .trim_end_matches(']')
+        .trim();
+    let list = |args: &str| -> Vec<String> {
+        args.trim()
+            .trim_start_matches('(')
+            .trim_end_matches(')')
+            .split(',')
+            .map(type_name)
+            .filter(|d| !d.is_empty())
+            .collect()
+    };
+    if let Some(args) = inner.strip_prefix("derive") {
+        return list(args).into_iter().map(|d| (d, false)).collect();
+    }
+    let Some(args) = inner
+        .strip_prefix("cfg_attr")
+        .map(|a| a.trim().trim_start_matches('(').trim_end_matches(')'))
+    else {
+        return Vec::new();
+    };
+    // The attributes after its condition: split where no bracket is open.
+    let mut parts = Vec::new();
+    let (mut depth, mut start, mut quoted) = (0usize, 0usize, false);
+    for (i, c) in args.char_indices() {
+        match c {
+            '"' => quoted = !quoted,
+            '(' | '[' if !quoted => depth += 1,
+            ')' | ']' if !quoted => depth = depth.saturating_sub(1),
+            ',' if !quoted && depth == 0 => {
+                parts.push(&args[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&args[start..]);
+    parts
+        .into_iter()
+        .skip(1)
+        .filter_map(|a| a.trim().strip_prefix("derive"))
+        .flat_map(list)
+        .map(|d| (d, true))
+        .collect()
 }
 
 fn traits(corpus: &Corpus) -> Option<ProjectMap> {
@@ -71,16 +136,10 @@ fn traits(corpus: &Corpus) -> Option<ProjectMap> {
             );
         }
         for attribute in all_of(root, "attribute_item") {
-            let body = text(attribute, src);
-            let Some(inner) = body
-                .trim_start_matches("#[")
-                .trim_end_matches(']')
-                .trim()
-                .strip_prefix("derive")
-                .map(|r| r.trim().trim_start_matches('(').trim_end_matches(')'))
-            else {
+            let derived = derives(text(attribute, src));
+            if derived.is_empty() {
                 continue;
-            };
+            }
             // The item the attribute is on: the next sibling that is no
             // attribute or comment.
             let mut next = attribute.next_named_sibling();
@@ -104,9 +163,17 @@ fn traits(corpus: &Corpus) -> Option<ProjectMap> {
             let t = text(name, src).to_string();
             let from = map.node("type", &t, &t);
             map.place(from, &source.rel, line(item));
-            for derived in inner.split(',').map(type_name).filter(|d| !d.is_empty()) {
+            for (derived, conditional) in derived {
                 let to = map.node("trait", &derived, &derived);
-                map.edge(from, to, "derive");
+                map.edge(
+                    from,
+                    to,
+                    if conditional {
+                        "derive (cfg)"
+                    } else {
+                        "derive"
+                    },
+                );
             }
         }
     }
@@ -242,67 +309,127 @@ fn public_api(corpus: &Corpus) -> Option<ProjectMap> {
         "Public API",
         "each module and an arrow to each item it makes pub (not pub(crate)), and to what it re-exports with pub use",
     );
-    for source in corpus.in_langs(&[Lang::Rust]) {
-        if source.rel.contains("tests/")
-            || source.rel.contains("examples/")
-            || source.rel.contains("benches/")
-        {
-            continue;
-        }
+    let sources: Vec<&super::Source> = corpus
+        .in_langs(&[Lang::Rust])
+        .filter(|s| {
+            !(s.rel.contains("tests/") || s.rel.contains("examples/") || s.rel.contains("benches/"))
+        })
+        .collect();
+    // A module the crate's root does not reach (`mod internal;`, not
+    // `pub mod`) is no API, however `pub` its items: its files are left out.
+    let declared: Vec<Vec<(String, bool)>> = sources.iter().map(|s| module_decls(s)).collect();
+    let rels: Vec<&str> = sources.iter().map(|s| s.rel.as_str()).collect();
+    let hidden = crate::rustapi::unreachable(&rels, |fi, name| {
+        declared[fi]
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|&(_, public)| public)
+    });
+    for (fi, source) in sources.iter().enumerate() {
         let Some(tree) = source.tree() else {
             continue;
         };
         let src = source.text.as_str();
-        let root = tree.root_node();
-        let module = source
+        let lines: Vec<&str> = src.lines().collect();
+        let reachable = hidden.binary_search(&fi).is_err();
+        let file_module = source
             .rel
             .trim_end_matches(".rs")
             .trim_end_matches("/mod")
             .to_string();
-        let mut cursor = root.walk();
-        for item in root.named_children(&mut cursor) {
-            let Some(vis) = all_of(item, "visibility_modifier")
-                .into_iter()
-                .find(|v| v.parent() == Some(item))
-            else {
-                continue;
-            };
-            if text(vis, src) != "pub" {
-                continue;
+        // The file's items, and those of each inline `pub mod` in it, under
+        // that module.
+        let mut scopes: Vec<(Node, String)> = vec![(tree.root_node(), file_module)];
+        while let Some((scope, module)) = scopes.pop() {
+            let mut cursor = scope.walk();
+            for item in scope.named_children(&mut cursor) {
+                let attrs = crate::rustapi::attrs_above(&lines, line(item));
+                // `#[macro_export]` exports a macro at the crate's root,
+                // from any module, reached or not.
+                let exported_macro = item.kind() == "macro_definition" && attrs.macro_export;
+                if attrs.hidden || !(exported_macro || (reachable && plain_pub(item, src))) {
+                    continue;
+                }
+                let m = map.node("module", &module, &module);
+                map.place(m, &source.rel, 1);
+                if item.kind() == "use_declaration" {
+                    let path = text(item, src)
+                        .trim_start_matches("pub")
+                        .trim()
+                        .trim_start_matches("use")
+                        .trim()
+                        .trim_end_matches(';')
+                        .to_string();
+                    let to = map.node("re-export", &format!("{module}:{path}"), &path);
+                    map.place(to, &source.rel, line(item));
+                    map.edge(m, to, "pub use");
+                    continue;
+                }
+                let Some(name) = item.child_by_field_name("name") else {
+                    continue;
+                };
+                let kind = match item.kind() {
+                    "macro_definition" => "macro".to_string(),
+                    k => k.trim_end_matches("_item").replace('_', " "),
+                };
+                let label = text(name, src).to_string();
+                let at = map.node(&kind, &format!("{module}::{label}"), &label);
+                map.place(at, &source.rel, line(item));
+                let signature = match item.kind() {
+                    "macro_definition" => format!("macro_rules! {label}"),
+                    _ => text(item, src)
+                        .split(['{', ';'])
+                        .next()
+                        .unwrap_or("")
+                        .trim()
+                        .to_string(),
+                };
+                map.detail(at, signature);
+                map.edge(
+                    m,
+                    at,
+                    if exported_macro {
+                        "#[macro_export]"
+                    } else {
+                        "pub"
+                    },
+                );
+                if item.kind() == "mod_item"
+                    && let Some(body) = item.child_by_field_name("body")
+                {
+                    scopes.push((body, format!("{module}::{label}")));
+                }
             }
-            let m = map.node("module", &module, &module);
-            map.place(m, &source.rel, 1);
-            if item.kind() == "use_declaration" {
-                let path = text(item, src)
-                    .trim_start_matches("pub")
-                    .trim()
-                    .trim_start_matches("use")
-                    .trim()
-                    .trim_end_matches(';')
-                    .to_string();
-                let to = map.node("re-export", &format!("{module}:{path}"), &path);
-                map.place(to, &source.rel, line(item));
-                map.edge(m, to, "pub use");
-                continue;
-            }
-            let Some(name) = item.child_by_field_name("name") else {
-                continue;
-            };
-            let kind = item.kind().trim_end_matches("_item").replace('_', " ");
-            let label = text(name, src).to_string();
-            let at = map.node(&kind, &format!("{module}::{label}"), &label);
-            map.place(at, &source.rel, line(item));
-            let signature = text(item, src)
-                .split(['{', ';'])
-                .next()
-                .unwrap_or("")
-                .trim()
-                .to_string();
-            map.detail(at, signature);
-            map.edge(m, at, "pub");
         }
     }
     map.finish()
+}
+
+/// Whether `item` is declared plain `pub`: not `pub(crate)` and the like,
+/// the crate's own.
+fn plain_pub(item: Node<'_>, src: &str) -> bool {
+    all_of(item, "visibility_modifier")
+        .into_iter()
+        .find(|v| v.parent() == Some(item))
+        .is_some_and(|v| text(v, src) == "pub")
+}
+
+/// The modules `source` declares at its top level, each with whether it is
+/// `pub mod`.
+fn module_decls(source: &super::Source) -> Vec<(String, bool)> {
+    let Some(tree) = source.tree() else {
+        return Vec::new();
+    };
+    let src = source.text.as_str();
+    let root = tree.root_node();
+    let mut cursor = root.walk();
+    root.named_children(&mut cursor)
+        .filter(|n| n.kind() == "mod_item")
+        .filter_map(|n| {
+            let name = text(n.child_by_field_name("name")?, src).to_string();
+            Some((name, plain_pub(n, src)))
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -361,6 +488,30 @@ mod tests {
         assert_eq!(area.file, "src/shapes.rs", "the trait where it is defined");
     }
 
+    /// A derive under a condition is one, said so; a lifetime is no part
+    /// of a type's name.
+    #[test]
+    fn derives_under_cfg_attr_and_lifetimes() {
+        let maps = maps(&Corpus::of(&[(
+            "src/lib.rs",
+            "#[cfg_attr(feature = \"serde\", derive(serde::Serialize, Deserialize), allow(x))]\n#[derive(Debug)]\npub struct Cfg;\nimpl<'a> From<&'a str> for &'a Cfg { fn from(_: &str) -> Self { todo!() } }\n",
+        )]));
+        let traits = maps.iter().find(|m| m.id == "rust.traits").unwrap();
+        let got = edges(traits);
+        for want in [
+            e("Cfg", "Serialize", "derive (cfg)"),
+            e("Cfg", "Deserialize", "derive (cfg)"),
+            e("Cfg", "Debug", "derive"),
+            e("Cfg", "From", "impl"),
+        ] {
+            assert!(got.contains(&want), "{want:?} in {got:?}");
+        }
+        assert!(
+            !traits.nodes.iter().any(|n| n.label.contains('\'')),
+            "{got:?}"
+        );
+    }
+
     #[test]
     fn unsafe_code_and_what_it_calls() {
         let maps = maps(&Corpus::of(LIB));
@@ -386,6 +537,35 @@ mod tests {
         assert!(kinds.contains(&("unsafe fn", "raw_area")), "{kinds:?}");
     }
 
+    /// A private module's items are no API; an inline `pub mod`'s are, and
+    /// so is a `#[macro_export]` macro wherever it is declared; a
+    /// `#[doc(hidden)]` item is not.
+    #[test]
+    fn the_public_api_is_what_the_crate_root_reaches() {
+        let maps = maps(&Corpus::of(&[
+            (
+                "src/lib.rs",
+                "mod internal;\npub mod api {\n    pub fn call() {}\n    fn own() {}\n}\n#[doc(hidden)]\npub fn __private() {}\n",
+            ),
+            (
+                "src/internal.rs",
+                "pub fn helper() {}\n#[macro_export]\nmacro_rules! shout { () => {} }\n",
+            ),
+        ]));
+        let api = maps.iter().find(|m| m.id == "rust.api").unwrap();
+        let got = edges(api);
+        for want in [
+            e("src/lib", "api", "pub"),
+            e("src/lib::api", "call", "pub"),
+            e("src/internal", "shout", "#[macro_export]"),
+        ] {
+            assert!(got.contains(&want), "{want:?} in {got:?}");
+        }
+        for gone in ["own", "helper", "__private"] {
+            assert!(!got.iter().any(|(_, b, _)| b == gone), "{gone} in {got:?}");
+        }
+    }
+
     #[test]
     fn the_public_api_by_module() {
         let maps = maps(&Corpus::of(LIB));
@@ -408,5 +588,7 @@ mod tests {
         let area = api.nodes.iter().find(|n| n.label == "area").unwrap();
         assert_eq!(area.detail, "pub fn area(c: &Circle) -> f64");
         assert_eq!(type_name("&'a mut std::vec::Vec<T>"), "Vec");
+        assert_eq!(type_name("&'a Cfg"), "Cfg");
+        assert_eq!(type_name("&'static dyn Shape"), "Shape");
     }
 }

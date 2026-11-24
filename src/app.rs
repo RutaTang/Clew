@@ -84,6 +84,7 @@ pub(crate) mod integrations;
 pub(crate) mod keys;
 pub(crate) mod languages;
 mod lsp;
+pub(crate) use lsp::RustSrc;
 pub(crate) mod navigation;
 pub(crate) use navigation::count_matches;
 mod overview;

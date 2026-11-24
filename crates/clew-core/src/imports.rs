@@ -231,8 +231,9 @@ pub fn bears_on_manifests(rel: &str) -> bool {
     name == "composer.json"
         || name == "Cargo.toml"
         || name == "pyproject.toml"
+        || is_lakefile(name)
         || is_haskell_manifest(name)
-        || [".php", ".hs", ".lhs"]
+        || [".php", ".hs", ".lhs", ".lean"]
             .iter()
             .any(|ext| name.ends_with(ext))
 }
@@ -289,7 +290,47 @@ pub fn source_manifests<S: AsRef<str>>(root: &Path, rels: &[S]) -> clew_protocol
             out.python.push((rel.to_string(), roots));
         }
     }
+    if has(&[".lean"]) {
+        for rel in picked(&is_lakefile) {
+            out.lean
+                .push((rel.to_string(), read_lake_src_dirs(&root.join(rel))));
+        }
+    }
     out
+}
+
+/// Whether a file name is a Lake package's lakefile.
+pub fn is_lakefile(name: &str) -> bool {
+    matches!(name, "lakefile.lean" | "lakefile.toml")
+}
+
+/// The source directories the lakefile at `path` names for its libraries
+/// and executables (`srcDir := "lib"`, `srcDir = "lib"`), relative to its
+/// own folder; none for one that names none (its folder is the root). Read
+/// as text, bounded: a `lakefile.lean` is a Lean program, not run.
+pub fn read_lake_src_dirs(path: &Path) -> Vec<String> {
+    let Some(text) = crate::statefile::read_capped(path, 256 * 1024) else {
+        return Vec::new();
+    };
+    let mut dirs = Vec::new();
+    for (at, _) in text.match_indices("srcDir") {
+        let rest = text[at + "srcDir".len()..].trim_start();
+        let rest = rest
+            .strip_prefix(":=")
+            .or_else(|| rest.strip_prefix('='))
+            .map(str::trim_start);
+        let Some(literal) = rest.and_then(|r| r.strip_prefix('"')) else {
+            continue;
+        };
+        let Some(close) = literal.find('"') else {
+            continue;
+        };
+        let dir = literal[..close].trim_matches('/').trim_start_matches("./");
+        if !dir.is_empty() && !dir.contains("..") && !dirs.iter().any(|d| d == dir) {
+            dirs.push(dir.to_string());
+        }
+    }
+    dirs
 }
 
 /// Most `Cargo.toml`s [`source_manifests`] reads: more than of any other
@@ -594,9 +635,19 @@ pub(crate) fn for_each_rust_import<'tree>(
                     return;
                 }
                 budget -= 1;
+                // A `#[path = "…"]` says which file the module is: it goes
+                // with the name (see `rustscope::PATH_ATTR`).
+                let module = match path_attribute(mi, src) {
+                    Some(path) => format!(
+                        "{}{}{path}",
+                        node_text(name, src),
+                        crate::rustscope::PATH_ATTR
+                    ),
+                    None => node_text(name, src).to_string(),
+                };
                 emit(
                     RawImport {
-                        module: node_text(name, src).to_string(),
+                        module,
                         line: line_of(mi),
                         is_mod_decl: true,
                     },
@@ -628,6 +679,39 @@ pub(crate) fn for_each_rust_import<'tree>(
             }
         }
     });
+}
+
+/// The file a `#[path = "…"]` among the attributes right above a module
+/// declaration names, as written; `None` without one (or one under a
+/// `cfg_attr`, which may not apply).
+fn path_attribute(mod_item: Node, src: &str) -> Option<String> {
+    let mut at = mod_item.prev_named_sibling();
+    while let Some(node) = at {
+        match node.kind() {
+            "attribute_item" => {
+                let text: String = node_text(node, src)
+                    .chars()
+                    .filter(|c| !c.is_whitespace())
+                    .collect();
+                if let Some(rest) = text.strip_prefix("#[path=\"")
+                    && let Some(path) = rest.strip_suffix("\"]")
+                    && !path.is_empty()
+                    && !path.contains(['"', '\\'])
+                {
+                    // Spaces in the path were squeezed out with the rest:
+                    // read the literal itself.
+                    let raw = node_text(node, src);
+                    let open = raw.find('"')? + 1;
+                    let close = raw.rfind('"')?;
+                    return raw.get(open..close).map(str::to_string);
+                }
+            }
+            "line_comment" | "block_comment" => {}
+            _ => return None,
+        }
+        at = node.prev_named_sibling();
+    }
+    None
 }
 
 /// Whether a `use_declaration` re-exports what it names: it carries a
@@ -759,7 +843,10 @@ pub fn statement_of(raw: &RawImport, lang: Lang) -> String {
             Some(path) => format!("-include_lib(\"{path}\")"),
             None => raw.module.clone(),
         },
-        Lang::Rust if raw.is_mod_decl => format!("mod {}", raw.module),
+        Lang::Rust if raw.is_mod_decl => match crate::rustscope::mod_decl_parts(&raw.module) {
+            (name, Some(path)) => format!("#[path = \"{path}\"] mod {name}"),
+            (name, None) => format!("mod {name}"),
+        },
         Lang::Rust => {
             let u = crate::rustscope::RustUse::parse(&raw.module);
             let glob = match (u.glob, u.path.is_empty()) {
@@ -1552,6 +1639,21 @@ mod extraction_tests {
     /// A `use` records whether it re-exports and whether it is a glob in the
     /// specifier itself, so the index cache and the wire carry both unchanged
     /// (the import graph needs them to tell a facade from a dependency).
+    /// A module declaration carries the file its `#[path]` names, past its
+    /// other attributes and comments; one under `cfg_attr` does not.
+    #[test]
+    fn a_rust_module_declaration_keeps_its_path_attribute() {
+        let src = "#[path = \"sys/my win.rs\"]\n#[cfg(windows)]\n// The backend.\nmod windows;\nmod plain;\n#[cfg_attr(unix, path = \"u.rs\")]\nmod maybe;\n";
+        let got = imports_of(src, "rust");
+        let modules: Vec<&str> = got.iter().map(|r| r.module.as_str()).collect();
+        assert_eq!(modules, ["windows=sys/my win.rs", "plain", "maybe"]);
+        assert_eq!(
+            statement_of(&got[0], Lang::Rust),
+            "#[path = \"sys/my win.rs\"] mod windows"
+        );
+        assert_eq!(statement_of(&got[1], Lang::Rust), "mod plain");
+    }
+
     #[test]
     fn rust_uses_record_reexports_and_globs() {
         let src = "pub use a::b;\npub(crate) use c::*;\npub(self) use d::e;\n\

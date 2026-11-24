@@ -33,6 +33,95 @@ pub fn tokio_command(program: impl AsRef<OsStr>) -> tokio::process::Command {
     command
 }
 
+/// How a program run to its end ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunEnd {
+    /// It ran and exited with this code.
+    Exited(i64),
+    /// It was stopped, and everything it started with it.
+    Stopped,
+}
+
+/// Run `command` to its end, each line it writes handed to `said` as it
+/// comes, with whether it was written to stderr; its input is closed and
+/// its output piped here. Blocking; stopped, with everything it started,
+/// once `cancel` is set.
+pub fn run_streaming(
+    mut command: std::process::Command,
+    mut said: impl FnMut(&str, bool),
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Result<RunEnd, String> {
+    use std::io::{BufRead, BufReader};
+    use std::process::Stdio;
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    // A group of its own: what it starts runs under it, and stopping it stops all of it.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    let mut child = command.spawn().map_err(|e| e.to_string())?;
+    #[cfg(windows)]
+    let _job = crate::procgroup::adopt_scoped(&child);
+    let (lines_tx, lines) = std::sync::mpsc::channel::<(bool, String)>();
+    let readers: Vec<std::thread::JoinHandle<()>> = [
+        child
+            .stdout
+            .take()
+            .map(|s| (false, Box::new(s) as Box<dyn std::io::Read + Send>)),
+        child
+            .stderr
+            .take()
+            .map(|s| (true, Box::new(s) as Box<dyn std::io::Read + Send>)),
+    ]
+    .into_iter()
+    .flatten()
+    .map(|(stderr, stream)| {
+        let tx = lines_tx.clone();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stream).lines().map_while(Result::ok) {
+                if tx.send((stderr, line)).is_err() {
+                    break;
+                }
+            }
+        })
+    })
+    .collect();
+    drop(lines_tx);
+    let status = loop {
+        while let Ok((stderr, line)) = lines.try_recv() {
+            said(&line, stderr);
+        }
+        if cancel.load(Ordering::SeqCst) {
+            crate::procgroup::kill(child.id());
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(RunEnd::Stopped);
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if let Ok((stderr, line)) = lines.recv_timeout(Duration::from_millis(100)) {
+                    said(&line, stderr);
+                }
+            }
+            Err(e) => return Err(e.to_string()),
+        }
+    };
+    for reader in readers {
+        let _ = reader.join();
+    }
+    while let Ok((stderr, line)) = lines.try_recv() {
+        said(&line, stderr);
+    }
+    Ok(RunEnd::Exited(status.code().map_or(-1, i64::from)))
+}
+
 #[cfg(test)]
 mod tests {
     /// The commands run what they name, with what they are given — on

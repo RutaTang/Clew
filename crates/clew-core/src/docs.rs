@@ -136,10 +136,129 @@ fn extract_with(
             }
         }
     }
+    // A Python function's `@overload` signatures are not in the outline
+    // (one entry, the implementation's): a docstring written on one of
+    // them is the implementation's when it has none of its own.
+    if lang == Lang::Python && source.contains("overload") {
+        let wanted: HashMap<usize, &str> = targets
+            .iter()
+            .filter(|t| t.kind == "function" && !out.contains_key(&t.key))
+            .map(|t| (t.key, t.name))
+            .collect();
+        for (key, stub_line) in python_overload_stubs(source, &wanted) {
+            let stub = Target {
+                key: stub_line,
+                anchor: stub_line,
+                kind: "function",
+                name: wanted[&key],
+                owner: None,
+            };
+            if let Some(doc) = style.doc_for(&lines, &openers, &ends, &stub) {
+                let mut doc = clean_doc_text(&doc, lang);
+                if doc.chars().count() > max {
+                    doc = doc.chars().take(max).collect::<String>() + "…";
+                }
+                if !doc.trim().is_empty() {
+                    out.entry(key).or_insert(doc);
+                }
+            }
+        }
+    }
     if has_overloading(lang) {
         share_overload_docs(source, lang, &mut targets, &mut out);
     }
     out
+}
+
+/// Most classes deep the `@overload` stubs of a method are looked for.
+const MAX_OVERLOAD_DEPTH: usize = 32;
+
+/// For each function of `wanted` (its `def` line and name), the first
+/// `@overload` signature right above it of the same name, in the same
+/// block, that has a docstring: `(function's line, signature's line)`.
+fn python_overload_stubs(source: &str, wanted: &HashMap<usize, &str>) -> Vec<(usize, usize)> {
+    use tree_sitter::Node;
+    let Some(tree) = crate::highlight::parse(source, Lang::Python) else {
+        return Vec::new();
+    };
+    let text = |node: Node| source.get(node.byte_range()).unwrap_or("");
+    // A statement's function and whether it is an `@overload` stub.
+    fn function<'t>(statement: Node<'t>, source: &str) -> Option<(Node<'t>, bool)> {
+        match statement.kind() {
+            "function_definition" => Some((statement, false)),
+            "decorated_definition" => {
+                let def = statement
+                    .child_by_field_name("definition")
+                    .filter(|d| d.kind() == "function_definition")?;
+                let mut cursor = statement.walk();
+                let stub = statement
+                    .children(&mut cursor)
+                    .filter(|c| c.kind() == "decorator")
+                    .any(|d| {
+                        let decorator = source.get(d.byte_range()).unwrap_or("");
+                        let name = decorator.trim_start_matches('@').trim();
+                        name.rsplit('.').next().unwrap_or(name).trim() == "overload"
+                    });
+                Some((def, stub))
+            }
+            _ => None,
+        }
+    }
+    let has_docstring = |def: Node| {
+        def.child_by_field_name("body")
+            .and_then(|body| body.named_child(0))
+            .filter(|first| first.kind() == "expression_statement")
+            .and_then(|first| first.named_child(0))
+            .is_some_and(|value| value.kind() == "string")
+    };
+    let mut found = Vec::new();
+    let mut blocks = vec![(tree.root_node(), 0)];
+    while let Some((block, depth)) = blocks.pop() {
+        let statements: Vec<Node> = {
+            let mut cursor = block.walk();
+            block.named_children(&mut cursor).collect()
+        };
+        for (i, &statement) in statements.iter().enumerate() {
+            let class = match statement.kind() {
+                "class_definition" => Some(statement),
+                "decorated_definition" => statement
+                    .child_by_field_name("definition")
+                    .filter(|d| d.kind() == "class_definition"),
+                _ => None,
+            };
+            if let Some(body) = class.and_then(|c| c.child_by_field_name("body"))
+                && depth < MAX_OVERLOAD_DEPTH
+            {
+                blocks.push((body, depth + 1));
+                continue;
+            }
+            let Some((def, false)) = function(statement, source) else {
+                continue;
+            };
+            let line = def.start_position().row + 1;
+            let Some(&name) = wanted.get(&line) else {
+                continue;
+            };
+            let stub = statements[..i]
+                .iter()
+                .rev()
+                .map_while(|&above| {
+                    function(above, source).filter(|&(stub, is_stub)| {
+                        is_stub
+                            && stub
+                                .child_by_field_name("name")
+                                .is_some_and(|n| text(n) == name)
+                    })
+                })
+                .map(|(stub, _)| stub)
+                .filter(|&stub| has_docstring(stub))
+                .last();
+            if let Some(stub) = stub {
+                found.push((line, stub.start_position().row + 1));
+            }
+        }
+    }
+    found
 }
 
 /// Overloads: the doc sits above the first overload signature, so only that
@@ -340,11 +459,13 @@ impl DocStyle {
         }
         // Up from the line directly above the signature, past the lines glued
         // between it and its doc.
-        let end = ends.get(sig_line - 2).copied().flatten()?;
+        let end = ends.get(sig_line - 2).copied().flatten();
+        if matches!(self, DocStyle::RustLike) {
+            return rust_item_doc(lines, end, sig_line - 2);
+        }
+        let end = end?;
         match self {
             DocStyle::Block(syntax) => collect_block(lines, openers, end, syntax),
-            // `//!` documents the module it sits in, never the item below it.
-            DocStyle::RustLike => collect_line_docs(lines, end, &["///"]),
             DocStyle::SlashSlash => collect_line_docs(lines, end, &["//"]),
             DocStyle::DashDash => collect_line_docs(lines, end, &["--"]),
             // A magic comment (`# frozen_string_literal: true`) or a
@@ -360,6 +481,232 @@ impl DocStyle {
             _ => None,
         }
     }
+}
+
+/// A Rust item's doc, as rustdoc reads it: its `///` lines — or its
+/// `/** … */` block — ending on `end` (`//!` documents the module it sits
+/// in, never the item below it), then the `#[doc = "…"]` among the
+/// attributes between there and the item (`last` the line above it); the
+/// lines a doctest hides (`# use …;`) left out of its examples.
+fn rust_item_doc(lines: &[&str], end: Option<usize>, last: usize) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(end) = end {
+        let comment = match lines[end].trim_end().ends_with("*/") {
+            true => rust_block_doc(lines, end),
+            false => collect_line_docs(lines, end, &["///"]),
+        };
+        parts.extend(comment);
+    }
+    let first = end.map_or(0, |e| e + 1);
+    for line in lines.get(first..=last).unwrap_or_default() {
+        let t = line.trim();
+        if let Some(attr) = t.strip_prefix("#[").and_then(|a| a.strip_suffix(']'))
+            && let Some(doc) = crate::apidoc::doc_attribute(attr, &|_| None)
+        {
+            parts.push(doc);
+        }
+    }
+    non_empty(&rustdoc_shown(&parts.join("\n")))
+}
+
+/// The `/** … */` block ending on line `end`, its text as rustdoc reads it;
+/// `None` for a plain `/* … */` comment.
+fn rust_block_doc(lines: &[&str], end: usize) -> Option<String> {
+    const MAX_BLOCK_LINES: usize = 400;
+    let first = (end.saturating_sub(MAX_BLOCK_LINES)..=end)
+        .rev()
+        .find(|&i| lines[i].contains("/*"))?;
+    let opener = lines[first].trim_start();
+    if !opener.starts_with("/**") || opener.starts_with("/***") || opener.starts_with("/**/") {
+        return None;
+    }
+    let text = lines[first..=end].join("\n");
+    let inner = text.trim().strip_prefix("/**")?.strip_suffix("*/")?;
+    Some(crate::apidoc::block_doc(inner))
+}
+
+/// A Rust doc as rustdoc shows it: in its examples (a fenced block of Rust,
+/// as rustdoc tells one), a line `# …` is hidden — the setup a doctest
+/// needs and the reader does not — and `##` is a `#` written out.
+pub fn rustdoc_shown(doc: &str) -> String {
+    let mut out: Vec<std::borrow::Cow<'_, str>> = Vec::new();
+    let mut fence: Option<(&str, bool)> = None;
+    for line in doc.lines() {
+        let t = line.trim_start();
+        let marker = ["```", "~~~"].into_iter().find(|m| t.starts_with(m));
+        match (fence, marker) {
+            (None, Some(m)) => fence = Some((m, is_rust_fence(t.trim_start_matches(['`', '~'])))),
+            (Some((open, _)), Some(m)) if m == open => fence = None,
+            (Some((_, true)), _) if t == "#" || t.starts_with("# ") => continue,
+            (Some((_, true)), _) if t.starts_with("##") => {
+                out.push(line.replacen("##", "#", 1).into());
+                continue;
+            }
+            _ => {}
+        }
+        out.push(line.into());
+    }
+    out.join("\n")
+}
+
+/// A Rust doc's intra-doc links that nothing resolved — `[Subscriber]`,
+/// ``[`Layer`]``, `[layers](Layer)`'s kin `[text][Layer]`, `[struct@Foo]` —
+/// as rustdoc shows them: their text, the brackets (and a `kind@`) gone,
+/// where Markdown left them literal, brackets and all. A link with a target
+/// or a definition, an image, a task box (`[x]`), a footnote (`[^1]`), and
+/// anything in code stay as written.
+pub fn rustdoc_links(doc: &str) -> String {
+    // The labels the doc defines (`[Foo]: https://…`): links in their own right.
+    let defined: std::collections::HashSet<String> = doc
+        .lines()
+        .filter_map(|l| {
+            let l = l.trim_start().strip_prefix('[')?;
+            let (label, rest) = l.split_once(']')?;
+            rest.starts_with(':').then(|| label.to_ascii_lowercase())
+        })
+        .collect();
+    let mut out: Vec<String> = Vec::new();
+    let mut fence: Option<&str> = None;
+    for line in doc.lines() {
+        let t = line.trim_start();
+        let marker = ["```", "~~~"].into_iter().find(|m| t.starts_with(m));
+        match (fence, marker) {
+            (None, Some(m)) => fence = Some(m),
+            (Some(open), Some(m)) if m == open => fence = None,
+            _ => {}
+        }
+        if fence.is_some() || marker.is_some() {
+            out.push(line.to_string());
+            continue;
+        }
+        out.push(intra_links_in_line(line, &defined));
+    }
+    out.join("\n")
+}
+
+/// One line of prose with its unresolved intra-doc links shown as text
+/// ([`rustdoc_links`]); its inline code left as it is.
+fn intra_links_in_line(line: &str, defined: &std::collections::HashSet<String>) -> String {
+    let chars: Vec<char> = line.chars().collect();
+    let mut out = String::with_capacity(line.len());
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        // Inline code: copied whole, to its closing run of as many backticks.
+        if c == '`' {
+            let run = chars[i..].iter().take_while(|&&b| b == '`').count();
+            let close = (i + run..chars.len()).find(|&k| {
+                chars[k..].iter().take_while(|&&b| b == '`').count() == run
+                    && (k == 0 || chars[k - 1] != '`')
+            });
+            let end = close.map_or(chars.len(), |k| k + run);
+            out.extend(&chars[i..end]);
+            i = end;
+            continue;
+        }
+        if c == '['
+            && (i == 0 || !matches!(chars[i - 1], '\\' | '!' | ']'))
+            && let Some(len) = chars[i + 1..].iter().position(|&b| b == ']')
+        {
+            let close = i + 1 + len;
+            let inner: String = chars[i + 1..close].iter().collect();
+            let after = chars.get(close + 1).copied();
+            // `[text][ref]`: the text, when nothing defines `ref`.
+            let reference = (after == Some('['))
+                .then(|| chars[close + 2..].iter().position(|&b| b == ']'))
+                .flatten()
+                .map(|n| {
+                    let r: String = chars[close + 2..close + 2 + n].iter().collect();
+                    (r, close + 2 + n)
+                })
+                .filter(|(r, _)| !defined.contains(&r.to_ascii_lowercase()) && intra_target(r));
+            if let Some((_, end)) = reference {
+                out.push_str(&shown_link_text(&inner));
+                i = end + 1;
+                continue;
+            }
+            let bare = !matches!(after, Some('(' | '[' | ':'))
+                && !defined.contains(&inner.to_ascii_lowercase())
+                && intra_target(&inner);
+            if bare {
+                out.push_str(&shown_link_text(&inner));
+                i = close + 1;
+                continue;
+            }
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
+}
+
+/// Whether bracketed text names an item as an intra-doc link does: a path
+/// (`Foo`, `crate::a::B`, `Vec<T>`, `f()`, `m!`), maybe in backticks or
+/// with a `kind@` — not a task box, a footnote, or prose.
+fn intra_target(inner: &str) -> bool {
+    let name = inner.trim();
+    let name = name
+        .strip_prefix('`')
+        .and_then(|n| n.strip_suffix('`'))
+        .unwrap_or(name);
+    let name = name.split_once('@').map_or(name, |(_, n)| n);
+    // `[x]`, `[X]`: a list item's task box.
+    !name.is_empty()
+        && !matches!(name, "x" | "X")
+        && !name.starts_with('^')
+        && name.chars().any(|c| c.is_alphabetic())
+        && name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_alphabetic() || c == '_')
+        && name.chars().all(|c| {
+            c.is_alphanumeric()
+                || matches!(c, '_' | ':' | '<' | '>' | ',' | '&' | '(' | ')' | '!' | ' ')
+        })
+        && !name.contains("  ")
+        && name.split_whitespace().count() <= 2
+}
+
+/// A link's text as rustdoc shows it: its `kind@` gone, its backticks kept.
+fn shown_link_text(inner: &str) -> String {
+    let (tick, name) = match inner.strip_prefix('`').and_then(|n| n.strip_suffix('`')) {
+        Some(n) => (true, n),
+        None => (false, inner),
+    };
+    let name = match name.split_once('@') {
+        Some((kind, rest)) if kind.chars().all(|c| c.is_ascii_lowercase()) => rest,
+        _ => name,
+    };
+    match tick {
+        true => format!("`{name}`"),
+        false => name.to_string(),
+    }
+}
+
+/// Whether a fenced block's info string marks Rust code, as rustdoc reads
+/// it: none, `rust`, or only rustdoc's own words (`no_run`, `ignore`,
+/// `should_panic`, `edition2021`, …).
+fn is_rust_fence(info: &str) -> bool {
+    info.split([',', ' ', '\t'])
+        .map(str::trim)
+        .filter(|w| !w.is_empty())
+        .all(|w| {
+            matches!(
+                w,
+                "rust"
+                    | "ignore"
+                    | "should_panic"
+                    | "no_run"
+                    | "compile_fail"
+                    | "test_harness"
+                    | "standalone_crate"
+                    | "allow_fail"
+            ) || w.starts_with("edition")
+                || w.starts_with("ignore-")
+                || (w.len() == 5
+                    && w.starts_with('E')
+                    && w[1..].bytes().all(|b| b.is_ascii_digit()))
+        })
 }
 
 /// Collect a contiguous run of line-comment docs upward from `end`, keeping only
@@ -554,6 +901,30 @@ fn language_glue(lang: Lang, line: &str, continued: &mut bool) -> Option<bool> {
             }
             None
         }
+        // `set_option maxHeartbeats 400000 in`, `open Function in`: a
+        // command that scopes the declaration under it stands between the
+        // declaration and its doc, as it does for Lean.
+        Lang::Lean => {
+            let scopes_next = t.ends_with(" in")
+                && [
+                    "set_option ",
+                    "open ",
+                    "variable ",
+                    "omit ",
+                    "include ",
+                    "attribute ",
+                ]
+                .iter()
+                .any(|w| t.starts_with(w));
+            scopes_next.then_some(true)
+        }
+        // A doc comment is an attribute of the next item, whatever stands
+        // between: a blank line or a plain `// comment` does not part them,
+        // as rustdoc reads it (`////` is a plain comment too).
+        Lang::Rust => {
+            let doc = (t.starts_with("///") && !t.starts_with("////")) || t.starts_with("//!");
+            (t.is_empty() || (t.starts_with("//") && !doc)).then_some(true)
+        }
         _ => None,
     }
 }
@@ -640,8 +1011,14 @@ fn collect_block(
     }
     work::add(end - start + 1);
     let mut buf: Vec<String> = Vec::new();
-    for line in &lines[start..=end] {
-        let mut s = line.trim();
+    for (i, line) in lines[start..=end].iter().enumerate() {
+        // A block with no `*` gutter (Lean's `/-- … -/`) keeps each line's
+        // indent past the block's own: an example in it, a list nested in
+        // a list, read as written — trimmed, `  decide` lost its place.
+        let mut s = match (syntax.gutter, i) {
+            (false, 1..) => line.trim_end(),
+            _ => line.trim(),
+        };
         if let Some(p) = s.find(syntax.doc) {
             s = s[p + syntax.doc.len()..].trim_start();
         } else if let Some(p) = s.find(syntax.open) {
@@ -655,6 +1032,18 @@ fn collect_block(
             false => s,
         };
         buf.push(s.to_string());
+    }
+    if !syntax.gutter && buf.len() > 1 {
+        let indent = buf[1..]
+            .iter()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| l.len() - l.trim_start().len())
+            .min()
+            .unwrap_or(0);
+        for l in &mut buf[1..] {
+            let cut = indent.min(l.len() - l.trim_start().len());
+            *l = l[cut..].to_string();
+        }
     }
     let doc = buf.join("\n").trim().to_string();
     (!doc.is_empty()).then_some(doc)
@@ -953,13 +1342,35 @@ fn rest_role_at(s: &str) -> Option<(String, usize)> {
         .find(|&(_, c)| c == '`')
         .map(|(i, _)| i)?;
     let target = &target_part[..target_end];
-    let shown = if let Some(t) = target.strip_prefix('~') {
+    let role = &after_first[..close];
+    let role = role.rsplit(':').next().unwrap_or(role);
+    // `:ref:`the guide <guide>``: the words, not the label.
+    let (target, titled) = match target.rsplit_once('<').filter(|(_, l)| l.ends_with('>')) {
+        Some((title, _)) if !title.trim().is_empty() => (title.trim(), true),
+        _ => (target, false),
+    };
+    let shown = if titled {
+        target
+    } else if let Some(t) = target.strip_prefix('~') {
         t.rsplit(['.', ':']).next().unwrap_or(t)
     } else {
         target.strip_prefix('.').unwrap_or(target)
     };
+    let shown = match role {
+        _ if titled => shown.to_string(),
+        "pep" => format!("PEP {shown}"),
+        "rfc" => format!("RFC {shown}"),
+        "issue" | "pr" | "gh" => format!("#{shown}"),
+        "ref" | "doc" | "term" | "abbr" | "dfn" | "title" | "emphasis" | "strong" => {
+            shown.to_string()
+        }
+        // `func`, `class`, `meth`, `attr`, `data`, `exc`, `obj`, `mod`,
+        // `const`, `kbd`, `file`, `envvar`, …: names and things typed.
+        _ if !shown.contains('`') => format!("`{shown}`"),
+        _ => shown.to_string(),
+    };
     // leading ':' (1) + name + ":`" (2) + target + closing '`' (1)
-    Some((shown.to_string(), 1 + close + 2 + target_end + 1))
+    Some((shown, 1 + close + 2 + target_end + 1))
 }
 
 /// Most lines a def/class header may span. A real one, however wrapped, is a
@@ -1117,7 +1528,8 @@ const NUMPY_SECTIONS: &[&str] = &[
 /// a code block and Sphinx's fields as one run-on paragraph. Prose is left
 /// as it is.
 pub fn python_doc_markdown(doc: &str) -> String {
-    let lines: Vec<&str> = doc.lines().collect();
+    let rest = rest_blocks(&doc.lines().collect::<Vec<_>>());
+    let lines: Vec<&str> = rest.iter().map(String::as_str).collect();
     let mut out: Vec<String> = Vec::new();
     let mut i = 0;
     while i < lines.len() {
@@ -1195,6 +1607,205 @@ pub fn python_doc_markdown(doc: &str) -> String {
         text = text.replace("\n\n\n", "\n\n");
     }
     text.trim().to_string()
+}
+
+/// Most lines a reST directive's body may span: a docstring's note is a
+/// paragraph or two, an example a screenful.
+const MAX_DIRECTIVE_LINES: usize = 400;
+
+/// reStructuredText's block markup as Markdown, ahead of the sections:
+/// an admonition (`.. note::`, `.. warning::`, `.. seealso::`, …) as a
+/// quote headed with its kind, `.. versionadded::`/`versionchanged::`/
+/// `deprecated::` as an italic line with what it says, `.. code-block::`
+/// (and `code`, `sourcecode`, `doctest`) and a paragraph ending `::` as a
+/// fenced block of code, a hyperlink as a Markdown link. A comment or a
+/// target (`.. _name:`) is dropped; any other directive keeps its text.
+/// As written, these showed as `.. note::` lines and indented runs the
+/// Markdown read as unhighlighted code.
+fn rest_blocks(lines: &[&str]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut i = 0;
+    // A directive's or literal block's body: the lines after `at` indented
+    // past `indent`, blank ones among them; returned dedented, and the
+    // index after it.
+    let body = |at: usize, indent: usize| -> (Vec<String>, usize) {
+        let mut end = at + 1;
+        while end < lines.len()
+            && end - at <= MAX_DIRECTIVE_LINES
+            && (lines[end].trim().is_empty() || indent_of(lines[end]) > indent)
+        {
+            end += 1;
+        }
+        let mut last = end;
+        while last > at + 1 && lines[last - 1].trim().is_empty() {
+            last -= 1;
+        }
+        (dedent_lines(&lines[at + 1..last]), end)
+    };
+    let fence = |out: &mut Vec<String>, language: &str, code: &[String]| {
+        if out.last().is_some_and(|l| !l.trim().is_empty()) {
+            out.push(String::new());
+        }
+        out.push(format!("```{language}"));
+        let skip = code.iter().take_while(|l| l.trim().is_empty()).count();
+        out.extend(code[skip..].iter().cloned());
+        out.push("```".to_string());
+        out.push(String::new());
+    };
+    while i < lines.len() {
+        let line = lines[i];
+        let indent = indent_of(line);
+        let head = line.trim();
+        // Only markup at the left edge: an indented one is inside a
+        // section's body, which reads its own (`prose_and_code`).
+        if let Some(directive) = head.strip_prefix(".. ").filter(|_| indent == 0) {
+            let (mut text, end) = body(i, indent);
+            i = end;
+            let Some((name, args)) = directive.split_once("::") else {
+                // `.. _target:` and `.. a comment`: nothing to read.
+                continue;
+            };
+            let (name, args) = (name.trim(), args.trim());
+            // A directive's options (`:linenos:`) open its body.
+            let options = text
+                .iter()
+                .take_while(|l| l.trim_start().starts_with(':') && !l.trim().is_empty())
+                .count();
+            text.drain(..options);
+            let blank = text.iter().take_while(|l| l.trim().is_empty()).count();
+            text.drain(..blank);
+            let prose = || {
+                text.iter()
+                    .map(|l| l.trim())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            };
+            let label = match name {
+                "note" => Some("Note"),
+                "warning" => Some("Warning"),
+                "tip" => Some("Tip"),
+                "hint" => Some("Hint"),
+                "important" => Some("Important"),
+                "caution" => Some("Caution"),
+                "danger" => Some("Danger"),
+                "attention" => Some("Attention"),
+                "error" => Some("Error"),
+                "seealso" => Some("See also"),
+                "admonition" => Some(args),
+                _ => None,
+            };
+            if out.last().is_some_and(|l| !l.trim().is_empty()) {
+                out.push(String::new());
+            }
+            match (name, label) {
+                (_, Some(label)) => {
+                    let lead = match name {
+                        "admonition" => String::new(),
+                        _ => args.to_string(),
+                    };
+                    let mut said: Vec<String> = Vec::new();
+                    if !lead.is_empty() {
+                        said.push(lead);
+                    }
+                    said.extend(text.iter().map(|l| l.trim().to_string()));
+                    let mut first = true;
+                    for line in said {
+                        out.push(match (first, line.is_empty()) {
+                            (true, _) => format!("> **{label}:** {line}").trim_end().to_string(),
+                            (false, true) => ">".to_string(),
+                            (false, false) => format!("> {line}"),
+                        });
+                        first = false;
+                    }
+                    if first {
+                        out.push(format!("> **{label}**"));
+                    }
+                    out.push(String::new());
+                }
+                ("versionadded" | "versionchanged" | "deprecated", _) => {
+                    let (version, inline) =
+                        args.split_once(char::is_whitespace).unwrap_or((args, ""));
+                    let what = match name {
+                        "versionadded" => "New in version",
+                        "versionchanged" => "Changed in version",
+                        _ => "Deprecated since version",
+                    };
+                    let said = [inline.trim().to_string(), prose()]
+                        .into_iter()
+                        .filter(|p| !p.is_empty())
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    out.push(match said.is_empty() {
+                        true => format!("*{what} {version}.*"),
+                        false => format!("*{what} {version}:* {said}"),
+                    });
+                    out.push(String::new());
+                }
+                ("code-block" | "code" | "sourcecode" | "doctest" | "testcode", _) => {
+                    let language = match (name, args) {
+                        ("doctest" | "testcode", _) | (_, "") | (_, "pycon") => "python",
+                        (_, language) => language,
+                    };
+                    fence(&mut out, language, &text);
+                }
+                _ => out.extend(text),
+            }
+            continue;
+        }
+        // `Example::` or a lone `::`: a literal block, Python's code.
+        if indent == 0 && head.ends_with("::") && lines.get(i + 1).is_some() {
+            let (code, end) = body(i, indent);
+            if !code.iter().all(|l| l.trim().is_empty()) {
+                let intro = head.trim_end_matches(':').trim_end();
+                if !intro.is_empty() {
+                    out.push(format!("{}{intro}:", " ".repeat(indent)));
+                }
+                fence(&mut out, "python", &code);
+                i = end;
+                continue;
+            }
+        }
+        out.push(rest_links(line));
+        i += 1;
+    }
+    out
+}
+
+/// reST hyperlinks as Markdown's: `` `text <url>`_ `` as `[text](url)`,
+/// a bare reference (`` `text`_ ``) as its text.
+fn rest_links(line: &str) -> String {
+    if !line.contains("`_") {
+        return line.to_string();
+    }
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    while let Some(open) = rest.find('`') {
+        let after = &rest[open + 1..];
+        let Some(close) = after.find('`') else {
+            break;
+        };
+        let inner = &after[..close];
+        let tail = &after[close + 1..];
+        if tail.starts_with('_') {
+            let skip = if tail.starts_with("__") { 2 } else { 1 };
+            out.push_str(&rest[..open]);
+            match inner.rsplit_once('<').filter(|(_, u)| u.ends_with('>')) {
+                Some((text, url)) => {
+                    out.push_str(&format!("[{}]({})", text.trim(), url.trim_end_matches('>')));
+                }
+                None => out.push_str(inner),
+            }
+            rest = &tail[skip..];
+        } else {
+            out.push_str(&rest[..open + 1 + close + 1]);
+            rest = tail;
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// A line's leading whitespace, in chars.
@@ -1616,6 +2227,70 @@ mod tests {
         extract(src, lang, &syms)
     }
 
+    /// A Rust item's doc in each of rustdoc's forms — `/** */`, `#[doc]`
+    /// among its attributes — and its examples as rustdoc shows them.
+    #[test]
+    fn rust_docs_in_every_form_and_examples_as_shown() {
+        let src = "/**\n * Adds two numbers.\n *\n * ```\n * # use calc::add;\n * assert_eq!(add(1, 2), 3);\n * ```\n */\npub fn add(a: i32, b: i32) -> i32 { a + b }\n\n\
+                   /// Subtracts.\n#[doc = \"Saturating.\"]\n#[inline]\npub fn sub(a: u8, b: u8) -> u8 { a.saturating_sub(b) }\n\n\
+                   /* not a doc */\npub fn mul() {}\n";
+        let docs = docs_of(src, "rust");
+        assert_eq!(
+            docs.get(&9).map(String::as_str),
+            Some("Adds two numbers.\n\n```\nassert_eq!(add(1, 2), 3);\n```"),
+            "{docs:?}"
+        );
+        assert_eq!(
+            docs.get(&14).map(String::as_str),
+            Some("Subtracts.\nSaturating.")
+        );
+        assert_eq!(docs.get(&17), None, "{docs:?}");
+        // `##` is a `#` written out; a block of another language keeps its `#`s.
+        assert_eq!(
+            rustdoc_shown(
+                "```no_run\n## not hidden\n# hidden\nlet x = 1;\n```\n```sh\n# a comment\n```"
+            ),
+            "```no_run\n# not hidden\nlet x = 1;\n```\n```sh\n# a comment\n```"
+        );
+    }
+
+    /// Intra-doc links nothing resolved read as rustdoc shows them; real
+    /// links, task boxes, footnotes and code stay as written.
+    #[test]
+    fn unresolved_intra_doc_links_read_as_their_text() {
+        let doc = "The [Subscriber] trait and [`Layer`]s, see [struct@Registry] and [the layer][Layer].\n\
+                   A [link](https://x) and [defined]; [^1] and `[Code]`.\n\
+                   - [x] done\n\n[defined]: https://y\n```\n[Kept]\n```";
+        assert_eq!(
+            rustdoc_links(doc),
+            "The Subscriber trait and `Layer`s, see Registry and the layer.\n\
+             A [link](https://x) and [defined]; [^1] and `[Code]`.\n\
+             - [x] done\n\n[defined]: https://y\n```\n[Kept]\n```"
+        );
+        assert_eq!(
+            rustdoc_links("[crate::fmt()] and [Vec<T>]"),
+            "crate::fmt() and Vec<T>"
+        );
+        assert_eq!(
+            rustdoc_links("prose [in brackets with words]"),
+            "prose [in brackets with words]"
+        );
+    }
+
+    /// A Rust doc stays its item's across a blank line or a plain comment,
+    /// as rustdoc reads it — never across another item, and never a `//!`.
+    #[test]
+    fn a_rust_doc_reaches_its_item_past_blank_lines_and_comments() {
+        let src = "//! The module.\n\nfn first() {}\n/// Spaced.\n\nfn spaced() {}\n/// Over a note.\n// TODO: tidy\n//// banner\n#[inline]\n\nfn noted() {}\n/// For a.\nfn a() {}\n\nfn b() {}\n";
+        let docs = docs_of(src, "rust");
+        let doc = |line: usize| docs.get(&line).map(String::as_str);
+        assert_eq!(doc(3), None, "{docs:?}");
+        assert_eq!(doc(6), Some("Spaced."));
+        assert_eq!(doc(12), Some("Over a note."));
+        assert_eq!(doc(14), Some("For a."));
+        assert_eq!(doc(16), None);
+    }
+
     #[test]
     fn rust_line_docs_above_attributes() {
         let src = "/// Adds two numbers.\n/// Returns the sum.\n#[inline]\npub fn add(a: i32, b: i32) -> i32 { a + b }\n";
@@ -1662,8 +2337,10 @@ mod tests {
         // Never closed: the lines below it glue only up to the bound, so a
         // function far below borrows nothing. (A parser reads the rest of the
         // file into the attribute, so the function is named by hand.)
+        // (Its arguments, not blank lines: those part no Rust doc from its
+        // item.)
         let mut src = String::from("/// Of nothing.\n#[cfg(\n");
-        src.push_str(&"\n".repeat(MAX_ATTRIBUTE_LINES + 1));
+        src.push_str(&"    a,\n".repeat(MAX_ATTRIBUTE_LINES + 1));
         src.push_str("pub fn far() {}\n");
         let line = src.lines().count();
         let far = |line| Symbol {
@@ -1762,23 +2439,109 @@ mod tests {
             clean_doc_text("See {@macro foo} here", Lang::Dart),
             "See  here"
         );
-        // reST roles simplified to their target, honoring ~ and leading dot.
+        // reST roles as their target, honoring ~ and leading dot: a name in
+        // code, a cross-reference's words as words.
         assert_eq!(
             clean_doc_text("A :class:`Request` object", Lang::Python),
-            "A Request object"
+            "A `Request` object"
         );
         assert_eq!(
             clean_doc_text("uses :py:class:`Foo`", Lang::Python),
-            "uses Foo"
+            "uses `Foo`"
         );
         assert_eq!(
             clean_doc_text("call :meth:`~scrapy.Request.replace`", Lang::Python),
-            "call replace"
+            "call `replace`"
+        );
+        assert_eq!(
+            clean_doc_text("see :ref:`the guide <guide>` and :pep:`8`", Lang::Python),
+            "see the guide and PEP 8"
+        );
+        assert_eq!(
+            clean_doc_text(":doc:`/tutorial`, :issue:`42`", Lang::Python),
+            "/tutorial, #42"
         );
         // Plain colons (not a role) are untouched.
         assert_eq!(
             clean_doc_text("note: this is fine", Lang::Python),
             "note: this is fine"
+        );
+    }
+
+    /// reST's block markup as Markdown: an admonition as a quote headed with
+    /// its kind, a version note as an italic line, a code block and a `::`
+    /// paragraph's block as fenced code, a hyperlink as a link; a comment and
+    /// a target dropped.
+    #[test]
+    fn python_rest_directives_render_as_markdown() {
+        let doc = "\
+Register a URL rule.
+
+.. _rules:
+
+.. note::
+   Endpoints default to the
+   view's name.
+
+   Two paragraphs.
+
+.. versionchanged:: 2.0
+    The ``provide_automatic_options`` default moved.
+
+.. versionadded:: 0.7
+
+.. code-block:: python
+   :linenos:
+
+   app.add_url_rule(\"/\", view_func=index)
+
+Use it like this::
+
+    @app.route(\"/\")
+    def index():
+        return \"Hi\"
+
+.. this is a comment
+   that spans two lines
+
+See `the docs <https://flask.palletsprojects.com/>`_ and `Rules`_.
+";
+        let md = python_doc_markdown(doc);
+        let want = "\
+Register a URL rule.
+
+> **Note:** Endpoints default to the
+> view's name.
+>
+> Two paragraphs.
+
+*Changed in version 2.0:* The ``provide_automatic_options`` default moved.
+
+*New in version 0.7.*
+
+```python
+app.add_url_rule(\"/\", view_func=index)
+```
+
+Use it like this:
+
+```python
+@app.route(\"/\")
+def index():
+    return \"Hi\"
+```
+
+See [the docs](https://flask.palletsprojects.com/) and Rules.";
+        assert_eq!(md, want);
+        // A seealso with its text on the directive's own line, and a titled
+        // admonition.
+        assert_eq!(
+            python_doc_markdown(".. seealso:: :func:`url_for`\n"),
+            "> **See also:** :func:`url_for`"
+        );
+        assert_eq!(
+            python_doc_markdown(".. admonition:: Thread safety\n\n   Not safe.\n"),
+            "> **Thread safety:** Not safe."
         );
     }
 
@@ -2280,6 +3043,32 @@ mod markup_tests {
         );
     }
 
+    /// A Lean doc keeps its lines' indent past its own — an example in it,
+    /// a nested list — and reaches its declaration past a command that
+    /// scopes it (`set_option … in`, `open … in`).
+    #[test]
+    fn a_lean_doc_keeps_its_indent_and_reaches_past_scoping_commands() {
+        let src = "/-- Steps:\n  * first\n    * nested\n\n```lean\nexample : True := by\n  decide\n```\n-/\ntheorem a : True := trivial\n\
+                   /-- Heavy. -/\nset_option maxHeartbeats 400000 in\ntheorem heavy : True := trivial\n\
+                   /-- Opened. -/\nopen Function in\ntheorem opened : True := trivial\n";
+        let docs = located_docs_of(src, "lean");
+        assert_eq!(
+            docs.get(&10).map(String::as_str),
+            Some("Steps:\n  * first\n    * nested\n\n```lean\nexample : True := by\n  decide\n```"),
+            "{docs:?}"
+        );
+        assert_eq!(
+            docs.get(&13).map(String::as_str),
+            Some("Heavy."),
+            "{docs:?}"
+        );
+        assert_eq!(
+            docs.get(&16).map(String::as_str),
+            Some("Opened."),
+            "{docs:?}"
+        );
+    }
+
     /// Javadoc and JSDoc inline tags keep their words. Deleting every `{@…}`
     /// turned "Returns {@code true} if …" into "Returns  if …".
     #[test]
@@ -2504,9 +3293,17 @@ mod markup_tests {
             "Area.",
         );
         shared(
+            "class K:\n    @property\n    def f(self) -> int:\n        \"\"\"Converts.\"\"\"\n    @f.setter\n    def f(self, x: int) -> None: ...\n",
+            "python",
+            &[3, 6],
+            "Converts.",
+        );
+        // A function's `@overload` signatures are one entry, its
+        // implementation's, which takes the docstring written on them.
+        shared(
             "class K:\n    @overload\n    def f(self, x: int) -> int:\n        \"\"\"Converts.\"\"\"\n    @overload\n    def f(self, x: str) -> str: ...\n    def f(self, x):\n        return x\n",
             "python",
-            &[3, 6, 7],
+            &[7],
             "Converts.",
         );
     }
@@ -2538,7 +3335,7 @@ mod markup_tests {
         assert_eq!(out, s);
         let bound = COLONS * (MAX_ROLE_NAME + 1 + MAX_ROLE_TARGET);
         assert!(scanned <= bound, "scanned {scanned} chars (bound {bound})");
-        assert_eq!(rest_role_at(":x:`y`"), Some(("y".to_string(), 6)));
+        assert_eq!(rest_role_at(":x:`y`"), Some(("`y`".to_string(), 6)));
         assert_eq!(rest_role_at("::`y`"), None);
     }
 }

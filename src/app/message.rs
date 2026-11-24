@@ -484,7 +484,7 @@ pub enum EditorMsg {
         /// rest of the bundle it does not follow from the bytes, so the hash
         /// cannot vouch for it: the user may have picked another target while
         /// this pass ran, and the same source then has a different answer.
-        target: inactive::Target,
+        target: Arc<inactive::Target>,
         /// The build facts `inactive` was evaluated against, for the same
         /// reason (`ProjectSession::build_facts`).
         facts: Arc<clew_protocol::BuildFacts>,
@@ -619,6 +619,15 @@ pub enum HoverMsg {
         x: f32,
         y: f32,
     },
+    /// A line's ▶ in the gutter was clicked (1-based `line` of `pane`, at
+    /// `x`, `y` in the code's space): what starts there is offered, run or
+    /// debugged.
+    RunMarkClicked {
+        pane: usize,
+        line: usize,
+        x: f32,
+        y: f32,
+    },
     ContextMenuClosed,
     ContextGoto(GotoKind),
     Requested {
@@ -642,6 +651,16 @@ pub enum HoverMsg {
     },
     /// The cursor left the code — clear any open peek.
     Cleared,
+    /// The pointer left the peeked word a moment ago ([`HOVER_LEAVE_GRACE`]):
+    /// the peek goes, unless the pointer came back to the word or went into
+    /// the peek since. `leave` is the leaving it was scheduled for
+    /// (`ProjectSession::hover_leave`).
+    ///
+    /// [`HOVER_LEAVE_GRACE`]: crate::app::hover::HOVER_LEAVE_GRACE
+    Left {
+        stamp: Stamp,
+        leave: u64,
+    },
     /// The pointer rests on gutter line `line` (0-based) of `pane`, at `x`,
     /// `y` in the code's scrolled space — or has left the gutter (`None`).
     Gutter {
@@ -1665,8 +1684,12 @@ pub enum LanguagesMsg {
     Draft(LangField, String),
     /// Use what is typed in the field.
     UseDraft(LangField),
-    /// The language a server program is being chosen for.
+    /// The language a server program is being chosen for: its key, or
+    /// the key of the server beside its main one (`python.also`).
     ServerLanguage(String),
+    /// Whether the server program being chosen runs beside the language's
+    /// main server rather than in its place.
+    ServerBeside(bool),
     /// Pick a file (or, for a compilation database, a folder) for the field
     /// in a dialog — a project on this machine.
     Browse(LangField),
@@ -1733,6 +1756,7 @@ impl LanguagesMsg {
             | LanguagesMsg::Draft(..)
             | LanguagesMsg::UseDraft(..)
             | LanguagesMsg::ServerLanguage(..)
+            | LanguagesMsg::ServerBeside(..)
             | LanguagesMsg::Browse(..) => None,
         }
     }
@@ -1842,6 +1866,14 @@ pub enum DebugMsg {
     /// active file — the code menu's line — or, `None`, at the cursor: Run
     /// Test, Debug Test.
     RunTest { line: Option<usize>, no_debug: bool },
+    /// Run (`no_debug`) or debug the program that starts at a 1-based line
+    /// of the active file — a gutter ▶'s: a Rust `main`, built by Cargo; a
+    /// Python `__main__` block's file, run as a script.
+    RunMain { line: usize, no_debug: bool },
+    /// Build the Lake project of the Lean file read, or run its tests
+    /// (`lake build`, `lake test`): the palette's Lean: Build Project and
+    /// Lean: Run Project Tests.
+    RunLake(crate::app::runplan::LakeTask),
     /// The adapter is ready; carry its handle + the TCP address it announced
     /// (for child sessions).
     /// Every DAP-side message names the `run` it belongs to (`App::debug_run`):
@@ -1968,6 +2000,10 @@ pub enum DebugMsg {
     BpConditionRemove,
     /// The add-watch input changed.
     WatchInput(String),
+    /// What is typed for the running program changed.
+    ProgramInput(String),
+    /// Send what is typed to the running program, as a line.
+    ProgramInputSent,
     /// Add the current input as a watch expression.
     WatchAdd,
     /// Remove a watch expression by identity (its text), from both the watch
@@ -2037,8 +2073,9 @@ pub enum DebugMsg {
     /// install itself is reported whatever the project).
     AdapterInstalled {
         stamp: Stamp,
-        /// It was pytest, which runs tests: no debug adapter.
-        test_runner: bool,
+        /// What was installed: a debug adapter, pytest (which runs tests),
+        /// or a script's own packages — each said as what it is.
+        install: crate::dap::AdapterInstall,
         result: Result<(), String>,
     },
 }
@@ -2092,6 +2129,21 @@ pub enum LspMsg {
         language: String,
         name: &'static str,
         program: PathBuf,
+    },
+    /// Whether the project's Rust toolchain has Rust's own sources
+    /// (`rust-src`), looked at as rust-analyzer started: `None` with no
+    /// rustup toolchain to ask; `Err` with the toolchain they are missing
+    /// from (`None` its default).
+    RustSrcFound {
+        stamp: Stamp,
+        found: Option<Result<(), Option<String>>>,
+    },
+    /// The status bar's Add Rust's Sources: `rustup component add rust-src`.
+    AddRustSrc,
+    /// How adding them went: rustup's word why, where it could not.
+    RustSrcAdded {
+        stamp: Stamp,
+        result: Result<(), String>,
     },
     DownloadResult {
         stamp: Stamp,
@@ -2434,6 +2486,9 @@ pub enum WindowMsg {
     ToggleInlineBlame,
     /// Toggle the lines down the code's indentation.
     ToggleIndentGuides,
+    /// Toggle code info showing when the pointer rests on a word
+    /// ([`crate::App::peek_on_rest`]).
+    TogglePeekOnRest,
     /// A file picker could not be shown ([`crate::app::tasks::NoDialog`]).
     NoFileDialog,
     /// Open / close the app menu of Windows and Linux (the top bar's ☰).
@@ -2475,6 +2530,10 @@ pub enum WindowMsg {
     TreeKey(TreeKey),
     /// The Files view's tree has the keyboard now, or no longer.
     TreeFocused(bool),
+    /// A press on the Files view's tree: the keys are its, but the row they
+    /// rest on is not ringed — the ring is for the keyboard, as a focus
+    /// ring is only where keys moved it (`:focus-visible`).
+    TreePointed,
     /// The Files view's tree scrolled: where it is, and how much of it
     /// shows.
     FilesTreeScrolled {
@@ -2725,9 +2784,11 @@ impl HoverMsg {
             HoverMsg::Dwell { stamp, .. }
             | HoverMsg::Answered { stamp, .. }
             | HoverMsg::GutterDue { stamp, .. }
+            | HoverMsg::Left { stamp, .. }
             | HoverMsg::InsightAnswered { stamp, .. } => Some(Origin::Stamped(stamp)),
             HoverMsg::Gutter { .. }
             | HoverMsg::ContextMenuOpened { .. }
+            | HoverMsg::RunMarkClicked { .. }
             | HoverMsg::ContextMenuClosed
             | HoverMsg::ContextGoto(..)
             | HoverMsg::Requested { .. }
@@ -3199,6 +3260,8 @@ impl DebugMsg {
             DebugMsg::Start
             | DebugMsg::Run
             | DebugMsg::RunTest { .. }
+            | DebugMsg::RunMain { .. }
+            | DebugMsg::RunLake(..)
             | DebugMsg::Control(..)
             | DebugMsg::Stop
             | DebugMsg::ShowTab(..)
@@ -3212,6 +3275,8 @@ impl DebugMsg {
             | DebugMsg::BpConditionCancel
             | DebugMsg::BpConditionRemove
             | DebugMsg::WatchInput(..)
+            | DebugMsg::ProgramInput(..)
+            | DebugMsg::ProgramInputSent
             | DebugMsg::WatchAdd
             | DebugMsg::WatchRemoveExpr(..)
             | DebugMsg::ToggleVar(..)
@@ -3232,6 +3297,8 @@ impl LspMsg {
             | LspMsg::Fetched { stamp, .. }
             | LspMsg::Staged { stamp, .. }
             | LspMsg::FoundOnPath { stamp, .. }
+            | LspMsg::RustSrcFound { stamp, .. }
+            | LspMsg::RustSrcAdded { stamp, .. }
             | LspMsg::PanelListed { stamp, .. } => Some(Origin::Stamped(stamp)),
             LspMsg::ConsentAllowed(..)
             | LspMsg::CommandAllowed(..)
@@ -3242,6 +3309,7 @@ impl LspMsg {
             | LspMsg::ToggleInlayHints
             | LspMsg::TogglePanel
             | LspMsg::Restart(..)
+            | LspMsg::AddRustSrc
             | LspMsg::Remove { .. }
             | LspMsg::DownloadFor(..) => None,
         }
@@ -3446,6 +3514,7 @@ impl WindowMsg {
             | WindowMsg::ToggleMinimap
             | WindowMsg::ToggleInlineBlame
             | WindowMsg::ToggleIndentGuides
+            | WindowMsg::TogglePeekOnRest
             | WindowMsg::NoFileDialog
             | WindowMsg::ToggleAppMenu
             | WindowMsg::ToggleViewMenu
@@ -3459,6 +3528,7 @@ impl WindowMsg {
             | WindowMsg::RingMoved(..)
             | WindowMsg::TreeKey(..)
             | WindowMsg::TreeFocused(..)
+            | WindowMsg::TreePointed
             | WindowMsg::ToggleMaximize
             | WindowMsg::MarginTabPicked(..)
             | WindowMsg::FilesTreeScrolled { .. }

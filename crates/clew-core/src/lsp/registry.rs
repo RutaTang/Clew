@@ -260,7 +260,7 @@ pub const MAX_NAME_LEN: usize = 128;
 
 /// Whether `version` is a plain version: ASCII letters and digits, with `.`,
 /// `-`, `_` and `+`, starting with a letter or digit, at most
-/// [`MAX_VERSION_LEN`] bytes. `latest`, `2026-07-13`, `v0.16.2`,
+/// [`MAX_VERSION_LEN`] bytes. `latest`, `2026-11-23`, `v0.16.2`,
 /// `1.0.0+build` and Go's pseudo-versions all are.
 ///
 /// A version can come from the project's `lsp.toml`, and it is spliced into
@@ -402,7 +402,7 @@ impl ServerSpec {
 pub static SERVERS: &[ServerSpec] = &[
     ServerSpec {
         name: "rust-analyzer",
-        version: "2026-07-13",
+        version: "2026-11-23",
         languages: &["rust"],
         args: &[],
         runs_project_code: Some(
@@ -413,54 +413,54 @@ pub static SERVERS: &[ServerSpec] = &[
         source: Source::Download(&[
             Artifact {
                 platforms: &[Platform::MacArm64],
-                url: "https://github.com/rust-lang/rust-analyzer/releases/download/2026-07-13/rust-analyzer-aarch64-apple-darwin.gz",
+                url: "https://github.com/rust-lang/rust-analyzer/releases/download/2026-11-23/rust-analyzer-aarch64-apple-darwin.gz",
                 sha256: Sha256::from_hex(
-                    "9c6b3ebf06480e2c95a7b01750fa68d77834bffa34da81e4eb00cef3cdff4613",
+                    "9d996784c9bc811642edd9d993c8c85e12c7111463a8e426d5e74c27da1bc0a5",
                 ),
                 archive: Archive::Gzip,
                 binary: "rust-analyzer",
             },
             Artifact {
                 platforms: &[Platform::MacX64],
-                url: "https://github.com/rust-lang/rust-analyzer/releases/download/2026-07-13/rust-analyzer-x86_64-apple-darwin.gz",
+                url: "https://github.com/rust-lang/rust-analyzer/releases/download/2026-11-23/rust-analyzer-x86_64-apple-darwin.gz",
                 sha256: Sha256::from_hex(
-                    "b8832accb9f163214e63ccc989bb2161d52f19270eafb136da0fb16093185041",
+                    "4673e51749f937567b77813ef12621b6e11e6ba9c1b591c58f8a98fbbc9f5bac",
                 ),
                 archive: Archive::Gzip,
                 binary: "rust-analyzer",
             },
             Artifact {
                 platforms: &[Platform::LinuxArm64],
-                url: "https://github.com/rust-lang/rust-analyzer/releases/download/2026-07-13/rust-analyzer-aarch64-unknown-linux-gnu.gz",
+                url: "https://github.com/rust-lang/rust-analyzer/releases/download/2026-11-23/rust-analyzer-aarch64-unknown-linux-gnu.gz",
                 sha256: Sha256::from_hex(
-                    "d30c3ac726f93ae7cb57c6e16cd2d2b5460c9893ccdd38b6d3ae9300c72852ab",
+                    "cf7e9c2cd34540da92473d47f0866c9515425da01116e7aaca988c9b19408285",
                 ),
                 archive: Archive::Gzip,
                 binary: "rust-analyzer",
             },
             Artifact {
                 platforms: &[Platform::LinuxX64],
-                url: "https://github.com/rust-lang/rust-analyzer/releases/download/2026-07-13/rust-analyzer-x86_64-unknown-linux-gnu.gz",
+                url: "https://github.com/rust-lang/rust-analyzer/releases/download/2026-11-23/rust-analyzer-x86_64-unknown-linux-gnu.gz",
                 sha256: Sha256::from_hex(
-                    "5ee1754afa7a1eb7f56606847b61328e6fac2f316e40ebf314dcefb30263df4d",
+                    "99748126069cc1360e2729e45ae7b563a2b885def41c0d600de8e5977a7adf13",
                 ),
                 archive: Archive::Gzip,
                 binary: "rust-analyzer",
             },
             Artifact {
                 platforms: &[Platform::WindowsX64],
-                url: "https://github.com/rust-lang/rust-analyzer/releases/download/2026-07-13/rust-analyzer-x86_64-pc-windows-msvc.zip",
+                url: "https://github.com/rust-lang/rust-analyzer/releases/download/2026-11-23/rust-analyzer-x86_64-pc-windows-msvc.zip",
                 sha256: Sha256::from_hex(
-                    "d8d79975da21ca59dcb9d19d253b2210f33c3eef41eab24ec48b6d5aaaa4e1ff",
+                    "6d0c3835155bb1fbee9d93d1eca4270251e08cb9a4621dbcadaf7450a6a4add2",
                 ),
                 archive: Archive::Zip,
                 binary: "rust-analyzer.exe",
             },
             Artifact {
                 platforms: &[Platform::WindowsArm64],
-                url: "https://github.com/rust-lang/rust-analyzer/releases/download/2026-07-13/rust-analyzer-aarch64-pc-windows-msvc.zip",
+                url: "https://github.com/rust-lang/rust-analyzer/releases/download/2026-11-23/rust-analyzer-aarch64-pc-windows-msvc.zip",
                 sha256: Sha256::from_hex(
-                    "ae7bf858503bb26f49d5ef9bd5d14a61f78573ea706225cdbc39cb52afe9f9f7",
+                    "c4bee363bec04ca721beb3a90a996d799ecfd94fe8128d65814f6d1ca844343d",
                 ),
                 archive: Archive::Zip,
                 binary: "rust-analyzer.exe",
@@ -796,48 +796,48 @@ mod tests {
             (
                 "rust-analyzer",
                 Platform::MacArm64,
-                "https://github.com/rust-lang/rust-analyzer/releases/download/2026-07-13/rust-analyzer-aarch64-apple-darwin.gz",
-                "9c6b3ebf06480e2c95a7b01750fa68d77834bffa34da81e4eb00cef3cdff4613",
+                "https://github.com/rust-lang/rust-analyzer/releases/download/2026-11-23/rust-analyzer-aarch64-apple-darwin.gz",
+                "9d996784c9bc811642edd9d993c8c85e12c7111463a8e426d5e74c27da1bc0a5",
                 Archive::Gzip,
                 "rust-analyzer",
             ),
             (
                 "rust-analyzer",
                 Platform::MacX64,
-                "https://github.com/rust-lang/rust-analyzer/releases/download/2026-07-13/rust-analyzer-x86_64-apple-darwin.gz",
-                "b8832accb9f163214e63ccc989bb2161d52f19270eafb136da0fb16093185041",
+                "https://github.com/rust-lang/rust-analyzer/releases/download/2026-11-23/rust-analyzer-x86_64-apple-darwin.gz",
+                "4673e51749f937567b77813ef12621b6e11e6ba9c1b591c58f8a98fbbc9f5bac",
                 Archive::Gzip,
                 "rust-analyzer",
             ),
             (
                 "rust-analyzer",
                 Platform::LinuxArm64,
-                "https://github.com/rust-lang/rust-analyzer/releases/download/2026-07-13/rust-analyzer-aarch64-unknown-linux-gnu.gz",
-                "d30c3ac726f93ae7cb57c6e16cd2d2b5460c9893ccdd38b6d3ae9300c72852ab",
+                "https://github.com/rust-lang/rust-analyzer/releases/download/2026-11-23/rust-analyzer-aarch64-unknown-linux-gnu.gz",
+                "cf7e9c2cd34540da92473d47f0866c9515425da01116e7aaca988c9b19408285",
                 Archive::Gzip,
                 "rust-analyzer",
             ),
             (
                 "rust-analyzer",
                 Platform::LinuxX64,
-                "https://github.com/rust-lang/rust-analyzer/releases/download/2026-07-13/rust-analyzer-x86_64-unknown-linux-gnu.gz",
-                "5ee1754afa7a1eb7f56606847b61328e6fac2f316e40ebf314dcefb30263df4d",
+                "https://github.com/rust-lang/rust-analyzer/releases/download/2026-11-23/rust-analyzer-x86_64-unknown-linux-gnu.gz",
+                "99748126069cc1360e2729e45ae7b563a2b885def41c0d600de8e5977a7adf13",
                 Archive::Gzip,
                 "rust-analyzer",
             ),
             (
                 "rust-analyzer",
                 Platform::WindowsX64,
-                "https://github.com/rust-lang/rust-analyzer/releases/download/2026-07-13/rust-analyzer-x86_64-pc-windows-msvc.zip",
-                "d8d79975da21ca59dcb9d19d253b2210f33c3eef41eab24ec48b6d5aaaa4e1ff",
+                "https://github.com/rust-lang/rust-analyzer/releases/download/2026-11-23/rust-analyzer-x86_64-pc-windows-msvc.zip",
+                "6d0c3835155bb1fbee9d93d1eca4270251e08cb9a4621dbcadaf7450a6a4add2",
                 Archive::Zip,
                 "rust-analyzer.exe",
             ),
             (
                 "rust-analyzer",
                 Platform::WindowsArm64,
-                "https://github.com/rust-lang/rust-analyzer/releases/download/2026-07-13/rust-analyzer-aarch64-pc-windows-msvc.zip",
-                "ae7bf858503bb26f49d5ef9bd5d14a61f78573ea706225cdbc39cb52afe9f9f7",
+                "https://github.com/rust-lang/rust-analyzer/releases/download/2026-11-23/rust-analyzer-aarch64-pc-windows-msvc.zip",
+                "c4bee363bec04ca721beb3a90a996d799ecfd94fe8128d65814f6d1ca844343d",
                 Archive::Zip,
                 "rust-analyzer.exe",
             ),
@@ -1130,7 +1130,7 @@ mod version_consistency_tests {
             "latest",
             "sdk",
             "next",
-            "2026-07-13",
+            "2026-11-23",
             "0.16.0",
             "v0.99.0",
             "1.0.0+build.5",

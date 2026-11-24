@@ -31,6 +31,20 @@ use crate::imports::RawImport;
 /// without whitespace, so no real path can begin with `pub `.
 pub const REEXPORT: &str = "pub ";
 
+/// What joins a module declaration's name to the file its `#[path]`
+/// attribute names: `#[path = "sys/win.rs"] mod windows;` is recorded as
+/// `windows=sys/win.rs` (no name has a `=`).
+pub const PATH_ATTR: char = '=';
+
+/// A module declaration's specifier, decoded: its name (`a::b` inside an
+/// inline `mod a`) and the file its `#[path]` names, if it names one.
+pub fn mod_decl_parts(module: &str) -> (&str, Option<&str>) {
+    match module.split_once(PATH_ATTR) {
+        Some((name, path)) => (name, Some(path)),
+        None => (module, None),
+    }
+}
+
 /// The last segment of a glob import's specifier: `use a::b::*` is recorded as
 /// `a::b::*` — the module the glob reads from, plus the star.
 pub const GLOB: &str = "*";

@@ -116,6 +116,38 @@ pub(crate) fn gutter_words(app: &App, pane: usize, line: usize) -> Option<String
             (None, _) => tr!("Breakpoint. Click to remove").to_string(),
         });
     }
+    // A ▶ (drawn where no breakpoint is): what a click on it offers.
+    if said.is_empty() && app.run_marks(v).contains(&(line + 1)) {
+        use clew_core::runnables::RunnableKind;
+        let found = v.runnables();
+        if let Some(r) = found.iter().find(|r| r.line == line + 1) {
+            said.push(match r.kind {
+                RunnableKind::Test => tr!("Run or debug {test}", test = r.name),
+                RunnableKind::Tests => tr!("Run or debug the tests in {name}", name = r.name),
+                RunnableKind::Doctest => match r.name.is_empty() {
+                    true => tr!("Run this example").to_string(),
+                    false => tr!("Run this example of {item}", item = r.name),
+                },
+                // Named without reading the package (this is drawn each
+                // frame): Rust's `main`, a Python block's file, a Lean
+                // file's — which runs, but has no debugger.
+                RunnableKind::Main => {
+                    let program = match v.lang_key {
+                        Some("python" | "lean") => v
+                            .abs
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| r.name.clone()),
+                        _ => r.name.clone(),
+                    };
+                    match v.lang_key {
+                        Some("lean") => tr!("Run {program}", program = program),
+                        _ => tr!("Run or debug {program}", program = program),
+                    }
+                }
+            });
+        }
+    }
     if let Some(bm) = app
         .proj
         .bookmarks
@@ -294,7 +326,7 @@ pub(crate) fn context_menu<'a>(app: &App, menu: &'a crate::ContextMenu) -> Eleme
         .collect();
     // In groups: going somewhere, understanding what is here, the
     // plugins', marking the line, debugging.
-    let groups = [
+    let mut groups = vec![
         navigate,
         vec![
             plain(tr!("View Docs"), Message::Docs(DocsMsg::ViewFromMenu)),
@@ -368,41 +400,94 @@ pub(crate) fn context_menu<'a>(app: &App, menu: &'a crate::ContextMenu) -> Eleme
             ]
         },
         {
-            // The test the line is in, run or debugged alone, beside where
-            // it stops: Rust's through Cargo, Python's by pytest.
+            // What Run Test runs from the line, run or debugged, beside
+            // where it stops — named, where it is more than the test the
+            // line is in: one case of a parametrized test, or a class's or
+            // a file's tests. Rust's through Cargo, Python's by pytest.
             let mut debugging = Vec::new();
-            if menu.in_test {
-                let line = Some(menu.line + 1);
+            // A gutter ▶ on a program's start: it, run or debugged.
+            if let Some(gutter) = menu.gutter.as_ref()
+                && let Some(main) = gutter.main.as_ref()
+            {
+                let line = menu.line + 1;
                 debugging.push(Row {
-                    keys: Some(app.keymap.chord(crate::keymap::Action::RunTest).caps()),
-                    ..plain(
-                        tr!("Run Test"),
-                        Message::Debug(DebugMsg::RunTest {
-                            line,
-                            no_debug: true,
-                        }),
-                    )
+                    label: tr!("Run {program}", program = main).into(),
+                    msg: Message::Debug(DebugMsg::RunMain {
+                        line,
+                        no_debug: true,
+                    }),
+                    keys: None,
+                    able: true,
+                    ai: false,
                 });
+            }
+            if let Some(gutter) = menu.gutter.as_ref().filter(|g| g.debug)
+                && let Some(main) = gutter.main.as_ref()
+            {
+                let line = menu.line + 1;
                 debugging.push(Row {
-                    keys: Some(app.keymap.chord(crate::keymap::Action::DebugTest).caps()),
-                    ..plain(
-                        tr!("Debug Test"),
-                        Message::Debug(DebugMsg::RunTest {
+                    label: tr!("Debug {program}", program = main).into(),
+                    msg: Message::Debug(DebugMsg::RunMain {
+                        line,
+                        no_debug: false,
+                    }),
+                    keys: None,
+                    able: true,
+                    ai: false,
+                });
+            }
+            if let Some(test) = &menu.test {
+                let line = Some(menu.line + 1);
+                let (run, debug): (std::borrow::Cow<'static, str>, _) = match test {
+                    // Run only: rustdoc builds and runs an example itself.
+                    crate::TestAt::Doctest(name) => (tr!("Run {test}", test = name).into(), None),
+                    crate::TestAt::One => (tr!("Run Test").into(), Some(tr!("Debug Test").into())),
+                    crate::TestAt::Case(name) => (
+                        tr!("Run {test}", test = name).into(),
+                        Some(tr!("Debug {test}", test = name).into()),
+                    ),
+                    crate::TestAt::Group(name) => (
+                        tr!("Run Tests in {name}", name = name).into(),
+                        Some(tr!("Debug Tests in {name}", name = name).into()),
+                    ),
+                };
+                debugging.push(Row {
+                    label: run,
+                    msg: Message::Debug(DebugMsg::RunTest {
+                        line,
+                        no_debug: true,
+                    }),
+                    keys: Some(app.keymap.chord(crate::keymap::Action::RunTest).caps()),
+                    able: true,
+                    ai: false,
+                });
+                if let Some(debug) = debug {
+                    debugging.push(Row {
+                        label: debug,
+                        msg: Message::Debug(DebugMsg::RunTest {
                             line,
                             no_debug: false,
                         }),
-                    )
-                });
+                        keys: Some(app.keymap.chord(crate::keymap::Action::DebugTest).caps()),
+                        able: true,
+                        ai: false,
+                    });
+                }
             }
             debugging
         },
         vec![
             // Its key, as Settings lists it: the menu showed Ctrl+D on
-            // Toggle Bookmark and nothing on this one.
+            // Toggle Bookmark and nothing on this one. From a ▶, which is
+            // drawn only where no breakpoint is, the one it stands in for.
             Row {
                 keys: keys("F9"),
                 ..plain(
-                    tr!("Toggle Breakpoint"),
+                    if menu.gutter.is_some() {
+                        tr!("Add Breakpoint")
+                    } else {
+                        tr!("Toggle Breakpoint")
+                    },
                     Message::Debug(DebugMsg::ToggleBreakpointFromMenu),
                 )
             },
@@ -419,6 +504,21 @@ pub(crate) fn context_menu<'a>(app: &App, menu: &'a crate::ContextMenu) -> Eleme
             ),
         ],
     ];
+    // Lean runs no debugger: no breakpoint is offered in it.
+    let lean = app
+        .proj
+        .panes
+        .get(menu.pane)
+        .and_then(Option::as_ref)
+        .is_some_and(|v| v.lang_key == Some("lean"));
+    if lean {
+        groups.pop();
+    }
+    // From a gutter ▶: what runs from the line, and its breakpoint.
+    if menu.gutter.is_some() {
+        let kept = if lean { 1 } else { 2 };
+        groups.drain(..groups.len() - kept);
+    }
     // As designed, or as wide as its longest row (its keys too) in the
     // reader's language, so none wraps or is clipped. A row is its words,
     // the room between and its keys, two gaps of 16 apart (the keys' slot

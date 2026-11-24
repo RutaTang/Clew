@@ -101,6 +101,131 @@ pub struct DapClient {
     /// it is not told of, and a program died of an exception with the
     /// debugger never pausing where it was raised.
     exception_filters: Arc<std::sync::Mutex<Vec<String>>>,
+    /// Every exception filter the adapter offers, on by default or not: what
+    /// a launch may ask for instead ([`Self::prefer_exception_filters`]).
+    offered_filters: Arc<std::sync::Mutex<Vec<String>>>,
+    /// The programs the adapter asks Clew to run for it (`runInTerminal`),
+    /// and the input of the one running: see [`ProgramHost`].
+    programs: Arc<ProgramHost>,
+}
+
+/// The programs a debug adapter asks Clew to run for it (DAP's
+/// `runInTerminal`): debugpy's way of giving a program an input. Run with
+/// its output in the console as its own, its input from the run's input
+/// line, and ended with the session.
+#[derive(Debug, Default)]
+struct ProgramHost {
+    /// Whether this session's programs may run on this computer: only a
+    /// session on this computer's project — a remote host's adapter asks
+    /// for a program of that host, which Clew has no business running
+    /// here. Said in `initialize`, so an adapter asks only when it may.
+    allowed: std::sync::atomic::AtomicBool,
+    /// Where what is typed for the running program goes, while it runs.
+    input: std::sync::Mutex<Option<mpsc::UnboundedSender<Vec<u8>>>>,
+    /// The programs run, reaped when the session ends.
+    children: std::sync::Mutex<Vec<Child>>,
+}
+
+impl ProgramHost {
+    /// Run the program `arguments` (a `runInTerminal` request's) names, on
+    /// this computer: its output into `sink` as the program's, its input
+    /// open to [`DapClient::send_input`]. Its process id, or why not.
+    fn run(&self, arguments: &Value, sink: &EventSink) -> Result<u32, String> {
+        let argv: Vec<&str> = arguments
+            .get("args")
+            .and_then(Value::as_array)
+            .map(|args| args.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        let Some((program, args)) = argv.split_first() else {
+            return Err("no program to run".into());
+        };
+        let mut command = clew_core::spawn::tokio_command(program);
+        command
+            .args(args)
+            // As the adapter's own: only the absolute entries of `PATH`.
+            .env("PATH", clew_core::linerpc::child_path())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
+        if let Some(cwd) = arguments.get("cwd").and_then(Value::as_str)
+            && !cwd.is_empty()
+        {
+            command.current_dir(cwd);
+        }
+        // What the launch sets, on top of what Clew runs with; `null`
+        // takes a variable away.
+        if let Some(env) = arguments.get("env").and_then(Value::as_object) {
+            for (name, value) in env {
+                match value {
+                    Value::String(value) => {
+                        command.env(name, value);
+                    }
+                    Value::Null => {
+                        command.env_remove(name);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        #[cfg(unix)]
+        command.process_group(0);
+        let mut child = command
+            .spawn()
+            .map_err(|e| format!("could not run {program}: {e}"))?;
+        #[cfg(windows)]
+        clew_core::procgroup::adopt_tokio(&child);
+        let pid = child.id().unwrap_or(0);
+        if let Some(out) = child.stdout.take() {
+            tokio::spawn(forward_output(Box::new(out), "stdout", sink.sharing()));
+        }
+        if let Some(err) = child.stderr.take() {
+            tokio::spawn(forward_output(Box::new(err), "stderr", sink.sharing()));
+        }
+        if let Some(mut stdin) = child.stdin.take() {
+            let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
+            tokio::spawn(async move {
+                use tokio::io::AsyncWriteExt as _;
+                while let Some(bytes) = rx.recv().await {
+                    if stdin.write_all(&bytes).await.is_err() || stdin.flush().await.is_err() {
+                        break;
+                    }
+                }
+            });
+            if let Ok(mut input) = self.input.lock() {
+                *input = Some(tx);
+            }
+        }
+        if let Ok(mut children) = self.children.lock() {
+            children.push(child);
+        }
+        Ok(pid)
+    }
+
+    /// End what was run: its input closed, each program given `grace` to
+    /// end by itself (the adapter ends it as its session ends), then
+    /// killed with what it started.
+    async fn end(&self, grace: Duration) {
+        if let Ok(mut input) = self.input.lock() {
+            *input = None;
+        }
+        let children = self
+            .children
+            .lock()
+            .map(|mut children| std::mem::take(&mut *children))
+            .unwrap_or_default();
+        for child in children {
+            framing::reap(child, grace, cfg!(unix)).await;
+        }
+    }
+}
+
+/// A local pytest's assertion rewriting adds to a test (`@py_assert1`,
+/// `@py_format4`): no name the test's code has, never one a reader looks
+/// for, and between the test's own variables when it stops at a failure.
+/// No Python name starts with `@`.
+fn is_pytest_temporary(name: &str) -> bool {
+    name.starts_with("@py_")
 }
 
 impl DapClient {
@@ -298,13 +423,24 @@ impl DapClient {
         for (stream, category) in outputs {
             tokio::spawn(forward_output(stream, category, sink.sharing()));
         }
-        tokio::spawn(run_session(writer, mailbox, incoming, child, sink, grace));
+        let programs = Arc::new(ProgramHost::default());
+        tokio::spawn(run_session(
+            writer,
+            mailbox,
+            incoming,
+            child,
+            sink,
+            grace,
+            programs.clone(),
+        ));
         let client = DapClient {
             rpc,
             addr,
             timeout: REQUEST_TIMEOUT,
             disconnect: Default::default(),
             exception_filters: Default::default(),
+            offered_filters: Default::default(),
+            programs,
         };
         (client, events)
     }
@@ -354,14 +490,58 @@ impl DapClient {
             })
     }
 
+    /// Let the adapter have its programs run on this computer, with an input
+    /// ([`Self::send_input`]): asked before [`Self::initialize`], which says
+    /// so. Only for a session of a project on this computer.
+    pub fn run_programs_here(&self) {
+        self.programs.allowed.store(true, Ordering::SeqCst);
+    }
+
+    /// Send `text` to the input of the program Clew runs for the adapter.
+    /// Whether there is one to take it.
+    pub fn send_input(&self, text: &str) -> bool {
+        self.programs
+            .input
+            .lock()
+            .ok()
+            .and_then(|input| input.as_ref().map(|tx| tx.send(text.as_bytes().to_vec())))
+            .is_some_and(|sent| sent.is_ok())
+    }
+
     pub async fn initialize(&self) -> Result<Value, String> {
+        let runs_programs = self.programs.allowed.load(Ordering::SeqCst);
         let capabilities = self
-            .request("initialize", initialize_args(crate::i18n::current()))
+            .request(
+                "initialize",
+                initialize_args(crate::i18n::current(), runs_programs),
+            )
             .await?;
         if let Ok(mut filters) = self.exception_filters.lock() {
             *filters = super::proto::default_exception_filters(&capabilities);
         }
+        if let Ok(mut offered) = self.offered_filters.lock() {
+            *offered = super::proto::offered_exception_filters(&capabilities);
+        }
         Ok(capabilities)
+    }
+
+    /// Stop at `wanted` instead of the adapter's defaults: those of them it
+    /// offers, after [`Self::initialize`]. None offered leaves the defaults.
+    pub fn prefer_exception_filters(&self, wanted: &[String]) {
+        let Ok(offered) = self.offered_filters.lock() else {
+            return;
+        };
+        let chosen: Vec<String> = wanted
+            .iter()
+            .filter(|w| offered.contains(w))
+            .cloned()
+            .collect();
+        if chosen.is_empty() {
+            return;
+        }
+        if let Ok(mut filters) = self.exception_filters.lock() {
+            *filters = chosen;
+        }
     }
 
     /// Have the adapter stop at the exceptions it stops at by default
@@ -562,7 +742,12 @@ impl DapClient {
         Ok(body
             .get("variables")
             .and_then(Value::as_array)
-            .map(|a| a.iter().filter_map(Variable::from_value).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(Variable::from_value)
+                    .filter(|v| !is_pytest_temporary(&v.name))
+                    .collect()
+            })
             .unwrap_or_default())
     }
 
@@ -662,11 +847,11 @@ const MAX_PENDING_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
 /// The `initialize` request's arguments. `lang`, the reader's, is named as
 /// the `locale` when it is not English, so an adapter that translates its
 /// messages answers in it.
-fn initialize_args(lang: crate::i18n::Lang) -> Value {
+fn initialize_args(lang: crate::i18n::Lang, runs_programs: bool) -> Value {
     let mut args = json!({
         "adapterID": "clew", "clientID": "clew", "clientName": "clew",
         "linesStartAt1": true, "columnsStartAt1": true, "pathFormat": "path",
-        "supportsRunInTerminalRequest": false,
+        "supportsRunInTerminalRequest": runs_programs,
     });
     if let Some(tag) = lang.server_locale() {
         args["locale"] = json!(tag);
@@ -829,6 +1014,7 @@ fn truncate_chunk(text: String) -> String {
 /// ("reverse") requests.
 struct DapWire {
     events: EventSink,
+    programs: Arc<ProgramHost>,
 }
 
 impl DapWire {
@@ -872,6 +1058,21 @@ impl DapWire {
                 return Handled::Close;
             }
             response["success"] = json!(true);
+        } else if command == "runInTerminal" && self.programs.allowed.load(Ordering::SeqCst) {
+            let arguments = value.get("arguments").cloned().unwrap_or(Value::Null);
+            match self.programs.run(&arguments, &self.events) {
+                Ok(pid) => {
+                    response["success"] = json!(true);
+                    response["body"] = json!({ "processId": pid });
+                    if self.events.send(DapEvent::TakesInput).is_err() {
+                        return Handled::Close;
+                    }
+                }
+                Err(message) => {
+                    response["success"] = json!(false);
+                    response["message"] = json!(message);
+                }
+            }
         } else {
             response["success"] = json!(false);
             // `message` is optional and, when present, a string: the old
@@ -979,10 +1180,19 @@ async fn run_session<W>(
     child: Option<Child>,
     events: EventSink,
     grace: Duration,
+    programs: Arc<ProgramHost>,
 ) where
     W: tokio::io::AsyncWrite + Unpin,
 {
-    let ended = framing::run(writer, DapWire { events }, mailbox, incoming).await;
+    let wire = DapWire {
+        events,
+        programs: programs.clone(),
+    };
+    let ended = framing::run(writer, wire, mailbox, incoming).await;
+    // A program Clew ran for the adapter has, by the session's end,
+    // ended or been ended by it: given the time a program takes to write
+    // out what it holds, it goes with the session.
+    programs.end(DEBUGGEE_EXIT_GRACE).await;
     if let Some(child) = child {
         framing::reap(child, grace, cfg!(unix)).await;
     }
@@ -1045,6 +1255,14 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pytests_assertion_temporaries_are_not_variables() {
+        assert!(is_pytest_temporary("@py_assert1"));
+        assert!(is_pytest_temporary("@py_format4"));
+        assert!(!is_pytest_temporary("result"));
+        assert!(!is_pytest_temporary("py_assert"));
+    }
     use crate::i18n::Lang;
     use clew_core::dapwire::parse_listening;
     use clew_core::framing::{read_message, write_frame};
@@ -1425,6 +1643,89 @@ mod tests {
         }
     }
 
+    /// A program the adapter asks Clew to run (`runInTerminal`) runs here
+    /// once the session may run programs here: told so in `initialize`, it
+    /// is run with an input, what is sent to that input reaches it, its
+    /// output comes as the program's, and its process id answers the
+    /// request. Before then it is declined, as a remote session's is.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_program_the_adapter_asks_for_runs_here_with_an_input() {
+        let (client, mut events, mut adapter) = manual_adapter().await;
+        assert!(!client.send_input("early\n"), "no program runs yet");
+        client.run_programs_here();
+        let init = tokio::spawn({
+            let client = client.clone();
+            async move { client.initialize().await }
+        });
+        let asked = adapter.next().await;
+        assert_eq!(asked["command"], "initialize");
+        assert_eq!(asked["arguments"]["supportsRunInTerminalRequest"], true);
+        adapter
+            .send(
+                json!({"seq": 1, "type": "response", "request_seq": asked["seq"],
+                         "command": "initialize", "success": true, "body": {}}),
+            )
+            .await;
+        init.await.unwrap().unwrap();
+
+        let dir = clew_core::testutil::TempDir::new("dap-run-in-terminal");
+        adapter
+            .send(json!({"seq": 100, "type": "request", "command": "runInTerminal",
+                         "arguments": {
+                             "kind": "integrated",
+                             "cwd": dir.path().to_string_lossy(),
+                             "args": ["/bin/sh", "-c",
+                                      "printf 'Name: '; read name; echo \"hello $name from $(basename \"$PWD\") $GREETING\""],
+                             "env": {"GREETING": "there", "CLEW_UNSET_ME": null}
+                         }}))
+            .await;
+        let answer = adapter.next().await;
+        assert_eq!(answer["request_seq"], 100);
+        assert_eq!(answer["success"], true, "{answer}");
+        assert!(
+            answer["body"]["processId"]
+                .as_u64()
+                .is_some_and(|pid| pid > 0)
+        );
+
+        let mut printed = String::new();
+        let mut takes_input = false;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while !printed.contains("hello") {
+            let event = tokio::time::timeout_at(deadline, events.recv())
+                .await
+                .expect("the program never answered");
+            match event {
+                Some(DapEvent::TakesInput) => {
+                    takes_input = true;
+                    assert!(client.send_input("Ada\n"));
+                }
+                Some(DapEvent::Output(o)) => {
+                    assert_eq!(o.category, "stdout");
+                    printed.push_str(&o.text);
+                }
+                Some(_) => {}
+                None => panic!("the session ended"),
+            }
+        }
+        assert!(takes_input);
+        let dir_name = dir
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert!(
+            printed.starts_with("Name: "),
+            "the prompt comes before the answer: {printed:?}"
+        );
+        assert!(
+            printed.contains(&format!("hello Ada from {dir_name} there")),
+            "{printed:?}"
+        );
+    }
+
     /// A session is asked to disconnect once, however many of its handles
     /// ask: Stop asked from the app and from the run's stream, and debugpy
     /// crashed on the second. Each handle returns once it has ended.
@@ -1791,6 +2092,89 @@ mod tests {
         assert_eq!(launched.await, Ok(()));
         assert_eq!(stops, [4, 5], "held at the breakpoint, then a line on");
         assert!(output.contains("answer 10"), "{output:?}");
+    }
+
+    /// A Rust program under the real lldb-dap, set up as Clew sets it up:
+    /// its enums shown by Rust's summaries — `Circle(1.5)`, `Some(7)` — in
+    /// the lldb a Linux distribution ships (18), which showed a Python error
+    /// for each. Needs `lldb-dap` (or a versioned one) and `rustc`.
+    #[tokio::test]
+    #[ignore = "needs lldb-dap and rustc on the PATH; run explicitly"]
+    async fn a_rust_programs_enums_are_shown_by_variant() {
+        let dir = clew_core::testutil::TempDir::new("dap-lldb-rust");
+        let source = dir.join("shapes.rs");
+        std::fs::write(
+            &source,
+            "#[derive(Debug)]\nenum Shape { Circle(f64), Rect { w: i32, h: i32 }, Empty }\n\n\
+             fn main() {\n    let a = Shape::Circle(1.5);\n    let b = Shape::Rect { w: 2, h: 3 };\n    \
+             let c = Shape::Empty;\n    let o: Option<i32> = Some(7);\n    println!(\"{a:?} {b:?} {c:?} {o:?}\");\n}\n",
+        )
+        .unwrap();
+        let binary = dir.join("shapes");
+        let built = std::process::Command::new("rustc")
+            .args(["-g", "-o"])
+            .arg(&binary)
+            .arg(&source)
+            .current_dir(&dir)
+            .status()
+            .unwrap();
+        assert!(built.success());
+        let spec = match clew_core::debugadapter::resolve(
+            "native",
+            &binary.to_string_lossy(),
+            &[],
+            &dir,
+            &dir,
+            &Default::default(),
+            None,
+        ) {
+            Ok(clew_core::debugadapter::Resolution::Ready(spec)) => spec,
+            other => panic!("{other:?}"),
+        };
+        let (client, mut events) =
+            DapClient::start(&spec.command, &spec.args, &dir, Transport::Stdio)
+                .await
+                .expect("lldb-dap started");
+        client.initialize().await.expect("initialized");
+        let launched = client.launch(spec.launch.clone());
+        let mut shown = Vec::new();
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(60), events.recv())
+                .await
+                .expect("an event in time");
+            match event {
+                Some(DapEvent::Initialized) => {
+                    client.set_breakpoints(&source, &[(9, None)]).await.unwrap();
+                    client.configuration_done().await.unwrap();
+                }
+                Some(DapEvent::Stopped(stop)) => {
+                    let thread = stop.thread_id.unwrap_or(1);
+                    let frames = client.stack_trace(thread).await.unwrap();
+                    let scopes = client.scopes(frames[0].id).await.unwrap();
+                    shown = client
+                        .variables(scopes[0].variables_reference)
+                        .await
+                        .unwrap()
+                        .into_iter()
+                        .map(|v| (v.name, v.value))
+                        .collect();
+                    client.continue_(thread).await.unwrap();
+                }
+                Some(DapEvent::Terminated) | Some(DapEvent::Exited { .. }) | None => break,
+                Some(_) => {}
+            }
+        }
+        assert_eq!(launched.await, Ok(()));
+        let value = |name: &str| {
+            shown
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, v)| v.as_str())
+        };
+        assert_eq!(value("a"), Some("Circle(1.5)"), "{shown:?}");
+        assert_eq!(value("b"), Some("Rect{w:2, h:3}"), "{shown:?}");
+        assert_eq!(value("c"), Some("Empty"), "{shown:?}");
+        assert_eq!(value("o"), Some("Some(7)"), "{shown:?}");
     }
 
     /// A Zig program under the real lldb-dap, as Clew debugs Zig: the `.zig`
@@ -2191,6 +2575,342 @@ mod tests {
         assert!(output.contains("answer 42"), "{output:?}");
     }
 
+    /// A failing test, debugged, stops at its failing line, with the
+    /// test's variables and none of pytest's rewriting temporaries; not at
+    /// the `SystemExit` pytest ends with, in pytest's own `__main__`. Needs
+    /// `python3` with pytest, and debugpy (its own or Clew's).
+    #[tokio::test]
+    #[ignore = "needs python3 with pytest and debugpy; run explicitly"]
+    async fn a_failing_python_test_stops_at_its_failing_line() {
+        let dir = clew_core::testutil::TempDir::new("dap-pytest-fail");
+        std::fs::create_dir_all(dir.join("tests")).unwrap();
+        let test = dir.join("tests/test_sum.py");
+        std::fs::write(
+            &test,
+            "def test_sum():\n    total = 2 + 2\n    assert total == 5\n",
+        )
+        .unwrap();
+        let node = format!("{}::test_sum", test.display());
+        let spec = match clew_core::debugadapter::resolve(
+            "python",
+            &test.to_string_lossy(),
+            &[node],
+            &dir,
+            &dir,
+            &Default::default(),
+            None,
+        ) {
+            Ok(clew_core::debugadapter::Resolution::Ready(spec)) => spec,
+            other => panic!("{other:?}"),
+        };
+        let mut launch = spec.launch.clone();
+        let wanted: Vec<String> = launch
+            .as_object_mut()
+            .and_then(|b| b.remove(clew_core::debugadapter::EXCEPTIONS))
+            .and_then(|f| serde_json::from_value(f).ok())
+            .expect("a test asks for its own exception filters");
+        let (client, mut events) =
+            DapClient::start(&spec.command, &spec.args, &dir, Transport::Stdio)
+                .await
+                .expect("debugpy started");
+        client.initialize().await.expect("initialized");
+        client.prefer_exception_filters(&wanted);
+        let launched = client.launch(launch);
+        tokio::pin!(launched);
+        let mut stops = Vec::new();
+        let mut configured = false;
+        let mut launch_answered = false;
+        loop {
+            let event = tokio::select! {
+                event = events.recv() => event,
+                answer = &mut launched, if !launch_answered => {
+                    launch_answered = true;
+                    assert_eq!(answer, Ok(()));
+                    continue;
+                }
+                _ = tokio::time::sleep(Duration::from_secs(60)) => panic!("no event in time"),
+            };
+            match event {
+                Some(DapEvent::Initialized) if !configured => {
+                    configured = true;
+                    client.set_default_exception_breakpoints().await.unwrap();
+                    client.configuration_done().await.unwrap();
+                }
+                Some(DapEvent::Stopped(stop)) => {
+                    let thread = stop.thread_id.unwrap_or(1);
+                    let frames = client.stack_trace(thread).await.unwrap();
+                    let top = frames.first().expect("a frame");
+                    let scopes = client.scopes(top.id).await.unwrap();
+                    let names: Vec<String> = match scopes.first() {
+                        Some(scope) => client
+                            .variables(scope.variables_reference)
+                            .await
+                            .unwrap()
+                            .into_iter()
+                            .map(|v| v.name)
+                            .collect(),
+                        None => Vec::new(),
+                    };
+                    stops.push((stop.reason.clone(), top.path.clone(), top.line, names));
+                    client.continue_(thread).await.unwrap();
+                }
+                Some(DapEvent::Terminated) | None => break,
+                Some(_) => {}
+            }
+        }
+        assert_eq!(stops.len(), 1, "{stops:?}");
+        let (reason, path, line, names) = &stops[0];
+        assert_eq!(reason, "exception");
+        assert_eq!(path.as_deref(), Some(test.as_path()));
+        assert_eq!(*line, 3);
+        assert!(names.iter().any(|n| n == "total"), "{names:?}");
+        assert!(!names.iter().any(|n| n.starts_with("@py_")), "{names:?}");
+    }
+
+    /// A Python program reading its input, run by real debugpy as Clew runs
+    /// a local one (`console: integratedTerminal`, Clew running it): its
+    /// prompt shows, what is sent reaches its `input()`, and it goes on.
+    /// Run by debugpy itself, it had no input and ended with an EOFError.
+    /// Needs `python3` and debugpy (its own or Clew's).
+    #[tokio::test]
+    #[ignore = "needs python3 and debugpy; run explicitly"]
+    async fn a_python_program_reads_what_is_typed_for_it() {
+        let dir = clew_core::testutil::TempDir::new("dap-python-input");
+        let script = dir.join("greet.py");
+        std::fs::write(
+            &script,
+            "name = input('Name: ')\nprint(f'hello {name}')\nprint(input('Again: ') * 2)\n",
+        )
+        .unwrap();
+        let spec = match clew_core::debugadapter::resolve(
+            "python",
+            &script.to_string_lossy(),
+            &[],
+            &dir,
+            &dir,
+            &Default::default(),
+            None,
+        ) {
+            Ok(clew_core::debugadapter::Resolution::Ready(spec)) => spec,
+            other => panic!("{other:?}"),
+        };
+        let mut launch = spec.launch.clone();
+        launch["console"] = json!("integratedTerminal");
+        launch["env"]["PYTHONUNBUFFERED"] = json!("1");
+        let (client, mut events) =
+            DapClient::start(&spec.command, &spec.args, &dir, Transport::Stdio)
+                .await
+                .expect("debugpy started");
+        client.run_programs_here();
+        client.initialize().await.expect("initialized");
+        let launched = client.launch(launch);
+        tokio::pin!(launched);
+        let mut printed = String::new();
+        let mut configured = false;
+        let mut launch_answered = false;
+        let mut answered = 0;
+        loop {
+            let event = tokio::select! {
+                event = events.recv() => event,
+                answer = &mut launched, if !launch_answered => {
+                    launch_answered = true;
+                    assert_eq!(answer, Ok(()));
+                    continue;
+                }
+                _ = tokio::time::sleep(Duration::from_secs(60)) => panic!("no event in time: {printed:?}"),
+            };
+            match event {
+                Some(DapEvent::Initialized) if !configured => {
+                    configured = true;
+                    client.configuration_done().await.unwrap();
+                }
+                Some(DapEvent::Output(o)) if o.category == "stdout" => {
+                    printed.push_str(&o.text);
+                    // Each prompt answered as it shows.
+                    if printed.ends_with("Name: ") && answered == 0 {
+                        answered = 1;
+                        assert!(client.send_input("Ada\n"));
+                    } else if printed.ends_with("Again: ") && answered == 1 {
+                        answered = 2;
+                        assert!(client.send_input("ab\n"));
+                    }
+                }
+                Some(DapEvent::Terminated) | None => break,
+                Some(_) => {}
+            }
+        }
+        assert_eq!(answered, 2, "{printed:?}");
+        assert!(printed.contains("hello Ada"), "{printed:?}");
+        assert!(printed.contains("abab"), "{printed:?}");
+        assert!(!printed.contains("EOFError"), "{printed:?}");
+    }
+
+    /// A launch file's `module` and `env`, put into real debugpy's launch as
+    /// Clew puts them: the module runs as `python -m` does (its package's
+    /// relative import works) and sees the variables. Needs `python3` and
+    /// debugpy (its own or Clew's).
+    #[tokio::test]
+    #[ignore = "needs python3 and debugpy; run explicitly"]
+    async fn a_launch_files_module_runs_with_its_environment() {
+        let dir = clew_core::testutil::TempDir::new("dap-python-module");
+        std::fs::create_dir_all(dir.join("shop")).unwrap();
+        std::fs::write(dir.join("shop/__init__.py"), "").unwrap();
+        std::fs::write(dir.join("shop/names.py"), "WHO = 'module'\n").unwrap();
+        std::fs::write(
+            dir.join("shop/cli.py"),
+            "import os\nfrom .names import WHO\nprint(f'{WHO} {os.environ[\"GREETING\"]}')\n",
+        )
+        .unwrap();
+        let cfg = crate::app::tasks::parse_launch_config(
+            &dir,
+            r#"{"module": "shop.cli", "env": {"GREETING": "hello"}}"#,
+            None,
+            true,
+        )
+        .unwrap();
+        let spec = match clew_core::debugadapter::resolve(
+            "python",
+            &cfg.program.to_string_lossy(),
+            &cfg.args,
+            &dir,
+            &cfg.cwd,
+            &Default::default(),
+            None,
+        ) {
+            Ok(clew_core::debugadapter::Resolution::Ready(spec)) => spec,
+            other => panic!("{other:?}"),
+        };
+        let mut launch = spec.launch.clone();
+        crate::app::tasks::with_launch_file(&mut launch, &cfg.extras);
+        let (client, mut events) =
+            DapClient::start(&spec.command, &spec.args, &dir, Transport::Stdio)
+                .await
+                .expect("debugpy started");
+        client.initialize().await.expect("initialized");
+        let launched = client.launch(launch);
+        tokio::pin!(launched);
+        let mut printed = String::new();
+        let (mut configured, mut launch_answered) = (false, false);
+        loop {
+            let event = tokio::select! {
+                event = events.recv() => event,
+                answer = &mut launched, if !launch_answered => {
+                    launch_answered = true;
+                    assert_eq!(answer, Ok(()));
+                    continue;
+                }
+                _ = tokio::time::sleep(Duration::from_secs(60)) => panic!("no event in time: {printed:?}"),
+            };
+            match event {
+                Some(DapEvent::Initialized) if !configured => {
+                    configured = true;
+                    client.configuration_done().await.unwrap();
+                }
+                Some(DapEvent::Output(o)) if o.category == "stdout" || o.category == "stderr" => {
+                    printed.push_str(&o.text);
+                }
+                Some(DapEvent::Terminated) | None => break,
+                Some(_) => {}
+            }
+        }
+        assert!(printed.contains("module hello"), "{printed:?}");
+    }
+
+    /// A script listing its packages (PEP 723) asks for them first (uv's
+    /// `sync --script`, shown before it runs), then runs in the environment
+    /// uv keeps for it, its import of them working. Needs `python3`, `uv`,
+    /// debugpy and the package index.
+    #[tokio::test]
+    #[ignore = "needs python3, uv, debugpy and PyPI; run explicitly"]
+    async fn a_script_listing_its_packages_runs_with_them() {
+        let dir = clew_core::testutil::TempDir::new("dap-pep723-live");
+        let script = dir.join("tool.py");
+        // A name of this run's own: uv keeps one environment per script.
+        std::fs::write(
+            &script,
+            format!(
+                "# /// script\n# dependencies = [\"six\"]\n# ///\n# {:?}\nimport six\nprint('six', six.__version__)\n",
+                std::time::SystemTime::now()
+            ),
+        )
+        .unwrap();
+        let resolve = || {
+            clew_core::debugadapter::resolve(
+                "python",
+                &script.to_string_lossy(),
+                &[],
+                &dir,
+                &dir,
+                &Default::default(),
+                None,
+            )
+        };
+        match resolve() {
+            Ok(clew_core::debugadapter::Resolution::NeedsInstall(install)) => {
+                assert!(install.is_script_packages(), "{install:?}");
+                assert!(install.describe().contains("sync --script"));
+                install
+                    .install_cancellable(&std::sync::atomic::AtomicBool::new(false))
+                    .expect("uv installed the packages");
+            }
+            other => panic!("asked for the packages first: {other:?}"),
+        }
+        // Clew's own debugpy, when this data folder has none yet: asked for
+        // next, as it would be of anyone.
+        let spec = match resolve() {
+            Ok(clew_core::debugadapter::Resolution::Ready(spec)) => spec,
+            Ok(clew_core::debugadapter::Resolution::NeedsInstall(install))
+                if install == clew_core::debugadapter::AdapterInstall::Debugpy =>
+            {
+                install
+                    .install_cancellable(&std::sync::atomic::AtomicBool::new(false))
+                    .expect("debugpy downloaded");
+                match resolve() {
+                    Ok(clew_core::debugadapter::Resolution::Ready(spec)) => spec,
+                    other => panic!("{other:?}"),
+                }
+            }
+            other => panic!("{other:?}"),
+        };
+        assert!(
+            spec.command.to_string_lossy().contains("environments-v"),
+            "run in the script's environment: {}",
+            spec.command.display()
+        );
+        let (client, mut events) =
+            DapClient::start(&spec.command, &spec.args, &dir, Transport::Stdio)
+                .await
+                .expect("debugpy started");
+        client.initialize().await.expect("initialized");
+        let launched = client.launch(spec.launch.clone());
+        tokio::pin!(launched);
+        let mut printed = String::new();
+        let (mut configured, mut launch_answered) = (false, false);
+        loop {
+            let event = tokio::select! {
+                event = events.recv() => event,
+                answer = &mut launched, if !launch_answered => {
+                    launch_answered = true;
+                    assert_eq!(answer, Ok(()));
+                    continue;
+                }
+                _ = tokio::time::sleep(Duration::from_secs(60)) => panic!("no event in time: {printed:?}"),
+            };
+            match event {
+                Some(DapEvent::Initialized) if !configured => {
+                    configured = true;
+                    client.configuration_done().await.unwrap();
+                }
+                Some(DapEvent::Output(o)) if o.category == "stdout" || o.category == "stderr" => {
+                    printed.push_str(&o.text);
+                }
+                Some(DapEvent::Terminated) | None => break,
+                Some(_) => {}
+            }
+        }
+        assert!(printed.contains("six 1."), "{printed:?}");
+    }
+
     /// F9: a TCP adapter is reached at the port it announced — not at one
     /// guessed in advance — and the session is wired over that socket.
     #[tokio::test]
@@ -2459,9 +3179,9 @@ mod tests {
     /// one that translates answers in it.
     #[test]
     fn initialize_names_the_readers_language() {
-        assert!(initialize_args(Lang::En).get("locale").is_none());
-        assert_eq!(initialize_args(Lang::Ja)["locale"], "ja");
-        assert_eq!(initialize_args(Lang::Zh)["locale"], "zh-cn");
-        assert_eq!(initialize_args(Lang::Fr)["adapterID"], "clew");
+        assert!(initialize_args(Lang::En, false).get("locale").is_none());
+        assert_eq!(initialize_args(Lang::Ja, false)["locale"], "ja");
+        assert_eq!(initialize_args(Lang::Zh, false)["locale"], "zh-cn");
+        assert_eq!(initialize_args(Lang::Fr, false)["adapterID"], "clew");
     }
 }

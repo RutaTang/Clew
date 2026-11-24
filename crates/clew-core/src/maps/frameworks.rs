@@ -644,26 +644,43 @@ fn django_sqlalchemy(orm: &mut Orm, source: &Source) {
                 .child_by_field_name("function")
                 .map(|f| text(f, src))
                 .unwrap_or("");
-            let relation = match super::last_name(function).as_str() {
+            let mut relation = match super::last_name(function).as_str() {
                 "ForeignKey" => "many-to-one",
                 "OneToOneField" => "one-to-one",
                 "ManyToManyField" => "many-to-many",
                 "relationship" => "relationship",
                 _ => continue,
             };
-            let Some(first) = right
-                .child_by_field_name("arguments")
+            let arguments = right.child_by_field_name("arguments");
+            let first = arguments
                 .and_then(|a| a.named_child(0))
-            else {
-                continue;
-            };
-            let target = match unquote(text(first, src)) {
-                Some(s) if s == "self" => name.clone(),
-                Some(s) => s.rsplit('.').next().unwrap_or(&s).to_string(),
+                .filter(|a| a.kind() != "keyword_argument");
+            let written = first.and_then(|first| match unquote(text(first, src)) {
+                Some(s) if s == "self" => Some(name.clone()),
+                Some(s) => Some(s.rsplit('.').next().unwrap_or(&s).to_string()),
                 None if first.kind() == "identifier" || first.kind() == "attribute" => {
-                    super::last_name(text(first, src))
+                    Some(super::last_name(text(first, src)))
                 }
-                None => continue,
+                None => None,
+            });
+            // SQLAlchemy 2.0: `orders: Mapped[list["Order"]] = relationship(…)`
+            // names its target, and whether it is one or many, in the
+            // annotation, and often only there.
+            let mapped = assignment
+                .child_by_field_name("type")
+                .and_then(|t| mapped_target(text(t, src)));
+            if relation == "relationship"
+                && let Some((_, many)) = &mapped
+            {
+                let secondary = arguments.is_some_and(|a| text(a, src).contains("secondary"));
+                relation = match (many, secondary) {
+                    (true, true) => "many-to-many",
+                    (true, false) => "one-to-many",
+                    (false, _) => "relationship",
+                };
+            }
+            let Some(target) = written.or(mapped.map(|(target, _)| target)) else {
+                continue;
             };
             if from.is_none() {
                 from = orm.entity(
@@ -679,6 +696,51 @@ fn django_sqlalchemy(orm: &mut Orm, source: &Source) {
             orm.entity(&name, &source.rel, line(class), "Django");
         }
     }
+}
+
+/// The class a SQLAlchemy 2.0 annotation maps to, and whether it is a
+/// collection of it: `Mapped[list["Order"]]` → (`Order`, true),
+/// `Mapped[Optional["Customer"]]` → (`Customer`, false),
+/// `WriteOnlyMapped["Item"]` → (`Item`, true). `None` for anything else.
+fn mapped_target(annotation: &str) -> Option<(String, bool)> {
+    let annotation = annotation.trim();
+    let (head, inner) = annotation.split_once('[')?;
+    let inner = inner.strip_suffix(']')?.trim();
+    let mut many = match super::last_name(head).as_str() {
+        "Mapped" => false,
+        "WriteOnlyMapped" | "DynamicMapped" => true,
+        _ => return None,
+    };
+    const COLLECTIONS: &[&str] = &[
+        "list",
+        "List",
+        "set",
+        "Set",
+        "frozenset",
+        "FrozenSet",
+        "Sequence",
+        "dict",
+        "Dict",
+    ];
+    const WRAPPERS: &[&str] = &["Optional", "Union", "None", "typing", "Annotated"];
+    let unquoted = inner.replace(['"', '\''], "");
+    let names: Vec<&str> = unquoted
+        .split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '.'))
+        .filter(|n| !n.is_empty())
+        .collect();
+    if names
+        .first()
+        .is_some_and(|n| COLLECTIONS.contains(&super::last_name(n).as_str()))
+    {
+        many = true;
+    }
+    // A dict maps keys to the class: its last name is the class.
+    let pick = names.iter().rev().map(|n| super::last_name(n)).find(|n| {
+        !COLLECTIONS.contains(&n.as_str())
+            && !WRAPPERS.contains(&n.as_str())
+            && n.chars().next().is_some_and(char::is_uppercase)
+    })?;
+    Some((pick, many))
 }
 
 fn typeorm(orm: &mut Orm, source: &Source) {
@@ -949,6 +1011,10 @@ mod tests {
                 "class Book(models.Model):\n    author = models.ForeignKey(Author, on_delete=models.CASCADE)\n    tags = models.ManyToManyField('Tag')\n    parent = models.ForeignKey('self', null=True)\n\nclass Author(models.Model):\n    name = models.CharField(max_length=80)\n",
             ),
             (
+                "shop/orm.py",
+                "from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship\n\nclass Base(DeclarativeBase):\n    pass\n\nclass Customer(Base):\n    __tablename__ = \"customer\"\n    id: Mapped[int] = mapped_column(primary_key=True)\n    invoices: Mapped[list[\"Bill\"]] = relationship(back_populates=\"customer\")\n    tags: Mapped[List[\"Label\"]] = relationship(secondary=customer_labels)\n    profile: Mapped[Optional[\"Profile\"]] = relationship()\n    notes: WriteOnlyMapped[\"Note\"] = relationship()\n",
+            ),
+            (
                 "src/photo.ts",
                 "@Entity()\nexport class Photo {\n  @ManyToOne(() => User, (user) => user.photos)\n  user: User;\n}\n",
             ),
@@ -968,6 +1034,10 @@ mod tests {
             e("Book", "Tag", "tags: many-to-many"),
             e("Book", "Book", "parent: many-to-one"),
             e("Photo", "User", "user: many-to-one"),
+            e("Customer", "Bill", "invoices: one-to-many"),
+            e("Customer", "Label", "tags: many-to-many"),
+            e("Customer", "Profile", "profile: relationship"),
+            e("Customer", "Note", "notes: one-to-many"),
         ] {
             assert!(got.contains(&want), "{want:?} in {got:?}");
         }
@@ -978,6 +1048,17 @@ mod tests {
             "a model with no relation is still one"
         );
         assert!(!got.iter().any(|(a, _, _)| a == "ShopContext"));
+        assert!(!got.iter().any(|(_, _, l)| l.starts_with("id:")), "{got:?}");
+        assert_eq!(
+            mapped_target("Mapped[dict[str, \"Item\"]]"),
+            Some(("Item".into(), true))
+        );
+        assert_eq!(
+            mapped_target("Mapped[\"Org | None\"]"),
+            Some(("Org".into(), false))
+        );
+        assert_eq!(mapped_target("Mapped[int]"), None);
+        assert_eq!(mapped_target("list[Order]"), None);
         assert_eq!(classify("order_items"), "OrderItem");
         assert_eq!(classify("categories"), "Category");
         assert_eq!(classify("boxes"), "Box");

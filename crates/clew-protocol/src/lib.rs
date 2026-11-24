@@ -152,7 +152,10 @@ pub use payload::*;
 /// ([`CargoTargets`]) and each `pyproject.toml`'s Python source roots: a
 /// workspace's crates resolve one another's `use`s, and Python imports
 /// resolve under the roots a project declares.
-pub const PROTOCOL_VERSION: u32 = 29;
+///
+/// v30: [`PythonEnvKind::Hatch`] and [`PythonEnvKind::Pdm`]: a project's
+/// Hatch environment, and the interpreter PDM records for it.
+pub const PROTOCOL_VERSION: u32 = 32;
 
 /// A hash of this crate's source as a token stream — comments and whitespace
 /// removed — computed at build time (see `build.rs`). Carried in `Hello` /
@@ -246,6 +249,11 @@ pub struct SourceManifests {
     /// relative to its own directory: where `import name` is looked for
     /// besides the project's root.
     pub python: Vec<(Rel, Vec<String>)>,
+    /// Each Lake package's lakefile (`lakefile.lean`, `lakefile.toml`; by
+    /// rel) with the source directories its libraries name (`srcDir`),
+    /// relative to its own: a Lean module is found under one of them, or
+    /// under the package's own folder.
+    pub lean: Vec<(Rel, Vec<String>)>,
 }
 
 impl SourceManifests {
@@ -254,6 +262,7 @@ impl SourceManifests {
             && self.haskell.is_empty()
             && self.cargo.is_empty()
             && self.python.is_empty()
+            && self.lean.is_empty()
     }
 }
 
@@ -372,6 +381,10 @@ pub struct TargetSpec {
     pub os: String,
     pub arch: String,
     pub family: String,
+    /// Its `target_env` (`gnu`, `msvc`, `musl`, "" for none); `None` from a
+    /// client that does not say, which leaves `target_env` undecided.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub env: Option<String>,
 }
 
 /// One line's git blame. Shared with clew-core (git produces it, the gutter
@@ -794,10 +807,17 @@ pub enum Request {
     /// `choices` are the user's for the project's languages: a server program
     /// they chose for `language` runs instead of clew's
     /// ([`LanguageChoices::servers`]).
+    ///
+    /// `folder` is where in the project it runs, when not at the project's
+    /// root: Lean's server in the Lake project of the file read (a
+    /// repository's proofs in a folder of their own), where its imports of
+    /// its own project resolve. Confined to the project; refused when not
+    /// a folder of it.
     SpawnLsp {
         proc: u64,
         language: String,
         choices: LanguageChoices,
+        folder: Option<Rel>,
     },
     /// Resolve AND spawn the debug adapter for `lang` (a client `Lang` slug:
     /// "native", "python", "dart", …) on this host — where the debuggee
@@ -977,6 +997,35 @@ pub enum Request {
     /// reading files only. The client dims the code these leave out as it
     /// is read. Reply: `BuildFacts`.
     BuildFacts { choices: LanguageChoices },
+    /// Run a task of the project's on this host ([`ProjectTask`]): resolved
+    /// here — the program, its arguments, the folder it runs in — from what
+    /// the task is, never from a command line. Proxied under `proc` as
+    /// `SpawnProcess` is: what it writes, stdout and stderr together, comes
+    /// as `ProcessOutput` lines; it ends in exactly one `ProcessExited`,
+    /// with its exit code — `None` when it never ran, the reason written as
+    /// its output — and `ProcessKill` stops it, with everything it started.
+    /// Never answered. What it runs runs the project's own code (its
+    /// build, its lakefile), as the language servers that build it do.
+    RunTask {
+        proc: u64,
+        task: ProjectTask,
+        choices: LanguageChoices,
+    },
+    /// Build a Rust task's program on this host and start the debugger on
+    /// it there — `RustMain`'s program, `RustTest`'s tests; any other task
+    /// is refused. Built as `RunTask` builds it: Cargo's lines come as
+    /// `ProcessOutput` under `build`, which ends in its `ProcessExited`
+    /// (code 0 once built). Then lldb-dap is spawned under `proc` and
+    /// proxied as `SpawnAdapter`'s is. Reply: `AdapterSpawned`, its launch
+    /// request built for the program — its arguments, the folder it runs
+    /// in, the variables Cargo sets for it — with this host's paths; a
+    /// failure replies `Error`, and `proc` ends in `ProcessExited`.
+    DebugTask {
+        proc: u64,
+        build: u64,
+        task: ProjectTask,
+        choices: LanguageChoices,
+    },
     /// The project's maps ([`ProjectMap`]) — its database schema, routes,
     /// supervision trees and the like — read from its files on this host.
     /// Reply: `ProjectMaps`.
@@ -1503,6 +1552,27 @@ impl Event {
     }
 }
 
+/// A task of the project's that [`Request::RunTask`] runs where the project
+/// is. Each names a file of the project, relative to its root; what runs
+/// is worked out from it on that host.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProjectTask {
+    /// A Lean file's `main`, as Run runs it: what it imports built, then
+    /// `lake env lean --run` in its Lake project.
+    LeanMain { file: Rel },
+    /// `lake build`, or `lake test` (`test`), in the Lake project of `file`.
+    Lake { file: Rel, test: bool },
+    /// `lake exe cache get` in the Lake project of `file`: Mathlib's build
+    /// cache.
+    MathlibCache { file: Rel },
+    /// The program `file` is a source of, built by Cargo and run: its
+    /// binary's, or its package's one program for a library's file.
+    RustMain { file: Rel },
+    /// The test, or the tests, at 1-based `line` of `file`, built by Cargo
+    /// and run as Run Test runs them; a doc example, by rustdoc.
+    RustTest { file: Rel, line: usize },
+}
+
 /// What the user chose for one project's languages, in Settings, where clew
 /// would otherwise detect. Kept by the client, in clew's own data directory —
 /// never in the project, which is the team's (`.clew/lsp.toml`) — and sent
@@ -1771,6 +1841,10 @@ pub enum PythonEnvKind {
     Pyenv,
     /// A uv-installed Python.
     Uv,
+    /// A Hatch environment of this project.
+    Hatch,
+    /// The interpreter PDM records for this project (`.pdm-python`).
+    Pdm,
     /// A Python on `PATH`, or where the system keeps one.
     System,
 }
@@ -1806,7 +1880,9 @@ pub enum PythonSource {
     /// the conda environment (`CONDA_PREFIX`).
     Activated,
     /// This project's own environment, kept by its tool outside the project:
-    /// its Poetry or Pipenv environment, or the pyenv Python it pins.
+    /// its Poetry, Pipenv or Hatch environment, the conda environment its
+    /// `environment.yml` names, PDM's interpreter for it, or the pyenv or uv
+    /// Python its `.python-version` pins.
     Managed(PythonEnvKind),
 }
 
@@ -1979,6 +2055,7 @@ mod tests {
             os: "macos".into(),
             arch: "aarch64".into(),
             family: "unix".into(),
+            env: None,
         };
         let msg = ClientMessage {
             id: 7,

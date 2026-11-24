@@ -70,6 +70,9 @@ pub struct ServerLink {
     /// language -> its live server-spawned proc handle, so a restart can kill the
     /// old process before starting a new one.
     pub lsp_procs: HashMap<String, u64>,
+    /// proc handle -> who waits for a task's end (`RunTask`): told its exit
+    /// code as it exits.
+    pub task_ends: HashMap<u64, tokio::sync::oneshot::Sender<Option<i32>>>,
     /// Request id of the in-flight `ListDir` for the Connect modal's folder
     /// picker. Only the newest listing may paint the browser: two quick
     /// clicks used to let a slower earlier reply overwrite the newer one.
@@ -1189,6 +1192,7 @@ impl App {
                             .symbols
                             .iter()
                             .map(|s| index::SymbolEntry {
+                                owner: None,
                                 name: s.name.clone(),
                                 kind: s.kind.clone(),
                                 rel: fs.rel.clone(),
@@ -1312,7 +1316,10 @@ impl App {
                         // answers about stays pinned to the text as it was
                         // when the file was first opened.
                         let abs = root.join(rel);
-                        if open.contains(&abs) || self.proj.link.lsp_opened.contains(&abs) {
+                        if open.contains(&abs)
+                            || self.proj.link.lsp_opened.contains(&abs)
+                            || self.proj.link.lsp_opened_also.contains(&abs)
+                        {
                             self.request_file_refresh(rel);
                         }
                     }
@@ -1418,7 +1425,7 @@ impl App {
                         self.status = match languages.first() {
                             Some(lang) => tr!(
                                 "Stopped the {lang} language server because its output was not being read. It restarts on next use.",
-                                lang = crate::app::languages::language_name(lang)
+                                lang = self.server_called(lang)
                             ),
                             None => {
                                 tr!("Stopped a background process because its output was not being read.")
@@ -1429,6 +1436,10 @@ impl App {
                 }
             }
             Event::ProcessExited { proc, code } => {
+                // A task's end, to whoever waits for it.
+                if let Some(end) = self.server.task_ends.remove(&proc) {
+                    let _ = end.send(code);
+                }
                 // Dropping the feed closes the bridge, so the LspClient sees EOF.
                 self.server.proc_feeds.remove(&proc);
                 // Only a proc STILL mapped to a language is that language's live
@@ -1456,12 +1467,12 @@ impl App {
                     self.status = match code {
                         Some(c) => tr!(
                             "{language} language server exited (code {code}). It restarts on the next request.",
-                            language = crate::app::languages::language_name(&language),
+                            language = self.server_called(&language),
                             code = c
                         ),
                         None => tr!(
                             "{language} language server exited. It restarts on the next request.",
-                            language = crate::app::languages::language_name(&language)
+                            language = self.server_called(&language)
                         ),
                     };
                 }

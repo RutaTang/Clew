@@ -147,6 +147,20 @@ pub enum Glyph {
     Plus,
     /// Less of something: the code's text a size smaller.
     Minus,
+    // The debugger's controls, drawn as the IDEs draw them, so a reader
+    // who has stepped through code elsewhere knows them on sight.
+    /// A bar and a play: run on to the next stop.
+    Continue,
+    /// An arc over a line's dot: run the line, calls and all.
+    StepOver,
+    /// An arrow down to the dot: into the call on the line.
+    StepInto,
+    /// An arrow up from the dot: out to the caller.
+    StepOut,
+    /// The step over's arc, turned back: the step before.
+    StepBack,
+    /// One arrow round, back to its start: run it again from the top.
+    Restart,
 }
 
 /// The window buttons Clew draws on Windows and Linux. Their own family:
@@ -263,7 +277,7 @@ fn body(g: Glyph) -> &'static str {
         // writes in the corner it leaves free: in the strip's column, the
         // play lines up with Run's above it.
         FakeRun => {
-            "<path d='M8.5 5.5 L18 12 L8.5 18.5 Z'/>\
+            "<path d='M7 3.5 L20 12 L7 20.5 Z'/>\
              <path d='M20 0.6C20.39 3.03 20.97 3.61 23.4 4C20.97 4.39 20.39 4.97 20 7.4C19.61 4.97 19.03 4.39 16.6 4C19.03 3.61 19.61 3.03 20 0.6Z' fill='STROKE' stroke-width='1'/>"
         }
         // Debug's own bug, where Debug draws it and as large, the spark in
@@ -281,11 +295,14 @@ fn body(g: Glyph) -> &'static str {
         }
         // Ask's bubble, and the spark Explain and the fake runs carry: what
         // spends an AI call bears it. The bubble drawn smaller, its lines
-        // as thick as the rest.
+        // as thick as the rest, and centred where the strip's other glyphs
+        // are, the spark on its corner: with the two centred together, the
+        // bubble the eye reads stood left of the gear under it.
         AskAi => {
-            "<path transform='translate(0.6 5.2) scale(0.74)' stroke-width='2.7' \
+            "<path transform='translate(3.12 3.12) scale(0.74)' stroke-width='2.7' \
              d='M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z'/>\
-             <path d='M18 2.5C18.4 5 19 5.6 21.5 6C19 6.4 18.4 7 18 9.5C17.6 7 17 6.4 14.5 6C17 5.6 17.6 5 18 2.5Z' fill='STROKE' stroke-width='1.2'/>"
+             <path transform='translate(20.5 3.95) scale(0.9) translate(-18 -6)' stroke-width='1.3' \
+             d='M18 2.5C18.4 5 19 5.6 21.5 6C19 6.4 18.4 7 18 9.5C17.6 7 17 6.4 14.5 6C17 5.6 17.6 5 18 2.5Z' fill='STROKE'/>"
         }
         Compass => "<circle cx='12' cy='12' r='8'/><path d='M12 6 L14.2 12 L12 18 L9.8 12 Z'/>",
         // Folded together: the bodies skimmed over.
@@ -341,11 +358,36 @@ fn body(g: Glyph) -> &'static str {
             "<path d='M12 3.8 L19.5 8 V16 L12 20.2 L4.5 16 V8 Z'/>\
              <path d='M4.5 8 L12 12.2 L19.5 8'/><path d='M12 12.2 V20.2'/>"
         }
+        // As tall as the strip's other glyphs (17 of 24, the graphs' and
+        // the bug's): at 13 tall, Run and Fake Run read a size smaller
+        // than the tools above and below them. The play's point set right
+        // of the middle, so its weight is where the eye centres it.
         Pause => {
-            "<rect x='7.5' y='6' width='3' height='12' rx='1'/>\
-             <rect x='13.5' y='6' width='3' height='12' rx='1'/>"
+            "<rect x='6.75' y='3.5' width='3.5' height='17' rx='1'/>\
+             <rect x='13.75' y='3.5' width='3.5' height='17' rx='1'/>"
         }
-        Play => "<path d='M8.5 5.5 L18 12 L8.5 18.5 Z'/>",
+        Play => "<path d='M7 3.5 L20 12 L7 20.5 Z'/>",
+        Continue => "<path d='M5.5 4 V20'/><path d='M9.5 4 L20.5 12 L9.5 20 Z'/>",
+        StepOver => {
+            "<path d='M4.5 13.5 A7 7 0 0 1 18.5 13.5'/><path d='M15.5 10.5 L18.5 13.5 L21.5 10.5'/>\
+             <circle cx='11.5' cy='19' r='2' fill='STROKE' stroke='none'/>"
+        }
+        StepInto => {
+            "<path d='M12 3.5 V13.5'/><path d='M8 9.5 L12 13.5 L16 9.5'/>\
+             <circle cx='12' cy='19' r='2' fill='STROKE' stroke='none'/>"
+        }
+        StepOut => {
+            "<path d='M12 14 V4'/><path d='M8 8 L12 4 L16 8'/>\
+             <circle cx='12' cy='19' r='2' fill='STROKE' stroke='none'/>"
+        }
+        StepBack => {
+            "<path d='M19.5 13.5 A7 7 0 0 0 5.5 13.5'/><path d='M2.5 10.5 L5.5 13.5 L8.5 10.5'/>\
+             <circle cx='12.5' cy='19' r='2' fill='STROKE' stroke='none'/>"
+        }
+        // Refresh's first arrow alone: once round, back to the start.
+        Restart => {
+            "<path d='M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8'/><path d='M3 3v5h5'/>"
+        }
         Book => "<path d='M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20'/>",
         Prompt => "<path d='m5 7 5 5-5 5'/><path d='M12.5 17H19'/>",
         Dictionary => {

@@ -215,9 +215,14 @@ impl ProjectCallGraph {
 /// collapsed) and finish the graph.
 fn finalize(mut nodes: Vec<SymNode>, edges: HashSet<(usize, usize)>) -> ProjectCallGraph {
     for (c, e) in edges {
-        if c < nodes.len() && e < nodes.len() && c != e {
+        if c < nodes.len() && e < nodes.len() {
             nodes[c].callees.push(e);
-            nodes[e].callers.push(c);
+            // A function calling itself is no caller of its own: a
+            // recursive function nothing else calls is still uncalled. It
+            // lists itself among what it calls.
+            if c != e {
+                nodes[e].callers.push(c);
+            }
         }
     }
     for n in &mut nodes {
@@ -287,7 +292,11 @@ impl FileCalls {
         let tree = crate::highlight::parse(source, lang)?;
         let symbols = crate::outline::located_in(&tree, source, lang);
         let calls = calls_in(&tree, source, lang, &symbols);
-        let owners = owners_in(&tree, source, lang, &symbols);
+        // A Lean declaration's is its namespace, read as `analyze` reads it.
+        let owners = match lang {
+            Lang::Lean => crate::outline::lean_owners(source, &symbols),
+            _ => owners_in(&tree, source, lang, &symbols),
+        };
         FileCalls::of(file.to_path_buf(), lang, calls, &symbols, owners)
     }
 
@@ -462,6 +471,8 @@ impl ProjectCallGraph {
             .iter()
             .map(|n| owner_at.get(&(n.file.as_path(), n.line)).copied())
             .collect();
+        // The project's own types (and traits): what defines a method here.
+        let project_types: HashSet<&str> = owner.iter().flatten().copied().collect();
 
         // Python runs a class's `__init__` when the class is called:
         // `Inventory(...)`, `raise OutOfStock(...)`. By the class's name.
@@ -519,16 +530,55 @@ impl ProjectCallGraph {
                     Some(Receiver::Type(ty)) => Some(ty.as_str()),
                     None => None,
                 };
-                let narrowed: Vec<usize> = wanted
+                // A Lean namespace is named from where the call is: `Voice`
+                // for `Clew.Extracted.Voice`, opened.
+                let owned_by = |c: usize, ty: &str| match owner[c] {
+                    Some(o) if fc.lang == Lang::Lean => {
+                        o == ty || o.strip_suffix(ty).is_some_and(|o| o.ends_with('.'))
+                    }
+                    o => o == Some(ty),
+                };
+                let mut narrowed: Vec<usize> = wanted
                     .map(|ty| {
                         callees
                             .iter()
                             .copied()
-                            .filter(|&c| owner[c] == Some(ty))
+                            .filter(|&c| owned_by(c, ty))
                             .collect()
                     })
                     .unwrap_or_default();
-                let targets: &[usize] = if narrowed.is_empty() {
+                // A Rust type's function is its own wherever it is defined:
+                // `Builder::new()` in a file with other `new`s, `Builder`'s
+                // defined in another — the name's nearest were not it.
+                if narrowed.is_empty()
+                    && fc.lang == Lang::Rust
+                    && let Some(ty) = wanted.filter(|ty| project_types.contains(ty))
+                {
+                    narrowed = (0..nodes.len())
+                        .filter(|&c| {
+                            owner[c] == Some(ty)
+                                && logical_name(&nodes[c].name, Some(Lang::Rust))
+                                    == logical_name(&cs.callee, Some(Lang::Rust))
+                        })
+                        .collect();
+                }
+                // A Rust receiver of a type the project defines nothing of —
+                // `Vec`, `str`, a type parameter — calls none of its
+                // functions: `haystack.len()` on a `&str` drew an edge to
+                // every `len` there was. (A language with inheritance keeps
+                // them: the method may be a base class's.)
+                // So does a Lean name in a namespace the project has none
+                // of: `Nat.succ` is no project `succ`.
+                let foreign = match (&cs.receiver, fc.lang) {
+                    (Some(Receiver::Type(ty)), Lang::Rust) => !project_types.contains(ty.as_str()),
+                    (Some(Receiver::Type(ty)), Lang::Lean) => {
+                        !(0..nodes.len()).any(|c| owner[c].is_some() && owned_by(c, ty))
+                    }
+                    _ => false,
+                };
+                let targets: &[usize] = if foreign {
+                    &[]
+                } else if narrowed.is_empty() {
                     callees
                 } else {
                     &narrowed
@@ -543,9 +593,8 @@ impl ProjectCallGraph {
                     .copied()
                     .filter(|&i| nodes[i].file == fc.file || imported.contains(&nodes[i].file));
                 for callee in targets.iter().copied().chain(constructed) {
-                    // Skip self-edges so a recursive function with no other
-                    // callers still reads as "uncalled".
-                    if callee != caller && edges.len() < MAX_EDGES {
+                    // A self-call is kept as a callee only (see `finalize`).
+                    if edges.len() < MAX_EDGES {
                         edges.insert((caller, callee));
                     }
                 }
@@ -665,7 +714,8 @@ impl ProjectCallGraph {
         let mut out: HashMap<SymKey, Vec<SymKey>> = HashMap::new();
         for (i, n) in self.nodes.iter().enumerate() {
             let callees = out.entry(key(i)).or_default();
-            callees.extend(n.callees.iter().map(|&c| key(c)));
+            // Not itself: what it waits on to be explained first.
+            callees.extend(n.callees.iter().filter(|&&c| c != i).map(|&c| key(c)));
             callees.sort();
             callees.dedup();
         }
@@ -985,16 +1035,11 @@ fn lang_spec(lang: Lang) -> Option<LangSpec> {
         // tactics (`rw [h]`, `simp [f]`) far more often than it applies them,
         // so a call graph of applications alone would say a proof uses
         // nothing.
-        Lang::Json
-        | Lang::Bash
-        | Lang::Yaml
-        | Lang::Toml
-        | Lang::Html
-        | Lang::Css
-        | Lang::Sql
-        | Lang::Lean => {
+        Lang::Json | Lang::Bash | Lang::Yaml | Lang::Toml | Lang::Html | Lang::Css | Lang::Sql => {
             return None;
         }
+        // Read from the text (see `crate::lean::calls`): no tree's kinds.
+        Lang::Lean => spec(&[], &[]),
     })
 }
 
@@ -1025,6 +1070,9 @@ pub fn calls_of(source: &str, lang: &str) -> Vec<CallSite> {
 /// name dropped them instead, since no node carries it. For a language
 /// without an outline every function name is accepted.
 pub fn calls_in(tree: &Tree, source: &str, lang: Lang, symbols: &[Located]) -> Vec<CallSite> {
+    if lang == Lang::Lean {
+        return crate::lean::calls(source, symbols);
+    }
     let Some(spec) = lang_spec(lang) else {
         return Vec::new();
     };
@@ -1117,6 +1165,7 @@ fn walk(
                     };
                     receiver_of(node, &callee, &scope, src, lang, &mut bindings)
                 }
+                _ if lang == Lang::Rust => rust_path_receiver(node, src),
                 _ => None,
             };
             out.push(CallSite {
@@ -1278,6 +1327,35 @@ fn dart_sig_name(sig: Node, src: &str) -> Option<String> {
         c.child_by_field_name("name")
             .map(|n| node_text(n, src).to_string())
     })
+}
+
+/// The type a Rust path call names its function through: `Self::make()`
+/// the impl's own, `Builder::new()` and `Vec::<u8>::new()` the type's. A
+/// module's path (`fs::read`, `crate::x::f`) names none: its function is
+/// found by the imports.
+fn rust_path_receiver(call: Node, src: &str) -> Option<Receiver> {
+    let mut function = call.child_by_field_name("function")?;
+    if function.kind() == "generic_function" {
+        function = function.child_by_field_name("function")?;
+    }
+    if function.kind() != "scoped_identifier" {
+        return None;
+    }
+    let path = function.child_by_field_name("path")?;
+    let path = match path.kind() {
+        "generic_type" => path.child_by_field_name("type")?,
+        _ => path,
+    };
+    let last = match path.kind() {
+        "scoped_identifier" | "scoped_type_identifier" => path.child_by_field_name("name")?,
+        _ => path,
+    };
+    let name = node_text(last, src);
+    match name {
+        "Self" => Some(Receiver::Own),
+        _ if name.starts_with(|c: char| c.is_uppercase()) => Some(Receiver::Type(name.to_string())),
+        _ => None,
+    }
 }
 
 /// Descend through wrappers that end in a name — a turbofish or template
@@ -1577,6 +1655,16 @@ fn receiver_of(
         "self" | "this" | "$this" | "Self" | "cls" | "static"
     ) {
         return (lang == Lang::Rust).then_some(Receiver::Own);
+    }
+    // A field of the type's own: `self.items.len()` is `Vec`'s `len`, as
+    // its struct declares `items`.
+    if lang == Lang::Rust
+        && let Some(field) = receiver.strip_prefix("self.")
+    {
+        return is_plain_name(field)
+            .then(|| rust_field_type(call, field, src))
+            .flatten()
+            .map(Receiver::Type);
     }
     if !is_plain_name(receiver) {
         return None;
@@ -2037,6 +2125,14 @@ fn binding_at(head: &str, after: &str, lang: Lang) -> Binding {
         if text.starts_with("dyn ") || text.starts_with("impl ") {
             return Binding::Unknown;
         }
+        // Rust's own types are named in lower case (`&str`, `u8`), and a
+        // path names its last segment.
+        if lang == Lang::Rust {
+            return match rust_type_name(rest) {
+                Some(ty) => Binding::Typed(ty, false),
+                None => Binding::Unknown,
+            };
+        }
         return match leading_type(rest, lang) {
             Some(ty) => Binding::Typed(ty, false),
             None => Binding::Not,
@@ -2179,6 +2275,95 @@ fn leading_type(text: &str, lang: Lang) -> Option<String> {
         .unwrap_or(text.len());
     let ty = &text[..end];
     type_like(ty, lang).then(|| ty.to_string())
+}
+
+/// The type a Rust type names, as the one whose methods a value of it has:
+/// `&'a mut Vec<u8>` is `Vec`, `crate::a::Set` is `Set`, `&str` is `str`;
+/// a `Box<T>`, `Rc<T>` or `Arc<T>` hands on `T`'s methods, so it is `T`.
+/// `None` for no one type: a trait object, an `impl Trait`, a tuple, a
+/// slice or an array.
+fn rust_type_name(text: &str) -> Option<String> {
+    let mut t = text.trim();
+    // A pointer within a pointer within …: as deep as anyone writes.
+    for _ in 0..16 {
+        loop {
+            let before = t;
+            t = t.trim_start_matches('&').trim_start();
+            if let Some(rest) = t.strip_prefix('\'') {
+                t = rest
+                    .trim_start_matches(|c: char| c == '_' || c.is_alphanumeric())
+                    .trim_start();
+            }
+            for prefix in ["*const ", "*mut ", "mut "] {
+                if let Some(rest) = t.strip_prefix(prefix) {
+                    t = rest.trim_start();
+                }
+            }
+            if t == before {
+                break;
+            }
+        }
+        if t.starts_with("dyn ") || t.starts_with("impl ") || t.starts_with(['(', '[']) {
+            return None;
+        }
+        let end = t
+            .find(|c: char| !(c == '_' || c == ':' || c.is_alphanumeric()))
+            .unwrap_or(t.len());
+        let name = t[..end].rsplit("::").next()?;
+        if !name.starts_with(|c: char| c == '_' || c.is_alphabetic()) {
+            return None;
+        }
+        if !matches!(name, "Box" | "Rc" | "Arc") {
+            return Some(name.to_string());
+        }
+        // The pointer's content: its first type argument.
+        let inner = t[end..].trim_start().strip_prefix('<')?;
+        let mut depth = 0usize;
+        let mut close = None;
+        for (i, c) in inner.char_indices() {
+            match c {
+                '<' | '(' | '[' => depth += 1,
+                '>' | ')' | ']' | ',' if depth == 0 => {
+                    close = Some(i);
+                    break;
+                }
+                '>' | ')' | ']' => depth -= 1,
+                _ => {}
+            }
+        }
+        t = inner[..close?].trim();
+    }
+    None
+}
+
+/// The type of the field `field` of the type whose `impl` the Rust call
+/// `call` is in, as its struct declares it beside that `impl` (in the same
+/// module of the file): `items` of `struct Order { items: Vec<u8> }` is
+/// `Vec`. `None` where it is not found there.
+fn rust_field_type(call: Node, field: &str, src: &str) -> Option<String> {
+    // Up to the `impl`: a method's body is a few levels down; a call deeper
+    // than this in one is not one anyone wrote.
+    let mut at = call;
+    let imp = (0..64).find_map(|_| {
+        at = at.parent()?;
+        (at.kind() == "impl_item").then_some(at)
+    })?;
+    let owner = rust_type_name(node_text(imp.child_by_field_name("type")?, src))?;
+    let named = |n: &Node, name: &str| {
+        n.child_by_field_name("name")
+            .is_some_and(|x| node_text(x, src) == name)
+    };
+    let scope = imp.parent()?;
+    let mut cursor = scope.walk();
+    let declared = scope
+        .named_children(&mut cursor)
+        .find(|n| n.kind() == "struct_item" && named(n, &owner))?;
+    let body = declared.child_by_field_name("body")?;
+    let mut cursor = body.walk();
+    let decl = body
+        .named_children(&mut cursor)
+        .find(|n| n.kind() == "field_declaration" && named(n, field))?;
+    rust_type_name(node_text(decl.child_by_field_name("type")?, src))
 }
 
 /// The type a declaration ends with before its name: `Cart`, `final Cart`,
@@ -2882,6 +3067,58 @@ void main() {
         }
     }
 
+    /// Lean's calls: across the files a file imports, a namespace's name
+    /// called by its namespace (`Voice.toModel`, `Voice` being
+    /// `Clew.Voice`), and nothing for a name in a namespace the project has
+    /// none of (`Nat.succ` is no project `succ`).
+    #[test]
+    fn lean_calls_link_across_imports_and_namespaces() {
+        let basic = PathBuf::from("/p/Demo/Basic.lean");
+        let voice = PathBuf::from("/p/Demo/Voice.lean");
+        let usef = PathBuf::from("/p/Demo/Use.lean");
+        let sources = vec![
+            (
+                basic.clone(),
+                "def double (n : Nat) : Nat := n + n\n\ndef succ (n : Nat) : Nat := n\n".to_string(),
+            ),
+            (
+                voice.clone(),
+                "namespace Clew.Voice\n\ndef toModel (n : Nat) : Nat := n\n\nend Clew.Voice\n".to_string(),
+            ),
+            (
+                usef.clone(),
+                "import Demo.Basic\nimport Demo.Voice\n\ndef quad (n : Nat) : Nat :=\n  double (double n)\n\ndef speak (n : Nat) : Nat :=\n  Voice.toModel (Nat.succ n)\n".to_string(),
+            ),
+        ];
+        let mut defs = Vec::new();
+        for (file, src) in &sources {
+            for l in crate::outline::extract_located(src, "lean") {
+                defs.push(Def {
+                    name: l.symbol.name,
+                    kind: l.symbol.kind,
+                    file: file.clone(),
+                    line: l.symbol.line,
+                });
+            }
+        }
+        let scope: HashMap<PathBuf, HashSet<PathBuf>> =
+            HashMap::from([(usef.clone(), HashSet::from([basic.clone(), voice.clone()]))]);
+        let g = ProjectCallGraph::build(defs, &sources, &scope);
+        let callees = |name: &str| -> Vec<String> {
+            let id = g.id_of(&usef, name).expect(name);
+            let mut out: Vec<String> = g
+                .node(id)
+                .callees
+                .iter()
+                .map(|&c| g.node(c).name.clone())
+                .collect();
+            out.sort();
+            out
+        };
+        assert_eq!(callees("quad"), ["double"]);
+        assert_eq!(callees("speak"), ["toModel"]);
+    }
+
     #[test]
     fn builds_graph_and_finds_hubs_and_uncalled() {
         let defs = vec![
@@ -3012,9 +3249,11 @@ void main() {
             "fn fac(n: u64) -> u64 {\n    fac(n - 1)\n}\n".to_string(),
         )];
         let g = ProjectCallGraph::build(defs, &sources, &HashMap::new());
-        // The self-call is dropped, so `fac` still counts as uncalled.
+        // The self-call is no caller, so `fac` still counts as uncalled; it
+        // is among what `fac` calls.
         assert_eq!(g.node(g.uncalled()[0]).name, "fac");
-        assert_eq!(g.edge_count(), 0);
+        assert_eq!(g.callees_of(0), [0]);
+        assert!(g.callee_keys().values().all(Vec::is_empty));
     }
 
     #[test]
@@ -3171,15 +3410,17 @@ void main() {
             def("b", "/p/x.rs", 5),
             def("c", "/p/y.rs", 1),
         ];
-        // a→b, a→c (explicit, e.g. LSP-resolved), plus a self-edge that's dropped.
+        // a→b, a→c (explicit, e.g. LSP-resolved), plus b calling itself.
         let edges = HashSet::from([(0, 1), (0, 2), (1, 1)]);
         let g = ProjectCallGraph::from_callable_defs(defs, edges);
         assert_eq!(g.node_count(), 3);
         assert_eq!(g.node(id_named(&g, "a")).callee_count(), 2);
-        assert_eq!(g.node(id_named(&g, "b")).caller_count(), 1);
+        // b calls itself, and is no caller of its own: a is its one caller.
+        let b = id_named(&g, "b");
+        assert_eq!(g.node(b).caller_count(), 1);
+        assert_eq!(g.callees_of(b), [b]);
         assert_eq!(g.node(id_named(&g, "c")).caller_count(), 1);
-        // The dropped self-edge means b still has no *other* caller than a.
-        assert_eq!(g.edge_count(), 2);
+        assert_eq!(g.edge_count(), 3);
     }
 
     #[test]
@@ -4667,6 +4908,82 @@ pub fn main() void {
             calls.iter().any(|c| c.callee == "helper" && !c.method),
             "{calls:?}"
         );
+    }
+
+    /// A Rust path call is its type's function: `Self::make()` the impl's
+    /// own, `B::make()` B's — even where B's is in another file and this one
+    /// has a `make` of its own — not every `make` there is. A call on a
+    /// type the project defines nothing of (`Vec::new()`, `v.len()` on a
+    /// `Vec`) is none of the project's functions.
+    #[test]
+    fn rust_path_calls_go_to_their_types_function() {
+        let lib = "\
+struct A;
+struct Order;
+impl A {
+    fn make() -> A { A }
+    fn build() -> A { Self::make() }
+    fn other() { let _ = b::B::make(); }
+    fn len(&self) -> usize { 0 }
+}
+impl Order {
+    fn len(&self) -> usize { 1 }
+}
+fn count() -> usize { let v: Vec<u8> = Vec::new(); v.len() }
+fn fresh() -> Vec<u8> { Vec::new() }
+fn new() {}
+";
+        let b = "pub struct B;\nimpl B {\n    pub fn make() -> B { B }\n}\n";
+        let g = graph(&[("/p/lib.rs", lib), ("/p/b.rs", b)]);
+        assert_eq!(callers_named(&g, "/p/lib.rs", "make", 0), ["build@5"]);
+        assert_eq!(callers_named(&g, "/p/b.rs", "make", 0), ["other@6"]);
+        for (name, ordinal) in [("len", 0), ("len", 1), ("new", 0)] {
+            assert!(
+                callers_named(&g, "/p/lib.rs", name, ordinal).is_empty(),
+                "{name}#{ordinal}: {:?}",
+                edges(&g)
+            );
+        }
+    }
+
+    /// A method called on a parameter or a field of a type the project does
+    /// not define (`&str`, `Vec`) is none of the project's; on one of a
+    /// project type, that type's. Direct recursion is an edge of its own.
+    #[test]
+    fn rust_receivers_are_typed_by_parameters_and_fields() {
+        let lib = "\
+struct RegexSet;
+struct SetMatches;
+struct Order { items: Vec<u8>, set: RegexSet }
+impl RegexSet {
+    fn len(&self) -> usize { 0 }
+}
+impl SetMatches {
+    fn len(&self) -> usize { 1 }
+}
+impl Order {
+    fn size(&self) -> usize { self.items.len() }
+    fn count(&self) -> usize { self.set.len() }
+}
+fn find(haystack: &str) -> usize { haystack.len() }
+fn of_set(set: &RegexSet) -> usize { set.len() }
+fn fact(n: u64) -> u64 { if n == 0 { 1 } else { n * fact(n - 1) } }
+";
+        let g = graph(&[("/p/lib.rs", lib)]);
+        assert_eq!(
+            callers_named(&g, "/p/lib.rs", "len", 0),
+            ["count@12", "of_set@15"],
+            "{:?}",
+            edges(&g)
+        );
+        assert!(
+            callers_named(&g, "/p/lib.rs", "len", 1).is_empty(),
+            "{:?}",
+            edges(&g)
+        );
+        let fact = g.id_of_key(Path::new("/p/lib.rs"), "fact", 0).unwrap();
+        assert_eq!(g.callees_of(fact), [fact]);
+        assert!(g.callers_of(fact).is_empty());
     }
 
     /// Macro arguments are token trees, not expressions; the calls in them

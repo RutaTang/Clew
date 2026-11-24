@@ -563,6 +563,7 @@ impl App {
             os: self.proj.reading_target.os.clone(),
             arch: self.proj.reading_target.arch.clone(),
             family: self.proj.reading_target.family.clone(),
+            env: self.proj.reading_target.env.clone(),
         }
     }
 }

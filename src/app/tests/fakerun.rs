@@ -30,7 +30,8 @@ fn menu_at(app: &mut App, line: usize) {
         served: true,
         by_pointer: true,
         line_top: None,
-        in_test: false,
+        test: None,
+        gutter: None,
     });
 }
 
@@ -560,6 +561,7 @@ fn a_parked_fake_runs_failure_raises_no_notice_for_another_run() {
         args: Vec::new(),
         cwd: PathBuf::from("/"),
         addr: None,
+        takes_input: false,
     });
     app.debug.tab = app.next_run_tab();
     menu_at(&mut app, 3);

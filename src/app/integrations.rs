@@ -1056,6 +1056,7 @@ impl App {
             },
             ..AskTurn::default()
         });
+        self.warm_voice_for_question(spoken);
         // Said aloud, it is answered without the card opening over the code
         // (see `on_words`).
         if !spoken {

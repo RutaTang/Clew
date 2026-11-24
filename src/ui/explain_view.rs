@@ -1006,10 +1006,23 @@ pub(crate) fn lsp_consent_modal(
     use crate::LspProvision;
     let server_blurb = tr!("Clew installs it in its own folder, not system-wide:");
     let (title, blurb, action) = match &consent.provision {
+        // A script's own packages (PEP 723), into the environment uv keeps
+        // for it.
+        LspProvision::DebugAdapter { install, .. } if install.is_script_packages() => (
+            tr!("Install the packages this script needs?"),
+            tr!("This will run:"),
+            tr!("Install"),
+        ),
         // pytest runs a project's tests: no debug adapter.
         LspProvision::DebugAdapter { install, .. } if install.is_test_runner() => (
             tr!("Install pytest to run tests?"),
             tr!("This will run:"),
+            tr!("Install"),
+        ),
+        // debugpy and js-debug: a pinned download into Clew's own folder.
+        LspProvision::DebugAdapter { install, .. } if install.is_download() => (
+            tr!("Install a debug adapter?"),
+            server_blurb,
             tr!("Install"),
         ),
         LspProvision::DebugAdapter { .. } => (

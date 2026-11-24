@@ -16,6 +16,9 @@ pub(crate) fn short_kind(kind: &str) -> &'static str {
         "module" => "mod",
         "macro" => "macro",
         "constant" => "const",
+        "static" => "static",
+        "variant" => "variant",
+        "variable" => "var",
         "field" => "field",
         "type" => "type",
         "table" => "table",
@@ -405,7 +408,10 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
             Some((
                 crate::lsp::registry::default_for_language(k)
                     .filter(|_| at_work)
-                    .map(|server| server.name),
+                    .map(|server| server.name)
+                    // Named as its language ("lean"): said once, not
+                    // "Lean: lean ready".
+                    .filter(|name| !name.eq_ignore_ascii_case(lang)),
                 status,
             ))
         });
@@ -483,16 +489,14 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
             Some(tip) => super::toolbar::tip_at(lsp_button, tip, None, tooltip::Position::Top),
             None => lsp_button.into(),
         });
-        // Diagnostic counts for this file, from the same snapshot.
+        // Diagnostic counts for this file, from the same snapshots: its
+        // language's server and the one run beside it.
         let diags = v
-            .lang_key
-            .and_then(|k| match app.proj.link.lsp_snapshots.get(k) {
-                Some(Ok(snapshot)) => Some(snapshot.diagnostics(&v.abs)),
-                _ => None,
-            })
+            .lsp_lang()
+            .and_then(|k| app.file_diagnostics(k, &v.lsp_path()))
             .map(|ds| {
-                let errs = ds.iter().filter(|d| d.severity == 1).count();
-                let warns = ds.iter().filter(|d| d.severity == 2).count();
+                let errs = ds.iter().filter(|(d, _)| d.severity == 1).count();
+                let warns = ds.iter().filter(|(d, _)| d.severity == 2).count();
                 (errs, warns)
             });
         // Said whenever the server can say them, none included, each in a
@@ -1115,7 +1119,7 @@ fn plugin_run_chip(app: &App) -> Option<(Element<'_, Message>, f32)> {
 fn rust_setup_chip(app: &App) -> Option<(Element<'_, Message>, f32)> {
     use crate::app::plugins::{Building, PluginMsg, SettingsSpot};
     if !matches!(app.plugins.building, Building::SettingUp { .. }) {
-        return None;
+        return rust_src_chip(app);
     }
     let said = tr!("Setting up Rust for plugins…");
     let width = super::steady::width_of(said, ts::SMALL, crate::fonts::UI) + CHIP_EXTRA_W;
@@ -1137,6 +1141,49 @@ fn rust_setup_chip(app: &App) -> Option<(Element<'_, Message>, f32)> {
         Message::Plugin(PluginMsg::ShowInSettings(SettingsSpot::Rust)),
     ));
     Some((chip.into(), width))
+}
+
+/// Rust's own sources missing from the project's toolchain, which
+/// rust-analyzer reads the standard library from: a button that adds them
+/// (`rustup component add rust-src`), what it is doing while it does, and
+/// a way to try again where it failed, its reason in the tooltip.
+fn rust_src_chip(app: &App) -> Option<(Element<'_, Message>, f32)> {
+    use crate::app::RustSrc;
+    let (said, tip, press): (String, String, bool) = match &app.proj.rust_src {
+        RustSrc::Missing(_) => (
+            tr!("Add Rust's sources").into(),
+            tr!("rust-analyzer reads Rust's standard library from its sources, which this toolchain doesn't have. Adds them with rustup component add rust-src.").into(),
+            true,
+        ),
+        RustSrc::Adding(_) => (tr!("Adding Rust's sources…").into(), String::new(), false),
+        RustSrc::Failed { error, .. } => (
+            tr!("Couldn't add Rust's sources. Try again").into(),
+            error.clone(),
+            true,
+        ),
+        RustSrc::Unknown | RustSrc::Present => return None,
+    };
+    let width = super::steady::width_of(&said, ts::SMALL, crate::fonts::UI) + CHIP_EXTRA_W;
+    let body = row![
+        glyph::icon(Glyph::Cube, theme::accent(), 11.0),
+        text(said.clone())
+            .size(ts::SMALL)
+            .color(theme::accent())
+            .wrapping(iced::widget::text::Wrapping::None),
+    ]
+    .spacing(5)
+    .align_y(iced::Center);
+    let chip = button(body)
+        .style(theme::icon_button(false))
+        .padding([2, 8])
+        .on_press_maybe(
+            press.then(|| super::heard::said(&said, Message::Lsp(crate::LspMsg::AddRustSrc))),
+        );
+    let chip: Element<'_, Message> = match tip.is_empty() {
+        true => chip.into(),
+        false => super::toolbar::tip_at(chip, tip, None, tooltip::Position::Top),
+    };
+    Some((chip, width))
 }
 
 /// What the setting-up chip says, and whether it is a button: setting up,

@@ -98,8 +98,9 @@ pub mod inactive;
 pub mod incremental;
 pub(crate) mod lean;
 pub use lean::{
-    RunEnd as LeanRunEnd, has_main as lean_has_main, lake_root, mathlib_build_missing,
-    run_main as lean_run_main,
+    RunEnd as LeanRunEnd, blocks as lean_blocks, has_main as lean_has_main,
+    header_imports as lean_header_imports, lake_folder_in, lake_project_above, lake_root,
+    mathlib_build, mathlib_build_missing, run_lake as lean_run_lake, run_main as lean_run_main,
 };
 pub mod leanproof;
 pub mod linerpc;
@@ -113,6 +114,7 @@ pub mod outline;
 pub mod procgroup;
 pub mod projectcalls;
 pub mod runnables;
+pub mod rustapi;
 pub mod rustscope;
 pub mod search;
 pub mod server_dist;
@@ -120,6 +122,7 @@ pub mod spawn;
 pub mod statefile;
 pub mod stats;
 pub mod structure;
+pub mod tasks;
 #[doc(hidden)]
 pub mod testutil;
 pub mod trust;

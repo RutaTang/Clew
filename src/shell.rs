@@ -4004,6 +4004,7 @@ mod tests {
             args: Vec::new(),
             cwd: PathBuf::from("/tmp"),
             addr: None,
+            takes_input: false,
         }
     }
 

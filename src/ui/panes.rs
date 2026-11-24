@@ -35,8 +35,9 @@ pub(crate) fn pane_view(app: &App, pane: usize) -> Element<'_, Message> {
                 && d.abs == v.abs
             {
                 diff_view(app, pane, d)
-            } else if let Some(doc) = v.notebook.as_deref() {
-                // A Jupyter notebook renders as its native cell view.
+            } else if let Some(doc) = v.shows_cells().map(|d| d.as_ref()) {
+                // A Jupyter notebook renders as its native cell view; read
+                // as its script, it is code like any file's.
                 notebook_pane(app, pane, v, doc)
             } else if let Some(md) = v.md.as_ref().filter(|_| !v.show_source) {
                 // A markdown file renders as a document; a toggle in the
@@ -1395,6 +1396,15 @@ pub(crate) fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element
         Message::Debug(DebugMsg::BreakpointToggle {
             path: v.abs.clone(),
             line,
+        })
+    })
+    // A ▶ on each line something runs from: a click offers Run and Debug.
+    .run_marks(app.run_marks(v), move |line, at| {
+        Message::Hover(HoverMsg::RunMarkClicked {
+            pane,
+            line,
+            x: at.x - frame,
+            y: at.y - frame,
         })
     })
     .indent_guides(app.show_indent_guides)
@@ -2956,6 +2966,34 @@ fn margin_goals(app: &App) -> Element<'_, Message> {
         }
         _ => {}
     }
+    // The folder opened is a folder of a Lake project's, whose lakefile is
+    // above it: Lean finds none of the project's modules from here. Said,
+    // with the folder to open — asked about as any folder opened is.
+    if let Some(Some(outer)) = &app.proj.lean_outer {
+        let name = outer
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| outer.display().to_string());
+        let open = tr!("Open {folder}", folder = name);
+        let press = super::heard::said(
+            &open,
+            Message::Project(crate::ProjectMsg::FolderPicked(Some(outer.clone()))),
+        );
+        rows = rows.push(card(
+            tr!("This folder is part of a Lake project").into(),
+            tr!(
+                "Its lakefile is in {folder}, above the folder open here, so Lean can't find the project's modules. Open {folder} to check them.",
+                folder = outer.display()
+            ),
+            vec![
+                button(text(open).size(ts::SMALL).wrapping(Wrapping::None))
+                    .style(theme::primary_button)
+                    .padding([4, 10])
+                    .on_press(press)
+                    .into(),
+            ],
+        ));
+    }
     // The server's state, under the Mathlib card: a project whose Lean
     // would build all of Mathlib wants the card most while Lean starts.
     // Each said as it is — a failure, no Lean, a "no" — with the way on.
@@ -2988,6 +3026,17 @@ fn margin_goals(app: &App) -> Element<'_, Message> {
         Some(crate::LspSlot::Unsupported(why) | crate::LspSlot::Declined(why)) => {
             rows = rows.push(note(crate::i18n::message(why)));
             rows = rows.push(servers());
+            return scrollable(rows).height(Fill).into();
+        }
+        // Stopped while `lake exe cache get` puts Mathlib's build in place.
+        None if matches!(
+            app.proj.mathlib,
+            crate::app::proof::MathlibCache::Getting(_)
+        ) =>
+        {
+            rows = rows.push(note(
+                tr!("The Lean server starts again once Mathlib's build cache is in place.").into(),
+            ));
             return scrollable(rows).height(Fill).into();
         }
         None => {
@@ -3051,6 +3100,19 @@ fn margin_goals(app: &App) -> Element<'_, Message> {
             }
         }
     }
+    // Lean stopped checking the file — its worker died, out of memory or
+    // in a crash — and checks nothing more of it until it is restarted:
+    // said as checking, it read "checking line 3" for good.
+    if !restarting && let Some(at) = snapshot.and_then(|s| s.stopped(&v.abs)) {
+        rows = rows.push(note(tr!(
+            "Lean stopped checking this file at line {line}. Restart the file to check it again.",
+            line = at + 1
+        )));
+        rows = rows.push(link(
+            tr!("Restart File"),
+            Message::Proof(crate::ProofMsg::RestartFile),
+        ));
+    }
     let goals = app.proj.lean_goals.as_ref().filter(|g| g.abs == v.abs);
     // An answer for another line while this one is asked, and Lean has not
     // checked this far yet: its goals are not this line's, and may not be
@@ -3058,10 +3120,12 @@ fn margin_goals(app: &App) -> Element<'_, Message> {
     let behind = snapshot
         .and_then(|s| s.checking(&v.abs))
         .filter(|at| *at < line);
+    // Nor is a request that ran out of time before Lean got to the line:
+    // asked again once it does, how far it has got is said meanwhile.
     let answer = goals.and_then(|g| {
         g.answer
             .as_ref()
-            .filter(|(at, _)| !(g.asking && *at != line && behind.is_some()))
+            .filter(|(at, got)| !(behind.is_some() && ((g.asking && *at != line) || got.is_err())))
     });
     match answer {
         // How far Lean has got, where it says: a goal is answered once the
@@ -3099,23 +3163,29 @@ fn margin_goals(app: &App) -> Element<'_, Message> {
                 .into(),
             ))
         }
-        Some((at, Ok(Some(LeanGoal::Tactic(left))))) if left.is_empty() => {
+        Some((at, Ok(Some(LeanGoal::Tactic(left, term))))) => {
             rows = rows.push(super::explain_view::section_header(&tr!(
                 "Goals at line {line}",
                 line = at + 1
             )));
-            // Said of a `sorry` too: none left, not "complete".
-            rows = rows.push(note(tr!("No goals left here.").into()));
-        }
-        Some((at, Ok(Some(LeanGoal::Tactic(left))))) => {
-            rows = rows.push(super::explain_view::section_header(&tr!(
-                "Goals at line {line}",
-                line = at + 1
-            )));
-            rows = rows.push(
-                container(Column::with_children(super::proof::goal_rows(left, None)).spacing(2))
+            if left.is_empty() {
+                // Said of a `sorry` too: none left, not "complete".
+                rows = rows.push(note(tr!("No goals left here.").into()));
+            } else {
+                rows = rows.push(
+                    container(
+                        Column::with_children(super::proof::goal_rows(left, None)).spacing(2),
+                    )
                     .padding([2, 10]),
-            );
+                );
+            }
+            // The term the cursor is on, in the proof: the type it is to
+            // have, as Lean's own view shows beside the goals — where it
+            // is not the goal said above.
+            if let Some(ty) = term.as_ref().filter(|t| !left.contains(t)) {
+                rows = rows.push(super::explain_view::section_header(tr!("Expected type")));
+                rows = rows.push(code(ty.clone(), theme::fg()));
+            }
         }
         Some((at, Ok(Some(LeanGoal::Term(ty))))) => {
             rows = rows.push(super::explain_view::section_header(&tr!(

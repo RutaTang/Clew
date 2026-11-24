@@ -27,6 +27,7 @@ pub(crate) fn reason_words(reason: &Reason) -> String {
             Risk::Deserialize => trn!("1 deserialization", "{n} deserializations", n),
             Risk::RawHtml => trn!("writes raw HTML once", "writes raw HTML {n} times", n),
             Risk::CatchAll => trn!("1 catch-all", "{n} catch-alls", n),
+            Risk::Sorry => trn!("1 unfinished proof", "{n} unfinished proofs", n),
         },
         Reason::Swallowed(n) => trn!("swallows 1 error", "swallows {n} errors", n),
         Reason::Marked(n) => trn!("1 TODO or FIXME", "{n} TODOs or FIXMEs", n),

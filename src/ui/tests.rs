@@ -3410,6 +3410,7 @@ fn skim_keeps_the_code_in_view() {
         Arc::new(
             (0..120)
                 .map(|i| crate::index::SymbolEntry {
+                    owner: None,
                     name: format!("f{i}"),
                     kind: "function".into(),
                     rel: "src/lib.rs".into(),
@@ -4312,7 +4313,8 @@ fn escape_names_the_topmost_overlay() {
         served: true,
         by_pointer: true,
         line_top: None,
-        in_test: false,
+        test: None,
+        gutter: None,
     });
     assert!(matches!(
         super::escape_message(&app),
@@ -4379,7 +4381,8 @@ fn escape_closes_overlays_one_at_a_time() {
         served: true,
         by_pointer: true,
         line_top: None,
-        in_test: false,
+        test: None,
+        gutter: None,
     });
     open_tools_menu(&mut app);
     let escape = || {
@@ -4639,7 +4642,8 @@ fn the_context_menu_has_each_languages_own_rows() {
         served: true,
         by_pointer: true,
         line_top: None,
-        in_test: false,
+        test: None,
+        gutter: None,
     });
     let mut sim = sim_of(&app);
     assert!(shows(&mut sim, "Memory Layout"));
@@ -5044,6 +5048,7 @@ fn a_run_tab_holds_its_close_button() {
         args: Vec::new(),
         cwd: PathBuf::from("/p"),
         addr: None,
+        takes_input: false,
     });
     app.debug.tab = 1;
     app.run_shown = Some(RunTab::Real(1));
@@ -5135,6 +5140,7 @@ fn the_panel_has_a_tab_for_each_run() {
         args: Vec::new(),
         cwd: PathBuf::from("/p"),
         addr: None,
+        takes_input: false,
     };
     app.debug.session = Some(session(crate::DebugStatus::Running));
     app.debug.tab = 1;
@@ -5296,13 +5302,72 @@ fn the_code_menu_shows_the_breakpoints_key() {
         served: true,
         by_pointer: true,
         line_top: None,
-        in_test: false,
+        test: None,
+        gutter: None,
     });
     let mut sim = sim_of(&app);
     let row = text_at(&mut sim, |t| t == "Toggle Breakpoint", 0).expect("the row");
     let key = text_at(&mut sim, |t| t == "F9", 0).expect("its key");
     assert!((key.center_y() - row.center_y()).abs() < 2.0, "on its row");
     assert!(key.x > row.x + row.width, "after its words");
+}
+
+/// A Lean file's code menu, and its `main`'s ▶ menu, offer no breakpoint:
+/// Lean runs no debugger. Its ▶ runs the program, and only runs it.
+#[test]
+fn a_lean_files_menus_offer_no_breakpoint() {
+    let mut app = reader_app();
+    app.proj.panes[0].as_mut().unwrap().lang_key = Some("lean");
+    let menu = |gutter| crate::ContextMenu {
+        pane: 0,
+        line: 1,
+        col: 1,
+        x: 20.0,
+        y: 20.0,
+        insight: None,
+        served: true,
+        by_pointer: true,
+        line_top: None,
+        test: None,
+        gutter,
+    };
+    app.proj.context_menu = Some(menu(None));
+    let mut sim = sim_of(&app);
+    assert!(shows(&mut sim, "Toggle Bookmark"));
+    assert!(!shows(&mut sim, "Toggle Breakpoint"));
+    assert!(!shows(&mut sim, "Conditional Breakpoint…"));
+    drop(sim);
+    app.proj.context_menu = Some(menu(Some(crate::GutterRun {
+        main: Some("Main.lean".into()),
+        debug: false,
+    })));
+    let mut sim = sim_of(&app);
+    assert!(shows(&mut sim, "Run Main.lean"));
+    assert!(!shows(&mut sim, "Debug Main.lean"));
+    assert!(!shows(&mut sim, "Add Breakpoint"));
+    drop(sim);
+    // Picked, the menu goes as the run starts.
+    let sent = click(sim_of(&app), "Run Main.lean");
+    for m in sent {
+        let _ = app.update(m);
+    }
+    assert!(app.proj.context_menu.is_none());
+    // F9 there says why nothing is set.
+    let abs = app.proj.panes[0]
+        .as_ref()
+        .unwrap()
+        .abs
+        .with_extension("lean");
+    let _ = app.update(Message::Debug(crate::DebugMsg::BreakpointToggle {
+        path: abs.clone(),
+        line: 2,
+    }));
+    assert!(!app.debug.breakpoints.contains_key(&abs));
+    assert!(
+        app.status.contains("Lean has no debugger"),
+        "{}",
+        app.status
+    );
 }
 
 /// L11: the walkthrough player's ‹ and › do nothing at the ends — at
@@ -5440,7 +5505,8 @@ fn a_breakpoints_condition_dialog_edits_and_removes_it() {
             served: true,
             by_pointer: true,
             line_top: None,
-            in_test: false,
+            test: None,
+            gutter: None,
         });
     };
     menu(&mut app);
@@ -5756,6 +5822,62 @@ fn every_tool_on_the_strip_has_a_shortcut() {
             "{a:?} takes a chord the menu bar keeps"
         );
     }
+}
+
+/// The tour goes over the strip once, from its top down — the overview,
+/// the graphs, running, the glossary in the ⋯ menu, Ask at its foot — and
+/// the sidebar in at most two runs: it pointed at the strip, went to the
+/// sidebar and the code, and came back to the strip, and again.
+#[test]
+fn the_tour_goes_down_the_strip_once_and_round_the_window_in_order() {
+    use crate::app::tutorial::{Anchor, steps};
+    use crate::ui::StripTool;
+    let mut app = reader_app();
+    let _ = app.update(Message::Tutorial(TutorialMsg::Begin));
+    let all = steps(&app);
+    let pos = |t: StripTool| {
+        super::STRIP_TOP
+            .iter()
+            .position(|x| *x == t)
+            .unwrap_or_else(|| panic!("{t:?} on the strip"))
+    };
+    let on_strip: Vec<(usize, usize)> = all
+        .iter()
+        .enumerate()
+        .filter_map(|(i, s)| {
+            let at = match s.anchor {
+                Anchor::Strip(t) => pos(t),
+                Anchor::RunTools => pos(StripTool::Run),
+                Anchor::ToolbarMenu { .. } => pos(StripTool::More),
+                Anchor::AskCorner => super::STRIP_TOP.len(),
+                _ => return None,
+            };
+            Some((i, at))
+        })
+        .collect();
+    let titles = |is: &[(usize, usize)]| -> Vec<String> {
+        is.iter().map(|(i, _)| all[*i].title.clone()).collect()
+    };
+    assert!(on_strip.len() >= 5, "{:?}", titles(&on_strip));
+    let first = on_strip[0].0;
+    assert!(
+        on_strip
+            .iter()
+            .enumerate()
+            .all(|(k, (i, _))| *i == first + k),
+        "away from the strip and back: {:?}",
+        titles(&on_strip)
+    );
+    assert!(
+        on_strip.windows(2).all(|w| w[0].1 <= w[1].1),
+        "up the strip again: {:?}",
+        titles(&on_strip)
+    );
+    let sidebar_runs = all
+        .windows(2)
+        .filter(|w| w[0].anchor != Anchor::Sidebar && w[1].anchor == Anchor::Sidebar)
+        .count();
+    assert!(sidebar_runs <= 2, "the sidebar {sidebar_runs} times over");
 }
 
 /// Every tool on the strip for reading a project has its one tutorial
@@ -9187,6 +9309,7 @@ fn paused_debug_session() -> crate::DebugSession {
         args: Vec::new(),
         cwd: PathBuf::from("/p"),
         addr: None,
+        takes_input: false,
     }
 }
 
@@ -9828,6 +9951,135 @@ async fn the_goals_margin_says_how_far_lean_has_checked_and_offers_restart() {
             .any(|m| matches!(m, Message::Proof(crate::ProofMsg::RestartFile))),
         "{sent:?}"
     );
+
+    // Lean stopped checking the file (its worker died): said, not as
+    // checking, with the way on.
+    let stopped = format!(
+        r#"{{"jsonrpc":"2.0","method":"$/lean/fileProgress","params":{{"textDocument":{{"uri":"{uri}","version":1}},"processing":[{{"range":{{"start":{{"line":1,"character":0}},"end":{{"line":9,"character":0}}}},"kind":2}}]}}}}"#
+    );
+    let client = stub_lsp_client_saying(&root, vec![stopped]).await;
+    for _ in 0..200 {
+        if client.snapshot().is_ok_and(|s| s.stopped(&abs).is_some()) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    app.proj
+        .link
+        .lsp
+        .insert("lean".into(), crate::LspSlot::Ready(client));
+    let _ = app.update(Message::Noop);
+    assert!(shows(
+        &mut sim_of(&app),
+        "Lean stopped checking this file at line 2"
+    ));
+    assert!(!shows(&mut sim_of(&app), "Lean is checking line"));
+    assert_eq!(
+        app.lsp_status("lean").as_deref(),
+        Some("stopped checking Basic.lean"),
+        "not checking, nor ready"
+    );
+    assert!(!app.lsp_busy("lean"));
+    let sent = click(sim_of(&app), "Restart File");
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Proof(crate::ProofMsg::RestartFile))),
+        "{sent:?}"
+    );
+}
+
+/// The goals at a line Lean has not checked yet are asked once it has:
+/// asked before, the answer waited on the check and ran out of time, and a
+/// file that checks clean says nothing more to have them asked again.
+#[tokio::test]
+async fn goals_are_asked_once_lean_has_checked_as_far_as_the_cursor() {
+    let mut app = reader_app();
+    app.show_right_panel = true;
+    app.window_width = 1400.0;
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let abs = root.join("Basic.lean");
+    {
+        let v = app.proj.panes[0].as_mut().unwrap();
+        v.abs = abs.clone();
+        v.rel = "Basic.lean".into();
+        v.lang_key = Some("lean");
+        v.caret = Some((5, 0));
+    }
+    app.margin_tab = crate::MarginTab::Goals;
+    let uri = crate::lsp::client::path_to_uri(&abs);
+    let progress = format!(
+        r#"{{"jsonrpc":"2.0","method":"$/lean/fileProgress","params":{{"textDocument":{{"uri":"{uri}","version":1}},"processing":[{{"range":{{"start":{{"line":2,"character":0}},"end":{{"line":9,"character":0}}}},"kind":1}}]}}}}"#
+    );
+    let client = stub_lsp_client_saying(&root, vec![progress]).await;
+    for _ in 0..200 {
+        if client.snapshot().is_ok_and(|s| s.checking(&abs).is_some()) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    app.proj
+        .link
+        .lsp
+        .insert("lean".into(), crate::LspSlot::Ready(client));
+    let _ = app.update(Message::Noop);
+    let goals = app.proj.lean_goals.as_ref().expect("asked for");
+    assert!(goals.behind && goals.asking, "Lean is not at line 6 yet");
+    let token = goals.token;
+    // The request ran out of time before Lean got there: how far it has
+    // got is said, not the time-out.
+    let stamp = app.stamp();
+    let _ = app.update(Message::Proof(crate::ProofMsg::Goals {
+        stamp,
+        token,
+        result: Err("$/lean/plainGoal: timed out".into()),
+    }));
+    let total = app.active_viewer().unwrap().line_count().max(3);
+    assert!(shows(
+        &mut sim_of(&app),
+        &format!(
+            "Lean is checking line 3 of {total} in this file. The goals at line 6 show once it gets there."
+        )
+    ));
+    assert!(!shows(&mut sim_of(&app), "timed out"));
+    // Checked: asked again, now of a line Lean has reached.
+    let client = stub_lsp_client_saying(&root, Vec::new()).await;
+    app.proj
+        .link
+        .lsp
+        .insert("lean".into(), crate::LspSlot::Ready(client));
+    let _ = app.update(Message::Noop);
+    let goals = app.proj.lean_goals.as_ref().unwrap();
+    assert!(!goals.behind);
+    assert!(goals.token > token, "asked again");
+}
+
+/// A folder of a Lake project's sources, opened on its own, is told so in
+/// the Goals margin, with the project's folder to open.
+#[test]
+fn the_goals_margin_says_the_folder_is_in_a_lake_project() {
+    let mut app = reader_app();
+    app.show_right_panel = true;
+    app.proj.panes[0].as_mut().unwrap().lang_key = Some("lean");
+    app.margin_tab = crate::MarginTab::Goals;
+    app.proj
+        .link
+        .lsp
+        .insert("lean".into(), crate::LspSlot::Starting);
+    assert!(!shows(&mut sim_of(&app), "part of a Lake project"));
+    let outer = std::path::PathBuf::from("/work/proofs");
+    app.proj.lean_outer = Some(Some(outer.clone()));
+    assert!(shows(
+        &mut sim_of(&app),
+        "This folder is part of a Lake project"
+    ));
+    let sent = click(sim_of(&app), "Open proofs");
+    assert!(
+        sent.iter().any(|m| matches!(
+            m,
+            Message::Project(crate::ProjectMsg::FolderPicked(Some(p))) if *p == outer
+        )),
+        "{sent:?}"
+    );
 }
 
 /// The Goals margin offers a Mathlib project its build cache, says how
@@ -9865,10 +10117,22 @@ fn the_goals_margin_offers_mathlibs_build_cache() {
         "{sent:?}"
     );
     app.proj.mathlib = MathlibCache::Getting("Downloaded: 1200 file(s)".into());
+    // Lean's server is stopped while the cache is got: said so, not
+    // "start the server".
+    app.proj.link.lsp.remove("lean");
     let mut sim = sim_of(&app);
     assert!(shows(&mut sim, "Getting Mathlib's build cache…"));
     assert!(shows(&mut sim, "Downloaded: 1200 file(s)"));
+    assert!(shows(
+        &mut sim,
+        "starts again once Mathlib's build cache is in place"
+    ));
+    assert!(!shows(&mut sim, "Start the Lean server"));
     drop(sim);
+    app.proj
+        .link
+        .lsp
+        .insert("lean".into(), crate::LspSlot::Starting);
     app.proj.mathlib = MathlibCache::Failed("no network".into());
     let mut sim = sim_of(&app);
     assert!(shows(&mut sim, "Could not get Mathlib's build cache"));
@@ -10594,6 +10858,7 @@ fn a_long_entry_puts_its_chain_under_it() {
     );
     let symbol = |name: &str, line: usize, entry: Option<crate::index::EntryKind>| {
         crate::index::SymbolEntry {
+            owner: None,
             name: name.into(),
             kind: "function".into(),
             rel: "src/lib.rs".into(),
@@ -10678,6 +10943,7 @@ fn an_entrys_tag_stays_on_one_line_in_chinese() {
     );
     let symbol = |name: &str, line: usize, entry: Option<crate::index::EntryKind>| {
         crate::index::SymbolEntry {
+            owner: None,
             name: name.into(),
             kind: "function".into(),
             rel: "src/lib.rs".into(),
@@ -10775,6 +11041,7 @@ fn the_call_flow_shows_how_an_entry_point_reaches_the_function() {
     let symbol =
         |name: &str, line: usize, entry: Option<crate::index::EntryKind>, is_test: bool| {
             crate::index::SymbolEntry {
+                owner: None,
                 name: name.into(),
                 kind: "function".into(),
                 rel: "src/lib.rs".into(),
@@ -10963,6 +11230,7 @@ fn the_overlays_list_the_most_changed_files_and_the_entry_points() {
     let symbol =
         |name: &str, line: usize, entry: Option<crate::index::EntryKind>, is_test: bool| {
             crate::index::SymbolEntry {
+                owner: None,
                 name: name.into(),
                 kind: "function".into(),
                 rel: "src/lib.rs".into(),
@@ -11190,6 +11458,28 @@ fn the_maps_overlay_lists_a_maps_nodes_by_kind() {
     assert!(shows(&mut sim, "GET /users"));
     drop(sim);
     assert!(super::map_picker(&app).is_some());
+    // As wide whichever graph is picked, in every language: as wide as the
+    // one picked, it moved the search field beside it at each pick.
+    crate::fonts::load();
+    for lang in crate::i18n::Lang::ALL {
+        crate::i18n::with_lang(lang, || {
+            let mut beside = Vec::new();
+            for id in ["sql.schema", "routes"] {
+                app.proj.maps_selected = Some(id.into());
+                let mut sim = sim_elem(
+                    iced::widget::row![
+                        super::map_picker(&app).unwrap(),
+                        iced::widget::text("beside")
+                    ]
+                    .spacing(8)
+                    .into(),
+                );
+                beside.push(text_at(&mut sim, |t| t == "beside", 0).unwrap().x);
+            }
+            assert_eq!(beside[0], beside[1], "{lang:?}: the picker's width");
+        });
+    }
+    app.proj.maps_selected = Some("routes".into());
     // Each map by its name alone: a count beside one (where its nodes were
     // all of one kind) read as if the others had nothing in them (L18),
     // and a route and its handler are not two routes (L4).
@@ -11350,12 +11640,11 @@ fn a_plain_runs_panel_is_its_output_and_how_it_ended() {
         args: Vec::new(),
         cwd: root.clone(),
         addr: None,
+        takes_input: false,
     };
     let stops = |app: &App| {
-        let mut sim = sim_elem(super::debug_panel(app));
-        let _ = sim.click("■ Stop");
-        sent_by(sim)
-            .into_iter()
+        pressing(|| super::debug_panel(app), "Stop")
+            .iter()
             .any(|m| matches!(m, Message::Debug(DebugMsg::Stop)))
     };
     app.debug.no_debug = true;
@@ -11365,7 +11654,7 @@ fn a_plain_runs_panel_is_its_output_and_how_it_ended() {
         assert!(shows(&mut sim, "Run"));
         assert!(shows(&mut sim, "Sencha    37.50"));
         assert!(!shows(&mut sim, "CALL STACK"));
-        assert!(!shows(&mut sim, "▶ Continue"));
+        assert!(pressing(|| super::debug_panel(&app), "Continue").is_empty());
     }
     assert!(stops(&app), "a running program can be stopped");
     app.debug.session = Some(session(crate::DebugStatus::Terminated, Some(0)));
@@ -11398,7 +11687,11 @@ fn a_plain_runs_panel_is_its_output_and_how_it_ended() {
         let mut sim = sim_elem(super::debug_panel(&app));
         assert!(shows(&mut sim, "Debug"));
         assert!(shows(&mut sim, "terminated"));
-        assert!(shows(&mut sim, "↻ Debug Again"));
+        assert!(
+            pressing(|| super::debug_panel(&app), "Debug again")
+                .iter()
+                .any(|m| matches!(m, Message::Debug(DebugMsg::Again)))
+        );
         assert!(!shows(&mut sim, "CALL STACK"));
     }
     assert!(!stops(&app));
@@ -11493,6 +11786,7 @@ fn a_call_stack_frames_line_number_fits_its_column() {
             args: Vec::new(),
             cwd: root.clone(),
             addr: None,
+            takes_input: false,
         });
         app.show_bottom = true;
         let size = Size::new(width, 900.0);
@@ -11807,9 +12101,14 @@ fn the_last_runs_trace_is_offered_as_a_walkthrough_and_listed_on_the_call_graph(
     let root = app.proj.project.as_ref().unwrap().root.clone();
     assert_eq!(super::scope_label("@trace app"), "Debug run (app)");
     assert_eq!(super::scope_label("@trace"), "Debug run");
-    let mut sim = sim_elem(super::trace_control(&app));
-    assert!(shows(&mut sim, "No stops traced yet"));
-    drop(sim);
+    // With no stops, Walk this run is there, faded, and can do nothing:
+    // its tip says why.
+    assert_eq!(super::trace_count(&app), "No stops traced yet");
+    assert!(shows(
+        &mut sim_elem(super::trace_control(&app)),
+        "Walk this run"
+    ));
+    assert!(pressing(|| super::trace_control(&app), "Walk this run").is_empty());
     // A run that ended without stopping has no stops, not "yet".
     app.debug.session = Some(crate::DebugSession {
         client: None,
@@ -11825,11 +12124,9 @@ fn the_last_runs_trace_is_offered_as_a_walkthrough_and_listed_on_the_call_graph(
         args: Vec::new(),
         cwd: root.clone(),
         addr: None,
+        takes_input: false,
     });
-    let mut sim = sim_elem(super::trace_control(&app));
-    assert!(shows(&mut sim, "No stops traced"));
-    assert!(!shows(&mut sim, "No stops traced yet"));
-    drop(sim);
+    assert_eq!(super::trace_count(&app), "No stops traced");
     app.debug.session = None;
     let frame = |name: &str, line: usize| crate::TraceFrame {
         name: name.into(),
@@ -11851,8 +12148,10 @@ fn the_last_runs_trace_is_offered_as_a_walkthrough_and_listed_on_the_call_graph(
         },
     ];
     app.debug.trace_rev += 1;
+    assert_eq!(super::trace_count(&app), "3 stops traced");
+    // Said where Walk this run's tip is, not on the header's row.
     let mut sim = sim_elem(super::trace_control(&app));
-    assert!(shows(&mut sim, "3 stops traced"));
+    assert!(!shows(&mut sim, "3 stops traced"));
     let _ = sim.click("Walk this run");
     let sent: Vec<Message> = sent_by(sim).into_iter().collect();
     assert!(
@@ -11996,7 +12295,8 @@ fn the_flow_tab_lists_occurrences_under_their_roles() {
         served: true,
         by_pointer: true,
         line_top: None,
-        in_test: false,
+        test: None,
+        gutter: None,
     });
     assert!(shows(&mut sim_of(&app), "Trace Value"));
     app.proj.context_menu = None;
@@ -12241,6 +12541,7 @@ fn rows_send_the_identity_of_what_they_show() {
 
     // The symbol finder.
     app.proj.symbol_index = Arc::new(vec![crate::index::SymbolEntry {
+        owner: None,
         name: "origin".into(),
         kind: "function".into(),
         rel: "src/lib.rs".into(),
@@ -13525,6 +13826,17 @@ fn the_model_field_offers_the_models_the_key_can_call() {
     assert_eq!(app.settings.models, ModelList::Unasked);
 }
 
+/// What pressing the control named `name` in what `build` draws sends:
+/// nothing for one that can do nothing now, nor for one not drawn. For a
+/// control drawn as its glyph alone, named only where the pointer rests.
+fn pressing<'a>(build: impl FnOnce() -> Element<'a, Message>, name: &str) -> Vec<Message> {
+    crate::ui::heard::gather_of(build)
+        .into_iter()
+        .filter(|t| t.title == name)
+        .map(|t| t.message)
+        .collect()
+}
+
 /// What a press of the text size control named `said` sends, as `app`
 /// stands: nothing for one that is off.
 fn sent_by_pressing(app: &App, said: &str) -> Vec<Message> {
@@ -13575,7 +13887,8 @@ fn the_context_menu_offers_the_languages_own_action() {
         served: true,
         by_pointer: true,
         line_top: None,
-        in_test: false,
+        test: None,
+        gutter: None,
     };
     app.proj.context_menu = Some(menu(Some(crate::InsightKind::ExpandMacro)));
     assert!(shows(&mut sim_of(&app), "Expand Macro"));
@@ -13898,6 +14211,7 @@ fn no_line_of_a_runs_output_is_under_the_ask_pill() {
         args: Vec::new(),
         cwd: root.clone(),
         addr: None,
+        takes_input: false,
     });
     app.show_bottom = true;
     app.ask_view = crate::AskView::Hidden;
@@ -13945,6 +14259,7 @@ fn a_runs_output_is_shown_at_its_end() {
         args: Vec::new(),
         cwd: root.clone(),
         addr: None,
+        takes_input: false,
     });
     app.show_bottom = true;
     app.ask_view = crate::AskView::Hidden;
@@ -17750,7 +18065,8 @@ fn the_context_menu_waits_for_the_language_server() {
         served,
         by_pointer: true,
         line_top: None,
-        in_test: false,
+        test: None,
+        gutter: None,
     };
     app.proj.context_menu = Some(menu(false));
     for waits in ["Go to Definition", "Find References", "Call Hierarchy"] {
@@ -19517,13 +19833,13 @@ fn the_fake_debug_panel_shows_the_trace_and_steps_it() {
     assert!(shows(&mut sim, "value is set"));
     assert!(shows(&mut sim, "7"));
     assert!(shows(&mut sim, "nothing is called"));
-    let over = click(sim_of(&app), "↪ Over");
+    let over = pressing(|| super::view(&app), "Step over");
     assert!(
         over.iter()
             .any(|m| matches!(m, Message::Fake(crate::FakeMsg::Step(crate::SimCmd::Over)))),
         "{over:?}"
     );
-    let back = click(sim_of(&app), "◀ Back");
+    let back = pressing(|| super::view(&app), "Step back");
     assert!(
         back.iter()
             .any(|m| matches!(m, Message::Fake(crate::FakeMsg::Step(crate::SimCmd::Back)))),
@@ -19918,7 +20234,8 @@ fn audited_states() -> Vec<(String, App)> {
         served: true,
         by_pointer: true,
         line_top: None,
-        in_test: false,
+        test: None,
+        gutter: None,
     });
     states.push(("the context menu".into(), app));
     let mut app = base_clone(&base);
@@ -22692,6 +23009,7 @@ fn walk_this_run_is_never_cut_whatever_the_width() {
         args: Vec::new(),
         cwd: root.clone(),
         addr: None,
+        takes_input: false,
     });
     app.debug.hover_safe = false;
     app.debug.trace = vec![crate::TraceStop {
@@ -22750,6 +23068,7 @@ fn the_debug_header_keeps_walk_this_run_beside_the_ask_card() {
         args: Vec::new(),
         cwd: root.clone(),
         addr: None,
+        takes_input: false,
     });
     app.debug.trace = vec![crate::TraceStop {
         reason: "breakpoint".into(),
@@ -22773,14 +23092,81 @@ fn the_debug_header_keeps_walk_this_run_beside_the_ask_card() {
     let mut sim = sim_sized(&app, size);
     let walk = text_at(&mut sim, |t| t == "Walk this run", 0).expect("Walk this run");
     assert!(walk.width > 20.0, "drawn whole: {walk:?}");
+    assert_eq!(super::trace_count(&app), "1 stop traced", "the trace");
+    drop(sim);
     assert!(
-        text_at(&mut sim, |t| t == "1 stop traced", 0).is_some(),
-        "the trace"
-    );
-    assert!(
-        text_at(&mut sim, |t| t.contains("Debug Again"), 0).is_some(),
+        !pressing(|| super::view(&app), "Debug again").is_empty(),
         "the controls"
     );
+}
+
+/// A paused run's controls — Continue, the three steps, Stop — are their
+/// glyphs alone, named where the pointer rests, and stand on the header's
+/// own row beside what it says, in every language at a laptop's width:
+/// read as words ("▶ 继续", "↪ 单步跳过"), they took a row of their own
+/// under it, the stack and the variables a row further down.
+#[test]
+fn the_debug_controls_share_the_headers_row_in_every_language() {
+    let mut app = reader_app();
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    app.debug.session = Some(crate::DebugSession {
+        client: None,
+        status: crate::DebugStatus::Stopped,
+        exit_code: None,
+        thread_id: None,
+        frames: vec![crate::dap::StackFrame {
+            id: 1,
+            name: "main".into(),
+            path: Some(root.join("main.py")),
+            line: 15,
+            column: 1,
+        }],
+        scopes: Vec::new(),
+        watches: Vec::new(),
+        output: Vec::new(),
+        current: Some((root.join("main.py"), 15)),
+        program: root.join("main.py"),
+        args: Vec::new(),
+        cwd: root.clone(),
+        addr: None,
+        takes_input: false,
+    });
+    app.debug.trace = (0..4)
+        .map(|_| crate::TraceStop {
+            reason: "breakpoint".into(),
+            frames: Vec::new(),
+        })
+        .collect();
+    app.debug.trace_rev += 1;
+    app.show_bottom = true;
+    crate::fonts::load();
+    let size = Size::new(1366.0, 860.0);
+    app.window_width = size.width;
+    app.window_height = size.height;
+    for lang in crate::i18n::Lang::ALL {
+        crate::i18n::with_lang(lang, || {
+            for name in ["Continue", "Step over", "Step into", "Step out", "Stop"] {
+                assert_eq!(
+                    pressing(|| super::view(&app), name).len(),
+                    1,
+                    "{lang:?}: {name}"
+                );
+            }
+            let mut sim = sim_sized(&app, size);
+            for words in ["▶", "↪", "■"] {
+                assert!(
+                    text_at(&mut sim, |t| t.starts_with(words), 0).is_none(),
+                    "{lang:?}: a control read as words, {words}…"
+                );
+            }
+            let title = text_at(&mut sim, |t| t == crate::tr!("Debug"), 0).expect("the title");
+            let stack = text_at(&mut sim, |t| t == crate::tr!("CALL STACK"), 0).expect("the stack");
+            assert!(
+                stack.y - title.y < 45.0,
+                "{lang:?}: the columns a row down, under the controls: {title:?} {stack:?}"
+            );
+        });
+    }
 }
 
 /// The Ask card in the corner sits beside the debugger's columns, not
@@ -22812,6 +23198,7 @@ fn the_debug_columns_keep_clear_of_the_ask_card() {
         args: Vec::new(),
         cwd: root.clone(),
         addr: None,
+        takes_input: false,
     });
     app.show_bottom = true;
     crate::fonts::load();
@@ -22963,6 +23350,7 @@ fn the_debug_notes_cut_sentence_is_whole_in_its_tip_and_gone_when_it_says_nothin
         args: Vec::new(),
         cwd: root.clone(),
         addr: None,
+        takes_input: false,
     });
     app.debug.ran_for = Some("pricing.py".into());
     crate::app::tests::isolated_data_dir();
@@ -23038,6 +23426,7 @@ fn the_debug_note_is_whole_in_french_where_there_is_room() {
         args: Vec::new(),
         cwd: root.clone(),
         addr: None,
+        takes_input: false,
     });
     app.debug.ran_for = Some("pricing.py".into());
     app.debug.trace = vec![crate::TraceStop {
@@ -23100,6 +23489,7 @@ fn a_narrow_debug_header_keeps_its_trace_and_walk_this_run() {
         args: Vec::new(),
         cwd: root.clone(),
         addr: None,
+        takes_input: false,
     });
     app.debug.ran_for = Some("pricing.py".into());
     app.debug.trace = vec![crate::TraceStop {
@@ -23120,9 +23510,8 @@ fn a_narrow_debug_header_keeps_its_trace_and_walk_this_run() {
             Size::new(width, 260.0),
             super::debug_panel(&app),
         );
-        let count = text_at(&mut sim, |t| t == "1 stop traced", 0).expect("the trace's count");
-        assert!(count.height < 20.0, "{width}: on one line: {count:?}");
         let walk = text_at(&mut sim, |t| t == "Walk this run", 0).expect("Walk this run");
+        assert!(walk.height < 20.0, "{width}: on one line: {walk:?}");
         assert!(
             walk.x + walk.width <= width,
             "{width}: in the panel: {walk:?}"
@@ -23141,4 +23530,41 @@ fn a_narrow_debug_header_keeps_its_trace_and_walk_this_run() {
             "{width}: in the panel: {note:?}"
         );
     }
+}
+
+/// A run whose program takes an input has a line for it under its output;
+/// what is typed there is the program's input. A program that does not
+/// read one, or has ended, has no such line.
+#[test]
+fn a_run_that_reads_input_has_an_input_line() {
+    use iced_test::selector::Candidate;
+    let mut app = reader_app();
+    let mut session = paused_debug_session();
+    session.status = crate::DebugStatus::Running;
+    session.output = vec![("stdout".into(), "Name: ".into())];
+    app.debug.no_debug = true;
+    app.debug.session = Some(session);
+    let field = |app: &App| {
+        sim_elem(super::debug_panel(app))
+            .find(|c: Candidate<'_>| match c {
+                Candidate::TextInput { visible_bounds, .. } => visible_bounds,
+                _ => None,
+            })
+            .ok()
+    };
+    assert!(field(&app).is_none(), "no input to type into yet");
+    app.debug.session.as_mut().unwrap().takes_input = true;
+    let at = field(&app).expect("an input line");
+    let mut sim = sim_elem(super::debug_panel(&app));
+    sim.point_at(at.center());
+    let _ = sim.simulate(iced_test::simulator::click());
+    let _ = sim.typewrite("A");
+    let sent = sent_by(sim);
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Debug(DebugMsg::ProgramInput(q)) if q == "A")),
+        "{sent:?}"
+    );
+    app.debug.session.as_mut().unwrap().status = crate::DebugStatus::Terminated;
+    assert!(field(&app).is_none(), "an ended program reads nothing");
 }

@@ -509,6 +509,12 @@ impl App {
             self.pending_z = false;
             return self.update(msg);
         }
+        // Then the code info open over the code: Esc puts it away, as it
+        // does every card that opens over what is read.
+        if matches!(key.as_ref(), Key::Named(Named::Escape)) && self.proj.hover.is_some() {
+            self.invalidate_hover();
+            return Task::none();
+        }
         // Enter on a sheet presses its main button — as its "yes" by voice
         // does — where that is safe and only once it can be pressed and
         // read (`ActiveOverlay::enter_answers`). Opened from a shortcut,
@@ -790,6 +796,8 @@ impl App {
             Key::Character("0") => self.move_cursor(viewer::Motion::LineStart),
             Key::Character("$") => self.move_cursor(viewer::Motion::LineEnd),
             Key::Character("G") => self.move_cursor(viewer::Motion::LastLine),
+            // Vim's `K`: what the word at the caret is.
+            Key::Character("K") => self.toggle_peek_at_caret(),
             _ => Task::none(),
         }
     }
@@ -879,6 +887,7 @@ impl App {
             GoBack => self.update(Message::Reading(ReadingMsg::GoBack)),
             GoForward => self.update(Message::Reading(ReadingMsg::GoForward)),
             TraceValue => self.update(Message::Flow(crate::FlowMsg::AtCursor)),
+            ShowInfo => self.toggle_peek_at_caret(),
             FakeRun => self.update(Message::Fake(FakeMsg::AtCaret { debug: false })),
             FakeDebug => self.update(Message::Fake(FakeMsg::AtCaret { debug: true })),
             ToggleAsk => self.update(Message::Ask(AskMsg::Toggle)),

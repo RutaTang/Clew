@@ -117,9 +117,12 @@ impl<K: Hash + Eq> Ordinals<K> {
     }
 }
 
-/// Whether a symbol kind is a callable (a function or a method).
+/// Whether a symbol kind is a callable (a function or a method) — or a
+/// Lean theorem, a proof read as a function is: what Explain explains and
+/// the outline numbers among a file's same-name functions. A proof file was
+/// explained as a list of its theorems' names.
 pub fn is_callable(kind: &str) -> bool {
-    matches!(kind, "function" | "method")
+    matches!(kind, "function" | "method" | "theorem")
 }
 
 /// A work counter for the complexity tests: a hot loop reports its units of
@@ -477,9 +480,17 @@ fn lean_located(source: &str) -> Vec<Located> {
     let mut out = Vec::new();
     let mut lines_before = 0;
     let mut counted_to = 0;
-    for range in crate::lean::commands(source) {
+    let commands = crate::lean::commands(source);
+    let (_, ends) = crate::lean::scopes(source, &commands);
+    // Each command's first line, and the outline entry of each namespace
+    // by its command: a namespace spans to its `end`, its declarations
+    // nested in it — one line long, it held nothing.
+    let mut first_lines = Vec::with_capacity(commands.len());
+    let mut namespaces: Vec<(usize, usize)> = Vec::new();
+    for (index, range) in commands.iter().cloned().enumerate() {
         lines_before += source[counted_to..range.start].matches('\n').count();
         counted_to = range.start;
+        first_lines.push(lines_before + 1);
         let original = &source[range.clone()];
         let command = crate::lean::readable(original);
         let Some(tree) = parser.parse(command.as_bytes(), None) else {
@@ -496,13 +507,51 @@ fn lean_located(source: &str) -> Vec<Located> {
             let main = found.iter_mut().find(|l| {
                 l.symbol.line == line && !matches!(l.symbol.kind.as_str(), "field" | "constructor")
             });
-            match main {
-                Some(l) if l.symbol.name != name && name.ends_with(l.symbol.name.as_str()) => {
-                    l.symbol.name = name.to_string();
+            let at = match main {
+                Some(l) => {
+                    // The grammar's name with universe parameters ends in
+                    // their dot (`div.inductionOn.` of `.{u}`).
+                    let grammar = l.symbol.name.trim_end_matches('.');
+                    if l.symbol.name != name && name.ends_with(grammar) {
+                        l.symbol.name = name.to_string();
+                    }
+                    found
+                        .iter()
+                        .position(|l| l.symbol.line == line && l.symbol.name == name)
                 }
-                Some(_) => {}
-                None => found.insert(0, lean_head_located(original, &head, line)),
+                None => {
+                    found.insert(0, lean_head_located(original, &head, line));
+                    Some(0)
+                }
+            };
+            // The declaration is its whole command: its `where` helpers and
+            // its `termination_by` too — the grammar's node ended at its
+            // body's first line, and an Explain of it lacked its helpers.
+            if let Some(at) = at {
+                let text = original.trim_end();
+                let last = (text.matches('\n').count() + 1).max(line);
+                let l = &mut found[at];
+                if last > l.symbol.end_line
+                    && !matches!(head.kind, "struct" | "class" | "inductive")
+                {
+                    l.symbol.end_line = last;
+                    l.declaration.1 = l.declaration.1.max(text.len());
+                    if let Some(body) = l.body.as_mut() {
+                        body.1 = last;
+                    }
+                }
+                if matches!(head.kind, "function" | "theorem") {
+                    found.extend(lean_where_helpers(original, line));
+                }
+                if matches!(head.kind, "struct" | "class") {
+                    lean_fields(original, line, &mut found);
+                }
             }
+        }
+        if ends.contains_key(&index)
+            && let Some(at) = found.iter().position(|l| l.symbol.kind == "module")
+        {
+            namespaces.push((index, out.len() + at));
         }
         out.extend(
             found
@@ -510,7 +559,255 @@ fn lean_located(source: &str) -> Vec<Located> {
                 .map(|l| l.moved(range.start, lines_before)),
         );
     }
+    for (index, at) in namespaces {
+        // To its `end`'s line, or the file's end where it has none.
+        let (end_line, end_byte) = match ends.get(&index).copied().flatten() {
+            Some(end) => {
+                let range = &commands[end];
+                let text = source[range.clone()].trim_end();
+                (first_lines[end], range.start + text.len())
+            }
+            None => (source.lines().count().max(1), source.trim_end().len()),
+        };
+        let l = &mut out[at];
+        if end_line > l.symbol.line {
+            l.symbol.end_line = end_line;
+            l.declaration.1 = l.declaration.1.max(end_byte);
+            l.body = Some((l.symbol.line, end_line));
+        }
+    }
     out
+}
+
+/// Each Lean declaration's namespace, by its 1-based line: what it is
+/// called by from outside it (`Clew.Extracted.Voice` for `toModel`
+/// declared in `namespace Voice` in `namespace Clew.Extracted`). Not the
+/// declarations at the top, which are in none.
+pub(crate) fn lean_owners(
+    source: &str,
+    symbols: &[Located],
+) -> std::collections::HashMap<usize, String> {
+    let commands = crate::lean::commands(source);
+    let (paths, _) = crate::lean::scopes(source, &commands);
+    // Each command's first line, in order, to find the one a line is in.
+    let mut firsts = Vec::with_capacity(commands.len());
+    let mut line = 1;
+    let mut counted_to = 0;
+    for range in &commands {
+        line += source[counted_to..range.start].matches('\n').count();
+        counted_to = range.start;
+        firsts.push(line);
+    }
+    symbols
+        .iter()
+        .filter_map(|l| {
+            let at = firsts
+                .partition_point(|&first| first <= l.symbol.line)
+                .checked_sub(1)?;
+            let path = paths.get(at).filter(|p| !p.is_empty())?;
+            Some((l.symbol.line, path.clone()))
+        })
+        .collect()
+}
+
+/// The helpers a Lean declaration defines in its `where` clause (`go` in
+/// `def f … := go n where go …`), each from its line to the next one's, as
+/// functions of their own: they were in no outline. `line` is the
+/// declaration's first line in `command`.
+fn lean_where_helpers(command: &str, line: usize) -> Vec<Located> {
+    let lines: Vec<&str> = command.lines().collect();
+    // The `where` on a line of its own, or ending one.
+    let Some(at) = lines.iter().enumerate().skip(line - 1).find_map(|(i, l)| {
+        let code = l.split("--").next().unwrap_or("").trim_end();
+        (code.trim() == "where" || code.ends_with(" where")).then_some(i)
+    }) else {
+        return Vec::new();
+    };
+    let indent_of = |l: &str| l.len() - l.trim_start().len();
+    let mut helpers: Vec<(usize, &str)> = Vec::new();
+    let mut indent = None;
+    // Inside a helper's doc comment, over lines: its words name nothing.
+    let mut in_comment = false;
+    for (i, l) in lines.iter().enumerate().skip(at + 1) {
+        let t = l.trim();
+        if in_comment {
+            in_comment = !t.contains("-/");
+            continue;
+        }
+        if let Some(rest) = t.strip_prefix("/-") {
+            in_comment = !rest.contains("-/");
+            continue;
+        }
+        if t.is_empty() || t.starts_with("--") {
+            continue;
+        }
+        let here = indent_of(l);
+        if t.starts_with("termination_by") || t.starts_with("decreasing_by") {
+            if here <= indent.unwrap_or(usize::MAX) {
+                break;
+            }
+            continue;
+        }
+        let at_indent = *indent.get_or_insert(here);
+        if here < at_indent {
+            break;
+        }
+        if here > at_indent {
+            continue;
+        }
+        let t = t.trim_start_matches("@[").trim_start();
+        let len = crate::lean::name_len(t);
+        let name = &t[..len];
+        let follows = t[len..].trim_start();
+        let defines = name.chars().next().is_some_and(crate::lean::starts_name)
+            && (follows.starts_with(':') && !follows.starts_with(":=")
+                || follows.starts_with('(')
+                || follows.starts_with('{')
+                || follows.starts_with('[')
+                || follows.is_empty());
+        if defines && name != "|" {
+            helpers.push((i, name));
+        }
+    }
+    let starts: Vec<usize> = helpers.iter().map(|(i, _)| *i).collect();
+    let offset_of = |i: usize| -> usize { lines[..i].iter().map(|l| l.len() + 1).sum() };
+    helpers
+        .iter()
+        .enumerate()
+        .map(|(n, &(i, name))| {
+            let last = starts
+                .get(n + 1)
+                .map_or_else(|| lines.len(), |&next| next)
+                .max(i + 1);
+            // Its own lines, past those it ends before (a blank, a comment).
+            let last = (i + 1..=last)
+                .rev()
+                .find(|&k| lines.get(k - 1).is_some_and(|l| !l.trim().is_empty()))
+                .unwrap_or(i + 1);
+            let start = offset_of(i);
+            let end = (offset_of(last - 1) + lines[last - 1].len()).min(command.len());
+            Located {
+                symbol: Symbol {
+                    name: name.to_string(),
+                    kind: "function".to_string(),
+                    line: i + 1,
+                    end_line: last,
+                },
+                declaration: (start, end),
+                // At its `:=`, as a declaration's statement ends; its line's
+                // end where its equations are below it.
+                signature_end: start + lines[i].find(":=").unwrap_or(lines[i].len()),
+                cpp_public: None,
+                decl_line: i + 1,
+                body: Some((i + 1, last)),
+                container: None,
+                owner: Owner {
+                    scope: (0, command.len()),
+                    member_of: None,
+                },
+                accessed: false,
+            }
+        })
+        .collect()
+}
+
+/// A Lean structure's fields as its text writes them, set right in `found`
+/// (the command's entries; `line` its first line): a custom constructor
+/// (`mk ::`) is the constructor, not a field, and the field below it is
+/// one; each name of `x y : Nat` is a field. The grammar listed `mk` as a
+/// field, lost the field after it, and only the last of several names.
+fn lean_fields(command: &str, line: usize, found: &mut Vec<Located>) {
+    let lines: Vec<&str> = command.lines().collect();
+    let Some(at) = lines.iter().enumerate().skip(line - 1).find_map(|(i, l)| {
+        let code = l.split("--").next().unwrap_or("").trim_end();
+        (code.trim() == "where" || code.ends_with(" where")).then_some(i)
+    }) else {
+        return;
+    };
+    let indent_of = |l: &str| l.len() - l.trim_start().len();
+    let mut indent = None;
+    let mut offset: usize = lines[..=at].iter().map(|l| l.len() + 1).sum();
+    // Inside a field's doc comment, over lines: its words are no fields.
+    let mut in_comment = false;
+    for (i, l) in lines.iter().enumerate().skip(at + 1) {
+        let start = offset;
+        offset += l.len() + 1;
+        let t = l.trim();
+        if in_comment {
+            in_comment = !t.contains("-/");
+            continue;
+        }
+        if let Some(rest) = t.strip_prefix("/-") {
+            in_comment = !rest.contains("-/");
+            continue;
+        }
+        if t.is_empty() || t.starts_with("--") || t.starts_with('|') {
+            continue;
+        }
+        let here = indent_of(l);
+        if here == 0 {
+            break;
+        }
+        if here != *indent.get_or_insert(here) {
+            continue;
+        }
+        let line_no = i + 1;
+        let entry = |name: &str, kind: &str, from: usize| Located {
+            symbol: Symbol {
+                name: name.to_string(),
+                kind: kind.to_string(),
+                line: line_no,
+                end_line: line_no,
+            },
+            declaration: (from, start + l.len()),
+            signature_end: start + l.len(),
+            cpp_public: None,
+            decl_line: line_no,
+            body: None,
+            container: None,
+            owner: Owner {
+                scope: (0, command.len()),
+                member_of: None,
+            },
+            accessed: false,
+        };
+        // `mk ::`: the constructor.
+        if let Some(name) = t.strip_suffix("::").map(str::trim)
+            && !name.is_empty()
+            && crate::lean::name_len(name) == name.len()
+        {
+            match found
+                .iter_mut()
+                .find(|f| f.symbol.line == line_no && f.symbol.name == name)
+            {
+                Some(f) => f.symbol.kind = "constructor".to_string(),
+                None => found.push(entry(name, "constructor", start + here)),
+            }
+            continue;
+        }
+        // The names before the field's type (or its binders): a field has
+        // one, or a default given to an inherited field (`x := 1`), which
+        // is none.
+        let Some(head_end) = t.find([':', '(', '{', '[']) else {
+            continue;
+        };
+        if t[head_end..].starts_with(":=") || !t.contains(':') {
+            continue;
+        }
+        let names: Vec<&str> = t[..head_end].split_whitespace().collect();
+        if names.is_empty() || names.iter().any(|n| crate::lean::name_len(n) != n.len()) {
+            continue;
+        }
+        for name in names {
+            let known = found
+                .iter()
+                .any(|f| f.symbol.line == line_no && f.symbol.name == name);
+            if !known {
+                let from = start + l.find(name).unwrap_or(here);
+                found.push(entry(name, "field", from));
+            }
+        }
+    }
 }
 
 /// The outline entry of a Lean declaration the grammar could not read, from
@@ -558,6 +855,9 @@ fn located_in_tree(tree: &Tree, source: &str, lang: Lang) -> Vec<Located> {
     // through its parents — each found by tree-sitter walking down from the
     // root.
     cursor.set_max_start_depth(Some(MAX_DEF_DEPTH));
+    // Python's functions, by their index in `out`: the scope each is
+    // declared in, and whether it is an `@overload` stub.
+    let mut overloads: Vec<(usize, usize, bool)> = Vec::new();
     let mut matches = cursor.matches(query, tree.root_node(), source.as_bytes());
     while let Some(m) = matches.next() {
         let mut kind: Option<&str> = None;
@@ -593,10 +893,14 @@ fn located_in_tree(tree: &Tree, source: &str, lang: Lang) -> Vec<Located> {
             .map_or(0, |(_, last)| last)
             .max(def.end_position().row + 1)
             .max(line);
+        if lang == Lang::Python && kind == "function" {
+            let (scope, stub) = python_overload(def, source);
+            overloads.push((out.len(), scope, stub));
+        }
         out.push(Located {
             symbol: Symbol {
                 name: name.to_string(),
-                kind: refine_kind(def, kind, lang).to_string(),
+                kind: refine_kind(def, kind, lang, name, source).to_string(),
                 line,
                 end_line,
             },
@@ -610,6 +914,7 @@ fn located_in_tree(tree: &Tree, source: &str, lang: Lang) -> Vec<Located> {
             accessed: lang == Lang::Python && python_property(def, source),
         });
     }
+    drop_overload_stubs(&mut out, &overloads);
     // Stable, so of two patterns naming the same symbol the first match wins
     // (e.g. the Rust method pattern over the plain function one).
     out.sort_by(|a, b| {
@@ -695,6 +1000,15 @@ fn declaration_bytes(def: Node, lang: Lang, source: &str) -> ((usize, usize), us
                     ))
         })
         .map_or(declaration.end_byte(), |b| b.start_byte());
+    // A `macro_rules!` has no body field: its rules are its signature's
+    // tail, and the signature was the whole macro on one line (3,000
+    // characters for serde's helpers). It is `macro_rules! name`.
+    let signature_end = match (lang, def.kind()) {
+        (Lang::Rust, "macro_definition") => def
+            .child_by_field_name("name")
+            .map_or(signature_end, |n| n.end_byte()),
+        _ => signature_end,
+    };
     let mut top = template_wrapper(declaration);
     if let Some(export) = top.parent().filter(|p| p.kind() == "export_statement") {
         top = export;
@@ -848,7 +1162,12 @@ fn member_access(mut def: Node, access: &HashMap<usize, bool>) -> Option<bool> {
 /// Lean writes several kinds of declaration with one node: a `definition` is
 /// a `def` or an `abbrev`, a `theorem` or a `lemma`, or an `instance`, and a
 /// `structure` is a `structure` or a `class`. Its keyword says which.
-fn refine_kind<'a>(def: Node, kind: &'a str, lang: Lang) -> &'a str {
+///
+/// Python has no constants: a module's assignment is one by its name
+/// (`MAX_RETRIES`), else a variable (`logger = make()`, `app = Flask(…)`),
+/// or a type when it makes one (`Vector: TypeAlias = …`, `NewType`,
+/// `TypeVar`).
+fn refine_kind<'a>(def: Node, kind: &'a str, lang: Lang, name: &str, source: &str) -> &'a str {
     let function_valued = || {
         def.child_by_field_name("value")
             .is_some_and(|v| matches!(v.kind(), "arrow_function" | "function_expression"))
@@ -867,8 +1186,89 @@ fn refine_kind<'a>(def: Node, kind: &'a str, lang: Lang) -> &'a str {
                 _ => kind,
             }
         }
+        Lang::Python if kind == "constant" => python_assignment_kind(def, name, source),
         _ => kind,
     }
+}
+
+/// What a Python module's assignment `def` to `name` declares: a type
+/// (annotated `TypeAlias`, or made by `NewType`, `TypeVar`, `ParamSpec`,
+/// `TypeVarTuple` or `TypeAliasType`), a constant (named in capitals, as
+/// PEP 8 has constants named), else a variable.
+fn python_assignment_kind(def: Node, name: &str, source: &str) -> &'static str {
+    let text = |node: Node| source.get(node.byte_range()).unwrap_or("");
+    let last = |path: &str| path.rsplit('.').next().unwrap_or(path).trim().to_string();
+    let annotated_alias = def
+        .child_by_field_name("type")
+        .is_some_and(|t| last(text(t)) == "TypeAlias");
+    let made_type = def
+        .child_by_field_name("right")
+        .filter(|r| r.kind() == "call")
+        .and_then(|call| call.child_by_field_name("function"))
+        .is_some_and(|f| {
+            matches!(
+                last(text(f)).as_str(),
+                "NewType" | "TypeVar" | "ParamSpec" | "TypeVarTuple" | "TypeAliasType"
+            )
+        });
+    if annotated_alias || made_type {
+        "type"
+    } else if name.chars().any(|c| c.is_ascii_uppercase())
+        && !name.chars().any(|c| c.is_lowercase())
+    {
+        "constant"
+    } else {
+        "variable"
+    }
+}
+
+/// The scope a Python function `def` is declared in (its block's first
+/// byte), and whether it is an `@overload` stub: `@overload` or
+/// `@typing.overload` above it.
+fn python_overload(def: Node, source: &str) -> (usize, bool) {
+    let decorated = def.parent().filter(|p| p.kind() == "decorated_definition");
+    let statement = decorated.unwrap_or(def);
+    let scope = statement.parent().map_or(0, |scope| scope.start_byte());
+    let Some(decorated) = decorated else {
+        return (scope, false);
+    };
+    let mut cursor = decorated.walk();
+    let stub = decorated
+        .children(&mut cursor)
+        .filter(|c| c.kind() == "decorator")
+        .filter_map(|c| source.get(c.byte_range()))
+        .any(|text| {
+            let name = text.trim_start_matches('@').trim();
+            name.rsplit('.').next().unwrap_or(name).trim() == "overload"
+        });
+    (scope, stub)
+}
+
+/// Drops the `@overload` stubs of `out` that a later definition of the
+/// same name in the same scope follows — the implementation, or in a
+/// stub file the last overload: one entry for the function, where the
+/// outline listed it once per signature. `overloads` holds Python
+/// functions' indices in `out`, their scopes, and which are stubs.
+fn drop_overload_stubs(out: &mut Vec<Located>, overloads: &[(usize, usize, bool)]) {
+    if !overloads.iter().any(|&(_, _, stub)| stub) {
+        return;
+    }
+    let mut drop = vec![false; out.len()];
+    for &(i, scope, stub) in overloads {
+        if !stub {
+            continue;
+        }
+        let name = &out[i].symbol.name;
+        let line = out[i].symbol.line;
+        drop[i] = overloads.iter().any(|&(j, other, _)| {
+            other == scope && out[j].symbol.name == *name && out[j].symbol.line > line
+        });
+    }
+    let mut index = 0;
+    out.retain(|_| {
+        index += 1;
+        !drop[index - 1]
+    });
 }
 
 /// Whether the Python definition `def` is a property's: decorated
@@ -1105,15 +1505,20 @@ fn template_wrapper(node: Node) -> Node {
     top
 }
 
-/// The container of a Rust method or associated type (see [`Container`]):
-/// a `type Item = …;` inside an `impl` is the impl's, not a type of the
-/// module — the docs index names it an associated type for that reason.
+/// The container of a Rust method, associated type or associated constant
+/// (see [`Container`]): a `type Item = …;` inside an `impl` is the impl's,
+/// not a type of the module — the docs index names it an associated type for
+/// that reason — and a trait's `const MAX: u32;` is as public as the trait.
 fn container_of(def: Node, lang: Lang) -> Option<Container> {
     match lang {
         Lang::Rust => {
             if !matches!(
                 def.kind(),
-                "function_item" | "function_signature_item" | "type_item"
+                "function_item"
+                    | "function_signature_item"
+                    | "type_item"
+                    | "associated_type"
+                    | "const_item"
             ) {
                 return None;
             }
@@ -1245,7 +1650,10 @@ fn analyze_impl(source: &str, lang_key: &str, scope_rust: bool) -> Option<Analys
         imports = crate::rustscope::scope_rust_imports_in(&tree, source, imports);
     }
     let calls = crate::projectcalls::calls_in(&tree, source, lang, &symbols);
-    let owners = crate::projectcalls::owners_in(&tree, source, lang, &symbols);
+    let owners = match lang {
+        Lang::Lean => lean_owners(source, &symbols),
+        _ => crate::projectcalls::owners_in(&tree, source, lang, &symbols),
+    };
     Some(Analysis {
         lang,
         symbols,
@@ -1333,8 +1741,13 @@ fn attr_marks_test(rest: &str) -> bool {
             .skip(1)
             .any(attr_marks_test);
     }
-    // `test`, `test_case`, `wasm_bindgen_test`, `traced_test`, `rstest`.
-    seg == "test" || seg.starts_with("test_") || seg.ends_with("_test") || seg == "rstest"
+    // `test`, `test_case`, `wasm_bindgen_test`, `traced_test`, `rstest`;
+    // quickcheck's `#[quickcheck]`, which makes the function a test.
+    seg == "test"
+        || seg.starts_with("test_")
+        || seg.ends_with("_test")
+        || seg == "rstest"
+        || seg == "quickcheck"
 }
 
 /// What sits between an attribute's first `(` and its matching `)`, or `None`
@@ -4252,7 +4665,7 @@ fn build_inner() -> B { B }
             seen,
             [
                 ("MAX_RETRIES", "constant"),
-                ("logger", "constant"),
+                ("logger", "variable"),
                 ("Point", "class"),
                 ("x", "field"),
                 ("y", "field"),
@@ -4261,6 +4674,80 @@ fn build_inner() -> B { B }
                 ("Colour", "class"),
                 ("RED", "field"),
                 ("GREEN", "field"),
+            ]
+        );
+    }
+
+    /// A Python module's assignments are what they declare: a constant by
+    /// its capitals, a type alias (PEP 695's `type`, generic or not, an
+    /// annotated `TypeAlias`, a `NewType` or `TypeVar`) as a type, anything
+    /// else a variable. A function's `@overload` signatures are one entry —
+    /// its implementation's, or in a stub file its last signature's — not
+    /// one per signature; a property and its setter stay two.
+    #[test]
+    fn python_aliases_variables_and_overloads_are_outlined_as_they_are() {
+        let src = "\
+from typing import overload, NewType, TypeAlias, TypeVar
+import typing
+
+TIMEOUT_S = 30
+_DEFAULT_HOST = 'localhost'
+app = make_app()
+__all__ = ['parse']
+type Vector = list[float]
+type Pair[T] = tuple[T, T]
+Matrix: TypeAlias = list[Vector]
+UserId = NewType('UserId', int)
+T = TypeVar('T')
+
+@overload
+def parse(x: int) -> int: ...
+@typing.overload
+def parse(x: str) -> str: ...
+def parse(x):
+    return x
+
+class Reader:
+    @overload
+    def read(self, n: int) -> bytes: ...
+    @overload
+    def read(self) -> bytes: ...
+    def read(self, n=-1):
+        return b''
+
+    @property
+    def size(self): return 0
+    @size.setter
+    def size(self, v): pass
+
+@overload
+def stub_only(x: int) -> int: ...
+@overload
+def stub_only(x: str) -> str: ...
+";
+        let symbols = extract(src, "python");
+        let seen: Vec<(&str, &str, usize)> = symbols
+            .iter()
+            .map(|s| (s.name.as_str(), s.kind.as_str(), s.line))
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                ("TIMEOUT_S", "constant", 4),
+                ("_DEFAULT_HOST", "constant", 5),
+                ("app", "variable", 6),
+                ("__all__", "variable", 7),
+                ("Vector", "type", 8),
+                ("Pair", "type", 9),
+                ("Matrix", "type", 10),
+                ("UserId", "type", 11),
+                ("T", "type", 12),
+                ("parse", "function", 18),
+                ("Reader", "class", 21),
+                ("read", "function", 26),
+                ("size", "function", 30),
+                ("size", "function", 32),
+                ("stub_only", "function", 37),
             ]
         );
     }
@@ -4289,6 +4776,20 @@ fn build_inner() -> B { B }
         assert_eq!(find(&items, "Item").container, Some(Container::TraitImpl));
         assert_eq!(find(&items, "Own").container, Some(Container::Impl));
         assert_eq!(find(&items, "Free").container, None);
+
+        // A trait's associated type is its item; an `extern` block's
+        // functions are the module's, declared without a body.
+        let src = "trait Shape {\n  type Unit: Copy;\n  fn area(&self) -> f64;\n}\nextern \"C\" {\n  fn abs(x: i32) -> i32;\n  static ERRNO: i32;\n}\n";
+        let items = extract_located(src, "rust");
+        let unit = find(&items, "Unit");
+        assert_eq!(unit.symbol.kind, "type", "{items:?}");
+        assert_eq!(unit.container, Some(Container::Trait));
+        let abs = find(&items, "abs");
+        assert_eq!(abs.symbol.kind, "function", "{items:?}");
+        assert_eq!(abs.container, None);
+        assert!(abs.is_bodyless_callable(), "{items:?}");
+        // A `static` is a static, as rustdoc lists it — not a constant.
+        assert_eq!(find(&items, "ERRNO").symbol.kind, "static");
     }
 
     /// One parse yields all three facts, identical to the separate extractors.
@@ -4462,6 +4963,140 @@ fn build_inner() -> B { B }
                 .position(|l| l.starts_with("instance :"))
                 .unwrap()
                 + 1
+        );
+    }
+
+    /// A structure's custom constructor is its constructor, the field below
+    /// it a field, and each name of `x y : Nat` a field.
+    #[test]
+    fn a_lean_structures_fields_are_read_as_written() {
+        let src = "structure P where\n  mk ::\n  a : Nat\n  x y : Nat\n  f (n : Nat) : Nat\n  /-- The\n  fallback value -/\n  b : Nat := 0\n";
+        let items = extract_located(src, "lean");
+        let mut got: Vec<(&str, &str, usize)> = items
+            .iter()
+            .map(|l| {
+                (
+                    l.symbol.name.as_str(),
+                    l.symbol.kind.as_str(),
+                    l.symbol.line,
+                )
+            })
+            .collect();
+        got.sort_by_key(|g| (g.2, g.0));
+        assert_eq!(
+            got,
+            [
+                ("P", "struct", 1),
+                ("mk", "constructor", 2),
+                ("a", "field", 3),
+                ("x", "field", 4),
+                ("y", "field", 4),
+                ("f", "field", 5),
+                ("b", "field", 8)
+            ]
+        );
+    }
+
+    /// A string that runs on over lines holds its lines, whatever their
+    /// first column: no new command starts in it.
+    #[test]
+    fn a_lean_string_over_lines_is_its_declarations() {
+        let src = "def banner : String := \"first\nsecond line\nthird\"\n\ndef after : Nat := 1\n";
+        let items = extract_located(src, "lean");
+        let banner = find(&items, "banner");
+        assert_eq!(
+            (banner.symbol.line, banner.symbol.end_line),
+            (1, 3),
+            "{items:#?}"
+        );
+        assert_eq!(find(&items, "after").symbol.line, 5);
+        assert!(
+            !items.iter().any(|l| l.symbol.name == "second"),
+            "{items:#?}"
+        );
+    }
+
+    /// A declaration spans its `where` helpers and its `termination_by`,
+    /// and the helpers are listed; a `def … where` of field values defines
+    /// none. Notation, macros and syntax are listed by what they write.
+    #[test]
+    fn lean_attributes_with_a_comment_after_them_keep_their_declaration() {
+        let src = "/-- The map. -/\n@[instance_reducible] -- Not `@[reducible]`: an embedding.\ndef toSubmodule : Nat := 1\n\n@[simp high + 1] -- first\nlemma l : True := trivial\n";
+        let items = extract_located(src, "lean");
+        let got: Vec<(&str, usize)> = items
+            .iter()
+            .map(|l| (l.symbol.name.as_str(), l.symbol.line))
+            .collect();
+        assert_eq!(got, [("toSubmodule", 3), ("l", 6)], "{items:#?}");
+    }
+
+    #[test]
+    fn lean_universe_names_and_helper_docs_read_as_written() {
+        let src = "def div.inductionOn.{u} {motive : Nat → Sort u} : Nat := 0\n\n\
+                   def outer (n : Nat) : Nat := go n\nwhere\n  /--\n  Steps down,\n  ...\n  value.\n  -/\n  go (k : Nat) : Nat := k\n";
+        let items = extract_located(src, "lean");
+        let names: Vec<&str> = items.iter().map(|l| l.symbol.name.as_str()).collect();
+        assert_eq!(names, ["div.inductionOn", "outer", "go"], "{items:#?}");
+    }
+
+    #[test]
+    fn lean_where_helpers_and_notation_are_outlined() {
+        let src = "def w1 (n : Nat) : Nat := go n 0\nwhere\n  go : Nat → Nat → Nat\n    | 0, acc => acc\n    | k + 1, acc => go k (acc + 1)\n  helper (x : Nat) : Nat := x\n\n\
+                   def tm : Nat → Nat\n  | 0 => 0\n  | n + 1 => tm n\ntermination_by n => n\n\n\
+                   def p : Nat × Nat where\n  fst := 1\n  snd := 2\n\n\
+                   local notation \"⟪\" a \"⟫\" => a + 1\n\
+                   infixl:65 \" +++ \" => Nat.add\n\
+                   syntax (name := myTac) \"my_tac\" : tactic\n\
+                   declare_syntax_cat clew_cmd\n";
+        let items = extract_located(src, "lean");
+        let at = |name: &str| {
+            let l = find(&items, name);
+            (l.symbol.kind.as_str(), l.symbol.line, l.symbol.end_line)
+        };
+        assert_eq!(at("w1"), ("function", 1, 6), "{items:#?}");
+        assert_eq!(at("go"), ("function", 3, 5));
+        assert_eq!(at("helper"), ("function", 6, 6));
+        assert_eq!(at("tm"), ("function", 8, 11));
+        assert!(!items.iter().any(|l| l.symbol.name == "fst"), "{items:#?}");
+        assert_eq!(at("⟪"), ("macro", 17, 17));
+        assert_eq!(at("+++"), ("macro", 18, 18));
+        assert_eq!(at("myTac"), ("macro", 19, 19));
+        assert_eq!(at("clew_cmd"), ("macro", 20, 20));
+    }
+
+    /// A `mutual` block written indented, as Lean's own sources write it:
+    /// each of its declarations is listed. A namespace spans to its `end`,
+    /// its declarations in it and named through it; a section names
+    /// nothing, and a `mutual`'s `end` closes no namespace.
+    #[test]
+    fn lean_namespaces_and_mutual_blocks_hold_their_declarations() {
+        let src = "namespace Clew.Parity\n\nmutual\n  def isEven : Nat → Bool\n    | 0 => true\n    | n + 1 => isOdd n\n  def isOdd : Nat → Bool\n    | 0 => false\n    | n + 1 => isEven n\nend\n\nnoncomputable section\ndef inSection : Nat := 1\nend\n\ntheorem after : isEven 0 = true := rfl\n\nend Clew.Parity\n\ndef top : Nat := 0\n";
+        let items = extract_located(src, "lean");
+        let at = |name: &str| {
+            let l = find(&items, name);
+            (l.symbol.kind.as_str(), l.symbol.line, l.symbol.end_line)
+        };
+        assert_eq!(at("isEven"), ("function", 4, 6), "{items:#?}");
+        assert_eq!(at("isOdd"), ("function", 7, 9));
+        assert_eq!(at("after"), ("theorem", 16, 16));
+        let ns = find(&items, "Clew.Parity");
+        assert_eq!(
+            (ns.symbol.kind.as_str(), ns.symbol.line, ns.symbol.end_line),
+            ("module", 1, 18)
+        );
+        let owners = lean_owners(src, &items);
+        assert_eq!(owners.get(&4).map(String::as_str), Some("Clew.Parity"));
+        assert_eq!(owners.get(&13).map(String::as_str), Some("Clew.Parity"));
+        assert_eq!(owners.get(&16).map(String::as_str), Some("Clew.Parity"));
+        assert_eq!(owners.get(&20), None, "past its end");
+        assert_eq!(owners.get(&1), None, "the namespace itself is at the top");
+        // An unclosed namespace runs to the file's end.
+        let open = "namespace A\ndef f : Nat := 1\ndef g : Nat := 2\n";
+        let items = extract_located(open, "lean");
+        assert_eq!(find(&items, "A").symbol.end_line, 3);
+        assert_eq!(
+            lean_owners(open, &items).get(&3).map(String::as_str),
+            Some("A")
         );
     }
 

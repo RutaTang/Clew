@@ -171,6 +171,7 @@ const COVERED: &[&str] = &[
     "LspResolution",
     "NotebookOutput",
     "Patch",
+    "ProjectTask",
     "ProviderFailure",
     "PythonEnvKind",
     "PythonSource",
@@ -217,7 +218,41 @@ fn request_index(r: &Request) -> usize {
         Request::BuildFacts { .. } => 30,
         Request::ProjectMaps => 31,
         Request::ExpandMacro { .. } => 32,
+        Request::RunTask { .. } => 33,
+        Request::DebugTask { .. } => 34,
     }
+}
+
+fn project_task_index(t: &ProjectTask) -> usize {
+    match t {
+        ProjectTask::LeanMain { .. } => 0,
+        ProjectTask::Lake { .. } => 1,
+        ProjectTask::MathlibCache { .. } => 2,
+        ProjectTask::RustMain { .. } => 3,
+        ProjectTask::RustTest { .. } => 4,
+    }
+}
+
+fn project_tasks() -> Vec<ProjectTask> {
+    vec![
+        ProjectTask::LeanMain {
+            file: "proofs/Main.lean".into(),
+        },
+        ProjectTask::Lake {
+            file: "proofs/Basic.lean".into(),
+            test: true,
+        },
+        ProjectTask::MathlibCache {
+            file: "proofs/Basic.lean".into(),
+        },
+        ProjectTask::RustMain {
+            file: "src/main.rs".into(),
+        },
+        ProjectTask::RustTest {
+            file: "src/lib.rs".into(),
+            line: 12,
+        },
+    ]
 }
 
 fn event_index(e: &Event) -> usize {
@@ -274,6 +309,8 @@ fn python_env_kind_index(k: &PythonEnvKind) -> usize {
         PythonEnvKind::Pyenv => 5,
         PythonEnvKind::Uv => 6,
         PythonEnvKind::System => 7,
+        PythonEnvKind::Hatch => 8,
+        PythonEnvKind::Pdm => 9,
     }
 }
 
@@ -392,6 +429,8 @@ fn python_environments() -> Vec<PythonEnvironments> {
         PythonEnvKind::Pyenv,
         PythonEnvKind::Uv,
         PythonEnvKind::System,
+        PythonEnvKind::Hatch,
+        PythonEnvKind::Pdm,
     ];
     let candidates: Vec<PythonCandidate> = kinds
         .iter()
@@ -595,6 +634,7 @@ fn target() -> TargetSpec {
         os: "macos".into(),
         arch: "aarch64".into(),
         family: "unix".into(),
+        env: None,
     }
 }
 
@@ -956,6 +996,7 @@ fn project_symbols(
                     },
                 )],
                 python: vec![("pyproject.toml".into(), vec!["src".into()])],
+                lean: vec![("proofs/lakefile.lean".into(), vec!["lib".into()])],
             })),
             _ => Patch::Unchanged,
         },
@@ -1054,11 +1095,13 @@ fn request_samples() -> Vec<Request> {
             proc: 1,
             language: "rust".into(),
             choices: LanguageChoices::default(),
+            folder: None,
         },
         Request::SpawnLsp {
             proc: 2,
             language: "lean".into(),
             choices: choices(),
+            folder: Some("proofs".into()),
         },
         Request::SpawnAdapter {
             proc: 1,
@@ -1175,6 +1218,25 @@ fn request_samples() -> Vec<Request> {
             target: target(),
         },
     ]);
+    samples.extend(
+        project_tasks()
+            .into_iter()
+            .enumerate()
+            .map(|(proc, task)| Request::RunTask {
+                proc: proc as u64,
+                task,
+                choices: choices(),
+            }),
+    );
+    samples.push(Request::DebugTask {
+        proc: 6,
+        build: 7,
+        task: ProjectTask::RustTest {
+            file: "src/lib.rs".into(),
+            line: 12,
+        },
+        choices: choices(),
+    });
     samples
 }
 
@@ -1624,6 +1686,7 @@ fn every_variant_has_a_sample() {
     assert_covers("Event", &events, event_index);
     assert_covers("ServerMessage", &server_messages(), server_message_index);
     assert_covers("GitOp", &git_ops(), git_op_index);
+    assert_covers("ProjectTask", &project_tasks(), project_task_index);
     assert_covers("GitResult", &git_results(), git_result_index);
     assert_covers("StateEdit", &state_edits(), state_edit_index);
     assert_covers("NotebookOutput", &notebook_outputs(), notebook_output_index);
@@ -2070,6 +2133,22 @@ fn only_the_pinned_fields_may_be_left_out() {
         "request.BuildFacts.choices.servers.python.args",
         "request.BuildFacts.choices.typescript",
         "request.BuildFacts.choices.zig",
+        "request.DebugTask.choices.c",
+        "request.DebugTask.choices.c.compile_commands",
+        "request.DebugTask.choices.csharp",
+        "request.DebugTask.choices.go",
+        "request.DebugTask.choices.go.goarch",
+        "request.DebugTask.choices.go.goos",
+        "request.DebugTask.choices.java",
+        "request.DebugTask.choices.php",
+        "request.DebugTask.choices.python",
+        "request.DebugTask.choices.rust",
+        "request.DebugTask.choices.rust.target",
+        "request.DebugTask.choices.servers",
+        "request.DebugTask.choices.servers.lean.args",
+        "request.DebugTask.choices.servers.python.args",
+        "request.DebugTask.choices.typescript",
+        "request.DebugTask.choices.zig",
         "request.EditState.merge.edit.Patch.insert",
         "request.Git.op.Log.author",
         "request.Git.op.Log.grep",
@@ -2124,6 +2203,22 @@ fn only_the_pinned_fields_may_be_left_out() {
         "request.LspResolve.choices.servers.python.args",
         "request.LspResolve.choices.typescript",
         "request.LspResolve.choices.zig",
+        "request.RunTask.choices.c",
+        "request.RunTask.choices.c.compile_commands",
+        "request.RunTask.choices.csharp",
+        "request.RunTask.choices.go",
+        "request.RunTask.choices.go.goarch",
+        "request.RunTask.choices.go.goos",
+        "request.RunTask.choices.java",
+        "request.RunTask.choices.php",
+        "request.RunTask.choices.python",
+        "request.RunTask.choices.rust",
+        "request.RunTask.choices.rust.target",
+        "request.RunTask.choices.servers",
+        "request.RunTask.choices.servers.lean.args",
+        "request.RunTask.choices.servers.python.args",
+        "request.RunTask.choices.typescript",
+        "request.RunTask.choices.zig",
         "request.SetAiConfig.chat",
         "request.SetAiConfig.embed",
         "request.SetAiConfig.locale",
@@ -2159,6 +2254,7 @@ fn only_the_pinned_fields_may_be_left_out() {
         "request.SpawnLsp.choices.servers.python.args",
         "request.SpawnLsp.choices.typescript",
         "request.SpawnLsp.choices.zig",
+        "request.SpawnLsp.folder",
         "request.SpawnProcess.cwd",
         "request.WriteState.text",
     ];

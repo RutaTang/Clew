@@ -242,6 +242,7 @@ pub(crate) fn kind_badge(kind: &str) -> &str {
         "trait" | "interface" => "trait",
         "class" => "class",
         "constant" | "const" => "const",
+        "variable" | "var" => "var",
         "theorem" => "thm",
         "example" => "ex",
         "instance" => "inst",
@@ -251,6 +252,9 @@ pub(crate) fn kind_badge(kind: &str) -> &str {
         "impl" => "impl",
         "property" | "prop" => "prop",
         "field" => "field",
+        "static" => "static",
+        "variant" => "variant",
+        clew_core::rustapi::REEXPORT => "use",
         _ => kind,
     }
 }

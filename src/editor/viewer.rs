@@ -200,7 +200,8 @@ pub struct Viewer {
     /// parsed once so the view doesn't re-parse per frame. Shown instead of the
     /// code view unless `show_source` is set.
     pub md: Option<Arc<Vec<iced::widget::markdown::Item>>>,
-    /// For a markdown file, show the raw source instead of the rendered view.
+    /// For a markdown file, show the raw source instead of the rendered view;
+    /// for a notebook, its cells as one script in the code view.
     pub show_source: bool,
     /// A Jupyter notebook's prepared cells (`None` for ordinary files). Shown
     /// as the native cell view; `lines`/`source` hold the script projection so
@@ -209,6 +210,11 @@ pub struct Viewer {
     pub notebook: Option<Arc<crate::app::model::NotebookDoc>>,
     /// Notebook cells whose outputs are expanded (collapsed by default).
     pub nb_expanded: HashSet<usize>,
+    /// A notebook's code language, when Clew knows it (`python`): the
+    /// language its script is read in, by its language server among others.
+    /// `lang_key` stays `None` for a notebook, which is no program to run
+    /// or test.
+    pub script_lang: Option<&'static str>,
     /// Row → source-line projection when any fold is collapsed; empty means the
     /// identity mapping (every line visible), so the common path allocates none.
     visible: Vec<usize>,
@@ -239,6 +245,12 @@ pub struct Viewer {
     /// annotated line cost O(annotations) per frame (see
     /// [`Viewer::annotations`]).
     annotations: Annotations,
+    /// The file's runnables ([`Viewer::runnables`]) as of its lines
+    /// ([`Viewer::lines_generation`]): parsed once per text, not per frame.
+    runnables_cache: Memo<u64, Arc<[clew_core::runnables::Runnable]>>,
+    /// Whether the file is in a Cargo package (read once): a Rust file's
+    /// tests and `main` run through Cargo, and none run outside one.
+    in_cargo: std::cell::OnceCell<bool>,
 }
 
 /// Parse markdown items for `.md`-family files, so a readme renders as a
@@ -259,7 +271,43 @@ fn parse_markdown(
     })
 }
 
+/// The folds of a file: its indented blocks, and — Lean's bodies are not
+/// indented — its `namespace`, `section` and `mutual` blocks too.
+fn folds_of(lang_key: Option<&str>, source: &str, lines: &[HlLine]) -> Vec<(usize, usize)> {
+    let mut folds = analyze::fold_ranges(lines);
+    if lang_key == Some("lean") && source.lines().count() == lines.len() {
+        for block in clew_core::lean_blocks(source) {
+            if !folds.iter().any(|&(h, _)| h == block.0) {
+                folds.push(block);
+            }
+        }
+        folds.sort_unstable();
+    }
+    folds
+}
+
 impl Viewer {
+    /// The language its language server reads it in: its own, or for a
+    /// notebook, its script's.
+    pub fn lsp_lang(&self) -> Option<&'static str> {
+        self.lang_key.or(self.script_lang)
+    }
+
+    /// A notebook's cells, while they are what is on screen — not when it
+    /// is read as its script, in the code view, scrolled by its lines.
+    pub fn shows_cells(&self) -> Option<&Arc<crate::app::model::NotebookDoc>> {
+        self.notebook.as_ref().filter(|_| !self.show_source)
+    }
+
+    /// The path its language server knows it by: its own, or for a
+    /// notebook, its script's (see [`notebook_script_path`]).
+    pub fn lsp_path(&self) -> PathBuf {
+        match self.notebook {
+            Some(_) => notebook_script_path(&self.abs),
+            None => self.abs.clone(),
+        }
+    }
+
     pub fn new(
         abs: PathBuf,
         rel: String,
@@ -268,7 +316,7 @@ impl Viewer {
         lines: Vec<HlLine>,
     ) -> Self {
         let max_cols = max_cols_of(&lines);
-        let folds = analyze::fold_ranges(&lines);
+        let folds = folds_of(lang_key, &source, &lines);
         let fold_header_set = folds.iter().map(|&(h, _)| h).collect();
         let md = parse_markdown(&abs, &source);
         Self {
@@ -276,6 +324,7 @@ impl Viewer {
             show_source: false,
             notebook: None,
             nb_expanded: HashSet::new(),
+            script_lang: None,
             abs,
             rel,
             lang_key,
@@ -309,6 +358,8 @@ impl Viewer {
             lines_generation: next_generation(),
             annotations: Annotations::default(),
             git: None,
+            runnables_cache: std::cell::RefCell::new(None),
+            in_cargo: std::cell::OnceCell::new(),
         }
     }
 
@@ -331,6 +382,33 @@ impl Viewer {
     /// clamped under a reader scrolled right.
     pub fn lines_generation(&self) -> u64 {
         self.lines_generation
+    }
+
+    /// What runs on its own in the file — its tests, its test groups, its
+    /// program's start ([`clew_core::runnables::runnables`]) — read once per
+    /// text. None in a notebook, whose text is its JSON.
+    pub fn runnables(&self) -> Arc<[clew_core::runnables::Runnable]> {
+        let key = self.lines_generation;
+        if let Some((at, found)) = self.runnables_cache.borrow().as_ref()
+            && *at == key
+        {
+            return found.clone();
+        }
+        let found: Arc<[clew_core::runnables::Runnable]> = match self.lang_key {
+            Some(lang @ ("rust" | "python" | "lean")) if self.notebook.is_none() => {
+                clew_core::runnables::runnables(lang, &self.source).into()
+            }
+            _ => Arc::from(Vec::new()),
+        };
+        *self.runnables_cache.borrow_mut() = Some((key, found.clone()));
+        found
+    }
+
+    /// Whether the file is in a Cargo package Clew can read: read once.
+    pub fn in_cargo_package(&self) -> bool {
+        *self
+            .in_cargo
+            .get_or_init(|| clew_core::cargorun::target_of(&self.abs).is_some())
     }
 
     /// The code view's summary of this document's annotations — the inlay
@@ -422,7 +500,7 @@ impl Viewer {
     /// Folds are indentation-derived, so the collapsed set stays valid.
     pub fn set_lines(&mut self, lines: Arc<Vec<HlLine>>) {
         self.max_cols = max_cols_of(&lines);
-        self.folds = analyze::fold_ranges(&lines);
+        self.folds = folds_of(self.lang_key, &self.source, &lines);
         self.fold_header_set = self.folds.iter().map(|&(h, _)| h).collect();
         self.lines = lines;
         self.lines_generation = next_generation();
@@ -771,7 +849,7 @@ impl Viewer {
         let last_at_top = rows.saturating_sub(1) as f32 * line_height;
         // A notebook's rendered cells are not its lines' height: no view-
         // based limit is right for it.
-        if self.bounds_h > 0.0 && self.notebook.is_none() {
+        if self.bounds_h > 0.0 && self.shows_cells().is_none() {
             last_at_top.min((rows as f32 * line_height - self.bounds_h).max(0.0))
         } else {
             last_at_top.max(0.0)
@@ -805,7 +883,7 @@ impl Viewer {
         // past the end.
         let was_most = self.most_scroll(line_height);
         self.bounds_h = height;
-        if self.notebook.is_some() {
+        if self.shows_cells().is_some() {
             return None;
         }
         let most = self.most_scroll(line_height);
@@ -1889,5 +1967,28 @@ mod fold_motion_tests {
         assert_eq!(v.word_forward(0, v.line_len(0), 3), (0, v.line_len(0)));
         // And back from column 0 of the first line stays.
         assert_eq!(v.word_back(0, 0), (0, 0));
+    }
+}
+
+/// The path a notebook's script is known by to its language server: the
+/// notebook's own with `.py` after it (`analysis.ipynb.py`), beside it so
+/// that its imports resolve as the notebook's do. Never written to disk:
+/// the server is sent its text.
+pub fn notebook_script_path(notebook: &std::path::Path) -> PathBuf {
+    let mut name = notebook.as_os_str().to_owned();
+    name.push(".py");
+    PathBuf::from(name)
+}
+
+/// The notebook a path a language server answered with is the script of
+/// (`analysis.ipynb.py` → `analysis.ipynb`); any other path as it is.
+pub fn from_server_path(path: PathBuf) -> PathBuf {
+    let script = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.ends_with(".ipynb.py"));
+    match script {
+        true => path.with_extension(""),
+        false => path,
     }
 }

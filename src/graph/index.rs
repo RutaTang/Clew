@@ -34,6 +34,26 @@ pub struct SymbolEntry {
     /// through (see [`clew_core::outline::entry_kind`]); `None` for the rest,
     /// tests included.
     pub entry: Option<EntryKind>,
+    /// The type, class or trait a method belongs to (`Regex` for
+    /// `Regex::new`), where the code says.
+    pub owner: Option<String>,
+}
+
+impl SymbolEntry {
+    /// Its name as it is called from outside its owner: `Regex::new` in
+    /// Rust, C++ and PHP, `Cart.total` elsewhere; its name alone when it
+    /// has no owner. What Go to Symbol lists and finds it by — a file's
+    /// many `new`s were one name many times.
+    pub fn shown_name(&self) -> String {
+        let Some(owner) = &self.owner else {
+            return self.name.clone();
+        };
+        let path = matches!(
+            highlight::detect(Path::new(&self.rel)),
+            Some("rust" | "cpp" | "php")
+        );
+        format!("{owner}{}{}", if path { "::" } else { "." }, self.name)
+    }
 }
 
 // Shared with clew-server's project-symbol snapshot, so both classify tests
@@ -134,6 +154,9 @@ pub fn analyze_file(abs: &Path, rel: &str, content: &str, lang: &'static str) ->
     let Some(analysis) = outline::analyze_scoped(content, lang) else {
         return FileFacts::default();
     };
+    // Each method's type, class or trait, by its line: what a symbol is
+    // found by from outside it (`Regex::new`).
+    let owners = analysis.owners.clone();
     let calls = FileCalls::of(
         abs.to_path_buf(),
         analysis.lang,
@@ -155,6 +178,7 @@ pub fn analyze_file(abs: &Path, rel: &str, content: &str, lang: &'static str) ->
                     && entries.is_test(symbol.line, &symbol.name);
                 let entry = entries.kind_of(symbol.line, &symbol.name, &symbol.kind);
                 SymbolEntry {
+                    owner: owners.get(&symbol.line).cloned(),
                     name: symbol.name,
                     kind: symbol.kind,
                     rel: rel.to_string(),
@@ -538,6 +562,7 @@ fn build_core_capped(
                         line: s.line,
                         is_test: s.is_test,
                         entry: s.entry.map(|k| k.key().to_string()),
+                        owner: s.owner,
                     })
                     .collect();
                 let entry = FileCache {
@@ -566,6 +591,7 @@ fn build_core_capped(
                     line: c.line,
                     is_test: c.is_test,
                     entry: c.entry.as_deref().and_then(EntryKind::from_key),
+                    owner: c.owner.clone(),
                 })
                 .collect::<Vec<_>>();
             let items = crate::imports::rust_item_keys(&file.abs, &syms);

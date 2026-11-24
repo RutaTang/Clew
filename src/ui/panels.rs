@@ -24,6 +24,86 @@ pub(crate) fn debug_col(rows: Vec<Element<'_, Message>>) -> Element<'_, Message>
 /// as the run ends — its last line, most often the result or the error,
 /// was below the pane's foot with nothing to say more was there — and its
 /// scrollbar showing, faintly, while there is more than the pane holds.
+/// The call stack's heading, set in as far as its frames' names are (their
+/// rows' padding): flush with the column's edge, it stood out to the left
+/// of everything under it.
+pub(crate) fn stack_heading<'a>() -> Element<'a, Message> {
+    container(
+        text(tr!("CALL STACK"))
+            .size(ts::CAPTION)
+            .color(theme::dim()),
+    )
+    .padding(Padding {
+        left: STACK_ROW_PAD_X,
+        ..Padding::ZERO
+    })
+    .into()
+}
+
+/// A call stack row's padding either side: its name and place set in from
+/// the hover band it draws.
+pub(crate) const STACK_ROW_PAD_X: f32 = 6.0;
+
+/// A debugger control's side: as the strip's buttons, a little smaller
+/// for the panel's header row.
+pub(crate) const CONTROL_BTN: f32 = 26.0;
+/// Its glyph's size.
+const CONTROL_GLYPH: f32 = 16.0;
+/// The gap between two of them.
+pub(crate) const CONTROL_GAP: f32 = 2.0;
+
+/// What `n` debugger controls in a row take.
+pub(crate) fn step_controls_w(n: usize) -> f32 {
+    n as f32 * CONTROL_BTN + n.saturating_sub(1) as f32 * CONTROL_GAP
+}
+
+/// A debugger control — Continue, a step, Stop — drawn as its glyph alone,
+/// the way the IDEs draw them, so a reader who has stepped through code
+/// anywhere knows it on sight; its `name` and `key` where the pointer
+/// rests. One that can do nothing now (`why_not` says why) is faded, and
+/// its tip says why instead of offering a key that would do nothing too.
+/// Voice knows it by its name, as a reader would say it.
+pub(crate) fn step_control<'a>(
+    glyph: Glyph,
+    name: &'a str,
+    key: Option<&str>,
+    msg: Message,
+    why_not: Option<&'a str>,
+) -> Element<'a, Message> {
+    let able = why_not.is_none();
+    let mark = if able {
+        glyph::icon(glyph, theme::fg(), CONTROL_GLYPH)
+    } else {
+        glyph::icon_faded(
+            glyph,
+            theme::fg(),
+            CONTROL_GLYPH,
+            super::toolbar::DISABLED_OPACITY,
+        )
+    };
+    let mut b = button(
+        container(mark)
+            .width(Fill)
+            .height(Fill)
+            .align_x(iced::Center)
+            .align_y(iced::Center),
+    )
+    .style(theme::icon_button(false))
+    .padding(0)
+    .width(Length::Fixed(CONTROL_BTN))
+    .height(Length::Fixed(CONTROL_BTN));
+    if able {
+        b = b.on_press(super::heard::said(name, msg));
+    }
+    super::toolbar::tip_at_why(
+        b,
+        name,
+        key.filter(|_| able).map(crate::keymap::local_keys),
+        why_not,
+        tooltip::Position::Top,
+    )
+}
+
 fn output_col(rows: Vec<Element<'_, Message>>) -> Element<'_, Message> {
     container(
         scrollable(Column::with_children(rows).spacing(1).width(Fill))
@@ -374,114 +454,55 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
     let ended = session.status == DebugStatus::Terminated;
     let status_w = super::steady::width_of(&status_txt, ts::SMALL, crate::fonts::UI);
 
-    let ctrl = |label: &'static str, msg: Message, enabled: bool| {
-        let mut b = button(text(label).size(ts::BODY).wrapping(Wrapping::None))
-            .style(theme::toolbar_button)
-            .padding([2, 8]);
-        if enabled {
-            b = b.on_press(super::heard::said(label, msg));
-        }
-        b
-    };
-    // Ended, Stop gives way to running it again, as it was, in its tab.
-    let stop = if ended {
-        ctrl(
-            if plain {
-                tr!("↻ Run Again")
-            } else {
-                tr!("↻ Debug Again")
-            },
-            Message::Debug(DebugMsg::Again),
-            true,
-        )
-    } else {
-        ctrl(tr!("■ Stop"), Message::Debug(DebugMsg::Stop), true)
-    };
-    // Each says what it does and its function key where the pointer rests
-    // (`App::debug_key`): the keys were there, and nothing said so. Not
-    // while it can do nothing: a tip over a greyed control offered a key
-    // that did nothing either.
-    let keyed = |control: Element<'static, Message>, name: &'static str, key: &str| {
-        if !stopped {
-            return control;
-        }
-        super::toolbar::tip_at(
-            control,
+    // Each control its glyph alone, as the IDEs draw a debugger's: its
+    // name and key where the pointer rests. Read as words ("▶ Continue",
+    // "↪ Over"), they took a row of their own under the header.
+    let paused_only = (!stopped).then_some(tr!("Only while the program is paused"));
+    let step = |glyph: Glyph, name: &'static str, key: &'static str, cmd: DebugCmd| {
+        step_control(
+            glyph,
             name,
-            Some(crate::keymap::local_keys(key)),
-            iced::widget::tooltip::Position::Top,
+            Some(key),
+            Message::Debug(DebugMsg::Control(cmd)),
+            paused_only,
         )
     };
-    let stop: Element<'_, Message> = if ended {
-        stop.into()
+    // Ended, Stop gives way to running it again, as it was, in its tab:
+    // in the same place, the same size, so nothing beside it moves.
+    let stop = if ended {
+        step_control(
+            Glyph::Restart,
+            if plain {
+                tr!("Run again")
+            } else {
+                tr!("Debug again")
+            },
+            None,
+            Message::Debug(DebugMsg::Again),
+            None,
+        )
     } else {
-        super::toolbar::tip_at(
-            stop,
+        step_control(
+            Glyph::Stop,
             tr!("Stop"),
-            Some(crate::keymap::local_keys("⇧F5")),
-            iced::widget::tooltip::Position::Top,
+            Some("⇧F5"),
+            Message::Debug(DebugMsg::Stop),
+            None,
         )
     };
-    // In a slot as wide as the widest it becomes: Stop turning into Debug
-    // Again moved Continue, Over, In and Out some 50 px under the pointer.
-    let again = if plain {
-        tr!("↻ Run Again")
-    } else {
-        tr!("↻ Debug Again")
-    };
-    let stop_w = super::steady::widest(&[tr!("■ Stop"), again], ts::BODY, crate::fonts::UI) + 16.0;
-    let stop: Element<'_, Message> = container(stop)
-        .width(Length::Fixed(stop_w.ceil() + 2.0))
-        .align_x(iced::alignment::Horizontal::Right)
-        .into();
     let controls = if output_only {
         row![stop]
     } else {
         row![
-            keyed(
-                ctrl(
-                    tr!("▶ Continue"),
-                    Message::Debug(DebugMsg::Control(DebugCmd::Continue)),
-                    stopped
-                )
-                .into(),
-                tr!("Continue"),
-                "F5"
-            ),
-            keyed(
-                ctrl(
-                    tr!("↪ Over"),
-                    Message::Debug(DebugMsg::Control(DebugCmd::StepOver)),
-                    stopped
-                )
-                .into(),
-                tr!("Step over"),
-                "F10"
-            ),
-            keyed(
-                ctrl(
-                    tr!("↓ In"),
-                    Message::Debug(DebugMsg::Control(DebugCmd::StepIn)),
-                    stopped
-                )
-                .into(),
-                tr!("Step into"),
-                "F11"
-            ),
-            keyed(
-                ctrl(
-                    tr!("↑ Out"),
-                    Message::Debug(DebugMsg::Control(DebugCmd::StepOut)),
-                    stopped
-                )
-                .into(),
-                tr!("Step out"),
-                "⇧F11"
-            ),
+            step(Glyph::Continue, tr!("Continue"), "F5", DebugCmd::Continue),
+            step(Glyph::StepOver, tr!("Step over"), "F10", DebugCmd::StepOver),
+            step(Glyph::StepInto, tr!("Step into"), "F11", DebugCmd::StepIn),
+            step(Glyph::StepOut, tr!("Step out"), "⇧F11", DebugCmd::StepOut),
             stop,
         ]
     }
-    .spacing(4);
+    .spacing(CONTROL_GAP)
+    .align_y(iced::Center);
     // Clear of the Ask card in the corner: it sat over Continue, Step and
     // Stop (the panel's foot is the status bar's top; its header, some 40
     // px under the panel's top).
@@ -498,17 +519,7 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
     // this run" with it — whenever the Ask card was open at a laptop's
     // width.
     let w = |s: &str, size: f32| super::steady::width_of(s, size, crate::fonts::UI);
-    let controls_w = if output_only {
-        stop_w + 2.0
-    } else {
-        [tr!("▶ Continue"), tr!("↪ Over"), tr!("↓ In"), tr!("↑ Out")]
-            .iter()
-            .map(|label| w(label, ts::BODY) + 16.0)
-            .sum::<f32>()
-            + stop_w
-            + 2.0
-            + 4.0 * 4.0
-    };
+    let controls_w = step_controls_w(if output_only { 1 } else { 5 });
     // Every gap of its row counted (the note's slot, empty, keeps its two),
     // and the hover switch where it is shown: two gaps short and without
     // it, the header stayed on one row where it cut Walk this run.
@@ -659,12 +670,7 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
     };
 
     // Call stack — click a frame to jump to its source.
-    let mut stack_rows: Vec<Element<'_, Message>> = vec![
-        text(tr!("CALL STACK"))
-            .size(ts::CAPTION)
-            .color(theme::dim())
-            .into(),
-    ];
+    let mut stack_rows: Vec<Element<'_, Message>> = vec![stack_heading()];
     // The stack's column: two parts of the panel's, less the gaps between
     // the columns, the column's own padding (`debug_col`'s 6 a side), its
     // rows' padding (6 a side) and a pixel's rounding — the column's
@@ -740,7 +746,7 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
         )
         .style(theme::list_row(shown_at == Some(i) && i > 0))
         .width(Fill)
-        .padding([1, 6]);
+        .padding([1.0, STACK_ROW_PAD_X]);
         if let Some(p) = f.path.clone() {
             b = b.on_press(super::heard::said(
                 &f.name,
@@ -782,10 +788,12 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
     // Program output.
     let mut out_rows: Vec<Element<'_, Message>> = Vec::new();
     for (cat, txt) in &session.output {
-        let color = if cat == "stderr" {
-            theme::danger()
-        } else {
-            theme::fg()
+        // What the reader typed for the program, set apart from what it
+        // printed.
+        let color = match cat.as_str() {
+            "stderr" => theme::danger(),
+            "stdin" => theme::accent(),
+            _ => theme::fg(),
         };
         // In the code's font, so a program's columns line up, and wrapped:
         // a long line was cut at the column's edge.
@@ -911,7 +919,27 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
             bottom: 0.0,
             left: 6.0,
         });
-    let output: Element<'_, Message> = column![heading, output_col(out_rows), foot]
+    // The program's input, while it runs and reads one: typed here, sent
+    // as a line with Return.
+    let input: Option<Element<'_, Message>> =
+        (session.takes_input && session.status != DebugStatus::Terminated).then(|| {
+            let said = tr!("Input for the program");
+            container(super::jump::field_named(
+                text_input(said, &app.debug.program_input)
+                    .style(theme::input)
+                    .on_input(|v| Message::Debug(DebugMsg::ProgramInput(v)))
+                    .on_submit(Message::Debug(DebugMsg::ProgramInputSent))
+                    .font(crate::fonts::CODE)
+                    .size(ts::SMALL)
+                    .padding(4),
+                said,
+            ))
+            .padding([2, 6])
+            .into()
+        });
+    let output: Element<'_, Message> = column![heading, output_col(out_rows)]
+        .push(input)
+        .push(foot)
         .height(Fill)
         .into();
     let panels = if output_only {
@@ -984,27 +1012,14 @@ const RAN_NOTE_MIN_W: f32 = 120.0;
 
 /// How wide [`trace_control`] is: its count, and Walk this run with its
 /// spark.
-fn trace_control_w(app: &App) -> f32 {
-    let w = |s: &str, size: f32| super::steady::width_of(s, size, crate::fonts::UI);
-    let n = app.debug.trace.len();
-    if n == 0 {
-        return w(tr!("No stops traced yet"), ts::CAPTION);
-    }
-    let count = if app.debug.trace_cut {
-        trn!(
-            "1 stop traced (cut short)",
-            "{n} stops traced (cut short)",
-            n
-        )
-    } else {
-        trn!("1 stop traced", "{n} stops traced", n)
-    };
-    w(&count, ts::CAPTION) + 6.0 + w(tr!("Walk this run"), ts::SMALL) + 16.0 + 18.0
+fn trace_control_w(_app: &App) -> f32 {
+    super::steady::width_of(tr!("Walk this run"), ts::SMALL, crate::fonts::UI) + 16.0 + 18.0
 }
 
-/// The run's trace so far — how many stops it holds — and the button that
-/// turns it into a walkthrough of the path the program took.
-pub(crate) fn trace_control(app: &App) -> Element<'_, Message> {
+/// How many stops the run's trace holds, said where Walk this run's tip
+/// is: what the walk would be made of. On the header's row by itself,
+/// "4 stops traced" asked what it was for.
+pub(crate) fn trace_count(app: &App) -> String {
     let n = app.debug.trace.len();
     if n == 0 {
         // "Yet" only while the program can still stop: a run that ended
@@ -1014,16 +1029,14 @@ pub(crate) fn trace_control(app: &App) -> Element<'_, Message> {
             .session
             .as_ref()
             .is_some_and(|s| s.status == crate::DebugStatus::Terminated);
-        return text(if ended {
+        return if ended {
             tr!("No stops traced")
         } else {
             tr!("No stops traced yet")
-        })
-        .size(ts::CAPTION)
-        .color(theme::dim())
-        .into();
+        }
+        .to_string();
     }
-    let count = if app.debug.trace_cut {
+    if app.debug.trace_cut {
         trn!(
             "1 stop traced (cut short)",
             "{n} stops traced (cut short)",
@@ -1031,32 +1044,37 @@ pub(crate) fn trace_control(app: &App) -> Element<'_, Message> {
         )
     } else {
         trn!("1 stop traced", "{n} stops traced", n)
-    };
-    row![
-        text(count)
-            .size(ts::CAPTION)
-            .color(theme::dim())
-            .wrapping(Wrapping::None),
-        super::toolbar::tip_at(
-            button(super::toolbar::ai_words_one_line(
-                tr!("Walk this run"),
-                ts::SMALL,
-                theme::accent()
-            ))
-            .style(theme::toolbar_button)
-            .padding([2, 8])
-            .on_press(super::heard::said(
-                tr!("Walk this run"),
-                Message::Walk(WalkMsg::GenerateTrace),
-            )),
-            tr!("Tell the story of this run, stop by stop, with AI (one AI call)"),
-            None,
-            iced::widget::tooltip::Position::Top,
-        ),
-    ]
-    .spacing(6)
-    .align_y(iced::Center)
-    .into()
+    }
+}
+
+/// Walk this run: the run's trace — every stop it made, where and on what
+/// stack — told as a walkthrough of the path the program took. How many
+/// stops it would tell is in its tip; with none yet it is faded, its tip
+/// saying so, in the same place, so nothing moves when the first comes.
+pub(crate) fn trace_control(app: &App) -> Element<'_, Message> {
+    let any = !app.debug.trace.is_empty();
+    let mut face = button(super::toolbar::ai_words_one_line(
+        tr!("Walk this run"),
+        ts::SMALL,
+        if any { theme::accent() } else { theme::dim() },
+    ))
+    .style(theme::toolbar_button)
+    .padding([2, 8]);
+    if any {
+        face = face.on_press(super::heard::said(
+            tr!("Walk this run"),
+            Message::Walk(WalkMsg::GenerateTrace),
+        ));
+    }
+    super::toolbar::tip_at_why(
+        face,
+        trace_count(app),
+        None,
+        Some(tr!(
+            "Tell the story of this run, stop by stop, with AI (one AI call)"
+        )),
+        iced::widget::tooltip::Position::Top,
+    )
 }
 
 /// Whether hovering a name while paused evaluates it (see

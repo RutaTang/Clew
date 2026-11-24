@@ -318,8 +318,37 @@ impl Identity {
     }
 }
 
+/// How to get what `server` runs from, when Clew runs it from a toolchain
+/// of the machine's (Lean's `lake`, Dart's `dart`) and the toolchain is not
+/// installed: what the setup sheet says of it ("install Lean with elan").
+/// `None` for a server Clew provides, one chosen or named by the project,
+/// and a toolchain that is there.
+pub fn missing_toolchain(server: &EffectiveServer, path: Option<&OsStr>) -> Option<&'static str> {
+    if server.chosen.is_some() || server.command.is_some() {
+        return None;
+    }
+    let spec = registry::by_name(&server.server_name)?;
+    let Provision::Toolchain { binary } = spec.provision(&server.version, Platform::current()?)?
+    else {
+        return None;
+    };
+    let found = match path {
+        Some(path) => find_in_unresolved(path, binary),
+        None => find_on_path_unresolved(binary),
+    };
+    found.is_none().then(|| install_hint(binary))
+}
+
 /// Decide how to obtain the binary for `server` without touching the network.
 pub fn locate(server: &EffectiveServer) -> Located {
+    locate_on(server, None)
+}
+
+/// [`locate`], a server the user installed themselves looked for on
+/// `path` — `None` for the search path children get
+/// ([`crate::linerpc::spawn_path`]) — as the look that asks it does: a
+/// setup look given a PATH found Clew's copy missing on the process's.
+pub fn locate_on(server: &EffectiveServer, path: Option<&OsStr>) -> Located {
     // The program the user chose: run as found, on this host. Theirs, kept
     // outside the project, so there is nothing to approve and nothing of the
     // store's to install.
@@ -393,11 +422,41 @@ pub fn locate(server: &EffectiveServer) -> Located {
     if let Some(path) = installed_program(&dest_dir, binary) {
         return Located::Ready(path);
     }
+    // One the user installed already (`pip install pyright`, `npm i -g`, or
+    // basedpyright, which speaks the same): theirs, run as found, rather
+    // than an install that needs Node. Not where the project pins a version:
+    // that one is installed.
+    if server.version == spec.version
+        && let Some(path) = match path {
+            Some(path) => already_installed_on(spec.name, path),
+            None => already_installed(spec.name),
+        }
+    {
+        return Located::Ready(path);
+    }
     match provision {
         Provision::Download(download) => Located::NeedsDownload { download, dest_dir },
         Provision::Install(install) => Located::NeedsInstall { install, dest_dir },
         Provision::Toolchain { .. } => unreachable!("returned above"),
     }
+}
+
+/// A server the user installed themselves, on the search path children get
+/// ([`crate::linerpc::spawn_path`]), for one whose own install Clew would
+/// otherwise make: only where the program found serves as Clew's does.
+fn already_installed(server: &str) -> Option<PathBuf> {
+    already_installed_on(server, &crate::linerpc::spawn_path()?)
+}
+
+/// [`already_installed`] on `path`: the program of the user's own that
+/// serves as `server` does (`pyright-langserver` or
+/// `basedpyright-langserver` for pyright), as found there.
+pub fn already_installed_on(server: &str, path: &OsStr) -> Option<PathBuf> {
+    let names: &[&str] = match server {
+        "pyright" => &["pyright-langserver", "basedpyright-langserver"],
+        _ => return None,
+    };
+    names.iter().find_map(|name| find_in(path, name, false))
 }
 
 /// How to get the toolchain program `binary`, for the message saying it is
@@ -445,15 +504,17 @@ pub fn find_program(program: &str) -> Result<PathBuf, String> {
     }
 }
 
-/// The first directory on `PATH` containing an executable named `binary`,
-/// canonicalized to the real absolute file. Relative `PATH` entries (`.`,
+/// The first directory on the search path ([`crate::linerpc::search_path`]:
+/// `PATH`, the login shell's where the app was opened from the Finder, and
+/// the folders toolchain installers put a user's programs in) containing an
+/// executable named `binary`, canonicalized to the real absolute file. Relative `PATH` entries (`.`,
 /// `tools`) are skipped outright: they resolve against the process's cwd
 /// *now*, while the spawn later runs with the project root as cwd — a
 /// relative hit would mean approving one file and executing whatever the
 /// repo places at that name. Canonicalizing pins the approved inode the
 /// same way, independent of any later cwd.
 pub fn find_on_path(binary: &str) -> Option<PathBuf> {
-    find_in(&std::env::var_os("PATH")?, binary, true)
+    find_in(&crate::linerpc::search_path()?, binary, true)
 }
 
 /// Like [`find_on_path`] (relative entries skipped, executables only), but
@@ -467,7 +528,7 @@ pub fn find_on_path(binary: &str) -> Option<PathBuf> {
 /// multiplexer that dispatches on the name it was run under: resolved, `cargo
 /// install …` becomes `rustup install …`.
 pub fn find_on_path_unresolved(binary: &str) -> Option<PathBuf> {
-    find_in(&std::env::var_os("PATH")?, binary, false)
+    find_in(&crate::linerpc::search_path()?, binary, false)
 }
 
 /// [`find_on_path_unresolved`] over an explicit search path.
@@ -594,12 +655,12 @@ pub fn toolchain_install_cancellable(
     dest_dir: &Path,
     cancel: &AtomicBool,
 ) -> Result<PathBuf, String> {
-    let tool = toolchain_tool(install.tool, std::env::var_os("PATH").as_deref())?;
+    let tool = toolchain_tool(install.tool, crate::linerpc::search_path().as_deref())?;
     toolchain_install_with(install, version, dest_dir, &tool, cancel)
 }
 
-/// The toolchain binary an install runs, looked up on `path` (the inherited
-/// `PATH`) by absolute entries only. A bare name would be resolved by the OS
+/// The toolchain binary an install runs, looked up on `path` (the search
+/// path, [`crate::linerpc::search_path`]) by absolute entries only. A bare name would be resolved by the OS
 /// against every entry — `.` or another relative one included — so launching
 /// clew from a repository could run that repository's own `cargo`/`npm`/`go`
 /// the moment the user consents to an install.
@@ -686,6 +747,10 @@ pub(crate) fn install_command(install: &Install, tool: &Path, dir: &Path) -> std
     // ancestors (`.cargo/config.toml`, `.npmrc`), so inheriting a project's
     // cwd would let the project redirect the registry or inject build flags.
     cmd.current_dir(dir);
+    // The PATH the tool was found on: npm is a `#!/usr/bin/env node`
+    // script, and the `node` beside it is not on an app's own PATH when the
+    // Finder opened it.
+    cmd.env("PATH", crate::linerpc::child_path());
     cmd.args(install.args());
     match &install.kind {
         Installer::Go { .. } => {
@@ -1070,6 +1135,29 @@ pub(crate) mod testing {
 mod tests {
     use super::testing::with_store;
     use super::*;
+
+    /// pyright the user installed (or basedpyright, which serves the same)
+    /// is run as found instead of an install of Clew's; no other server is
+    /// looked for so, as their settings are Clew's own copy's.
+    #[test]
+    #[cfg(unix)]
+    fn a_pyright_on_the_path_is_used_as_found() {
+        let dir = crate::testutil::TempDir::new("pyright-on-path");
+        let bin = dir.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let path = bin.clone().into_os_string();
+        assert_eq!(already_installed_on("pyright", &path), None);
+        let script = crate::lsp::store::testing::script;
+        let based = script(&bin.join("basedpyright-langserver"), "exit 0");
+        assert_eq!(already_installed_on("pyright", &path), Some(based));
+        let pyright = script(&bin.join("pyright-langserver"), "exit 0");
+        assert_eq!(already_installed_on("pyright", &path), Some(pyright));
+        script(&bin.join("typescript-language-server"), "exit 0");
+        assert_eq!(
+            already_installed_on("typescript-language-server", &path),
+            None
+        );
+    }
     use crate::lsp::registry::Archive;
     use std::io::Write;
 
@@ -1098,7 +1186,7 @@ mod tests {
             let payload = b"#!/bin/sh\necho fake-server\n";
             let gz = gzip(payload);
             let dl = download(&gz, Archive::Gzip, "rust-analyzer");
-            let dest = dir.join("servers/rust-analyzer/2026-07-13");
+            let dest = dir.join("servers/rust-analyzer/2026-11-23");
             let installed = install_bytes(&gz, &dl, &dest, &store(dir), archive::BUDGET).unwrap();
             assert_eq!(installed, dest.join("rust-analyzer"));
             assert_eq!(std::fs::read(&installed).unwrap(), payload);
@@ -1114,7 +1202,7 @@ mod tests {
                 .flatten()
                 .map(|e| e.file_name())
                 .collect();
-            assert_eq!(leftovers, vec![std::ffi::OsString::from("2026-07-13")]);
+            assert_eq!(leftovers, vec![std::ffi::OsString::from("2026-11-23")]);
         });
     }
 
@@ -1302,7 +1390,7 @@ mod tests {
         let server = EffectiveServer {
             language: "rust".into(),
             server_name: "rust-analyzer".into(),
-            version: "2026-07-13".into(),
+            version: "2026-11-23".into(),
             args: Vec::new(),
             command: Some(PathBuf::from("tools/ra")),
             init_options: None,
@@ -1498,6 +1586,28 @@ mod tests {
 
         let err = toolchain_tool("cargo", None).unwrap_err();
         assert!(err.contains("not found on PATH"), "{err}");
+    }
+
+    /// A program where its installer puts it (rustup's `~/.cargo/bin`) is
+    /// found though the app's own PATH lacks that folder, as an app opened
+    /// from the Finder's does: "'cargo' is required to install this server
+    /// but was not found on PATH", while the shell ran `cargo`. One on PATH
+    /// still comes first.
+    #[test]
+    #[cfg(unix)]
+    fn a_program_in_its_installers_folder_is_found_off_path() {
+        let dir = crate::testutil::TempDir::new("store-tool-dirs");
+        let installed = super::testing::script(&dir.join("cargo-home/bin/cargo"), "");
+        let bare = dir.join("bare");
+        std::fs::create_dir_all(&bare).unwrap();
+        let _env = crate::testutil::EnvVars::new()
+            .set("PATH", &bare)
+            .set("CARGO_HOME", dir.join("cargo-home"));
+        assert_eq!(find_on_path_unresolved("cargo"), Some(installed.clone()));
+        let search = crate::linerpc::search_path().unwrap();
+        assert_eq!(toolchain_tool("cargo", Some(&search)), Ok(installed));
+        let first = super::testing::script(&bare.join("cargo"), "");
+        assert_eq!(find_on_path_unresolved("cargo"), Some(first));
     }
 
     /// What a server that cannot be had says to do is plain words: no
@@ -1983,7 +2093,7 @@ mod tests {
             // Nor collide with the store's own scratch names.
             assert!(server_dir("rust-analyzer", ".tmp-x").is_none());
             // A normal name/version still resolves under the store.
-            let ok = server_dir("rust-analyzer", "2026-07-13").expect("normal path");
+            let ok = server_dir("rust-analyzer", "2026-11-23").expect("normal path");
             assert!(ok.starts_with(dir.join("servers")));
 
             // …and the containment guard rejects anything outside the store
@@ -2038,8 +2148,8 @@ mod tests {
         with_store("override", |dir| {
             assert_eq!(data_root().as_deref(), Some(dir));
             assert_eq!(
-                server_dir("rust-analyzer", "2026-07-13"),
-                Some(dir.join("servers/rust-analyzer/2026-07-13"))
+                server_dir("rust-analyzer", "2026-11-23"),
+                Some(dir.join("servers/rust-analyzer/2026-11-23"))
             );
         });
     }

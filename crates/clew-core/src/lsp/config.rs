@@ -20,7 +20,7 @@ use super::registry;
 /// ```toml
 /// [rust]
 /// server = "rust-analyzer"
-/// version = "2026-07-13"
+/// version = "2026-11-23"
 /// enabled = true
 /// command = "/usr/local/bin/rust-analyzer"  # escape hatch, bypasses the store
 ///
@@ -219,12 +219,29 @@ impl ProjectLspConfig {
             chosen: None,
         });
         server.command = None;
-        if let Some(args) = &choice.args {
-            server.args = args.clone();
+        match (&choice.args, known_args(&program_name(&choice.command))) {
+            (Some(args), _) => server.args = args.clone(),
+            // A server Clew knows is run the way it is run: `pylsp` takes no
+            // `--stdio`, `ruff` serves as `ruff server`.
+            (None, Some(args)) => server.args = args.iter().map(|a| a.to_string()).collect(),
+            (None, None) => {}
         }
         server.chosen = Some(choice.command.trim().to_string());
         Some(server)
     }
+}
+
+/// The arguments a language server Clew knows by its program's name serves
+/// LSP over stdio with: what a choice of it with no arguments of its own
+/// runs with, instead of those of the server it replaces.
+pub fn known_args(program: &str) -> Option<&'static [&'static str]> {
+    Some(match program {
+        "pyright-langserver" | "basedpyright-langserver" => &["--stdio"],
+        "pylsp" | "jedi-language-server" => &[],
+        "ruff" | "ty" => &["server"],
+        "pyrefly" => &["lsp"],
+        _ => return None,
+    })
 }
 
 /// The name a chosen server program goes by: its file name without an
@@ -352,7 +369,7 @@ mod tests {
         let cfg = ProjectLspConfig::default();
         let eff = cfg.resolve("rust").unwrap();
         assert_eq!(eff.server_name, "rust-analyzer");
-        assert_eq!(eff.version, "2026-07-13");
+        assert_eq!(eff.version, "2026-11-23");
         assert!(eff.command.is_none());
         assert!(eff.init_options.is_none());
         assert!(cfg.resolve("cobol").is_none());
@@ -598,6 +615,19 @@ check = { command = "clippy" }
             config.resolve_with("lean", &choosing("rust", "/opt/ra", None)),
             config.resolve("lean")
         );
+        // A Python server Clew knows runs with its own arguments, not
+        // pyright's `--stdio`; one it does not know keeps pyright's.
+        let python = |program: &str| {
+            ProjectLspConfig::default()
+                .resolve_with("python", &choosing("python", program, None))
+                .unwrap()
+                .args
+        };
+        assert!(python("/home/u/.local/bin/pylsp").is_empty());
+        assert!(python("jedi-language-server").is_empty());
+        assert_eq!(python("/usr/bin/ruff"), ["server"]);
+        assert_eq!(python("basedpyright-langserver"), ["--stdio"]);
+        assert_eq!(python("/opt/my-server"), ["--stdio"]);
         // A language clew has no server for gets one named after the file.
         let lua = ProjectLspConfig::default()
             .resolve_with(

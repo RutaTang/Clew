@@ -189,6 +189,7 @@ impl PaletteCommand {
                 Message::Debug(
                     DebugMsg::ToggleVar(_)
                     | DebugMsg::WatchInput(_)
+                    | DebugMsg::ProgramInput(_)
                     | DebugMsg::BpConditionInput(_)
                     | DebugMsg::BpConditionCancel,
                 )
@@ -976,7 +977,8 @@ impl App {
                     served,
                     by_pointer: false,
                     line_top: None,
-                    in_test: self.test_at(pane, line + 1).is_some(),
+                    test: self.test_at(pane, line + 1),
+                    gutter: None,
                 });
                 self.update(message)
             }
@@ -1122,9 +1124,26 @@ impl App {
                     None,
                     send(Message::Proof(crate::ProofMsg::RestartFile)),
                 );
+                // Lake's own: the project built, its tests run, in the run
+                // panel.
+                add(
+                    tr_noop!("Lean: Build Project").to_string(),
+                    None,
+                    send(Message::Debug(DebugMsg::RunLake(
+                        crate::app::runplan::LakeTask::Build,
+                    ))),
+                );
+                add(
+                    tr_noop!("Lean: Run Project Tests").to_string(),
+                    None,
+                    send(Message::Debug(DebugMsg::RunLake(
+                        crate::app::runplan::LakeTask::Test,
+                    ))),
+                );
                 if matches!(
                     self.proj.mathlib,
                     crate::app::proof::MathlibCache::Missing
+                        | crate::app::proof::MathlibCache::Built
                         | crate::app::proof::MathlibCache::Failed(_)
                         | crate::app::proof::MathlibCache::Dismissed
                 ) {
@@ -1429,6 +1448,12 @@ impl App {
                     tr_noop!("View: Hide Indent Guides"),
                     tr_noop!("View: Show Indent Guides"),
                     Message::Window(WindowMsg::ToggleIndentGuides),
+                ),
+                (
+                    self.peek_on_rest,
+                    tr_noop!("View: Show Code Info Only When Asked"),
+                    tr_noop!("View: Show Code Info When the Pointer Rests"),
+                    Message::Window(WindowMsg::TogglePeekOnRest),
                 ),
             ] {
                 add(toggle(shown, hide, show), None, send(message));

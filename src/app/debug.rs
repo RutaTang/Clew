@@ -76,6 +76,39 @@ fn take_notice(mut launch: serde_json::Value) -> (serde_json::Value, Option<Stri
     (launch, notice)
 }
 
+/// A `launch` body without the exception filters Clew asks for in it (see
+/// `clew_core::debugadapter::EXCEPTIONS`), and those filters.
+fn take_exceptions(mut launch: serde_json::Value) -> (serde_json::Value, Vec<String>) {
+    let wanted = launch
+        .as_object_mut()
+        .and_then(|body| body.remove(clew_core::debugadapter::EXCEPTIONS))
+        .and_then(|filters| {
+            filters.as_array().map(|all| {
+                all.iter()
+                    .filter_map(|f| f.as_str().map(str::to_string))
+                    .collect()
+            })
+        })
+        .unwrap_or_default();
+    (launch, wanted)
+}
+
+/// A Python `launch` body asking debugpy to have Clew run the program
+/// (`runInTerminal`), so that it has an input. Its output, written to a
+/// pipe, is written as it comes (`PYTHONUNBUFFERED`): a prompt printed
+/// before an `input()` showed only after the answer was typed.
+fn in_clews_console(launch: &mut serde_json::Value) {
+    let Some(body) = launch.as_object_mut() else {
+        return;
+    };
+    body.insert("console".into(), serde_json::json!("integratedTerminal"));
+    let env = body.entry("env").or_insert_with(|| serde_json::json!({}));
+    if let Some(env) = env.as_object_mut() {
+        env.entry("PYTHONUNBUFFERED")
+            .or_insert_with(|| serde_json::json!("1"));
+    }
+}
+
 /// A `launch` body for a run without the debugger: DAP's `noDebug`, which
 /// every adapter that knows it takes as "run it, stop at nothing" — and no
 /// stop at the entry either, for one that does not. The breakpoints are
@@ -105,7 +138,8 @@ fn is_formatter_noise(text: &str) -> bool {
 /// Build a Cargo plan's program — `target`, or its test binary for `test`
 /// or a test target — Cargo's words sent to the run's output as they come;
 /// what the debugger is given then: the executable, its arguments (the one
-/// test, by the name its binary lists it under), and the folder it runs in.
+/// test, by the name its binary lists it under), the folder it runs in, and
+/// the variables Cargo sets on a program it runs.
 /// `None` when the run is over: stopped (`live` moved on), or the build
 /// failed, which is said ([`DebugMsg::BuildFailed`]).
 #[allow(clippy::too_many_arguments)]
@@ -118,7 +152,7 @@ async fn build_with_cargo(
     test: Option<&crate::app::runplan::CargoTest>,
     choices: &clew_protocol::LanguageChoices,
     root: &Path,
-) -> Option<(PathBuf, Vec<String>, PathBuf)> {
+) -> Option<(PathBuf, Vec<String>, PathBuf, Vec<(String, String)>)> {
     use clew_core::cargorun::{BuildError, TargetKind};
     use iced::futures::SinkExt;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -158,7 +192,9 @@ async fn build_with_cargo(
             .await;
         return None;
     };
-    let tests = test.is_some() || matches!(target.kind, TargetKind::Test(_));
+    // A bench is built as a test is (Cargo reports it as one, whatever its
+    // harness).
+    let tests = test.is_some() || matches!(target.kind, TargetKind::Test(_) | TargetKind::Bench(_));
     let features = clew_core::cargorun::Features::from_choices(choices.rust.as_ref());
     let (lines_tx, mut lines) = tokio::sync::mpsc::unbounded_channel::<String>();
     let cancel = std::sync::Arc::new(AtomicBool::new(false));
@@ -205,8 +241,8 @@ async fn build_with_cargo(
     while let Ok(line) = lines.try_recv() {
         let _ = output.send(console(format!("{line}\n"))).await;
     }
-    let executable = match built {
-        Ok(Ok(executable)) => executable,
+    let (executable, env) = match built {
+        Ok(Ok(built)) => (built.executable, built.env),
         Ok(Err(BuildError::Stopped)) => return None,
         Ok(Err(why)) => {
             let error = match why {
@@ -238,13 +274,18 @@ async fn build_with_cargo(
         // A test binary's tests run as `cargo test` runs them, in their
         // package's folder; a program as `cargo run` from the project.
         let cwd = if tests { package } else { root.to_path_buf() };
-        return Some((executable, Vec::new(), cwd));
+        // A bench runs as `cargo bench` runs it: told it is benchmarking.
+        let args = match target.kind {
+            TargetKind::Bench(_) => vec!["--bench".to_string()],
+            _ => Vec::new(),
+        };
+        return Some((executable, args, cwd, env));
     };
     // The test by the name its binary lists it under: worked out from the
     // code, a test in a module of its own file named through it.
     let listed = tokio::task::spawn_blocking({
-        let (executable, package) = (executable.clone(), package.clone());
-        move || clew_core::cargorun::list_tests(&executable, &package)
+        let (executable, package, env) = (executable.clone(), package.clone(), env.clone());
+        move || clew_core::cargorun::list_tests(&executable, &package, &env)
     })
     .await
     .ok()
@@ -257,32 +298,60 @@ async fn build_with_cargo(
         let _ = output.send(not_run(error)).await;
         return None;
     };
-    match clew_core::cargorun::listed_test(&list, &test.path) {
-        Some(found) => Some((executable, clew_core::cargorun::test_args(&found), package)),
-        None => {
-            let error = tr!(
-                "When built, {target} has no test named {name}. It may be behind a #[cfg] or a Cargo feature this run doesn't turn on (Settings → Language servers → Rust).",
-                target = name,
-                name = test.name
-            );
-            let _ = output.send(not_run(error)).await;
-            None
+    use crate::app::runplan::CargoTests;
+    match &test.runs {
+        // The one test; or a test of many cases (`#[rstest]`), them all.
+        CargoTests::One(path) => match clew_core::cargorun::one_test_args(&list, path) {
+            Some(args) => Some((executable, args, package, env)),
+            None => {
+                let error = tr!(
+                    "When built, {target} has no test named {name}. It may be behind a #[cfg] or a Cargo feature this run doesn't turn on (Settings → Language servers → Rust).",
+                    target = name,
+                    name = test.name
+                );
+                let _ = output.send(not_run(error)).await;
+                None
+            }
+        },
+        // A group: its tests as the binary lists them, by their module's
+        // filter where it picks them alone, else each by name.
+        CargoTests::Under(under) => {
+            let selected = clew_core::cargorun::listed_under(&list, under);
+            if selected.is_empty() {
+                let error = tr!(
+                    "When built, {target} has no tests in {name}. They may be behind a #[cfg] or a Cargo feature this run doesn't turn on (Settings → Language servers → Rust).",
+                    target = name,
+                    name = test.name
+                );
+                let _ = output.send(not_run(error)).await;
+                return None;
+            }
+            let args = clew_core::cargorun::group_args(&list, under, &selected);
+            Some((executable, args, package, env))
         }
     }
 }
 
-/// Run a Lean file's `main` (`lake env lean --run`) for run `run`: its
-/// lines into the run's output as they come, then its exit and its end, as
-/// a debugger reports a program's. Stopped with the run.
-async fn run_lean(
+/// Run a program Clew runs without a debugger — a Lean file's `main`, a
+/// doc example through Cargo — as a run of its own: `job` runs it to its
+/// end (blocking, on a thread of its own), each line it writes handed to
+/// the `said` it is given, and stops once the `cancel` it is given is set;
+/// it answers how the program ended, or what to tell the reader of why it
+/// did not run.
+async fn run_plain<F>(
     output: &mut iced::futures::channel::mpsc::Sender<Message>,
     stamp: &Stamp,
     run: u64,
     live: &std::sync::Arc<std::sync::atomic::AtomicU64>,
-    lake: &Path,
-    project: &Path,
-    file: &Path,
-) {
+    job: F,
+) where
+    F: FnOnce(
+            &mut dyn FnMut(&str, bool),
+            &std::sync::atomic::AtomicBool,
+        ) -> Result<clew_core::spawn::RunEnd, String>
+        + Send
+        + 'static,
+{
     use iced::futures::SinkExt;
     use std::sync::atomic::{AtomicBool, Ordering};
     let event = |event: dap::DapEvent| {
@@ -295,22 +364,12 @@ async fn run_lean(
     let (lines_tx, mut lines) = tokio::sync::mpsc::unbounded_channel::<(bool, String)>();
     let cancel = std::sync::Arc::new(AtomicBool::new(false));
     let job = tokio::task::spawn_blocking({
-        let (lake, project, file, cancel) = (
-            lake.to_path_buf(),
-            project.to_path_buf(),
-            file.to_path_buf(),
-            cancel.clone(),
-        );
+        let cancel = cancel.clone();
         move || {
-            clew_core::lean_run_main(
-                &lake,
-                &project,
-                &file,
-                |line, stderr| {
-                    let _ = lines_tx.send((stderr, line.to_string()));
-                },
-                &cancel,
-            )
+            let mut said = |line: &str, stderr: bool| {
+                let _ = lines_tx.send((stderr, line.to_string()));
+            };
+            job(&mut said, &cancel)
         }
     });
     // Running: its tab says so from the start, as a launched program's.
@@ -341,7 +400,8 @@ async fn run_lean(
             done = &mut job => break done,
             _ = tick.tick() => {
                 if live.load(Ordering::SeqCst) != run {
-                    // Stopped: Lean is stopped with it, and nothing more said.
+                    // Stopped: the program is stopped with it, and nothing
+                    // more said.
                     cancel.store(true, Ordering::SeqCst);
                     return;
                 }
@@ -351,14 +411,107 @@ async fn run_lean(
     while let Ok(line) = lines.try_recv() {
         let _ = output.send(said(line)).await;
     }
+    let failed = |error: String| {
+        Message::Debug(DebugMsg::Failed {
+            stamp: stamp.clone(),
+            run,
+            error,
+        })
+    };
     match ended {
-        Ok(Ok(clew_core::LeanRunEnd::Exited(code))) => {
+        Ok(Ok(clew_core::spawn::RunEnd::Exited(code))) => {
             let _ = output.send(event(dap::DapEvent::Exited { code })).await;
             let _ = output.send(event(dap::DapEvent::Terminated)).await;
         }
-        Ok(Ok(clew_core::LeanRunEnd::Stopped)) => {}
-        Ok(Err(e)) => {
-            let error = tr!("Lean could not be started: {error}", error = e);
+        Ok(Ok(clew_core::spawn::RunEnd::Stopped)) => {}
+        Ok(Err(error)) => {
+            let _ = output.send(failed(error)).await;
+        }
+        Err(e) => {
+            let _ = output.send(failed(e.to_string())).await;
+        }
+    }
+}
+
+/// A task started on a remote project's host ([`App::remote_run`]): its
+/// output's stream, the input whose closing stops it, and its end.
+pub(crate) struct RemoteRun {
+    pub(crate) stdin: tokio::io::DuplexStream,
+    pub(crate) stdout: tokio::io::DuplexStream,
+    pub(crate) end: tokio::sync::oneshot::Receiver<Option<i32>>,
+}
+
+/// Show a task run on a remote project's host as a run of its own, as
+/// [`run_plain`] shows one run here: each line it writes, and how it
+/// ended — or, ended with no code, the reason it gave for not running.
+/// Stopped, it is stopped there.
+async fn run_remote(
+    output: &mut iced::futures::channel::mpsc::Sender<Message>,
+    stamp: &Stamp,
+    run: u64,
+    live: &std::sync::Arc<std::sync::atomic::AtomicU64>,
+    remote: RemoteRun,
+) {
+    use iced::futures::SinkExt;
+    use std::sync::atomic::Ordering;
+    use tokio::io::AsyncBufReadExt;
+    let event = |event: dap::DapEvent| {
+        Message::Debug(DebugMsg::DapEvent {
+            stamp: stamp.clone(),
+            run,
+            event,
+        })
+    };
+    let RemoteRun { stdin, stdout, end } = remote;
+    let _ = output
+        .send(event(dap::DapEvent::Continued {
+            thread_id: None,
+            all_threads: true,
+        }))
+        .await;
+    let mut lines = tokio::io::BufReader::new(stdout).lines();
+    let mut last = String::new();
+    let mut tick = tokio::time::interval(std::time::Duration::from_millis(150));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            line = lines.next_line() => match line {
+                Ok(Some(line)) => {
+                    last.clone_from(&line);
+                    let _ = output
+                        .send(event(dap::DapEvent::Output(dap::proto::Output {
+                            category: "stdout".into(),
+                            text: format!("{line}\n"),
+                        })))
+                        .await;
+                }
+                Ok(None) | Err(_) => break,
+            },
+            _ = tick.tick() => {
+                if live.load(Ordering::SeqCst) != run {
+                    // Stopped: its input closed, which stops it there.
+                    drop(stdin);
+                    return;
+                }
+            }
+        }
+    }
+    drop(stdin);
+    match end.await {
+        Ok(Some(code)) => {
+            let _ = output
+                .send(event(dap::DapEvent::Exited {
+                    code: i64::from(code),
+                }))
+                .await;
+            let _ = output.send(event(dap::DapEvent::Terminated)).await;
+        }
+        _ => {
+            // In the reader's language where it is a message Clew knows.
+            let error = match last.trim() {
+                "" => tr!("The task did not run on the remote host.").to_string(),
+                why => crate::i18n::message(why),
+            };
             let _ = output
                 .send(Message::Debug(DebugMsg::Failed {
                     stamp: stamp.clone(),
@@ -367,14 +520,142 @@ async fn run_lean(
                 }))
                 .await;
         }
-        Err(e) => {
-            let _ = output
-                .send(Message::Debug(DebugMsg::Failed {
-                    stamp: stamp.clone(),
+    }
+}
+
+/// What [`remote_debug_task`] asks the host for.
+struct RemoteDebugAsk<'a> {
+    tx: &'a crate::backend::server::RequestTx,
+    next_id: &'a std::sync::Arc<std::sync::atomic::AtomicU64>,
+    ai: &'a crate::app::rpc::AiClient,
+    /// The adapter's handle.
+    proc: u64,
+    /// The build's handle: Cargo's lines.
+    build: u64,
+    task: clew_protocol::ProjectTask,
+    choices: clew_protocol::LanguageChoices,
+}
+
+/// A Rust program debugged on a remote project's host: the adapter's
+/// streams, and the launch request built there for what was built.
+struct RemoteDebug {
+    stdin: tokio::io::DuplexStream,
+    stdout: tokio::io::DuplexStream,
+    launch: serde_json::Value,
+}
+
+/// Build a remote project's Rust program or test on its host and start
+/// lldb-dap on it there (`DebugTask`): Cargo's lines shown in the run as
+/// they come; `None` — said why — when it was stopped, or did not build or
+/// start.
+async fn remote_debug_task(
+    output: &mut iced::futures::channel::mpsc::Sender<Message>,
+    stamp: &Stamp,
+    run: u64,
+    live: &std::sync::Arc<std::sync::atomic::AtomicU64>,
+    ask: RemoteDebugAsk<'_>,
+) -> Option<RemoteDebug> {
+    use iced::futures::SinkExt;
+    use std::sync::atomic::Ordering;
+    use tokio::io::AsyncBufReadExt;
+    let failed = |error: String| {
+        Message::Debug(DebugMsg::Failed {
+            stamp: stamp.clone(),
+            run,
+            error,
+        })
+    };
+    // Cargo's lines: their own feed, read into the run's output. Its input
+    // held while it builds: let go, its bridge stops the build.
+    let (build_in, build_out, build_feed) =
+        crate::app::tasks::proxy_streams(ask.tx, ask.next_id, ask.build);
+    let _ = output
+        .send(Message::Server(ServerMsg::RegisterProcFeed {
+            stamp: stamp.clone(),
+            proc: ask.build,
+            feed: build_feed,
+        }))
+        .await;
+    let mut said = output.clone();
+    let said_stamp = stamp.clone();
+    let lines = tokio::spawn(async move {
+        let _held = build_in;
+        let mut lines = tokio::io::BufReader::new(build_out).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            let _ = said
+                .send(Message::Debug(DebugMsg::DapEvent {
+                    stamp: said_stamp.clone(),
                     run,
-                    error: e.to_string(),
+                    event: dap::DapEvent::Output(dap::proto::Output {
+                        category: "console".into(),
+                        text: format!("{line}\n"),
+                    }),
                 }))
                 .await;
+        }
+    });
+    // The adapter's streams, its feed in place before it can answer.
+    let (stdin, stdout, feed) = crate::app::tasks::proxy_streams(ask.tx, ask.next_id, ask.proc);
+    let _ = output
+        .send(Message::Server(ServerMsg::RegisterProcFeed {
+            stamp: stamp.clone(),
+            proc: ask.proc,
+            feed,
+        }))
+        .await;
+    let request = ask.ai.request(clew_protocol::Request::DebugTask {
+        proc: ask.proc,
+        build: ask.build,
+        task: ask.task,
+        choices: ask.choices,
+    });
+    tokio::pin!(request);
+    let mut tick = tokio::time::interval(std::time::Duration::from_millis(150));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let reply = loop {
+        tokio::select! {
+            reply = &mut request => break reply,
+            _ = tick.tick() => {
+                if live.load(Ordering::SeqCst) != run {
+                    // Stopped while it built: letting go of both stops it.
+                    lines.abort();
+                    return None;
+                }
+            }
+        }
+    };
+    // What Cargo said is all said before the session goes on.
+    let _ = lines.await;
+    match reply {
+        Ok(clew_protocol::Event::AdapterSpawned { launch, .. }) => {
+            match serde_json::from_str::<serde_json::Value>(&launch) {
+                Ok(launch) => Some(RemoteDebug {
+                    stdin,
+                    stdout,
+                    launch,
+                }),
+                Err(e) => {
+                    let error = tr!("invalid launch configuration: {error}", error = e);
+                    let _ = output.send(failed(error)).await;
+                    None
+                }
+            }
+        }
+        Ok(clew_protocol::Event::Error { message, .. }) => {
+            let _ = output.send(failed(crate::i18n::message(&message))).await;
+            None
+        }
+        Ok(other) => {
+            let error = tr!(
+                "unexpected SpawnAdapter reply: {reply}",
+                reply = format!("{other:?}")
+            );
+            let _ = output.send(failed(error)).await;
+            None
+        }
+        Err(e) => {
+            let _ = output.send(failed(e)).await;
+            None
         }
     }
 }
@@ -434,6 +715,24 @@ impl App {
             .into();
             return Task::none();
         }
+        // A remote project's Lean is on its host: run there.
+        if self.connection.is_remote() {
+            let Some(rel) = self.project_rel(&file) else {
+                return Task::none();
+            };
+            let name = file
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            return self.start_session(
+                true,
+                Some(crate::app::runplan::RunPlan::Remote {
+                    task: clew_protocol::ProjectTask::LeanMain { file: rel },
+                    name,
+                    tests: None,
+                }),
+            );
+        }
         let lake = match self
             .effective_server("lean")
             .map(|server| clew_core::lsp::store::locate(&server))
@@ -447,13 +746,102 @@ impl App {
         let Some(root) = self.proj.project.as_ref().map(|p| p.root.clone()) else {
             return Task::none();
         };
-        let project = clew_core::lake_root(&root, &file);
+        let project = clew_core::lake_root(&root, &file).unwrap_or(root);
         self.start_session(
             true,
             Some(crate::app::runplan::RunPlan::Lean {
                 file,
                 project,
                 lake,
+            }),
+        )
+    }
+
+    /// Start `task` on the remote project's host (`RunTask`): its output
+    /// fed to the stream returned, its end told as it exits.
+    pub(crate) fn remote_run(
+        &mut self,
+        task: clew_protocol::ProjectTask,
+    ) -> Result<RemoteRun, String> {
+        let Some(tx) = self.server.tx().cloned() else {
+            return Err(tr!("not connected to the remote server").into());
+        };
+        let proc = self.next_proc_id;
+        self.next_proc_id += 1;
+        let request = clew_protocol::Request::RunTask {
+            proc,
+            task,
+            choices: self.proj.lang_choices.clone(),
+        };
+        let (stdin, stdout, feed) = crate::app::tasks::proxy_streams_spawning(
+            &tx,
+            &self.next_req_id,
+            proc,
+            request,
+            None::<std::future::Ready<()>>,
+        );
+        self.server.proc_feeds.insert(proc, feed);
+        let (end_tx, end) = tokio::sync::oneshot::channel();
+        self.server.task_ends.insert(proc, end_tx);
+        Ok(RemoteRun { stdin, stdout, end })
+    }
+
+    /// `abs`, a file of the project open, relative to it, `/`-separated:
+    /// what a remote task names it by.
+    pub(crate) fn project_rel(&self, abs: &Path) -> Option<String> {
+        let root = &self.proj.project.as_ref()?.root;
+        Some(
+            abs.strip_prefix(root)
+                .ok()?
+                .to_string_lossy()
+                .replace('\\', "/"),
+        )
+    }
+
+    /// Build the Lake project of the Lean file read, or run its tests, in
+    /// the run panel: Lake's own output, and how it ended.
+    fn start_lake_task(&mut self, task: crate::app::runplan::LakeTask) -> Task<Message> {
+        use crate::app::runplan::LakeTask;
+        // A remote project's: by Lake on its host, in the Lake project of
+        // the Lean file read.
+        if self.connection.is_remote() {
+            let Some(rel) = self.lean_file().and_then(|f| self.project_rel(&f)) else {
+                self.status = tr!("Open a Lean file of the project first.").into();
+                return Task::none();
+            };
+            let test = task == LakeTask::Test;
+            return self.start_session(
+                true,
+                Some(crate::app::runplan::RunPlan::Remote {
+                    task: clew_protocol::ProjectTask::Lake { file: rel, test },
+                    name: ["lake", task.args()[0]].join(" "),
+                    tests: test.then_some(true),
+                }),
+            );
+        }
+        let Some(root) = self.proj.project.as_ref().map(|p| p.root.clone()) else {
+            return Task::none();
+        };
+        let lake = match self
+            .effective_server("lean")
+            .map(|server| clew_core::lsp::store::locate(&server))
+        {
+            Some(clew_core::lsp::store::Located::Ready(lake)) => lake,
+            _ => {
+                self.status = tr!("Lean's lake wasn't found. Install Lean with elan.").into();
+                return Task::none();
+            }
+        };
+        let project = self
+            .lean_file()
+            .and_then(|file| clew_core::lake_root(&root, &file))
+            .unwrap_or(root);
+        self.start_session(
+            true,
+            Some(crate::app::runplan::RunPlan::Lake {
+                project,
+                lake,
+                task,
             }),
         )
     }
@@ -540,21 +928,166 @@ impl App {
         self.start_session(true, None)
     }
 
-    /// The name of the test at 1-based `line` of pane `pane`'s file, when
-    /// Run Test can run it there: a Rust or Python test, in a file on this
-    /// computer.
-    pub(crate) fn test_at(&self, pane: usize, line: usize) -> Option<String> {
-        if self.connection.is_remote() {
-            return None;
-        }
+    /// What Run Test runs from 1-based `line` of pane `pane`'s file, when
+    /// it runs anything there: the Rust or Python test the line is in, one
+    /// case of a parametrized Python test, or a Python test class's or
+    /// file's tests. A remote project's Python tests run on its host; its
+    /// Rust tests need a launch file.
+    pub(crate) fn test_at(&self, pane: usize, line: usize) -> Option<crate::TestAt> {
+        use clew_core::runnables::RunnableKind;
         let viewer = self.proj.panes.get(pane).and_then(Option::as_ref)?;
         let lang = viewer
             .lang_key
             .filter(|l| matches!(*l, "rust" | "python"))?;
+        let remote = self.connection.is_remote();
         let found = clew_core::runnables::runnables(lang, &viewer.source);
-        clew_core::runnables::runnable_at(&found, line)
-            .filter(|r| r.kind == clew_core::runnables::RunnableKind::Test)
-            .map(|r| r.name.clone())
+        let test = clew_core::runnables::runnable_at(&found, line)?;
+        Some(match test.kind {
+            RunnableKind::Main => return None,
+            // A remote project's Rust is built on its host: what the menu
+            // names it by, read from the file here.
+            RunnableKind::Doctest if remote => crate::TestAt::Doctest(tr!(
+                "Doctest of {item}",
+                item = match test.name.is_empty() {
+                    true => viewer
+                        .abs
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                    false => test.name.clone(),
+                }
+            )),
+            RunnableKind::Doctest => crate::TestAt::Doctest(
+                crate::app::runplan::RunPlan::Doctest {
+                    target: clew_core::cargorun::target_of(&viewer.abs)
+                        .filter(|t| t.kind == clew_core::cargorun::TargetKind::Lib)?,
+                    file: viewer.abs.clone(),
+                    line: test.line,
+                    item: test.name.clone(),
+                }
+                .label(),
+            ),
+            RunnableKind::Tests if test.name.is_empty() => crate::TestAt::Group(
+                viewer
+                    .abs
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+            ),
+            RunnableKind::Tests => crate::TestAt::Group(test.name.clone()),
+            // A case the project's own hook may rename runs as the whole
+            // test (`test_plan_at`), and is offered as it.
+            RunnableKind::Test
+                if test.name.contains('[') && !crate::app::runplan::renames_cases(&viewer.abs) =>
+            {
+                crate::TestAt::Case(test.name.clone())
+            }
+            RunnableKind::Test => crate::TestAt::One,
+        })
+    }
+
+    /// The program that starts at 1-based `line` of pane `pane`'s file, by
+    /// its name, where one does and runs from here: a Rust `main`'s, built
+    /// by Cargo on this computer; a Python `__main__` block's file.
+    pub(crate) fn main_at(&self, pane: usize, line: usize) -> Option<String> {
+        use clew_core::runnables::RunnableKind;
+        let viewer = self.proj.panes.get(pane).and_then(Option::as_ref)?;
+        let found = viewer.runnables();
+        clew_core::runnables::runnable_at(&found, line).filter(|r| r.kind == RunnableKind::Main)?;
+        match viewer.lang_key? {
+            // Run by Lake, the file its program — on this computer, or on a
+            // remote project's host; a remote project's Rust program, built
+            // there, called by its file.
+            "lean" => viewer
+                .abs
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned()),
+            "rust" if self.connection.is_remote() => viewer
+                .abs
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned()),
+            "rust" if !self.connection.is_remote() => {
+                crate::app::runplan::cargo_plan_for(&viewer.abs)
+                    .ok()
+                    .map(|plan| plan.label())
+            }
+            "python" => viewer
+                .abs
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned()),
+            _ => None,
+        }
+    }
+
+    /// The lines of `v`'s file marked ▶ in its gutter, 1-based: its tests,
+    /// its test groups (a class's, a module's) and its program's start —
+    /// not a parametrized test's cases, nor the file's own group, which have
+    /// no line of their own. Not where they can't be run from here: a
+    /// remote project's Rust, a Rust file in no Cargo package.
+    pub(crate) fn run_marks(&self, v: &crate::viewer::Viewer) -> std::collections::HashSet<usize> {
+        use clew_core::runnables::RunnableKind;
+        let found = v.runnables();
+        if found.is_empty()
+            || (v.lang_key == Some("rust") && !self.connection.is_remote() && !v.in_cargo_package())
+        {
+            return std::collections::HashSet::new();
+        }
+        found
+            .iter()
+            .filter(|r| match r.kind {
+                RunnableKind::Test => !r.name.contains('['),
+                RunnableKind::Tests => !r.name.is_empty(),
+                RunnableKind::Main | RunnableKind::Doctest => true,
+            })
+            .map(|r| r.line)
+            .collect()
+    }
+
+    /// Run (`no_debug`) or debug the program that starts at 1-based `line`
+    /// of the active file: a gutter ▶'s ([`DebugMsg::RunMain`]) — whatever
+    /// a launch file names, it is this one that runs.
+    pub(crate) fn run_main_at(&mut self, line: usize, no_debug: bool) -> Task<Message> {
+        // Lean's `main` runs through Lake, as Run runs the file.
+        if self
+            .active_viewer()
+            .is_some_and(|v| v.lang_key == Some("lean"))
+        {
+            return self.start_lean_run(no_debug);
+        }
+        // A remote project's Rust program: built, and run or debugged, on
+        // its host.
+        if self.connection.is_remote()
+            && let Some(v) = self.active_viewer().filter(|v| v.lang_key == Some("rust"))
+        {
+            let (abs, name) = (
+                v.abs.clone(),
+                v.abs
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+            );
+            let Some(rel) = self.project_rel(&abs) else {
+                return Task::none();
+            };
+            return self.start_session(
+                no_debug,
+                Some(crate::app::runplan::RunPlan::Remote {
+                    task: clew_protocol::ProjectTask::RustMain { file: rel },
+                    name,
+                    tests: None,
+                }),
+            );
+        }
+        let plan = self
+            .active_viewer()
+            .and_then(|v| crate::app::runplan::main_plan_at(v.lang_key?, &v.abs, &v.source, line));
+        match plan {
+            Some(plan) => self.start_session(no_debug, Some(plan)),
+            None => {
+                self.status = tr!("No program starts here.").into();
+                Task::none()
+            }
+        }
     }
 
     /// Run (`no_debug`) or debug the one test at 1-based `line` of the
@@ -571,10 +1104,77 @@ impl App {
             return Task::none();
         };
         let lang = viewer.lang_key;
+        // A remote project's Rust tests: built, and run or debugged, on its
+        // host; named, and told one from a group, from the file. A doc
+        // example is rustdoc's, with no debugger.
+        if self.connection.is_remote() && lang == Some("rust") {
+            use clew_core::runnables::{RunnableKind, runnable_at, runnables};
+            let found = runnables("rust", &viewer.source);
+            let Some(test) = runnable_at(&found, line).filter(|r| {
+                matches!(
+                    r.kind,
+                    RunnableKind::Test | RunnableKind::Tests | RunnableKind::Doctest
+                )
+            }) else {
+                self.status =
+                    tr!("No test here. Put the cursor in a test function to run it.").into();
+                return Task::none();
+            };
+            let file_name = viewer
+                .abs
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let (name, tests) = match test.kind {
+                RunnableKind::Doctest => (
+                    tr!(
+                        "Doctest of {item}",
+                        item = if test.name.is_empty() {
+                            file_name.clone()
+                        } else {
+                            test.name.clone()
+                        }
+                    ),
+                    Some(false),
+                ),
+                RunnableKind::Tests if test.name.is_empty() => (file_name, Some(true)),
+                RunnableKind::Tests => (test.name.clone(), Some(true)),
+                _ => (test.name.clone(), Some(false)),
+            };
+            let Some(rel) = self.project_rel(&viewer.abs.clone()) else {
+                return Task::none();
+            };
+            let doctest = test.kind == RunnableKind::Doctest;
+            let task = self.start_session(
+                no_debug || doctest,
+                Some(crate::app::runplan::RunPlan::Remote {
+                    task: clew_protocol::ProjectTask::RustTest { file: rel, line },
+                    name,
+                    tests,
+                }),
+            );
+            if doctest && !no_debug {
+                self.status = tr!(
+                    "A doc example runs without the debugger: {status}",
+                    status = self.status
+                );
+            }
+            return task;
+        }
         let plan = lang.and_then(|lang| {
             crate::app::runplan::test_plan_at(lang, &viewer.abs, &viewer.source, line)
         });
         match plan {
+            // An example is run, never debugged: rustdoc builds and runs it
+            // itself. Said, and run.
+            Some(plan @ crate::app::runplan::RunPlan::Doctest { .. }) if !no_debug => {
+                let task = self.start_session(true, Some(plan));
+                self.status = tr!(
+                    "A doc example runs without the debugger: {status}",
+                    status = self.status
+                );
+                task
+            }
             Some(plan) => self.start_session(no_debug, Some(plan)),
             None => {
                 self.status = match lang {
@@ -587,6 +1187,29 @@ impl App {
                 Task::none()
             }
         }
+    }
+
+    /// Send the line typed in the run's input to the program, and show it
+    /// in its output where the program reads it: a program's input is no
+    /// terminal's, so nothing else echoes it.
+    fn send_program_input(&mut self) -> Task<Message> {
+        let Some(session) = self.debug.session.as_mut() else {
+            return Task::none();
+        };
+        let line = format!("{}\n", self.debug.program_input);
+        let sent = session.takes_input
+            && session.status != DebugStatus::Terminated
+            && session
+                .client
+                .as_ref()
+                .is_some_and(|client| client.send_input(&line));
+        if sent {
+            push_debug_output(session, "stdin".into(), line);
+            self.debug.program_input.clear();
+        } else {
+            self.status = tr!("The program has ended, so it takes no more input.").into();
+        }
+        Task::none()
     }
 
     /// Whether a run or debug session is still going — running, paused or
@@ -648,21 +1271,57 @@ impl App {
         // program, config, and adapter binary all live on that host, so
         // nothing here may read or probe the local filesystem).
         let remote = self.connection.is_remote();
-        // A test is run by this computer's own toolchain: a remote
-        // project's program and tests are those its launch file names.
-        if remote && plan.is_some() {
+        // A Rust test is built by this computer's Cargo, and a Lean file
+        // run by its Lean: a remote project's are those its launch file
+        // names. A Python test is run on the remote host, by its pytest.
+        let remote_test = match (&plan, remote) {
+            (
+                Some(
+                    plan @ RunPlan::Pytest { .. }
+                    | plan @ RunPlan::Django { .. }
+                    | plan @ RunPlan::Script { .. },
+                ),
+                true,
+            ) => {
+                let (program, args, cwd, _) = plan.launch(&root);
+                Some(
+                    serde_json::json!({
+                        "type": "python",
+                        "program": program.to_string_lossy(),
+                        "args": args,
+                        "cwd": cwd.to_string_lossy(),
+                    })
+                    .to_string(),
+                )
+            }
+            _ => None,
+        };
+        if remote
+            && plan.is_some()
+            && remote_test.is_none()
+            && !matches!(plan, Some(RunPlan::Remote { .. }))
+        {
             self.status = tr!(
-                "Run Test works on projects on this computer. In a remote project, run tests through a program named in .clew/launch.json."
+                "Rust tests run on projects on this computer. In a remote project, run them through a program named in .clew/launch.json."
             )
             .into();
             return Task::none();
         }
+        // The file being read, for the `${file}` a launch file may name.
+        let reading_file = self.active_viewer().map(|v| v.abs.clone());
+        // What the launch file asks of a Python run beyond its program,
+        // and what is said of it as the run starts.
+        let mut from_file: Option<crate::app::tasks::LaunchExtras> = None;
+        // A native program's environment, from its launch file's `env` and
+        // `envFile`: given to lldb as it is to debugpy.
+        let mut file_env: Vec<(String, String)> = Vec::new();
+        let mut file_notes: Vec<String> = Vec::new();
         let (program, args, cwd, lang) = if remote {
             (root.clone(), Vec::new(), root.clone(), None)
         } else if let Some(plan) = &plan {
             plan.launch(&root)
         } else {
-            let cfg = match read_launch_config(&root) {
+            let cfg = match read_launch_config(&root, reading_file.as_deref()) {
                 Ok(cfg) => cfg,
                 // No launch.json: a script open in the active pane is run as
                 // it is, as editors do — Debug on a Python file only told the
@@ -672,12 +1331,7 @@ impl App {
                     if !root.join(".clew").join("launch.json").exists()
                         && let Some(script) = self.debuggable_script() =>
                 {
-                    crate::app::model::LaunchConfig {
-                        program: script,
-                        args: Vec::new(),
-                        cwd: root.clone(),
-                        type_hint: None,
-                    }
+                    crate::app::model::LaunchConfig::script(script, root.clone())
                 }
                 // None at all: one for this project, in its language —
                 // or, a library crate, that it has nothing to run: a
@@ -716,6 +1370,13 @@ impl App {
                                 self.status = library.into();
                                 return Task::none();
                             }
+                            Err(NoProgram::Several(names)) => {
+                                self.status = tr!(
+                                    "This package has several programs: {names}. Open the one you want and Run it, or name it as default-run in Cargo.toml.",
+                                    names = crate::app::remote_state::and_list(&names)
+                                );
+                                return Task::none();
+                            }
                             Err(NoProgram::NoPackage) => {}
                         }
                     }
@@ -737,7 +1398,8 @@ impl App {
                     return Task::none();
                 }
             };
-            if !cfg.program.exists() {
+            // A module is found by Python, not at a path.
+            if cfg.extras.module.is_none() && !cfg.program.exists() {
                 self.status = tr!(
                     "Program not found at {path}. Build it first.",
                     path = cfg.program.display()
@@ -752,6 +1414,15 @@ impl App {
                 );
                 return Task::none();
             };
+            if lang == dap::Lang::Python {
+                from_file = Some(cfg.extras);
+            } else if let Some(env) = cfg.extras.fields.get("env").and_then(|e| e.as_object()) {
+                file_env = env
+                    .iter()
+                    .filter_map(|(name, value)| Some((name.clone(), value.as_str()?.to_string())))
+                    .collect();
+            }
+            file_notes = cfg.notes;
             (cfg.program, cfg.args, cfg.cwd, Some(lang))
         };
         // What the run is called, as a path: its tab and the status line
@@ -783,7 +1454,13 @@ impl App {
             args: args.clone(),
             cwd: cwd.clone(),
             addr: None,
+            takes_input: false,
         });
+        if let Some(session) = self.debug.session.as_mut() {
+            for note in file_notes {
+                push_debug_output(session, "console".into(), format!("{note}\n"));
+            }
+        }
         self.show_bottom = true;
         self.debug.no_debug = no_debug;
         self.debug.plan = plan.clone();
@@ -839,11 +1516,18 @@ impl App {
                 Some(RunPlan::Cargo {
                     target,
                     test: Some(test),
-                }) => tr!(
-                    "Building the tests of {target} with Cargo, to run {test}…",
-                    target = crate::app::runplan::target_name(target),
-                    test = test.name
-                ),
+                }) => match test.runs {
+                    crate::app::runplan::CargoTests::One(_) => tr!(
+                        "Building the tests of {target} with Cargo, to run {test}…",
+                        target = crate::app::runplan::target_name(target),
+                        test = test.name
+                    ),
+                    crate::app::runplan::CargoTests::Under(_) => tr!(
+                        "Building the tests of {target} with Cargo, to run the tests in {name}…",
+                        target = crate::app::runplan::target_name(target),
+                        name = test.name
+                    ),
+                },
                 _ => tr!("Building {program} with Cargo…", program = program_name),
             },
             Some(_) if no_debug => match reading {
@@ -861,15 +1545,65 @@ impl App {
             None if matches!(plan, Some(RunPlan::Lean { .. })) => {
                 tr!("Running {file} with Lean…", file = program_name)
             }
+            None if matches!(plan, Some(RunPlan::Lake { .. })) => tr!(
+                "Running {file}…",
+                file = plan.as_ref().map(RunPlan::label).unwrap_or_default()
+            ),
+            None if matches!(plan, Some(RunPlan::Doctest { .. })) => tr!(
+                "Running {doctest} with Cargo…",
+                doctest = plan.as_ref().map(RunPlan::label).unwrap_or_default()
+            ),
+            None if matches!(
+                plan,
+                Some(RunPlan::Pytest { .. } | RunPlan::Django { .. } | RunPlan::Script { .. })
+            ) =>
+            {
+                tr!(
+                    "Running {test} on the remote host…",
+                    test = plan.as_ref().map(RunPlan::label).unwrap_or_default()
+                )
+            }
+            None if no_debug && matches!(plan, Some(RunPlan::Remote { .. })) => tr!(
+                "Running {test} on the remote host…",
+                test = plan.as_ref().map(RunPlan::label).unwrap_or_default()
+            ),
             None if no_debug => tr!("Starting the program on the remote host…").into(),
             None => tr!("Starting debugger on the remote host…").into(),
         };
         // No adapter comes to say a Lean run is running: what is said now
         // is its running state, taken down when the program ends — it
         // said "Running Main.lean with Lean…" long after Main.lean exited.
-        if matches!(plan, Some(RunPlan::Lean { .. })) {
+        if matches!(
+            plan,
+            Some(RunPlan::Lean { .. } | RunPlan::Lake { .. } | RunPlan::Doctest { .. })
+        ) || (no_debug && matches!(plan, Some(RunPlan::Remote { .. })))
+        {
             self.say_debug_state(self.status.clone());
         }
+        // A remote project's Rust program or test, debugged: built on its
+        // host and debugged there (`DebugTask`), Cargo's lines under a
+        // handle of their own.
+        let remote_debug = match &plan {
+            Some(RunPlan::Remote {
+                task:
+                    task @ (clew_protocol::ProjectTask::RustMain { .. }
+                    | clew_protocol::ProjectTask::RustTest { .. }),
+                ..
+            }) if !no_debug => {
+                let build = self.next_proc_id;
+                self.next_proc_id += 1;
+                Some((task.clone(), build))
+            }
+            _ => None,
+        };
+        // A task of a remote project's, run: started on its host now, its
+        // output shown by the run's stream.
+        let remote_run = match &plan {
+            Some(RunPlan::Remote { task, .. }) if remote_debug.is_none() => {
+                Some(self.remote_run(task.clone()))
+            }
+            _ => None,
+        };
         // This run's identity: every message the adapter stream produces carries
         // it, so a late event from a previous run can't land on this session.
         self.bump_debug_run();
@@ -893,8 +1627,18 @@ impl App {
         // only while the adapter may ride it (see below).
         let stamp = self.transport_stamp();
         // The user's choices for the project: a Python program runs under the
-        // interpreter they picked.
-        let choices = self.proj.lang_choices.clone();
+        // interpreter they picked; a Rust one is built with the features
+        // they chose — or, choosing none, those the project's `lsp.toml`
+        // gives rust-analyzer, which the dimming reads too.
+        let mut choices = self.proj.lang_choices.clone();
+        choices.rust = Some(clew_core::buildfacts::rust_choices(
+            &choices,
+            Some(&self.proj.lsp_config),
+        ));
+        // A Python program of a project on this computer is run by Clew, at
+        // debugpy's asking, so that it has an input: run by debugpy, its
+        // input was none, and `input()` ended it at once.
+        let hosts_program = !remote && matches!(lang, Some(dap::Lang::Python));
 
         let stream = iced::stream::channel(
             64,
@@ -917,7 +1661,28 @@ impl App {
                 //           (`SpawnAdapter`), and its reply carries the
                 //           launch config built with remote paths. Nothing
                 //           on this machine is read or probed.
-                let (started, launch, addr, proxied) = if remote {
+                if let Some(remote_run) = remote_run {
+                    match remote_run {
+                        Ok(remote_run) => {
+                            run_remote(&mut output, &stamp, run, &live, remote_run).await;
+                        }
+                        Err(error) => {
+                            let _ = output
+                                .send(Message::Debug(DebugMsg::Failed {
+                                    stamp: stamp.clone(),
+                                    run,
+                                    error,
+                                }))
+                                .await;
+                        }
+                    }
+                    return;
+                }
+                let (started, launch, addr, proxied) = if let (true, Some((task, build))) =
+                    (remote, remote_debug.clone())
+                {
+                    // A Rust program or test of the project's: built there
+                    // and debugged there, with no launch file.
                     let Some(tx) = server_tx.clone() else {
                         let _ = output
                             .send(Message::Debug(DebugMsg::Failed {
@@ -928,14 +1693,59 @@ impl App {
                             .await;
                         return;
                     };
-                    // The launch config lives in the REMOTE .clew.
-                    let text = match ai
-                        .request(clew_protocol::Request::ReadState {
+                    let Some(debug) = remote_debug_task(
+                        &mut output,
+                        &stamp,
+                        run,
+                        &live,
+                        RemoteDebugAsk {
+                            tx: &tx,
+                            next_id: &next_id,
+                            ai: &ai,
+                            proc,
+                            build,
+                            task,
+                            choices: choices.clone(),
+                        },
+                    )
+                    .await
+                    else {
+                        return;
+                    };
+                    (
+                        dap::DapClient::connect(debug.stdin, debug.stdout).await,
+                        debug.launch,
+                        None,
+                        true,
+                    )
+                } else if remote {
+                    let Some(tx) = server_tx.clone() else {
+                        let _ = output
+                            .send(Message::Debug(DebugMsg::Failed {
+                                stamp: stamp.clone(),
+                                run,
+                                error: tr!("not connected to the remote server").into(),
+                            }))
+                            .await;
+                        return;
+                    };
+                    // The launch config lives in the REMOTE .clew — or, for
+                    // one test, is the test's own.
+                    let read = match &remote_test {
+                        Some(test) => Ok(clew_protocol::Event::StateContent {
                             root: root.to_string_lossy().into_owned(),
                             rel: "launch.json".into(),
-                        })
-                        .await
-                    {
+                            text: Some(test.clone()),
+                        }),
+                        None => {
+                            ai.request(clew_protocol::Request::ReadState {
+                                root: root.to_string_lossy().into_owned(),
+                                rel: "launch.json".into(),
+                            })
+                            .await
+                        }
+                    };
+                    let text = match read {
                         Ok(clew_protocol::Event::StateContent { text: Some(t), .. }) => t,
                         Ok(clew_protocol::Event::StateContent { text: None, .. }) => {
                             let error = tr!(
@@ -975,19 +1785,20 @@ impl App {
                             return;
                         }
                     };
-                    let cfg = match parse_launch_config(&root, &text) {
-                        Ok(cfg) => cfg,
-                        Err(e) => {
-                            let _ = output
-                                .send(Message::Debug(DebugMsg::Failed {
-                                    stamp: stamp.clone(),
-                                    run,
-                                    error: e,
-                                }))
-                                .await;
-                            return;
-                        }
-                    };
+                    let cfg =
+                        match parse_launch_config(&root, &text, reading_file.as_deref(), false) {
+                            Ok(cfg) => cfg,
+                            Err(e) => {
+                                let _ = output
+                                    .send(Message::Debug(DebugMsg::Failed {
+                                        stamp: stamp.clone(),
+                                        run,
+                                        error: e,
+                                    }))
+                                    .await;
+                                return;
+                            }
+                        };
                     let Some(lang) = dap::Lang::detect(cfg.type_hint.as_deref(), &cfg.program)
                     else {
                         let error = tr!(
@@ -1003,6 +1814,21 @@ impl App {
                             .await;
                         return;
                     };
+                    if lang == dap::Lang::Python {
+                        from_file = Some(cfg.extras.clone());
+                    }
+                    for note in &cfg.notes {
+                        let _ = output
+                            .send(Message::Debug(DebugMsg::DapEvent {
+                                stamp: stamp.clone(),
+                                run,
+                                event: dap::DapEvent::Output(dap::proto::Output {
+                                    category: "console".into(),
+                                    text: format!("{note}\n"),
+                                }),
+                            }))
+                            .await;
+                    }
                     if cancelled(&live) {
                         return; // stopped before anything was spawned
                     }
@@ -1079,6 +1905,22 @@ impl App {
                         None,
                         true,
                     )
+                } else if let Some(crate::app::runplan::RunPlan::Lake {
+                    project,
+                    lake,
+                    task,
+                }) = &plan
+                {
+                    // Lake building the project, or running its tests.
+                    let (lake, project, task) = (lake.clone(), project.clone(), *task);
+                    run_plain(&mut output, &stamp, run, &live, move |said, cancel| {
+                        clew_core::lean_run_lake(&lake, &project, task.args(), said, cancel)
+                            .map_err(|e| {
+                                tr!("Lake could not be started: {error}", error = e).to_string()
+                            })
+                    })
+                    .await;
+                    return;
                 } else if let Some(crate::app::runplan::RunPlan::Lean {
                     file,
                     project,
@@ -1086,14 +1928,55 @@ impl App {
                 }) = &plan
                 {
                     // A Lean file's `main`: run by Lean, no debugger.
-                    run_lean(&mut output, &stamp, run, &live, lake, project, file).await;
+                    let (lake, project, file) = (lake.clone(), project.clone(), file.clone());
+                    run_plain(&mut output, &stamp, run, &live, move |said, cancel| {
+                        clew_core::lean_run_main(&lake, &project, &file, said, cancel).map_err(
+                            |e| tr!("Lean could not be started: {error}", error = e).to_string(),
+                        )
+                    })
+                    .await;
+                    return;
+                } else if let Some(crate::app::runplan::RunPlan::Doctest {
+                    target,
+                    file,
+                    line,
+                    ..
+                }) = &plan
+                {
+                    // A doc example: run by rustdoc, through Cargo, no
+                    // debugger.
+                    let (target, file, line) = (target.clone(), file.clone(), *line);
+                    let features =
+                        clew_core::cargorun::Features::from_choices(choices.rust.as_ref());
+                    run_plain(&mut output, &stamp, run, &live, move |said, cancel| {
+                        let Some(cargo) = clew_core::cargorun::find_cargo() else {
+                            return Err(tr!(
+                                "Cargo was not found. Install Rust from rustup.rs, then run again."
+                            )
+                            .to_string());
+                        };
+                        use clew_core::cargorun::DoctestEnd;
+                        match clew_core::cargorun::run_doctest(
+                            &cargo, &target, &features, &file, line, said, cancel,
+                        ) {
+                            Ok(DoctestEnd::Ran(end)) => Ok(end),
+                            Ok(DoctestEnd::NotListed) => Err(tr!(
+                                "rustdoc lists no example at line {line} of {file}: is the file a module of its crate's library?",
+                                line = line,
+                                file = file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+                            )
+                            .to_string()),
+                            Err(e) => Err(tr!("Cargo could not be started: {error}", error = e).to_string()),
+                        }
+                    })
+                    .await;
                     return;
                 } else {
                     let lang = lang.expect("local start_debug always detects the language");
                     // A Rust program is built first, by Cargo, its words in
                     // the run's output as it builds: what runs is what the
                     // reader is reading, built as `cargo run` builds it.
-                    let (program, args, cwd, package) = match &plan {
+                    let (program, args, cwd, cargo_env) = match &plan {
                         Some(crate::app::runplan::RunPlan::Cargo { target, test }) => {
                             let built = build_with_cargo(
                                 &mut output,
@@ -1107,9 +1990,7 @@ impl App {
                             )
                             .await;
                             match built {
-                                Some((program, args, cwd)) => {
-                                    (program, args, cwd, Some(target.package_dir().to_path_buf()))
-                                }
+                                Some((program, args, cwd, env)) => (program, args, cwd, Some(env)),
                                 None => return,
                             }
                         }
@@ -1127,8 +2008,22 @@ impl App {
                             cwd.clone(),
                             choices.clone(),
                         );
+                        // Cargo built it: a Rust program, whatever its debug
+                        // information can be read to say (macOS keeps it in
+                        // the object files).
+                        let rust = cargo_env.is_some();
                         tokio::task::spawn_blocking(move || {
-                            dap::adapter::resolve(lang, &program, &args, &root, &cwd, &choices)
+                            let mut resolved =
+                                dap::adapter::resolve(lang, &program, &args, &root, &cwd, &choices);
+                            if let (true, Ok(dap::Resolved::Ready(adapter))) = (rust, &mut resolved)
+                            {
+                                clew_core::debugadapter::set_up_for_rust(
+                                    &mut adapter.launch,
+                                    &adapter.command,
+                                    &cwd,
+                                );
+                            }
+                            resolved
                         })
                         .await
                         .unwrap_or_else(|e| {
@@ -1164,8 +2059,8 @@ impl App {
                             return;
                         }
                     };
-                    if let Some(package) = &package {
-                        clew_core::cargorun::with_cargo_env(&mut adapter.launch, package);
+                    if let Some(env) = &cargo_env {
+                        clew_core::cargorun::with_cargo_env(&mut adapter.launch, env);
                     }
                     if cancelled(&live) {
                         return; // stopped before anything was spawned
@@ -1251,6 +2146,9 @@ impl App {
                 if cancelled(&live) {
                     return; // stopped while the adapter was starting
                 }
+                if hosts_program {
+                    client.run_programs_here();
+                }
                 // initialize() can hang forever on a wedged adapter, and the
                 // run-counter checkpoints only run BETWEEN awaits — so race
                 // it against the Stop signal and a hard timeout. Without
@@ -1320,9 +2218,20 @@ impl App {
                 // What the adapter's resolution has to say (a Zig binary
                 // whose variables lldb cannot read): to the debug console,
                 // and out of the body the adapter gets.
-                let (mut launch, notice) = take_notice(launch);
+                let (launch, notice) = take_notice(launch);
+                let (mut launch, exceptions) = take_exceptions(launch);
+                client.prefer_exception_filters(&exceptions);
+                if let Some(extras) = &from_file {
+                    crate::app::tasks::with_launch_file(&mut launch, extras);
+                }
+                if !file_env.is_empty() {
+                    clew_core::cargorun::with_cargo_env(&mut launch, &file_env);
+                }
                 if no_debug {
                     without_debugger(&mut launch);
+                }
+                if hosts_program {
+                    in_clews_console(&mut launch);
                 }
                 if let Some(text) = notice {
                     let _ = output
@@ -1423,16 +2332,20 @@ impl App {
         if self.proj.project.is_none() {
             return Task::none();
         }
-        // pytest is not a debugger: a test, run or debugged, needs it.
-        self.status = match install.is_test_runner() {
-            true => tr!(
+        // pytest is not a debugger: a test, run or debugged, needs it; nor
+        // are a script's own packages.
+        self.status = if install.is_script_packages() {
+            tr!("This script needs the packages it lists. Waiting for your approval.").into()
+        } else if install.is_test_runner() {
+            tr!(
                 "Running tests needs {runner}. Waiting for your approval.",
                 runner = install.name()
-            ),
-            false => tr!(
+            )
+        } else {
+            tr!(
                 "Debugging needs {adapter}. Waiting for your approval.",
                 adapter = install.name()
-            ),
+            )
         };
         self.proj.pending_lsp_consent.offer(LspConsent {
             on_path: None,
@@ -1454,26 +2367,29 @@ impl App {
         install: dap::AdapterInstall,
         stamp: Stamp,
     ) -> Task<Message> {
-        let test_runner = install.is_test_runner();
-        self.status = tr!(
-            "Installing {name} {version}…",
-            name = install.name(),
-            version = install.version()
-        );
+        self.status = match install.is_script_packages() {
+            true => tr!("Installing the packages the script lists…").into(),
+            false => tr!(
+                "Installing {name} {version}…",
+                name = install.name(),
+                version = install.version()
+            ),
+        };
+        let installing = install.clone();
         // Raised when the project it was consented in is left (the session
         // is dropped whole): the install stops between chunks, or its `pip`
         // is killed, instead of running on for a session that cannot start.
         let cancel = self.proj.adapter_install_cancel.flag();
         Task::perform(
             async move {
-                tokio::task::spawn_blocking(move || install.install_cancellable(&cancel))
+                tokio::task::spawn_blocking(move || installing.install_cancellable(&cancel))
                     .await
                     .unwrap_or_else(|e| Err(e.to_string()))
             },
             move |result| {
                 Message::Debug(DebugMsg::AdapterInstalled {
                     stamp: stamp.clone(),
-                    test_runner,
+                    install: install.clone(),
                     result,
                 })
             },
@@ -1488,7 +2404,7 @@ impl App {
     pub(crate) fn on_debug_adapter_installed(
         &mut self,
         stamp: Stamp,
-        test_runner: bool,
+        install: dap::AdapterInstall,
         result: Result<(), String>,
     ) -> Task<Message> {
         match result {
@@ -1501,8 +2417,13 @@ impl App {
                 );
                 Task::none()
             }
-            // pytest is no debug adapter: what failed is named as it is.
-            Err(e) if test_runner => {
+            // pytest is no debug adapter: what failed is named as it is;
+            // a script's packages say so themselves.
+            Err(e) if install.is_script_packages() => {
+                self.status = crate::i18n::message(&e);
+                Task::none()
+            }
+            Err(e) if install.is_test_runner() => {
                 self.status = tr!("pytest install failed: {error}", error = e);
                 Task::none()
             }
@@ -1516,9 +2437,12 @@ impl App {
                 self.start_session(self.debug.no_debug, self.debug.plan.clone())
             }
             Ok(()) => {
-                self.status = match test_runner {
-                    true => tr!("pytest installed").into(),
-                    false => tr!("Debug adapter installed").into(),
+                self.status = if install.is_script_packages() {
+                    tr!("The script's packages are installed").into()
+                } else if install.is_test_runner() {
+                    tr!("pytest installed").into()
+                } else {
+                    tr!("Debug adapter installed").into()
                 };
                 Task::none()
             }
@@ -1547,6 +2471,7 @@ impl App {
             args: s.args.clone(),
             cwd: s.cwd.clone(),
             addr: None,
+            takes_input: false,
         });
         // The teardown itself is shared with the project switch, which used to
         // carry its own copy of it (see `stop_debug_session`).
@@ -2275,6 +3200,12 @@ impl App {
             dap::DapEvent::Output(o) if is_formatter_noise(&o.text) => Task::none(),
             dap::DapEvent::Output(o) => {
                 push_debug_output(session, o.category, o.text);
+                Task::none()
+            }
+            // The program runs with an input Clew holds: the run's input
+            // line shows.
+            dap::DapEvent::TakesInput => {
+                session.takes_input = true;
                 Task::none()
             }
             // Its code said once, beside the run's name — the output said
@@ -3123,6 +4054,20 @@ impl App {
     }
 
     pub(crate) fn on_breakpoint_toggle(&mut self, path: PathBuf, line: usize) -> Task<Message> {
+        // Lean runs no debugger: a breakpoint there would stop nothing.
+        if crate::highlight::detect(&path) == Some("lean")
+            && !self
+                .debug
+                .breakpoints
+                .get(&path)
+                .is_some_and(|m| m.contains_key(&line))
+        {
+            self.status = tr!(
+                "Lean has no debugger, so a breakpoint here would stop nothing. To follow a proof, use Step Through Proof."
+            )
+            .into();
+            return Task::none();
+        }
         let map = self.debug.breakpoints.entry(path.clone()).or_default();
         if map.remove(&line).is_none() {
             map.insert(line, Bp::default());
@@ -3242,7 +4187,17 @@ impl App {
         match message {
             DebugMsg::Start => self.start_debug(),
             DebugMsg::Run => self.start_run(),
-            DebugMsg::RunTest { line, no_debug } => self.run_test_at(line, no_debug),
+            // Picked from the code menu, or a ▶'s: the menu goes as the run
+            // starts. It stayed up over the run it had started.
+            DebugMsg::RunTest { line, no_debug } => {
+                self.proj.context_menu = None;
+                self.run_test_at(line, no_debug)
+            }
+            DebugMsg::RunMain { line, no_debug } => {
+                self.proj.context_menu = None;
+                self.run_main_at(line, no_debug)
+            }
+            DebugMsg::RunLake(task) => self.start_lake_task(task),
             DebugMsg::ShowTab(tab) => self.show_run_tab(tab),
             DebugMsg::CloseTab(tab) => self.close_run_tab(tab),
             DebugMsg::Again => self.on_debug_again(),
@@ -3402,9 +4357,9 @@ impl App {
             }
             DebugMsg::AdapterInstalled {
                 stamp,
-                test_runner,
+                install,
                 result,
-            } => self.on_debug_adapter_installed(stamp, test_runner, result),
+            } => self.on_debug_adapter_installed(stamp, install, result),
             DebugMsg::ToggleBreakpointFromMenu => self.on_toggle_breakpoint_from_menu(),
             DebugMsg::ConditionalBreakpointFromMenu => self.on_conditional_breakpoint_from_menu(),
             DebugMsg::BpConditionInput(s) => {
@@ -3439,6 +4394,11 @@ impl App {
                 self.debug.watch_input = s;
                 Task::none()
             }
+            DebugMsg::ProgramInput(s) => {
+                self.debug.program_input = s;
+                Task::none()
+            }
+            DebugMsg::ProgramInputSent => self.send_program_input(),
             DebugMsg::WatchAdd => {
                 let expr = self.debug.watch_input.trim().to_string();
                 if expr.is_empty() {
@@ -3765,6 +4725,22 @@ mod tests {
         assert_eq!(take_notice(plain.clone()), (plain, None));
     }
 
+    /// The exception filters a launch asks for come out of the body: the
+    /// adapter is asked to stop at them instead of its defaults, and never
+    /// sees the key.
+    #[test]
+    fn a_launchs_exception_filters_are_taken_out() {
+        let launch = serde_json::json!({
+            "module": "pytest",
+            clew_core::debugadapter::EXCEPTIONS: ["userUnhandled"],
+        });
+        let (launch, filters) = take_exceptions(launch);
+        assert_eq!(filters, ["userUnhandled"]);
+        assert_eq!(launch, serde_json::json!({ "module": "pytest" }));
+        let plain = serde_json::json!({ "program": "/p/app" });
+        assert_eq!(take_exceptions(plain.clone()), (plain, Vec::new()));
+    }
+
     /// A run's launch body tells the adapter `noDebug`, and not to stop at
     /// the entry: a config's own `stopOnEntry` is a debugging choice.
     #[test]
@@ -3785,6 +4761,28 @@ mod tests {
         without_debugger(&mut launch);
         assert!(launch.get("preRunCommands").is_none(), "{launch}");
         assert!(launch.get("initCommands").is_some());
+    }
+
+    /// A local Python program is run by Clew, so that it has an input, and
+    /// writes its output as it comes; an environment the launch sets is
+    /// kept, its own buffering choice included.
+    #[test]
+    fn a_local_python_program_is_run_in_clews_console() {
+        let mut launch = serde_json::json!({
+            "program": "/p/app.py",
+            "console": "internalConsole",
+            "env": { "PYTHONDONTWRITEBYTECODE": "1" },
+        });
+        in_clews_console(&mut launch);
+        assert_eq!(launch["console"], "integratedTerminal");
+        assert_eq!(launch["env"]["PYTHONUNBUFFERED"], "1");
+        assert_eq!(launch["env"]["PYTHONDONTWRITEBYTECODE"], "1");
+        let mut own = serde_json::json!({ "env": { "PYTHONUNBUFFERED": "0" } });
+        in_clews_console(&mut own);
+        assert_eq!(own["env"]["PYTHONUNBUFFERED"], "0");
+        let mut bare = serde_json::json!({ "program": "/p/app.py" });
+        in_clews_console(&mut bare);
+        assert_eq!(bare["env"]["PYTHONUNBUFFERED"], "1");
     }
 
     /// lldb's Python tracebacks from Rust's formatters are not the
@@ -3843,6 +4841,7 @@ mod tests {
             args: Vec::new(),
             cwd: PathBuf::from("/tmp"),
             addr: None,
+            takes_input: false,
         }
     }
 

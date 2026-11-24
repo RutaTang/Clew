@@ -39,38 +39,192 @@ pub const ASSOCIATED_TYPE: &str = "associated type";
 /// must not drift apart.
 pub const MAX_DOC_DEPTH: usize = 32;
 
+/// [`module_doc`], a Rust file's `#![doc = include_str!("…")]` read by
+/// `include`, given the path as written (from the file's folder): a crate
+/// whose doc is its README.
+pub fn module_doc_with(
+    source: &str,
+    lang_key: &str,
+    include: &dyn Fn(&str) -> Option<String>,
+) -> String {
+    match lang_key {
+        "rust" => rust_crate_doc(source, include),
+        _ => module_doc(source, lang_key),
+    }
+}
+
+/// A Rust file's own doc, as rustdoc reads it: the inner docs before its
+/// first item, in order — `//!` lines, `/*! … */` blocks, `#![doc = "…"]`
+/// and `#![doc = include_str!("…")]` (read by `include`) — past licence
+/// comments and other inner attributes (`#![deny(…)]`).
+fn rust_crate_doc(source: &str, include: &dyn Fn(&str) -> Option<String>) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    let mut rest = source.trim_start_matches('\u{feff}');
+    // `#!/usr/bin/env …`, not an attribute.
+    if rest.starts_with("#!") && !rest.starts_with("#![") {
+        rest = rest.split_once('\n').map_or("", |(_, r)| r);
+    }
+    let line_of = |r: &str| -> (String, usize) {
+        let end = r.find('\n').map_or(r.len(), |i| i + 1);
+        (r[..end].trim_end().to_string(), end)
+    };
+    loop {
+        rest = rest.trim_start();
+        if let Some(r) = rest.strip_prefix("//!") {
+            let (line, end) = line_of(r);
+            parts.push(line.strip_prefix(' ').unwrap_or(&line).to_string());
+            rest = &r[end.min(r.len())..];
+        } else if rest.starts_with("///") {
+            break; // an item's doc
+        } else if rest.starts_with("//") {
+            rest = &rest[line_of(rest).1..];
+        } else if let Some(r) = rest.strip_prefix("/*!") {
+            let Some(close) = r.find("*/") else { break };
+            parts.push(block_doc(&r[..close]));
+            rest = &r[close + 2..];
+        } else if rest.starts_with("/**") && !rest.starts_with("/**/") {
+            break; // an item's doc
+        } else if let Some(r) = rest.strip_prefix("/*") {
+            let Some(close) = r.find("*/") else { break };
+            rest = &r[close + 2..];
+        } else if let Some(r) = rest.strip_prefix("#![") {
+            let Some(close) = attribute_end(r) else { break };
+            if let Some(doc) = doc_attribute(&r[..close], include) {
+                parts.push(doc);
+            }
+            rest = &r[close + 1..];
+        } else {
+            break;
+        }
+    }
+    crate::docs::rustdoc_shown(parts.join("\n").trim())
+}
+
+/// Where an attribute's text, after its `#![`, ends: its closing `]`,
+/// brackets and string literals skipped.
+fn attribute_end(text: &str) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (i, c) in text.char_indices() {
+        if in_string {
+            match c {
+                _ if escaped => escaped = false,
+                '\\' => escaped = true,
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match c {
+            '"' => in_string = true,
+            '[' | '(' | '{' => depth += 1,
+            ']' if depth == 0 => return Some(i),
+            ']' | ')' | '}' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The doc an inner attribute gives: `doc = "…"`, or `doc =
+/// include_str!("…")` read by `include` — on its own or in a `cfg_attr`
+/// (`#![cfg_attr(docsrs, doc = include_str!("../README.md"))]`).
+pub(crate) fn doc_attribute(
+    attr: &str,
+    include: &dyn Fn(&str) -> Option<String>,
+) -> Option<String> {
+    let at = attr.match_indices("doc").map(|(i, _)| i).find(|&i| {
+        let before = attr[..i].chars().next_back();
+        !before.is_some_and(|c| c.is_alphanumeric() || c == '_')
+            && attr[i + 3..].trim_start().starts_with('=')
+    })?;
+    let value = attr[at + 3..].trim_start().strip_prefix('=')?.trim_start();
+    if let Some(call) = value.strip_prefix("include_str!") {
+        let path = string_literal(call.trim_start().strip_prefix('(')?.trim_start())?;
+        return include(&path);
+    }
+    string_literal(value)
+}
+
+/// The string literal `text` starts with, its escapes read.
+fn string_literal(text: &str) -> Option<String> {
+    let body = text.strip_prefix('"')?;
+    let mut out = String::new();
+    let mut chars = body.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => return Some(out),
+            '\\' => match chars.next()? {
+                'n' => out.push('\n'),
+                't' => out.push('\t'),
+                '\n' => {
+                    // A line continuation: the next line's indent goes too.
+                    let rest: String = chars.clone().collect();
+                    let skipped = rest.len() - rest.trim_start().len();
+                    for _ in 0..rest[..skipped].chars().count() {
+                        chars.next();
+                    }
+                }
+                other => out.push(other),
+            },
+            _ => out.push(c),
+        }
+    }
+    None
+}
+
+/// A `/*! … */` or `/** … */` block's text as rustdoc reads it: a column of
+/// leading `*`s taken off, then the common indent, blank lines at the ends
+/// dropped.
+pub(crate) fn block_doc(inner: &str) -> String {
+    let lines: Vec<&str> = inner.lines().map(|l| l.trim_end()).collect();
+    let starred = lines
+        .iter()
+        .skip(1)
+        .filter(|l| !l.trim().is_empty())
+        .all(|l| l.trim_start().starts_with('*'));
+    let lines: Vec<String> = lines
+        .iter()
+        .enumerate()
+        .map(|(i, l)| match (i, starred) {
+            (0, _) => l.trim_start().to_string(),
+            (_, true) => {
+                let t = l.trim_start();
+                let t = t.strip_prefix('*').unwrap_or(t);
+                t.strip_prefix(' ').unwrap_or(t).to_string()
+            }
+            _ => l.to_string(),
+        })
+        .collect();
+    let indent = lines
+        .iter()
+        .skip(1)
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.len() - l.trim_start().len())
+        .min()
+        .unwrap_or(0);
+    let lines: Vec<&str> = lines
+        .iter()
+        .enumerate()
+        .map(|(i, l)| match i {
+            0 => l.as_str(),
+            _ => l.get(indent..).unwrap_or(l.trim_start()),
+        })
+        .collect();
+    lines.join("\n").trim().to_string()
+}
+
 /// A file's own doc comment, its comment markers stripped: Rust's leading
-/// `//!` lines, a Python module's docstring, Go's package comment (the
-/// comment block right above `package`), Lean's `/-! … -/` module doc. Empty
-/// for the other languages, whose file-top comments are licence headers as
-/// often as docs, and for a file without one.
+/// inner docs (`//!`, `/*! */`, `#![doc = "…"]`), a Python module's
+/// docstring, Go's package comment (the comment block right above
+/// `package`), Lean's `/-! … -/` module doc. Empty for the other languages,
+/// whose file-top comments are licence headers as often as docs, and for a
+/// file without one.
 pub fn module_doc(source: &str, lang_key: &str) -> String {
     let lines = source.lines().map(|l| l.trim_end_matches('\r'));
     match lang_key {
-        "rust" => {
-            let mut doc: Vec<&str> = Vec::new();
-            // Inside a plain `/* … */` comment above the docs.
-            let mut in_comment = false;
-            for line in lines {
-                let t = line.trim_start();
-                if in_comment {
-                    in_comment = !t.contains("*/");
-                } else if let Some(rest) = t.strip_prefix("//!") {
-                    doc.push(rest.strip_prefix(' ').unwrap_or(rest));
-                } else if !doc.is_empty() {
-                    break;
-                } else if t.starts_with("/*") && !t.starts_with("/**") && !t.starts_with("/*!") {
-                    // A licence header, as often as not, above the docs.
-                    in_comment = !t[2..].contains("*/");
-                } else if !(t.is_empty()
-                    || t.starts_with("#!")
-                    || t.starts_with("//") && !t.starts_with("///"))
-                {
-                    break;
-                }
-            }
-            doc.join("\n").trim().to_string()
-        }
+        "rust" => rust_crate_doc(source, &|_| None),
         "python" => {
             // The first statement, when it is a string literal.
             let body: Vec<&str> = lines
@@ -242,8 +396,18 @@ pub fn build_file(source: &str, lang_key: &str) -> Vec<DocItem> {
         Some(tree) => crate::outline::located_in(tree, source, lang),
         None => crate::outline::extract_located(source, lang.key()),
     };
+    // A Rust module's `pub use`s are its API too: a crate root of nothing
+    // but re-exports lists them ([`crate::rustapi::link_crates`] fills in
+    // what they name).
+    let reexports: Vec<DocItem> = match lang {
+        Lang::Rust => crate::rustapi::reexports(source)
+            .iter()
+            .map(crate::rustapi::reexport_item)
+            .collect(),
+        _ => Vec::new(),
+    };
     if located.is_empty() {
-        return Vec::new();
+        return reexports;
     }
     // Outline rows are ordered by line/name; Docs need source order even
     // within a line, with an enclosing declaration before its members.
@@ -352,6 +516,10 @@ pub fn build_file(source: &str, lang_key: &str) -> Vec<DocItem> {
     // word for its own names: the listed ones, and only those.
     let python_all = (lang == Lang::Python).then(|| python_all(source)).flatten();
 
+    let lean_publics = match lang {
+        Lang::Lean => crate::lean::module_publics(source),
+        _ => None,
+    };
     // In index order, so a parent's verdict exists before its members'.
     let mut public: Vec<bool> = vec![false; n];
     for i in 0..n {
@@ -381,11 +549,42 @@ pub fn build_file(source: &str, lang_key: &str) -> Vec<DocItem> {
             (Lang::Python, _) if parent[i].is_none() && python_all.is_some() => python_all
                 .as_ref()
                 .is_some_and(|all| all.contains(raws[i].name.as_str())),
+            // An enum's variants, and the fields of a variant, carry no
+            // `pub`: they are as public as the enum.
+            (Lang::Rust, _)
+                if raws[i].kind == "variant"
+                    || (raws[i].kind == "field"
+                        && parent[i].is_some_and(|p| raws[p].kind == "variant")) =>
+            {
+                parent[i].is_none_or(|p| public[p])
+            }
             _ => {
                 is_public(&raws[i].signature, &raws[i].name, lang, member_of.is_some())
                     || (parent[i].is_none() && exported.contains(raws[i].name.as_str()))
             }
         };
+        // Lean's module system: in a file that is a `module`, a declaration
+        // is public only marked so or in a `public section`.
+        if let Some(publics) = &lean_publics
+            && public[i]
+        {
+            let marked = before_name(&raws[i].signature, &raws[i].name)
+                .split_whitespace()
+                .any(|w| w == "public");
+            let at = located[i].declaration.0;
+            public[i] = marked || publics.iter().any(|r| r.contains(&at));
+        }
+        // What rustdoc reads off an item's attributes: `#[doc(hidden)]`
+        // leaves it out however `pub` it is; `#[macro_export]` exports a
+        // `macro_rules!`, which has no `pub` to say so.
+        if lang == Lang::Rust {
+            let attrs = crate::rustapi::attrs_above(&lines, raws[i].line);
+            if attrs.hidden {
+                public[i] = false;
+            } else if attrs.macro_export && raws[i].kind == "macro" {
+                public[i] = true;
+            }
+        }
     }
 
     // Assemble bottom-up rather than recursively: the nesting depth is the
@@ -437,7 +636,67 @@ pub fn build_file(source: &str, lang_key: &str) -> Vec<DocItem> {
             refs,
         });
     }
-    roots.iter().filter_map(|&i| built[i].take()).collect()
+    let items: Vec<DocItem> = roots.iter().filter_map(|&i| built[i].take()).collect();
+    match lang {
+        Lang::Rust => {
+            let mut items = nest_rust_impls(items, &crate::outline::rust_impl_blocks(source));
+            // In source order with the rest (stable: an item before a
+            // re-export written on its line).
+            items.extend(reexports);
+            items.sort_by_key(|i| i.line);
+            items
+        }
+        _ => items,
+    }
+}
+
+/// A Rust file's items with each `impl` block's members (its methods,
+/// associated types and constants) under the type it implements, as rustdoc
+/// lists them — `Point`'s `new` and its `Display` `fmt` under `Point` — when
+/// that type is the file's own; listed at the top, they were nobody's: two
+/// `new`s read as one name twice. A type of another file keeps its members
+/// where they are.
+fn nest_rust_impls(items: Vec<DocItem>, blocks: &[crate::outline::ImplBlock]) -> Vec<DocItem> {
+    if blocks.is_empty() {
+        return items;
+    }
+    // The type an impl is for: `Display for Point` → `Point`, `Stack<T>` →
+    // `Stack`.
+    let type_of = |label: &str| -> String {
+        let ty = label.rsplit_once(" for ").map_or(label, |(_, ty)| ty);
+        let ty = ty.trim_start_matches(['&', '!']).trim_start_matches("mut ");
+        ty.split(['<', ' ']).next().unwrap_or(ty).to_string()
+    };
+    let types: HashMap<String, usize> = items
+        .iter()
+        .enumerate()
+        .filter(|(_, i)| {
+            matches!(
+                i.kind.as_str(),
+                "struct" | "enum" | "union" | "type" | "trait"
+            )
+        })
+        .map(|(n, i)| (i.name.clone(), n))
+        .collect();
+    let owner = |item: &DocItem| -> Option<usize> {
+        let block = blocks
+            .iter()
+            .filter(|b| b.line < item.line && item.line <= b.end_line)
+            .min_by_key(|b| b.end_line - b.line)?;
+        types.get(&type_of(&block.label)).copied()
+    };
+    let mut slots: Vec<Option<DocItem>> = items.into_iter().map(Some).collect();
+    for n in 0..slots.len() {
+        let Some(to) = slots[n].as_ref().and_then(owner).filter(|&to| to != n) else {
+            continue;
+        };
+        if let Some(member) = slots[n].take()
+            && let Some(ty) = slots[to].as_mut()
+        {
+            ty.children.push(member);
+        }
+    }
+    slots.into_iter().flatten().collect()
 }
 
 /// Most syntax nodes [`sql_references`] visits: a schema dump of tens of
@@ -1294,19 +1553,13 @@ fn is_plain_ident(s: &str) -> bool {
 fn is_public(decl: &str, name: &str, lang: Lang, is_member: bool) -> bool {
     let d = decl.trim_start();
     match lang {
-        // Any `pub` (including pub(crate)/pub(super)) counts for the surface
-        // — but `pub(self)`, which is private by another name.
-        Lang::Rust => {
-            d.strip_prefix("pub")
-                .is_some_and(|rest| match rest.trim_start().strip_prefix('(') {
-                    Some(scope) => {
-                        let scope = scope.split(')').next().unwrap_or_default();
-                        let scope: Vec<&str> = scope.split_whitespace().collect();
-                        !matches!(scope.as_slice(), ["self"] | ["in", "self"])
-                    }
-                    None => rest.starts_with(char::is_whitespace) || rest.is_empty(),
-                })
-        }
+        // `pub` alone: `pub(crate)`, `pub(super)` and `pub(in path)` are
+        // the crate's own, which rustdoc leaves out of its API, and
+        // `pub(self)` is private by another name.
+        Lang::Rust => d.strip_prefix("pub").is_some_and(|rest| {
+            !rest.trim_start().starts_with('(')
+                && (rest.starts_with(char::is_whitespace) || rest.is_empty())
+        }),
         Lang::TypeScript | Lang::Tsx | Lang::JavaScript => {
             if is_member {
                 // Class members are public unless they say otherwise — before
@@ -1750,9 +2003,10 @@ export class Cart {
         assert!(find(&cart.children, "format").public, "{items:?}");
     }
 
-    /// `pub(self)` is private by another name; any other `pub` counts.
+    /// Only `pub` is API: `pub(self)` is private by another name, and
+    /// `pub(crate)`, `pub(super)` are the crate's own, as rustdoc has them.
     #[test]
-    fn rust_pub_self_is_private() {
+    fn rust_only_a_plain_pub_is_public() {
         let src = "pub(self) fn a() {}\npub(in self) fn b() {}\npub(crate) fn c() {}\npub fn d() {}\nfn e() {}\npub ( super ) fn f() {}\n";
         let items = build_file(src, "rust");
         let public: Vec<(&str, bool)> = items.iter().map(|i| (i.name.as_str(), i.public)).collect();
@@ -1761,12 +2015,79 @@ export class Cart {
             [
                 ("a", false),
                 ("b", false),
-                ("c", true),
+                ("c", false),
                 ("d", true),
                 ("e", false),
-                ("f", true)
+                ("f", false)
             ]
         );
+    }
+
+    /// A struct's fields and an enum's variants are its members, with their
+    /// docs, as public as Rust has them: a field by its own `pub`, a variant
+    /// (and a variant's fields) as its enum. A trait's constants are as
+    /// public as the trait; a `static` is listed as one; `#[doc(hidden)]`
+    /// is no API; a macro's signature is its name, not its rules.
+    #[test]
+    fn rust_members_and_attributes_are_read_as_rustdoc_reads_them() {
+        let src = "/// A point.\npub struct Point {\n    /// Across.\n    pub x: f64,\n    y: f64,\n    #[doc(hidden)]\n    pub z: f64,\n}\n/// A shape.\npub enum Shape {\n    /// Round.\n    Circle { r: f64 },\n    Square(f64),\n}\nenum Private { A }\npub trait Limit {\n    /// The most.\n    const MAX: u32;\n}\n/// Errors seen.\npub static SEEN: u32 = 0;\n#[doc(hidden)]\npub fn internal() {}\n#[macro_export]\nmacro_rules! shout {\n    ($x:expr) => { $x };\n}\nmacro_rules! quiet { () => {} }\n";
+        let items = build_file(src, "rust");
+        let point = find(&items, "Point");
+        let fields: Vec<(&str, &str, &str, bool)> = point
+            .children
+            .iter()
+            .map(|c| (c.name.as_str(), c.kind.as_str(), c.doc.as_str(), c.public))
+            .collect();
+        assert_eq!(
+            fields,
+            [
+                ("x", "field", "Across.", true),
+                ("y", "field", "", false),
+                ("z", "field", "", false)
+            ]
+        );
+        assert_eq!(find(&point.children, "x").signature, "pub x: f64");
+        let shape = find(&items, "Shape");
+        let circle = find(&shape.children, "Circle");
+        assert_eq!(
+            (circle.kind.as_str(), circle.doc.as_str()),
+            ("variant", "Round.")
+        );
+        assert_eq!(circle.signature, "Circle");
+        assert!(circle.public && find(&circle.children, "r").public);
+        assert_eq!(find(&shape.children, "Square").signature, "Square(f64)");
+        assert!(!find(&find(&items, "Private").children, "A").public);
+        assert!(find(&find(&items, "Limit").children, "MAX").public);
+        let seen = find(&items, "SEEN");
+        assert_eq!(
+            (seen.kind.as_str(), seen.doc.as_str()),
+            ("static", "Errors seen.")
+        );
+        assert!(!find(&items, "internal").public);
+        let shout = find(&items, "shout");
+        assert_eq!(shout.signature, "macro_rules! shout");
+        assert!(shout.public);
+        assert!(!find(&items, "quiet").public);
+    }
+
+    /// A Lean `module`: a declaration is public only marked `public` or in
+    /// a `public section`; a file of no module, unless `private`.
+    #[test]
+    fn a_lean_modules_declarations_are_private_unless_made_public() {
+        let src = "module\n\npublic import Std\n\ndef hidden : Nat := 1\npublic def shown : Nat := 2\n\n@[expose] public section\n\ndef inside : Nat := 3\nprivate def secret : Nat := 4\n\nend\n\ndef after : Nat := 5\n";
+        let items = build_file(src, "lean");
+        let public = |name: &str| find(&items, name).public;
+        assert!(!public("hidden"), "{items:#?}");
+        assert!(public("shown"));
+        assert!(public("inside"));
+        assert!(!public("secret"));
+        assert!(!public("after"));
+        let plain = build_file(
+            "def open_ : Nat := 1\nprivate def closed : Nat := 2\n",
+            "lean",
+        );
+        assert!(find(&plain, "open_").public);
+        assert!(!find(&plain, "closed").public);
     }
 
     /// A function's nested helpers are its locals, whatever their names.
@@ -2186,18 +2507,24 @@ impl Sq {
 }
 ";
         let items = build_file(src, "rust");
+        // An impl's members are its type's, as rustdoc lists them.
+        let sq = find(&items, "Sq");
+        let names: Vec<&str> = sq.children.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["describe", "helper", "new"], "{items:?}");
+        assert!(!items.iter().any(|i| i.name == "new"), "{items:?}");
         let shape = find(&items, "Shape");
         assert!(shape.public);
         assert!(find(&shape.children, "describe").public, "{items:?}");
         let hidden = find(&items, "Hidden");
         assert!(!find(&hidden.children, "secret").public, "{items:?}");
-        let impl_describe = items
+        let impl_describe = sq
+            .children
             .iter()
             .find(|i| i.name == "describe" && i.line == 9)
             .expect("the trait impl's method is an item");
         assert!(impl_describe.public, "{items:?}");
-        assert!(!find(&items, "helper").public);
-        assert!(find(&items, "new").public);
+        assert!(!find(&sq.children, "helper").public);
+        assert!(find(&sq.children, "new").public);
     }
 
     /// GNU style puts the return type (and `static`) on the line ABOVE the
@@ -2388,6 +2715,44 @@ module.exports = {
                 "rust"
             ),
             "Prices."
+        );
+        // A block doc, a doc attribute, a README the crate includes, past
+        // other attributes — in order, as rustdoc joins them.
+        assert_eq!(
+            module_doc(
+                "/*!\n * Prices.\n *\n *     let p = 1;\n */\n#![deny(missing_docs)]\n#![doc = \"More.\"]\nuse x;\n",
+                "rust"
+            ),
+            "Prices.\n\n    let p = 1;\nMore."
+        );
+        let readme = |path: &str| (path == "../README.md").then(|| "# Shop\n\nSells.".to_string());
+        assert_eq!(
+            module_doc_with(
+                "#![doc = include_str!(\"../README.md\")]\n#![cfg_attr(docsrs, feature(doc_cfg))]\npub mod a;\n",
+                "rust",
+                &readme
+            ),
+            "# Shop\n\nSells."
+        );
+        assert_eq!(
+            module_doc_with(
+                "#![cfg_attr(\n    docsrs,\n    doc = include_str!(\"../README.md\")\n)]\nuse x;\n",
+                "rust",
+                &readme
+            ),
+            "# Shop\n\nSells."
+        );
+        // Not read where nothing reads it, and not mistaken for a doc.
+        assert_eq!(
+            module_doc("#![doc = include_str!(\"../README.md\")]\n", "rust"),
+            ""
+        );
+        assert_eq!(
+            module_doc(
+                "#![doc(html_root_url = \"https://x\")]\n#![no_std]\n",
+                "rust"
+            ),
+            ""
         );
         // Code, or an item's doc, still ends the search.
         assert_eq!(module_doc("// Copyright.\nuse x;\n//! Late.\n", "rust"), "");

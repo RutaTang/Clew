@@ -342,6 +342,53 @@ fn build_projection(cells: &mut [Cell]) -> String {
     out
 }
 
+/// Cell magics whose body is still Python (`%%time` times the cell's code):
+/// their cell is read as code; under any other (`%%bash`, `%%html`) the
+/// cell is another language's, and read as none.
+const PYTHON_CELL_MAGICS: &[&str] = &["time", "timeit", "capture", "prun", "debug"];
+
+/// The script projection as a Python language server is to read it: an
+/// IPython line magic or shell escape (`%matplotlib inline`, `!pip install
+/// x`) is no Python, and a cell under another language's cell magic
+/// (`%%bash`) holds none, so each such line is a comment — its first
+/// character a `#`, the line no longer or shorter, so every position the
+/// server answers with is one in the notebook's script.
+pub fn script_for_server(projection: &str) -> String {
+    let mut out = String::with_capacity(projection.len());
+    // In a code cell, and whether its body is commented out.
+    let mut in_code = false;
+    let mut foreign = false;
+    let mut first = false;
+    for line in projection.split_inclusive('\n') {
+        let text = line.trim_end_matches(['\n', '\r']);
+        if text.starts_with("# %%") {
+            in_code = text == "# %%";
+            foreign = false;
+            first = true;
+            out.push_str(line);
+            continue;
+        }
+        let trimmed = text.trim_start();
+        let magic = in_code && (trimmed.starts_with('%') || trimmed.starts_with('!'));
+        if in_code && first && !trimmed.is_empty() {
+            first = false;
+            if let Some(name) = trimmed.strip_prefix("%%") {
+                let name = name.split_whitespace().next().unwrap_or("");
+                foreign = !PYTHON_CELL_MAGICS.contains(&name);
+            }
+        }
+        if magic || (in_code && foreign && !trimmed.is_empty()) {
+            let indent = text.len() - trimmed.len();
+            out.push_str(&line[..indent]);
+            out.push('#');
+            out.push_str(&line[indent + trimmed.chars().next().map_or(0, char::len_utf8)..]);
+        } else {
+            out.push_str(line);
+        }
+    }
+    out
+}
+
 impl Notebook {
     /// Index of the cell containing this 1-based projection line (the nearest
     /// cell starting at or before it).
@@ -724,5 +771,55 @@ mod tests {
         // (nbformat tolerates it), which renders as an empty file.
         let nb = parse("{}").expect("tolerant");
         assert!(nb.cells.is_empty());
+    }
+
+    /// The script a language server reads: magics and shell escapes, and a
+    /// cell in another language's cell magic, are comments; nothing moves.
+    #[test]
+    fn the_servers_script_comments_out_what_is_no_python() {
+        let projection = "\
+# %% [markdown]
+# %pip in prose stays prose
+
+# %%
+%matplotlib inline
+import pandas as pd
+!pip install x
+    %timeit pd.Series()
+
+# %%
+%%bash
+echo hi
+ls
+
+# %%
+%%time
+total = 1 + 1
+";
+        let script = script_for_server(projection);
+        let expected = "\
+# %% [markdown]
+# %pip in prose stays prose
+
+# %%
+#matplotlib inline
+import pandas as pd
+#pip install x
+    #timeit pd.Series()
+
+# %%
+#%bash
+#cho hi
+#s
+
+# %%
+#%time
+total = 1 + 1
+";
+        assert_eq!(script, expected);
+        // Every line in its place, every column too.
+        for (a, b) in projection.lines().zip(script.lines()) {
+            assert_eq!(a.chars().count(), b.chars().count(), "{a:?}");
+        }
     }
 }

@@ -266,7 +266,7 @@ async fn rust_lean_and_haskell_ask_their_language_server() {
             1,
             2,
             "$/lean/plainGoal",
-            lean_answer(LeanGoal::Tactic(vec!["⊢ 1 = 1".into()])),
+            lean_answer(LeanGoal::Tactic(vec!["⊢ 1 = 1".into()], None)),
         ),
         (
             "Main.hs",
@@ -429,16 +429,26 @@ fn answers_read_as_the_popup_shows_them() {
     );
 
     assert_eq!(
-        lean_answer(LeanGoal::Tactic(Vec::new())).markdown,
+        lean_answer(LeanGoal::Tactic(Vec::new(), None)).markdown,
         "*No goals left here.*"
     );
     assert_eq!(
-        lean_answer(LeanGoal::Tactic(vec!["⊢ p".into()])).markdown,
+        lean_answer(LeanGoal::Tactic(vec!["⊢ p".into()], None)).markdown,
         "```lean\n⊢ p\n```"
     );
     assert_eq!(
-        lean_answer(LeanGoal::Tactic(vec!["⊢ p".into(), "⊢ q".into()])).markdown,
+        lean_answer(LeanGoal::Tactic(vec!["⊢ p".into(), "⊢ q".into()], None)).markdown,
         "**Goal 1 of 2**\n\n```lean\n⊢ p\n```\n\n**Goal 2 of 2**\n\n```lean\n⊢ q\n```"
+    );
+    // In a tactic proof, the term at the cursor's type too — unless it is
+    // the goal said already.
+    assert_eq!(
+        lean_answer(LeanGoal::Tactic(vec!["⊢ p".into()], Some("⊢ Nat".into()))).markdown,
+        "```lean\n⊢ p\n```\n\n**Expected type**\n\n```lean\n⊢ Nat\n```"
+    );
+    assert_eq!(
+        lean_answer(LeanGoal::Tactic(vec!["⊢ p".into()], Some("⊢ p".into()))).markdown,
+        "```lean\n⊢ p\n```"
     );
     assert_eq!(
         lean_answer(LeanGoal::Term("⊢ Nat".into())).markdown,
@@ -508,7 +518,7 @@ async fn the_margin_follows_the_lean_goals_at_the_cursor() {
             .answer
             .as_ref()
             .map(|(line, got)| (*line, got.clone())),
-        Some((1, Ok(Some(LeanGoal::Tactic(vec!["⊢ 1 = 1".into()])))))
+        Some((1, Ok(Some(LeanGoal::Tactic(vec!["⊢ 1 = 1".into()], None)))))
     );
     assert!(
         wire.lock()
@@ -550,10 +560,15 @@ async fn restart_file_has_lean_check_the_file_afresh() {
     let root = app.proj.project.as_ref().unwrap().root.clone();
     std::fs::write(root.join("Proof.lean"), "theorem t : 1 = 1 := by\n  rfl\n").unwrap();
     scan_synchronously(&mut app, root.clone());
-    open_synchronously(&mut app, "Proof.lean", None);
-    // No server yet: it says how to get one, and sends nothing.
-    let _ = app.update(Message::Proof(crate::ProofMsg::RestartFile));
-    assert!(app.status.contains("isn't running"), "{}", app.status);
+    {
+        // No Lean to be found — elan's folder, where Clew looks for one off
+        // PATH, empty too — so none starts.
+        let _no_lean = clew_core::testutil::EnvVars::new().set("ELAN_HOME", root.join("no-elan"));
+        open_synchronously(&mut app, "Proof.lean", None);
+        // No server yet: it says how to get one, and sends nothing.
+        let _ = app.update(Message::Proof(crate::ProofMsg::RestartFile));
+        assert!(app.status.contains("isn't running"), "{}", app.status);
+    }
 
     let (client, wire) = scripted_lsp_client(&root).await;
     app.proj
@@ -593,6 +608,83 @@ async fn restart_file_has_lean_check_the_file_afresh() {
     assert!(
         said[opened..].contains("\"languageId\":\"lean4\""),
         "{said}"
+    );
+}
+
+/// A Lean file that has left both panes is closed on Lean's server, which
+/// checks each open file in a process of its own, its imports loaded;
+/// opened again, it is opened again.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_lean_file_out_of_both_panes_is_closed_on_the_server() {
+    let mut app = scanned_app("lean-did-close");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    std::fs::write(root.join("Proof.lean"), "theorem t : 1 = 1 := rfl\n").unwrap();
+    scan_synchronously(&mut app, root.clone());
+    open_synchronously(&mut app, "Proof.lean", None);
+    let (client, wire) = scripted_lsp_client(&root).await;
+    app.proj
+        .link
+        .lsp
+        .insert("lean".into(), LspSlot::Ready(client.clone()));
+    let proof = root.join("Proof.lean");
+    let _ = app.open_docs_for_language("lean", &client);
+    assert!(app.proj.link.lsp_opened.contains(&proof));
+    let _ = app.update(Message::Noop);
+    assert!(
+        app.proj.link.lsp_opened.contains(&proof),
+        "on screen: kept open"
+    );
+    open_synchronously(&mut app, "src/lib.rs", None);
+    let _ = app.update(Message::Noop);
+    assert!(!app.proj.link.lsp_opened.contains(&proof), "closed");
+    let uri = lsp::client::path_to_uri(&proof);
+    let mut said = String::new();
+    for _ in 0..400 {
+        said = wire.lock().unwrap().clone();
+        if said.contains("textDocument/didClose") {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    let closed = said
+        .find("\"method\":\"textDocument/didClose\"")
+        .expect("closed on the server");
+    assert!(said[closed..].contains(&uri), "{said}");
+    // Back on screen, it is opened again.
+    open_synchronously(&mut app, "Proof.lean", None);
+    let _ = app.open_docs_for_language("lean", &client);
+    assert!(app.proj.link.lsp_opened.contains(&proof));
+}
+
+/// Getting Mathlib's build cache stops Lean's server — building what the
+/// open files import, it would build Mathlib into the folder the cache is
+/// unpacked into — and nothing starts it while the cache is got; it
+/// starts again when the fetch ends.
+#[test]
+fn lean_waits_while_mathlibs_cache_is_got() {
+    let mut app = scanned_app("lean-cache-stops-server");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    std::fs::write(root.join("Proof.lean"), "theorem t : 1 = 1 := rfl\n").unwrap();
+    scan_synchronously(&mut app, root.clone());
+    open_synchronously(&mut app, "Proof.lean", None);
+    // As the fetch starts: the server stopped, the cache being got.
+    app.reset_lsp("lean");
+    app.proj.mathlib = crate::app::proof::MathlibCache::Getting(String::new());
+    let _ = app.ensure_lsp("lean");
+    let _ = app.update(Message::Noop);
+    assert!(
+        app.proj.link.lsp.get("lean").is_none(),
+        "nothing starts Lean while the cache is got"
+    );
+    let stamp = app.stamp();
+    let _ = app.update(Message::Proof(crate::ProofMsg::MathlibGot {
+        stamp,
+        result: Err("no network".into()),
+    }));
+    assert!(
+        app.proj.link.lsp.get("lean").is_some(),
+        "the fetch ended, Lean starts again: {:?}",
+        app.proj.link.lsp.get("lean").map(|_| ())
     );
 }
 
@@ -693,7 +785,7 @@ async fn a_mathlib_project_is_offered_its_build_cache() {
         stamp,
         result: Ok(()),
     }));
-    assert_eq!(app.proj.mathlib, crate::app::proof::MathlibCache::Ready);
+    assert_eq!(app.proj.mathlib, crate::app::proof::MathlibCache::Built);
     assert!(app.status.contains("in place"), "{}", app.status);
     let mut said = String::new();
     for _ in 0..400 {
@@ -770,6 +862,26 @@ async fn a_lean_file_of_another_lake_project_restarts_lean_there() {
     open_synchronously(&mut app, "verification/More.lean", None);
     let _ = app.update(Message::Noop);
     assert!(ready(&app), "the same project: the server stays");
+    // A dependency's file, where go to definition goes: the project's
+    // server serves it, with the dependency on its path.
+    for (rel, text) in [
+        ("verification/.lake/packages/mathlib/lakefile.lean", ""),
+        (
+            "verification/.lake/packages/mathlib/Mathlib/Logic/Basic.lean",
+            "theorem m : True := trivial\n",
+        ),
+    ] {
+        let path = root.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+    open_synchronously(
+        &mut app,
+        "verification/.lake/packages/mathlib/Mathlib/Logic/Basic.lean",
+        None,
+    );
+    let _ = app.update(Message::Noop);
+    assert!(ready(&app), "a dependency's file: the server stays");
     open_synchronously(&mut app, "verification/extracted/Funs.lean", None);
     let _ = app.update(Message::Noop);
     assert!(!ready(&app), "another project: the server is started again");

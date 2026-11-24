@@ -709,9 +709,8 @@ pub(crate) fn languages_section(app: &App) -> Element<'_, Message> {
                 .unwrap_or_else(|| tr!("no server").to_string()),
         };
         let (status, action) = app.lsp_row(language);
-        let named = crate::highlight::lang_name(language)
-            .map(str::to_string)
-            .unwrap_or_else(|| language.clone());
+        // "Python", or "Python, second server" for the one run beside it.
+        let named = crate::app::languages::slot_label(language);
         let action: Element<'_, Message> = match action {
             Some((label, msg)) => {
                 super::heard::about(&named, || form::action(label, Some(msg))).into()
@@ -719,9 +718,7 @@ pub(crate) fn languages_section(app: &App) -> Element<'_, Message> {
             None => space().width(0).into(),
         };
         servers.push(form::item(
-            crate::highlight::lang_name(language)
-                .map(str::to_string)
-                .unwrap_or_else(|| language.clone()),
+            named.clone(),
             // The server, and under it how it stands — a line of its own,
             // so begun as a sentence is: the status bar's "pyright: ready"
             // read here as a bare "ready".
@@ -1016,6 +1013,18 @@ fn python_block<'a>(
             PythonSource::Managed(PythonEnvKind::Pyenv) => {
                 tr!("The pyenv Python this project pins")
             }
+            PythonSource::Managed(PythonEnvKind::Uv) => {
+                tr!("The uv Python this project pins")
+            }
+            PythonSource::Managed(PythonEnvKind::Hatch) => {
+                tr!("This project's Hatch environment")
+            }
+            PythonSource::Managed(PythonEnvKind::Conda) => {
+                tr!("The conda environment this project names")
+            }
+            PythonSource::Managed(PythonEnvKind::Pdm) => {
+                tr!("The Python PDM uses for this project")
+            }
             PythonSource::Managed(_) => tr!("Found for this project"),
             // Nobody named one: the server looks for its own. "None" read
             // as though Python went without an interpreter.
@@ -1052,6 +1061,8 @@ fn python_block<'a>(
                 PythonEnvKind::Conda => "conda",
                 PythonEnvKind::Pyenv => "pyenv",
                 PythonEnvKind::Uv => "uv",
+                PythonEnvKind::Hatch => "Hatch",
+                PythonEnvKind::Pdm => "PDM",
                 PythonEnvKind::System => tr!("System"),
             };
             let label = match (&candidate.kind, &candidate.version) {
@@ -1587,7 +1598,8 @@ fn servers_block(app: &App) -> Vec<Element<'_, Message>> {
     let drafts = &app.proj.lang_drafts;
     let mut rows = Vec::new();
     for (language, choice) in choices.servers.iter().flatten() {
-        let name = crate::highlight::lang_name(language).unwrap_or(language.as_str());
+        let name = crate::app::languages::slot_label(language);
+        let name = name.as_str();
         let remove = choose_with(choices, |c| {
             c.servers.get_or_insert_default().remove(language);
         });
@@ -1655,6 +1667,19 @@ fn servers_block(app: &App) -> Vec<Element<'_, Message>> {
         tr!("Arguments"),
         None,
         draft_field(app, tr!("Optional"), F::ServerArgs),
+    ));
+    // In place of the language's server, or beside it: a linter (ruff)
+    // adds its warnings to pyright's, and pyright still answers the rest.
+    rows.push(form::toggle(
+        tr!("Run beside the language's server"),
+        Some(
+            tr!(
+                "Adds its warnings to those of the language's server, as a linter such as ruff does, instead of replacing it."
+            )
+            .into(),
+        ),
+        drafts.server_beside,
+        |on| Message::Languages(L::ServerBeside(on)),
     ));
     rows.push(form::plain(
         row![

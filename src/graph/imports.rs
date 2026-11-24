@@ -153,6 +153,10 @@ pub struct Resolver {
     /// directory it is imported from (its package's source root) is not
     /// written down anywhere clew reads. See [`Resolver::resolve_lean`].
     lean_modules: Arc<HashMap<String, Vec<PathBuf>>>,
+    /// The folders a Lean module may be found under, as the project's
+    /// lakefiles say: each Lake package's own and the `srcDir`s it names.
+    /// `None` for a project with no lakefile, where any folder may be.
+    lean_roots: Option<Vec<PathBuf>>,
     /// The project's conventional Java source roots, sorted: every
     /// `src/main/java` and `src/test/java`, one pair per module of a
     /// multi-module build. See [`Resolver::resolve_java`].
@@ -442,8 +446,9 @@ impl RustFacts {
         for r in imports {
             if r.is_mod_decl {
                 // Only the file's own children; `a::b` is inside inline `a`.
-                if !r.module.contains("::") {
-                    facts.mods.insert(rust_identifier(&r.module).to_string());
+                let (name, _) = clew_core::rustscope::mod_decl_parts(&r.module);
+                if !name.contains("::") {
+                    facts.mods.insert(rust_identifier(name).to_string());
                 }
             } else {
                 let u = RustUse::parse(&r.module);
@@ -618,6 +623,7 @@ fn is_importable_rust_item(kind: &str) -> bool {
             | "module"
             | "macro"
             | "constant"
+            | "static"
     )
 }
 
@@ -819,6 +825,25 @@ impl Resolver {
             }
         }
         self.python_roots = python_roots;
+        let mut lean_roots: Vec<PathBuf> = Vec::new();
+        for (rel, dirs) in &manifests.lean {
+            let Some(package) = self.root.join(rel).parent().map(normalize) else {
+                continue;
+            };
+            if !package.starts_with(&self.root) {
+                continue;
+            }
+            for dir in dirs {
+                let dir = normalize(&package.join(dir));
+                if dir.starts_with(&package) && !lean_roots.contains(&dir) {
+                    lean_roots.push(dir);
+                }
+            }
+            if !lean_roots.contains(&package) {
+                lean_roots.push(package);
+            }
+        }
+        self.lean_roots = (!lean_roots.is_empty()).then_some(lean_roots);
         self
     }
 
@@ -947,6 +972,7 @@ impl Resolver {
             ts_configs: Arc::default(),
             packages: Arc::new(packages),
             lean_modules: Arc::new(lean_modules),
+            lean_roots: None,
             java_roots,
             php_psr4: Vec::new(),
             haskell_roots,
@@ -1408,16 +1434,46 @@ impl Resolver {
             }
             root
         };
-        files
+        // Where the project's lakefiles say modules are found: a file found
+        // under another folder is no module of that name (`MyLib/Lean/Meta`
+        // is `MyLib.Lean.Meta`, never core's `Lean.Meta`).
+        let candidates: Vec<(PathBuf, &PathBuf)> = files
             .iter()
             .filter(|f| f.as_path() != from)
             .map(|f| (source_root(f), f))
+            .filter(|(root, _)| {
+                self.lean_roots
+                    .as_ref()
+                    .is_none_or(|roots| roots.contains(root))
+            })
+            .collect();
+        if candidates.is_empty() && self.lean_roots.is_some() {
+            let package = module.split('.').next().unwrap_or(module);
+            return Target::External(package.to_string());
+        }
+        // Under a root holding the importer, the deepest; else — with
+        // lakefiles to say so — under one of the importer's own package (a
+        // `srcDir` library a root `Main.lean` imports), else the one of
+        // another package of the project (`require foo from "../foo"`).
+        let holding = candidates
+            .iter()
             .filter(|(root, _)| from.starts_with(root))
-            .max_by_key(|(root, _)| root.components().count())
-            .map_or_else(
-                || Target::Unresolved(module.to_string()),
-                |(_, f)| Target::Internal(f.clone()),
-            )
+            .max_by_key(|(root, _)| root.components().count());
+        let found = holding.or_else(|| {
+            let roots = self.lean_roots.as_ref()?;
+            let package = roots
+                .iter()
+                .filter(|r| from.starts_with(r))
+                .max_by_key(|r| r.components().count())?;
+            candidates
+                .iter()
+                .find(|(root, _)| root.starts_with(package))
+                .or_else(|| (candidates.len() == 1).then(|| &candidates[0]))
+        });
+        found.map_or_else(
+            || Target::Unresolved(module.to_string()),
+            |(_, f)| Target::Internal((*f).clone()),
+        )
     }
 
     // --- Dart ---
@@ -1471,7 +1527,25 @@ impl Resolver {
             // `clew_core::rustscope::scope_rust_imports`): its file lives one
             // directory further down, `a/b.rs`.
             let dir = self.rust_mod_dir(from);
-            let segs = rust_path_segments(&raw.module);
+            let (name, path) = clew_core::rustscope::mod_decl_parts(&raw.module);
+            let segs = rust_path_segments(name);
+            // `#[path = "…"]` names the file: from the declaring file's
+            // folder — or, inside inline modules, from the module's own
+            // folder and theirs below it, as rustc finds it.
+            if let Some(path) = path {
+                let base = match segs.split_last() {
+                    Some((_, inline)) if !inline.is_empty() => {
+                        inline.iter().fold(dir.clone(), |d, s| d.join(s))
+                    }
+                    _ => from.parent().unwrap_or(&self.root).to_path_buf(),
+                };
+                let file = normalize(&base.join(path));
+                let target = match self.has_file(&file) {
+                    true => Target::Internal(file),
+                    false => Target::Unresolved(raw.module.clone()),
+                };
+                return (target, false);
+            }
             let target = self
                 .rust_child_module_file(from, &dir, &segs)
                 .map(Target::Internal)
@@ -1842,28 +1916,58 @@ impl Resolver {
                     _ => Target::Unresolved(format!("{dots}{body}")),
                 });
         }
-        // Absolute: try the project root, the source roots its
-        // `pyproject.toml` names (setuptools' `where`, maturin's
-        // `python-source`, pytest's `pythonpath`, …), and each ancestor of
-        // `from` as a source root (covers `src/`-layout and package-relative
-        // resolution), then `src/` itself, as Pyright does: a `tests/` file's
-        // `from cart import` of `src/cart.py` (pytest's `pythonpath = src`)
-        // read as a package.
-        let mut bases: Vec<PathBuf> = vec![self.root.clone()];
-        bases.extend(self.python_roots.iter().cloned());
-        let mut p = from.parent();
-        while let Some(d) = p {
-            bases.push(d.to_path_buf());
-            if d == self.root {
-                break;
+        // Absolute: the bases Python itself searches, in its order. First
+        // the directory the file runs from: its own folder for a script, or,
+        // for a module of a package, the folder above its outermost package
+        // (pytest's rootdir insertion, `python -m`). Then the source roots
+        // the project's `pyproject.toml` names (setuptools' `where`,
+        // maturin's `python-source`, pytest's `pythonpath`, …). Then the
+        // project root and `src/`, as Pyright does: a `tests/` file's
+        // `from cart import` of `src/cart.py` read as a package. Last, the
+        // folders between that base and the root that are not packages
+        // themselves (a service's folder in a monorepo).
+        //
+        // A folder inside a package is never a base: `import json` in
+        // `flask/json/__init__.py` is the standard library's `json`, never
+        // the file itself, nor `flask/typing.py` for `import typing`. And a
+        // standard-library name is looked for only where Python would find
+        // a file before its own: the running folder and the named roots.
+        let package_dir = |d: &Path| {
+            self.has_file(&d.join("__init__.py")) || self.has_file(&d.join("__init__.pyi"))
+        };
+        let mut running = from.parent().unwrap_or(&self.root);
+        while running != self.root && package_dir(running) {
+            match running.parent() {
+                Some(up) => running = up,
+                None => break,
             }
-            p = d.parent();
         }
-        bases.push(self.root.join("src"));
-        for base in bases {
+        let mut bases: Vec<PathBuf> = vec![running.to_path_buf()];
+        bases.extend(self.python_roots.iter().cloned());
+        let stdlib = segs.first().is_some_and(|top| python_stdlib(top));
+        if !stdlib {
+            bases.push(self.root.clone());
+            bases.push(self.root.join("src"));
+            let mut p = running.parent();
+            while let Some(d) = p {
+                if !d.starts_with(&self.root) || d == self.root {
+                    break;
+                }
+                if !package_dir(d) {
+                    bases.push(d.to_path_buf());
+                }
+                p = d.parent();
+            }
+        }
+        let mut seen: Vec<&Path> = Vec::new();
+        for base in &bases {
+            if seen.contains(&base.as_path()) {
+                continue;
+            }
+            seen.push(base);
             if let Some(f) = name
-                .and_then(|name| self.python_module_file(&base, &named(name)))
-                .or_else(|| self.python_module_file(&base, &segs))
+                .and_then(|name| self.python_module_file(base, &named(name)))
+                .or_else(|| self.python_module_file(base, &segs))
             {
                 return Target::Internal(f);
             }
@@ -4198,6 +4302,44 @@ fn rel_path(root: &Path, path: &Path) -> String {
         .unwrap_or_else(|| ".".to_string())
 }
 
+/// Whether `top` is a module of Python's standard library: the names
+/// `sys.stdlib_module_names` lists (3.13, the private `_` ones left out),
+/// and the ones recent releases removed that older projects still import.
+fn python_stdlib(top: &str) -> bool {
+    PY_STDLIB.binary_search(&top).is_ok()
+}
+
+/// Sorted, for [`python_stdlib`].
+#[rustfmt::skip]
+const PY_STDLIB: &[&str] = &[
+    "__future__", "abc", "aifc", "antigravity", "argparse", "array", "ast", "asynchat", "asyncio",
+    "asyncore", "atexit", "audioop", "base64", "bdb", "binascii", "bisect", "builtins", "bz2",
+    "cProfile", "calendar", "cgi", "cgitb", "chunk", "cmath", "cmd", "code", "codecs", "codeop",
+    "collections", "colorsys", "compileall", "concurrent", "configparser", "contextlib",
+    "contextvars", "copy", "copyreg", "crypt", "csv", "ctypes", "curses", "dataclasses",
+    "datetime", "dbm", "decimal", "difflib", "dis", "distutils", "doctest", "email", "encodings",
+    "ensurepip", "enum", "errno", "faulthandler", "fcntl", "filecmp", "fileinput", "fnmatch",
+    "fractions", "ftplib", "functools", "gc", "genericpath", "getopt", "getpass", "gettext",
+    "glob", "graphlib", "grp", "gzip", "hashlib", "heapq", "hmac", "html", "http", "idlelib",
+    "imaplib", "imghdr", "imp", "importlib", "inspect", "io", "ipaddress", "itertools", "json",
+    "keyword", "lib2to3", "linecache", "locale", "logging", "lzma", "mailbox", "mailcap",
+    "marshal", "math", "mimetypes", "mmap", "modulefinder", "msilib", "msvcrt", "multiprocessing",
+    "netrc", "nis", "nntplib", "nt", "ntpath", "nturl2path", "numbers", "opcode", "operator",
+    "optparse", "os", "ossaudiodev", "pathlib", "pdb", "pickle", "pickletools", "pipes",
+    "pkgutil", "platform", "plistlib", "poplib", "posix", "posixpath", "pprint", "profile",
+    "pstats", "pty", "pwd", "py_compile", "pyclbr", "pydoc", "pydoc_data", "pyexpat", "queue",
+    "quopri", "random", "re", "readline", "reprlib", "resource", "rlcompleter", "runpy", "sched",
+    "secrets", "select", "selectors", "shelve", "shlex", "shutil", "signal", "site", "smtpd",
+    "smtplib", "sndhdr", "socket", "socketserver", "spwd", "sqlite3", "sre_compile",
+    "sre_constants", "sre_parse", "ssl", "stat", "statistics", "string", "stringprep", "struct",
+    "subprocess", "sunau", "symtable", "sys", "sysconfig", "syslog", "tabnanny", "tarfile",
+    "telnetlib", "tempfile", "termios", "textwrap", "this", "threading", "time", "timeit",
+    "tkinter", "token", "tokenize", "tomllib", "trace", "traceback", "tracemalloc", "tty",
+    "turtle", "turtledemo", "types", "typing", "unicodedata", "unittest", "urllib", "uu", "uuid",
+    "venv", "warnings", "wave", "weakref", "webbrowser", "winreg", "winsound", "wsgiref",
+    "xdrlib", "xml", "xmlrpc", "zipapp", "zipfile", "zipimport", "zlib", "zoneinfo",
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4865,6 +5007,46 @@ mod tests {
         assert_eq!(at("requests"), Target::External("requests".into()));
     }
 
+    /// `#[path = "…"] mod x;` is the file it names: from the declaring
+    /// file's folder, or inside an inline module from that module's folder.
+    #[test]
+    fn a_rust_module_with_a_path_attribute_is_the_file_it_names() {
+        let root = Path::new("/proj");
+        let r = resolver(
+            root,
+            &[
+                "src/lib.rs",
+                "src/sys/windows.rs",
+                "src/net.rs",
+                "src/net/inner/x.rs",
+                "src/imp.rs",
+            ],
+        );
+        let decl = |module: &str| RawImport {
+            module: module.into(),
+            line: 1,
+            is_mod_decl: true,
+        };
+        let at = |module: &str, from: &str| r.resolve(&decl(module), &root.join(from), "rust");
+        assert_eq!(
+            at("os=sys/windows.rs", "src/lib.rs"),
+            Target::Internal(root.join("src/sys/windows.rs"))
+        );
+        // From a module file too, its own folder: `src/`, not `src/net/`.
+        assert_eq!(
+            at("imp=imp.rs", "src/net.rs"),
+            Target::Internal(root.join("src/imp.rs"))
+        );
+        assert_eq!(
+            at("inner::x=x.rs", "src/net.rs"),
+            Target::Internal(root.join("src/net/inner/x.rs"))
+        );
+        assert_eq!(
+            at("gone=nowhere.rs", "src/lib.rs"),
+            Target::Unresolved("gone=nowhere.rs".into())
+        );
+    }
+
     #[test]
     fn resolves_rust_mod_and_use_paths() {
         let root = Path::new("/proj");
@@ -5001,6 +5183,52 @@ mod tests {
             Target::External("Mathlib".into())
         );
         assert_eq!(at("Init", "main.lean"), Target::External("Init".into()));
+    }
+
+    /// With lakefiles, a Lean module is found under a Lake package's folder
+    /// or a `srcDir` it names: a library in `lib/` imported from the root's
+    /// `Main.lean`, a sibling package; never a project folder that only
+    /// looks like the toolchain's module (`MyLib/Lean/Meta.lean` is no
+    /// `Lean.Meta`).
+    #[test]
+    fn a_lean_import_resolves_where_the_lakefiles_say() {
+        let root = Path::new("/p");
+        let r = resolver(
+            root,
+            &[
+                "lakefile.lean",
+                "Main.lean",
+                "lib/Extra/Thing.lean",
+                "MyLib/Foo.lean",
+                "MyLib/Lean/Meta.lean",
+                "sib/lakefile.lean",
+                "sib/Sib/Core.lean",
+            ],
+        )
+        .with_manifests(&clew_protocol::SourceManifests {
+            lean: vec![
+                ("lakefile.lean".into(), vec!["lib".into()]),
+                ("sib/lakefile.lean".into(), Vec::new()),
+            ],
+            ..Default::default()
+        });
+        let at = |module: &str, from: &str| r.resolve(&ri(module), &root.join(from), "lean");
+        assert_eq!(
+            at("Extra.Thing", "Main.lean"),
+            Target::Internal(root.join("lib/Extra/Thing.lean"))
+        );
+        assert_eq!(
+            at("MyLib.Lean.Meta", "MyLib/Foo.lean"),
+            Target::Internal(root.join("MyLib/Lean/Meta.lean"))
+        );
+        assert_eq!(
+            at("Lean.Meta", "MyLib/Foo.lean"),
+            Target::External("Lean".into())
+        );
+        assert_eq!(
+            at("Sib.Core", "Main.lean"),
+            Target::Internal(root.join("sib/Sib/Core.lean"))
+        );
     }
 
     /// PHP names resolve by the PSR-4 map composer.json gives (`autoload` and
@@ -5406,6 +5634,131 @@ mod tests {
             r.resolve(&ri("cart"), &root.join("src/main.py"), "python"),
             Target::Internal(root.join("src/cart.py"))
         );
+    }
+
+    /// A package's module named like the standard library's (Flask's
+    /// `flask/json/`, `flask/typing.py`) is never what `import json` or
+    /// `import typing` reads, in the package or beside it: Python 3's
+    /// imports are absolute, and a folder inside a package is not on
+    /// `sys.path`. Nor is a package's module what a third-party name reads.
+    #[test]
+    fn a_python_package_module_never_shadows_an_absolute_import() {
+        let root = Path::new("/proj");
+        let r = resolver(
+            root,
+            &[
+                "src/flask/__init__.py",
+                "src/flask/app.py",
+                "src/flask/typing.py",
+                "src/flask/json/__init__.py",
+                "src/flask/json/provider.py",
+                "src/flask/requests.py",
+            ],
+        );
+        let json_init = root.join("src/flask/json/__init__.py");
+        let app = root.join("src/flask/app.py");
+        assert_eq!(
+            r.resolve(&ri("json"), &json_init, "python"),
+            Target::External("json".into())
+        );
+        assert_eq!(
+            r.resolve(&ri("typing"), &app, "python"),
+            Target::External("typing".into())
+        );
+        assert_eq!(
+            r.resolve(&ri("requests"), &app, "python"),
+            Target::External("requests".into())
+        );
+        // The package's own names still resolve, from inside and outside.
+        assert_eq!(
+            r.resolve(&ri("flask.typing"), &app, "python"),
+            Target::Internal(root.join("src/flask/typing.py"))
+        );
+        assert_eq!(
+            r.resolve(&ri("flask.json.provider"), &json_init, "python"),
+            Target::Internal(root.join("src/flask/json/provider.py"))
+        );
+    }
+
+    /// A script's own folder is the first place its imports are found, so a
+    /// file named like the standard library's beside a script does shadow it,
+    /// as it does when Python runs that script; elsewhere the standard
+    /// library's name stays external.
+    #[test]
+    fn a_python_script_folder_is_searched_first() {
+        let root = Path::new("/proj");
+        let r = resolver(
+            root,
+            &[
+                "tools/run.py",
+                "tools/random.py",
+                "tools/helpers.py",
+                "app/__init__.py",
+                "app/main.py",
+                "random.py",
+            ],
+        );
+        assert_eq!(
+            r.resolve(&ri("random"), &root.join("tools/run.py"), "python"),
+            Target::Internal(root.join("tools/random.py"))
+        );
+        assert_eq!(
+            r.resolve(&ri("helpers"), &root.join("tools/run.py"), "python"),
+            Target::Internal(root.join("tools/helpers.py"))
+        );
+        // `app/main.py` runs from the root (its package's parent): the
+        // root's `random.py` is what Python would find.
+        assert_eq!(
+            r.resolve(&ri("random"), &root.join("app/main.py"), "python"),
+            Target::Internal(root.join("random.py"))
+        );
+        // A tool's sibling is not on the package's path.
+        assert_eq!(
+            r.resolve(&ri("helpers"), &root.join("app/main.py"), "python"),
+            Target::External("helpers".into())
+        );
+    }
+
+    /// A service's folder in a monorepo is a base for its own packages.
+    #[test]
+    fn a_python_monorepo_service_folder_holds_its_packages() {
+        let root = Path::new("/proj");
+        let r = resolver(
+            root,
+            &[
+                "services/api/app/__init__.py",
+                "services/api/app/models.py",
+                "services/api/app/routes/__init__.py",
+                "services/api/app/routes/users.py",
+            ],
+        );
+        assert_eq!(
+            r.resolve(
+                &ri("app.models"),
+                &root.join("services/api/app/routes/users.py"),
+                "python"
+            ),
+            Target::Internal(root.join("services/api/app/models.py"))
+        );
+    }
+
+    #[test]
+    fn the_python_stdlib_list_is_sorted_and_answers() {
+        assert!(PY_STDLIB.windows(2).all(|w| w[0] < w[1]));
+        for name in [
+            "json",
+            "typing",
+            "os",
+            "asyncio",
+            "cProfile",
+            "__future__",
+            "distutils",
+        ] {
+            assert!(python_stdlib(name), "{name}");
+        }
+        for name in ["flask", "requests", "numpy", "_json"] {
+            assert!(!python_stdlib(name), "{name}");
+        }
     }
 
     /// `.`, `..` and a path ending in `/` name a directory, whose index is

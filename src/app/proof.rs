@@ -49,6 +49,12 @@ pub struct LeanGoals {
     /// The server's diagnostics version when asked: moved on, the file has
     /// been checked further, and what it says there may have changed.
     pub(crate) checked: u64,
+    /// Lean had not checked as far as the line when asked (its
+    /// `$/lean/fileProgress`): asked again once it has. Lean answers a
+    /// line it has not reached once it gets there — or the request runs
+    /// out of time first — and a file that checks clean says no more
+    /// diagnostics: its goals stayed "timed out" for good.
+    pub(crate) behind: bool,
     /// Which asking is the latest: an answer for an older one is dropped.
     pub(crate) token: u64,
     /// Asked and not yet answered (or about to be: the cursor is resting).
@@ -99,9 +105,12 @@ pub enum MathlibCache {
     /// Not looked at yet.
     #[default]
     Unknown,
-    /// Nothing to get: no Mathlib, its build in place, or a project on
-    /// another host.
+    /// Nothing to get: no Mathlib, or a project on another host.
     Ready,
+    /// The project uses Mathlib and its build is in place: got again from
+    /// the palette, as after `lake update` moves Mathlib on and its build
+    /// is out of date.
+    Built,
     /// The project uses Mathlib and its build is not there.
     Missing,
     /// `lake exe cache get` at work: the last line it said.
@@ -353,11 +362,22 @@ impl App {
             .is_some_and(|v| v.lang_key == Some("lean"))
     }
 
-    /// Keep the margin's Goals up with where the cursor is: the first Lean
-    /// file read turns the margin to them (once — the tab is the reader's
-    /// after that); while they are shown, the cursor resting somewhere new,
-    /// or the server having checked more of the file, asks the server
-    /// again. Run after every update ([`App::update`]).
+    /// The folder, relative to the project, of the Lake project of the
+    /// Lean file read, in a remote project: read from its listing, its
+    /// files being on its host. `None` for the project's own, or no Lean
+    /// file read.
+    pub(crate) fn remote_lake_folder(&self) -> Option<String> {
+        let project = self.proj.project.as_ref()?;
+        let file = self.lean_file()?;
+        let rel = file
+            .strip_prefix(&project.root)
+            .ok()?
+            .to_string_lossy()
+            .replace('\\', "/");
+        let folder = clew_core::lake_folder_in(project.files.iter().map(|f| f.rel.as_str()), &rel);
+        (!folder.is_empty()).then_some(folder)
+    }
+
     /// The Lean file being read: the active one, else any open.
     pub(crate) fn lean_file(&self) -> Option<PathBuf> {
         self.active_viewer()
@@ -377,13 +397,21 @@ impl App {
     /// imports resolve (a repository's proofs and its extracted code are
     /// often two). `None` while it is where it should be.
     fn sync_lean_root(&mut self) -> Option<Task<Message>> {
-        if self.connection.is_remote() || !self.reading_lean() {
+        if !self.reading_lean() {
             return None;
         }
         if !matches!(self.proj.link.lsp.get("lean"), Some(LspSlot::Ready(_))) {
             return None;
         }
-        let lake = self.lake_of_lean_file()?;
+        let lake = match self.connection.is_remote() {
+            // Read from the project's listing: its files are on its host.
+            true => {
+                let root = self.proj.project.as_ref()?.root.clone();
+                self.remote_lake_folder()
+                    .map_or_else(|| root.clone(), |folder| root.join(folder))
+            }
+            false => self.lake_of_lean_file()?,
+        };
         let started = self.proj.link.lean_root.as_ref()?;
         if *started == lake {
             return None;
@@ -394,22 +422,61 @@ impl App {
     }
 
     /// The Lake project of the Lean file read — the folder of the nearest
-    /// lakefile above it in the project, else the project — looked for on
-    /// disk once per file: this runs on every message while one is read.
+    /// lakefile above it in the project, else the project; a dependency's
+    /// file, the project's holding it — looked for on disk once per file:
+    /// this runs on every message while one is read. `None` for a file
+    /// outside the project (the toolchain's sources, where go to
+    /// definition goes): the server that runs serves it where it is.
     fn lake_of_lean_file(&mut self) -> Option<PathBuf> {
         let file = self.lean_file()?;
         if let Some((known, lake)) = &self.proj.lean_lake
             && *known == file
         {
-            return Some(lake.clone());
+            return lake.clone();
         }
         let root = self.proj.project.as_ref()?.root.clone();
         let lake = clew_core::lake_root(&root, &file);
         self.proj.lean_lake = Some((file, lake.clone()));
-        Some(lake)
+        lake
     }
 
+    /// Lean's server checks each document it holds open in a process of
+    /// its own, with all the file imports loaded (Mathlib's take
+    /// gigabytes), for as long as it is open: a Lean file that has left
+    /// both panes is closed on the server, as an editor closes it with its
+    /// tab. Opened again with the file ([`App::ensure_lsp`]). Kept open,
+    /// every file read in a session held its worker, until memory ran out.
+    fn sync_lean_docs(&mut self) {
+        let Some(LspSlot::Ready(client)) = self.proj.link.lsp.get("lean") else {
+            return;
+        };
+        let panes = &self.proj.panes;
+        let gone: Vec<PathBuf> = self
+            .proj
+            .link
+            .lsp_opened
+            .iter()
+            .filter(|p| crate::highlight::detect(p) == Some("lean"))
+            .filter(|p| !panes.iter().flatten().any(|v| v.lsp_path() == **p))
+            .cloned()
+            .collect();
+        if gone.is_empty() {
+            return;
+        }
+        let client = client.clone();
+        for path in gone {
+            client.did_close(&path);
+            self.proj.link.lsp_opened.remove(&path);
+        }
+    }
+
+    /// Keep the margin's Goals up with where the cursor is: the first Lean
+    /// file read turns the margin to them (once — the tab is the reader's
+    /// after that); while they are shown, the cursor resting somewhere new,
+    /// or the server having checked more of the file, asks the server
+    /// again. Run after every update ([`App::update`]).
     pub(crate) fn sync_lean_goals(&mut self) -> Option<Task<Message>> {
+        self.sync_lean_docs();
         if let Some(restart) = self.sync_lean_root() {
             return Some(restart);
         }
@@ -420,18 +487,39 @@ impl App {
         // never offered the cache: Lean built all of Mathlib, for hours.
         if self.reading_lean() && !matches!(self.proj.mathlib, MathlibCache::Getting(_)) {
             if self.connection.is_remote() {
+                // Its build is on its host, not looked at from here: one
+                // whose file imports Mathlib may get the cache, from the
+                // palette.
                 if self.proj.mathlib == MathlibCache::Unknown {
-                    self.proj.mathlib = MathlibCache::Ready;
+                    let mathlib = self.active_viewer().is_some_and(|v| {
+                        clew_core::lean_header_imports(&v.source)
+                            .iter()
+                            .any(|m| m == "Mathlib" || m.starts_with("Mathlib."))
+                    });
+                    self.proj.mathlib = match mathlib {
+                        true => MathlibCache::Built,
+                        false => MathlibCache::Ready,
+                    };
                 }
             } else if let Some(lake) = self.lake_of_lean_file()
                 && self.proj.mathlib_root.as_ref() != Some(&lake)
             {
-                self.proj.mathlib = match clew_core::mathlib_build_missing(&lake) {
-                    Some(_) => MathlibCache::Missing,
+                self.proj.mathlib = match clew_core::mathlib_build(&lake) {
+                    Some((_, false)) => MathlibCache::Missing,
+                    Some((_, true)) => MathlibCache::Built,
                     None => MathlibCache::Ready,
                 };
                 self.proj.mathlib_root = Some(lake);
             }
+        }
+        // A folder of a Lake project's sources, opened on its own: Lean finds
+        // none of the project's modules. Looked for once.
+        if self.reading_lean()
+            && self.proj.lean_outer.is_none()
+            && !self.connection.is_remote()
+            && let Some(root) = self.proj.project.as_ref().map(|p| p.root.clone())
+        {
+            self.proj.lean_outer = Some(clew_core::lake_project_above(&root));
         }
         if self.reading_lean() && !self.lean_goals_offered {
             self.lean_goals_offered = true;
@@ -449,16 +537,20 @@ impl App {
         if !matches!(self.proj.link.lsp.get("lean"), Some(LspSlot::Ready(_))) {
             return None;
         }
-        let checked = match self.proj.link.lsp_snapshots.get("lean") {
-            Some(Ok(snapshot)) => snapshot.diag_version,
-            _ => 0,
+        let (checked, behind) = match self.proj.link.lsp_snapshots.get("lean") {
+            Some(Ok(snapshot)) => (
+                snapshot.diag_version,
+                snapshot.checking(&abs).is_some_and(|at| at <= line),
+            ),
+            _ => (0, false),
         };
-        if self
-            .proj
-            .lean_goals
-            .as_ref()
-            .is_some_and(|g| g.abs == abs && g.line == line && g.col == col && g.checked == checked)
-        {
+        if self.proj.lean_goals.as_ref().is_some_and(|g| {
+            g.abs == abs
+                && g.line == line
+                && g.col == col
+                && g.checked == checked
+                && g.behind == behind
+        }) {
             return None;
         }
         self.lean_goals_seq += 1;
@@ -475,6 +567,7 @@ impl App {
             line,
             col,
             checked,
+            behind,
             token,
             asking: true,
             answer,
@@ -518,8 +611,11 @@ impl App {
     /// Mathlib, for hours, with nothing said of it.
     fn on_get_mathlib_cache(&mut self) -> Task<Message> {
         use iced::futures::channel::mpsc;
-        if matches!(self.proj.mathlib, MathlibCache::Getting(_)) || self.connection.is_remote() {
+        if matches!(self.proj.mathlib, MathlibCache::Getting(_)) {
             return Task::none();
+        }
+        if self.connection.is_remote() {
+            return self.get_remote_mathlib_cache();
         }
         // In the Lake project whose Mathlib is missing: `lake exe cache get`
         // in a folder with no lakefile finds no Mathlib to get.
@@ -542,6 +638,12 @@ impl App {
             }
         };
         self.proj.mathlib = MathlibCache::Getting(String::new());
+        // Lean's server stops while the cache is put in place: building
+        // what the open files import, it builds Mathlib itself, into the
+        // same folder `cache get` unpacks into. Started again once it ends
+        // ([`App::ensure_lsp`] waits for that).
+        self.reset_lsp("lean");
+        self.proj.lean_goals = None;
         let stamp = self.stamp();
         let (tx, rx) = mpsc::unbounded::<Message>();
         std::thread::spawn(move || {
@@ -558,6 +660,72 @@ impl App {
         Task::run(rx, std::convert::identity)
     }
 
+    /// Get Mathlib's build cache where a remote project is: `lake exe cache
+    /// get` run on its host (`RunTask`), in the Lake project of the Lean
+    /// file read, said on the Goals' card as it goes.
+    fn get_remote_mathlib_cache(&mut self) -> Task<Message> {
+        let Some(rel) = self.lean_file().and_then(|f| self.project_rel(&f)) else {
+            self.status = tr!("Open a Lean file of the project first.").into();
+            return Task::none();
+        };
+        let remote = match self.remote_run(clew_protocol::ProjectTask::MathlibCache { file: rel }) {
+            Ok(remote) => remote,
+            Err(error) => {
+                self.status = error;
+                return Task::none();
+            }
+        };
+        self.proj.mathlib = MathlibCache::Getting(String::new());
+        self.reset_lsp("lean");
+        self.proj.lean_goals = None;
+        let stamp = self.stamp();
+        let stream = iced::stream::channel(
+            16,
+            move |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
+                use iced::futures::SinkExt;
+                use tokio::io::AsyncBufReadExt;
+                let crate::app::debug::RemoteRun { stdin, stdout, end } = remote;
+                let mut lines = tokio::io::BufReader::new(stdout).lines();
+                let mut last = String::new();
+                let mut passed = std::time::Instant::now() - MATHLIB_SAID_EVERY;
+                while let Ok(Some(line)) = lines.next_line().await {
+                    // Progress is redrawn with `\r`: its last state.
+                    let line = line
+                        .rsplit('\r')
+                        .next()
+                        .unwrap_or_default()
+                        .trim()
+                        .to_string();
+                    if line.is_empty() {
+                        continue;
+                    }
+                    last.clone_from(&line);
+                    if passed.elapsed() >= MATHLIB_SAID_EVERY {
+                        passed = std::time::Instant::now();
+                        let _ = output
+                            .send(Message::Proof(ProofMsg::MathlibSaid {
+                                stamp: stamp.clone(),
+                                line,
+                            }))
+                            .await;
+                    }
+                }
+                drop(stdin);
+                let result = match end.await {
+                    Ok(Some(0)) => Ok(()),
+                    _ if last.is_empty() => {
+                        Err(tr!("lake exe cache get failed on the remote host.").into())
+                    }
+                    _ => Err(last),
+                };
+                let _ = output
+                    .send(Message::Proof(ProofMsg::MathlibGot { stamp, result }))
+                    .await;
+            },
+        );
+        Task::run(stream, std::convert::identity)
+    }
+
     /// `lake exe cache get` ended: Mathlib's build is looked for again, and
     /// the open Lean files are checked afresh against it.
     fn on_mathlib_got(&mut self, result: Result<(), String>) -> Task<Message> {
@@ -572,9 +740,20 @@ impl App {
             Ok(()) if still_missing => MathlibCache::Failed(
                 tr!("lake exe cache get finished, but Mathlib's compiled files are still missing. This version of Mathlib may have no cache.").into(),
             ),
-            Ok(()) => MathlibCache::Ready,
+            Ok(()) => MathlibCache::Built,
         };
-        if self.proj.mathlib == MathlibCache::Ready {
+        // Lean's server, stopped for the fetch, starts again — against the
+        // build as it is now — whichever way it ended.
+        if !matches!(self.proj.link.lsp.get("lean"), Some(LspSlot::Ready(_))) {
+            if self.proj.mathlib == MathlibCache::Built {
+                self.status = tr!("Mathlib's build cache is in place").into();
+            }
+            return match self.lean_file() {
+                Some(_) => self.ensure_lsp("lean"),
+                None => Task::none(),
+            };
+        }
+        if self.proj.mathlib == MathlibCache::Built {
             self.status = tr!("Mathlib's build cache is in place").into();
             let lean: Vec<(PathBuf, std::sync::Arc<String>)> = self
                 .proj

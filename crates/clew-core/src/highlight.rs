@@ -510,6 +510,9 @@ const RUST_REFINEMENTS: &str = r##"
 (function_signature_item name: (identifier) @function.definition)
 
 (macro_invocation macro: (identifier) @function.macro "!" @function.macro)
+(macro_invocation
+  macro: (scoped_identifier name: (identifier) @function.macro)
+  "!" @function.macro)
 
 ((scoped_identifier path: (identifier) @module . "::" @module.separator)
  (#match? @module "^[a-z_]"))
@@ -767,12 +770,20 @@ const JS_EXTRA_TAGS: &str = r#"
 /// assignments, its classes and its functions: a class's fields — a
 /// dataclass's, a pydantic or Django model's, an enum's members, each an
 /// assignment in the class's body. A model read in the outline showed its
-/// methods and none of what it holds.
+/// methods and none of what it holds. And a module's type aliases (PEP
+/// 695's `type Vector = list[float]`, generic ones too), which the
+/// outline left out.
 const PYTHON_EXTRA_TAGS: &str = r#"
 (class_definition
   body: (block
     (expression_statement
       (assignment left: (identifier) @name) @definition.field)))
+(module
+  (type_alias_statement
+    left: [
+      (type (identifier) @name)
+      (type (generic_type (identifier) @name))
+    ]) @definition.type)
 "#;
 
 /// Added to tree-sitter-java's own tags query, which has no constructors: the
@@ -791,12 +802,18 @@ const JAVA_EXTRA_TAGS: &str = r#"
 /// an `extern` block's — made the functions of a module methods. A trait's
 /// required methods (`fn area(&self) -> f64;`) are its items too, declared
 /// without a body as an interface's are: a trait's outline listed only the
-/// methods it provides.
+/// methods it provides. Its associated types (`type Item;`) are its items as
+/// well; and an `extern` block's functions (`fn abs(x: i32) -> i32;`) are the
+/// module's, foreign, without a body.
 const RUST_TAGS: &str = r#"
 (struct_item name: (type_identifier) @name) @definition.struct
 (enum_item name: (type_identifier) @name) @definition.enum
 (union_item name: (type_identifier) @name) @definition.union
 (type_item name: (type_identifier) @name) @definition.type
+(trait_item body: (declaration_list
+    (associated_type name: (type_identifier) @name) @definition.type))
+(foreign_mod_item body: (declaration_list
+    (function_signature_item name: (identifier) @name) @definition.function))
 (impl_item body: (declaration_list
     (function_item name: (identifier) @name) @definition.method))
 (trait_item body: (declaration_list
@@ -808,7 +825,10 @@ const RUST_TAGS: &str = r#"
 (mod_item name: (identifier) @name) @definition.module
 (macro_definition name: (identifier) @name) @definition.macro
 (const_item name: (identifier) @name) @definition.constant
-(static_item name: (identifier) @name) @definition.constant
+(static_item name: (identifier) @name) @definition.static
+(field_declaration_list
+    (field_declaration name: (field_identifier) @name) @definition.field)
+(enum_variant_list (enum_variant name: (identifier) @name) @definition.variant)
 "#;
 
 /// Whether C-family `source` uses syntax that only C++ has.
@@ -1340,11 +1360,18 @@ pub fn highlight_lines(source: &str, lang_key: Option<&'static str>) -> Vec<HlLi
         // One command at a time (see `crate::lean`): a command the grammar
         // cannot read would otherwise draw every line after it as one
         // expression.
+        // Each read as the outline reads it (`crate::lean::readable`): an
+        // attribute's arguments (`@[to_additive (attr := simp)]`) or an
+        // instance's priority the grammar does not take, blanked for it —
+        // the declaration's keyword and name were drawn as an expression's
+        // words — and its text drawn as written.
         Lang::Lean => crate::lean::commands(source)
             .into_iter()
             .flat_map(|range| {
                 let command = &source[range];
-                highlight_with(command, config).unwrap_or_else(|| plain_lines(command))
+                let readable = crate::lean::readable(command);
+                highlight_read_as(command, &readable, config)
+                    .unwrap_or_else(|| plain_lines(command))
             })
             .collect(),
         _ => highlight_with(source, config).unwrap_or_else(|| plain_lines(source)),
@@ -1352,9 +1379,22 @@ pub fn highlight_lines(source: &str, lang_key: Option<&'static str>) -> Vec<HlLi
 }
 
 fn highlight_with(source: &str, config: &HighlightConfiguration) -> Option<Vec<HlLine>> {
+    highlight_read_as(source, source, config)
+}
+
+/// `source` highlighted as `read` (the same length, byte for byte) is: its
+/// styles read off `read`, its text `source`'s own.
+fn highlight_read_as(
+    source: &str,
+    read: &str,
+    config: &HighlightConfiguration,
+) -> Option<Vec<HlLine>> {
+    if read.len() != source.len() {
+        return None;
+    }
     let mut highlighter = Highlighter::new();
     let events = highlighter
-        .highlight(config, source.as_bytes(), None, |_| None)
+        .highlight(config, read.as_bytes(), None, |_| None)
         .ok()?;
 
     let mut lines: Vec<HlLine> = Vec::new();
@@ -1432,6 +1472,7 @@ mod tests {
             "#[cfg(not(windows))]\n\
              pub fn rel_string(rel: &std::path::Path) -> String {\n\
              \x20   if cfg!(windows) { std::env::var_os(v) } else { PathBuf::from(x) }\n\
+             \x20   tokio::select! { _ = a => {} }\n\
              }\n",
         );
         let kind = |line: usize, text: &str| {
@@ -1454,6 +1495,9 @@ mod tests {
         assert_eq!(kind(2, "cfg"), ["function.macro"]);
         assert_eq!(kind(2, "!"), ["function.macro"]);
         assert_eq!(kind(2, "var_os"), ["function"]);
+        // A macro named by its path is a macro too.
+        assert_eq!(kind(3, "select"), ["function.macro"]);
+        assert_eq!(kind(3, "tokio"), ["module"]);
         // A type's `::` is not a module's.
         assert_eq!(kind(2, "::"), ["module", "module", "punctuation.delimiter"]);
     }
@@ -2028,6 +2072,41 @@ public:
             Some(Some(style("number"))),
             "{lines:?}"
         );
+    }
+
+    /// A declaration carrying what the grammar does not take — attribute
+    /// arguments, an instance's priority — and one in an indented `mutual`
+    /// block: its keyword and its name drawn as such, its text as written.
+    #[test]
+    fn lean_declarations_with_attribute_arguments_are_styled() {
+        let src = "@[to_additive (attr := simp)]\ntheorem a4 : True := trivial\n\
+                   instance (priority := 100) a10 : Inhabited Nat := ⟨0⟩\n\
+                   mutual\n  def isEven : Nat → Bool\n    | _ => true\nend\n";
+        let lines = highlight_lines(src, Some("lean"));
+        assert_eq!(
+            style_of(&lines, "theorem"),
+            Some(Some(style("keyword"))),
+            "{lines:?}"
+        );
+        assert_eq!(
+            style_of(&lines, "a4"),
+            Some(Some(style("function"))),
+            "{lines:?}"
+        );
+        assert_eq!(
+            style_of(&lines, "a10"),
+            Some(Some(style("function"))),
+            "{lines:?}"
+        );
+        assert_eq!(
+            style_of(&lines, "isEven"),
+            Some(Some(style("function"))),
+            "{lines:?}"
+        );
+        // Drawn as written: the arguments are there.
+        let text: String = lines[0].spans.iter().map(|(t, _)| t.as_str()).collect();
+        assert_eq!(text, "@[to_additive (attr := simp)]");
+        assert_eq!(lines.len(), src.lines().count());
     }
 
     /// Lean is highlighted a command at a time: a command the grammar does

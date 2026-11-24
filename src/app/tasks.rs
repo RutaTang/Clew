@@ -1823,8 +1823,9 @@ pub(crate) fn launch_example(root: &Path, lang: Option<&str>) -> String {
 }
 
 /// Read `.clew/launch.json`, resolving relative paths against the project root.
-/// A missing/invalid file yields a helpful message.
-pub(crate) fn read_launch_config(root: &Path) -> Result<LaunchConfig, String> {
+/// A missing/invalid file yields a helpful message. `file` is the file
+/// being read, for the `${file}` a launch file may name.
+pub(crate) fn read_launch_config(root: &Path, file: Option<&Path>) -> Result<LaunchConfig, String> {
     let path = root.join(".clew").join("launch.json");
     let text = clew_core::statefile::read_capped(&path, 1024 * 1024).ok_or_else(|| {
         tr!(
@@ -1833,19 +1834,251 @@ pub(crate) fn read_launch_config(root: &Path) -> Result<LaunchConfig, String> {
             example = r#"{"program": "path", "type": "python"}"#
         )
     })?;
-    parse_launch_config(root, &text)
+    parse_launch_config(root, &text, file, true)
+}
+
+/// What a launch file asks of a Python run beyond its program and its
+/// arguments, put into the adapter's `launch` as it is
+/// ([`crate::app::debug`]): a module to run in place of a program, the
+/// environment (with its `envFile`'s), and debugpy's own fields.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct LaunchExtras {
+    /// `python -m` this, in place of a program.
+    pub(crate) module: Option<String>,
+    /// debugpy's fields the file sets ([`PYTHON_LAUNCH_KEYS`]), `env`
+    /// with its `envFile`'s variables among them.
+    pub(crate) fields: serde_json::Map<String, serde_json::Value>,
+}
+
+/// A Python `launch` body with what the project's launch file asks of the
+/// run: a module run in place of the program (`python -m`), its
+/// environment on top of Clew's, and debugpy's own fields as written
+/// (`justMyCode`, `stopOnEntry`, `django`…), the file's over Clew's.
+pub(crate) fn with_launch_file(launch: &mut serde_json::Value, extras: &LaunchExtras) {
+    let Some(body) = launch.as_object_mut() else {
+        return;
+    };
+    if let Some(module) = &extras.module {
+        body.remove("program");
+        body.insert("module".into(), serde_json::json!(module));
+    }
+    for (key, value) in &extras.fields {
+        match (key.as_str(), body.get_mut(key), value) {
+            ("env", Some(serde_json::Value::Object(env)), serde_json::Value::Object(theirs)) => {
+                for (name, value) in theirs {
+                    env.insert(name.clone(), value.clone());
+                }
+            }
+            _ => {
+                body.insert(key.clone(), value.clone());
+            }
+        }
+    }
+}
+
+/// The fields of a Python launch file debugpy takes as they are written
+/// — VS Code's, as a project's `launch.json` has them. Not `console`
+/// (Clew runs the program, so that it has an input), nor `sudo`.
+pub(crate) const PYTHON_LAUNCH_KEYS: &[&str] = &[
+    "env",
+    "justMyCode",
+    "stopOnEntry",
+    "python",
+    "pythonArgs",
+    "django",
+    "jinja",
+    "pyramid",
+    "gevent",
+    "subProcess",
+    "showReturnValue",
+    "redirectOutput",
+];
+
+/// Most bytes of an `envFile` read.
+const MAX_ENV_FILE_BYTES: u64 = 256 * 1024;
+
+/// The variables of a dotenv file's `text`, in order: `NAME=value` lines
+/// (`export NAME=value` too), a `#` line a comment, a value in single
+/// quotes as written, one in double quotes with `\n` and `\"` read, a
+/// bare one to its first ` #`; `${NAME}` in a value is an earlier
+/// variable of the file, else `env`'s.
+pub(crate) fn parse_env_file(
+    text: &str,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line.strip_prefix("export ").unwrap_or(line).trim_start();
+        let Some((name, value)) = line.split_once('=') else {
+            continue;
+        };
+        let name = name.trim();
+        if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            continue;
+        }
+        let value = value.trim();
+        let value = if let Some(inner) = value.strip_prefix('\'') {
+            inner.split('\'').next().unwrap_or_default().to_string()
+        } else if let Some(inner) = value.strip_prefix('"') {
+            let mut read = String::new();
+            let mut chars = inner.chars();
+            while let Some(c) = chars.next() {
+                match c {
+                    '"' => break,
+                    '\\' => match chars.next() {
+                        Some('n') => read.push('\n'),
+                        Some('t') => read.push('\t'),
+                        Some(other) => read.push(other),
+                        None => {}
+                    },
+                    c => read.push(c),
+                }
+            }
+            expand_env(&read, &out, env)
+        } else {
+            let bare = value.split(" #").next().unwrap_or_default().trim_end();
+            expand_env(bare, &out, env)
+        };
+        out.retain(|(n, _)| n != name);
+        out.push((name.to_string(), value));
+    }
+    out
+}
+
+/// `value` with each `${NAME}` the variable of that name: an earlier one
+/// of `file`'s, else `env`'s, else nothing.
+fn expand_env(
+    value: &str,
+    file: &[(String, String)],
+    env: &dyn Fn(&str) -> Option<String>,
+) -> String {
+    substitute(value, &|name| {
+        file.iter()
+            .rev()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| v.clone())
+            .or_else(|| env(name))
+            .or(Some(String::new()))
+    })
+}
+
+/// `text` with each `${name}` that `var` knows replaced by its value; one
+/// it does not know is left as written.
+fn substitute(text: &str, var: &dyn Fn(&str) -> Option<String>) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("${") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        match after.find('}') {
+            Some(end) => {
+                let name = &after[..end];
+                match var(name) {
+                    Some(value) => out.push_str(&value),
+                    None => out.push_str(&rest[start..start + 2 + end + 1]),
+                }
+                rest = &after[end + 1..];
+            }
+            None => {
+                out.push_str(&rest[start..]);
+                rest = "";
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Every string in `value` with its `${…}` variables replaced
+/// ([`substitute`]).
+fn substitute_all(value: &mut serde_json::Value, var: &dyn Fn(&str) -> Option<String>) {
+    match value {
+        serde_json::Value::String(s) if s.contains("${") => {
+            *s = substitute(s, var);
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                substitute_all(item, var);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for item in map.values_mut() {
+                substitute_all(item, var);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The variables a launch file may name, as VS Code's do: the project's
+/// folder (`${workspaceFolder}`), the file being read (`${file}` and its
+/// parts), the home folder, and — for a project on this computer — the
+/// environment Clew runs in (`${env:NAME}`).
+fn launch_var(name: &str, root: &Path, file: Option<&Path>, local: bool) -> Option<String> {
+    let shown = |p: &Path| p.to_string_lossy().into_owned();
+    let file_part = |part: &str| -> Option<String> {
+        let file = file?;
+        Some(match part {
+            "file" => shown(file),
+            "fileBasename" => file.file_name()?.to_string_lossy().into_owned(),
+            "fileBasenameNoExtension" => file.file_stem()?.to_string_lossy().into_owned(),
+            "fileExtname" => file
+                .extension()
+                .map(|e| format!(".{}", e.to_string_lossy()))
+                .unwrap_or_default(),
+            "fileDirname" => shown(file.parent()?),
+            "relativeFile" => shown(file.strip_prefix(root).unwrap_or(file)),
+            "relativeFileDirname" => shown(file.parent()?.strip_prefix(root).ok()?),
+            _ => return None,
+        })
+    };
+    match name {
+        "workspaceFolder" | "workspaceRoot" | "cwd" => Some(shown(root)),
+        "workspaceFolderBasename" => root.file_name().map(|n| n.to_string_lossy().into_owned()),
+        "pathSeparator" => Some(std::path::MAIN_SEPARATOR.to_string()),
+        "userHome" if local => clew_core::home_dir().map(|h| shown(&h)),
+        _ => match name.strip_prefix("env:") {
+            Some(var) if local => Some(std::env::var(var).unwrap_or_default()),
+            Some(_) => None,
+            None => file_part(name),
+        },
+    }
 }
 
 /// Parse a `launch.json`'s text against `root` — shared by the local read
 /// above and the remote path (the file is fetched over the protocol; a
-/// remote root must never be read from the local disk).
-pub(crate) fn parse_launch_config(root: &Path, text: &str) -> Result<LaunchConfig, String> {
-    let v: serde_json::Value =
+/// remote root must never be read from the local disk). `local` says
+/// which: a remote project's `envFile` is not read here, nor this
+/// computer's environment named for it.
+pub(crate) fn parse_launch_config(
+    root: &Path,
+    text: &str,
+    file: Option<&Path>,
+    local: bool,
+) -> Result<LaunchConfig, String> {
+    let mut v: serde_json::Value =
         serde_json::from_str(text).map_err(|e| format!("launch.json: {e}"))?;
-    let program = v
-        .get("program")
-        .and_then(|p| p.as_str())
-        .ok_or(tr!("launch.json needs a \"program\" field"))?;
+    substitute_all(&mut v, &|name| launch_var(name, root, file, local));
+    let module = v
+        .get("module")
+        .and_then(|m| m.as_str())
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+        .map(str::to_string);
+    let program = match (v.get("program").and_then(|p| p.as_str()), &module) {
+        (Some(program), _) => program.to_string(),
+        // Named for the module it runs: its tab says so.
+        (None, Some(module)) => module.clone(),
+        (None, None) => {
+            return Err(
+                tr!("launch.json needs a \"program\" field (or a \"module\" to run)").into(),
+            );
+        }
+    };
     let args = v
         .get("args")
         .and_then(|a| a.as_array())
@@ -1860,12 +2093,70 @@ pub(crate) fn parse_launch_config(root: &Path, text: &str) -> Result<LaunchConfi
         .and_then(|c| c.as_str())
         .map(|c| resolve_rel(root, c))
         .unwrap_or_else(|| root.to_path_buf());
-    let type_hint = v.get("type").and_then(|t| t.as_str()).map(str::to_string);
+    let type_hint = v
+        .get("type")
+        .and_then(|t| t.as_str())
+        .map(str::to_string)
+        // A module is Python's to run.
+        .or_else(|| module.as_ref().map(|_| "python".to_string()));
+    let mut notes = Vec::new();
+    let mut fields = serde_json::Map::new();
+    for key in PYTHON_LAUNCH_KEYS {
+        if let Some(value) = v.get(*key) {
+            fields.insert(key.to_string(), value.clone());
+        }
+    }
+    // The environment: the `envFile`'s variables, under those `env` sets.
+    if let Some(env_file) = v.get("envFile").and_then(|f| f.as_str()) {
+        let path = resolve_rel(root, env_file);
+        if !local {
+            notes.push(tr!(
+                "{file} wasn't read: an envFile is read only for projects on this computer.",
+                file = env_file
+            ));
+        } else {
+            match std::fs::metadata(&path) {
+                Ok(meta) if meta.len() <= MAX_ENV_FILE_BYTES => {
+                    let text = std::fs::read_to_string(&path).unwrap_or_default();
+                    let read = parse_env_file(&text, &|name| std::env::var(name).ok());
+                    let env = fields.entry("env").or_insert_with(|| serde_json::json!({}));
+                    if let Some(env) = env.as_object_mut() {
+                        for (name, value) in read {
+                            env.entry(name).or_insert(serde_json::Value::String(value));
+                        }
+                    }
+                }
+                Ok(_) => notes.push(tr!(
+                    "{file} is too large to be an environment file, so its variables were not set.",
+                    file = env_file
+                )),
+                Err(_) => notes.push(tr!(
+                    "{file} was not found, so its variables were not set.",
+                    file = env_file
+                )),
+            }
+        }
+    }
+    // Every variable a string, as a process's environment is.
+    if let Some(env) = fields.get_mut("env").and_then(|e| e.as_object_mut()) {
+        env.retain(|_, value| !value.is_object() && !value.is_array());
+        for value in env.values_mut() {
+            if let serde_json::Value::Number(_) | serde_json::Value::Bool(_) = value {
+                *value = serde_json::Value::String(value.to_string());
+            }
+        }
+    }
+    let program = match &module {
+        Some(_) if v.get("program").is_none() => cwd.join(&program),
+        _ => resolve_rel(root, &program),
+    };
     Ok(LaunchConfig {
-        program: resolve_rel(root, program),
+        program,
         args,
         cwd,
         type_hint,
+        extras: LaunchExtras { module, fields },
+        notes,
     })
 }
 

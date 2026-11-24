@@ -215,6 +215,7 @@ fn ask_without_vector_retrieval_keeps_live_grounding_across_space_changes() {
                 args: Vec::new(),
                 cwd: root.clone(),
                 addr: None,
+                takes_input: false,
             });
         } else {
             app.proj.ask_pins.push(ask_pin(&root));

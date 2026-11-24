@@ -68,13 +68,24 @@ pub fn promises_hover_eval(capabilities: &Value) -> bool {
 /// editor turns on unless the reader chose otherwise. Each filter id as the
 /// adapter gave it, bounded: a filter list is a handful of short ids.
 pub fn default_exception_filters(capabilities: &Value) -> Vec<String> {
+    exception_filters(capabilities, true)
+}
+
+/// Every exception filter the adapter offers, on by default or not.
+pub fn offered_exception_filters(capabilities: &Value) -> Vec<String> {
+    exception_filters(capabilities, false)
+}
+
+fn exception_filters(capabilities: &Value, defaults_only: bool) -> Vec<String> {
     capabilities
         .get("exceptionBreakpointFilters")
         .and_then(Value::as_array)
         .map(|filters| {
             filters
                 .iter()
-                .filter(|f| f.get("default").and_then(Value::as_bool) == Some(true))
+                .filter(|f| {
+                    !defaults_only || f.get("default").and_then(Value::as_bool) == Some(true)
+                })
                 .filter_map(|f| f.get("filter").and_then(Value::as_str))
                 .filter(|id| !id.is_empty() && id.len() <= 64)
                 .take(16)
@@ -305,6 +316,9 @@ pub enum DapEvent {
     },
     /// The debug session ended.
     Terminated,
+    /// The program runs with an input Clew holds ([`super::DapClient::send_input`]):
+    /// what is typed for it can be sent.
+    TakesInput,
     /// The adapter asked clew to start a CHILD debug session (js-debug's
     /// multi-session model) with the given launch configuration.
     StartDebugging(Value),
@@ -431,6 +445,10 @@ mod tests {
             { "filter": "userUnhandled", "label": "User Uncaught Exceptions" },
         ]});
         assert_eq!(default_exception_filters(&debugpy), vec!["uncaught"]);
+        assert_eq!(
+            offered_exception_filters(&debugpy),
+            vec!["raised", "uncaught", "userUnhandled"]
+        );
         let lldb = json!({ "exceptionBreakpointFilters": [
             { "filter": "cpp_catch", "label": "C++ Catch", "default": false },
             { "filter": "cpp_throw", "label": "C++ Throw", "default": false },

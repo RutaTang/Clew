@@ -821,6 +821,10 @@ pub struct DebugSession {
     /// sessions are opened. The whole address, not a port: the adapter may
     /// listen on `[::1]` as well as on `127.0.0.1`.
     pub addr: Option<std::net::SocketAddr>,
+    /// The program runs with an input Clew holds (the adapter had Clew run
+    /// it: debugpy's programs): what is typed in the run's input line is
+    /// sent to it.
+    pub takes_input: bool,
 }
 
 /// A parsed `.clew/launch.json`: what to run and (optionally) which adapter.
@@ -830,6 +834,25 @@ pub(crate) struct LaunchConfig {
     pub(crate) cwd: PathBuf,
     /// Optional `"type"` hint (rust/python/go/dart/node) — else inferred.
     pub(crate) type_hint: Option<String>,
+    /// What the file asks of a Python run beyond its program.
+    pub(crate) extras: crate::app::tasks::LaunchExtras,
+    /// What is said in the run's output about the file as it starts: an
+    /// `envFile` not found, or not read for a remote project.
+    pub(crate) notes: Vec<String>,
+}
+
+impl LaunchConfig {
+    /// A script run as it is, with nothing a launch file asks.
+    pub(crate) fn script(program: PathBuf, cwd: PathBuf) -> Self {
+        LaunchConfig {
+            program,
+            args: Vec::new(),
+            cwd,
+            type_hint: None,
+            extras: Default::default(),
+            notes: Vec::new(),
+        }
+    }
 }
 
 /// The kind of LSP navigation request.
@@ -1028,8 +1051,24 @@ pub struct TimeStep {
     pub focus_line: Option<usize>,
 }
 
+/// What Run Test runs from a line (see [`ContextMenu::test`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TestAt {
+    /// The test the line is in.
+    One,
+    /// One case of a parametrized test, by pytest's name for it
+    /// (`test_add[1-2]`).
+    Case(String),
+    /// A group's tests, by the group's name: a test class's (`TestCart`)
+    /// or a test file's (`test_cart.py`).
+    Group(String),
+    /// A Rust doc comment's example, by what its run is called (`Doctest
+    /// of add`): run, never debugged — rustdoc builds and runs it itself.
+    Doctest(String),
+}
+
 /// An open right-click navigation menu.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct ContextMenu {
     pub pane: usize,
     pub line: usize,
@@ -1050,9 +1089,25 @@ pub struct ContextMenu {
     /// coordinates. With no room below the line, the menu opens above it —
     /// flipped up from under it, it covered the line it was for.
     pub line_top: Option<f32>,
-    /// The line is in a test Run Test runs (a Rust or Python test): the
-    /// menu offers Run Test and Debug Test.
-    pub in_test: bool,
+    /// What Run Test runs from the line, when it runs anything there: the
+    /// test the line is in (a Rust or Python test), one case of a
+    /// parametrized test, or a test class's or file's tests. The menu
+    /// offers running and debugging it, by its name.
+    pub test: Option<TestAt>,
+    /// Opened from a line's ▶ in the gutter: it offers running what starts
+    /// there, and the breakpoint the ▶ stands in for — no more.
+    pub gutter: Option<GutterRun>,
+}
+
+/// What a gutter ▶'s menu runs, beside [`ContextMenu::test`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GutterRun {
+    /// The program that starts on the line, by its name, where one does:
+    /// a Rust `main`'s (`shapes`), a Python `__main__` block's file's, a
+    /// Lean `main`'s file's.
+    pub main: Option<String>,
+    /// Whether it can be debugged too: Lean's has no debugger to run in.
+    pub debug: bool,
 }
 
 /// What a language can say about the code under the cursor that no other
@@ -1744,9 +1799,17 @@ impl LspSlot {
 /// What a server still checking files says of them on the status bar
 /// (Lean's `$/lean/fileProgress`): "checking Basic.lean", "checking
 /// Basic.lean and 2 more" — the first by path, so the name holds still.
+/// One Lean stopped checking, and checks no more until it is restarted:
+/// "stopped checking Basic.lean" — said as ready, it was not.
 fn checking_label(s: &lsp::client::Snapshot) -> Option<String> {
     let mut files: Vec<&std::path::Path> = s.checking_files().collect();
     files.sort();
+    if files.is_empty() {
+        let mut stopped: Vec<&std::path::Path> = s.stopped_files().collect();
+        stopped.sort();
+        let name = stopped.first()?.file_name()?.to_string_lossy();
+        return Some(tr!("stopped checking {file}", file = name));
+    }
     let name = files.first()?.file_name()?.to_string_lossy();
     Some(match files.len() - 1 {
         0 => tr!("checking {file}", file = name),

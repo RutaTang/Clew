@@ -196,6 +196,21 @@ impl<'a> From<Pick<'a>> for Element<'a, Message> {
             DRAWN.with(|d| d.set(Some(key)));
         }
         let shown = at.and_then(|i| picks.get(i)).map(|(said, _)| said.clone());
+        // Sized to itself, it is as wide as its widest choice, as a native
+        // drop-down is: as wide as the one chosen, it grew and shrank with
+        // each pick, and moved what stood beside it (the graph's search
+        // field, under the pointer, at each graph picked).
+        let words = if matches!(width, Length::Shrink) {
+            let widest = picks
+                .iter()
+                .map(|(said, _)| said.as_str())
+                .chain(placeholder.as_deref())
+                .map(|said| super::steady::width_of(said, size, crate::fonts::UI))
+                .fold(0.0, f32::max);
+            Length::Fixed(widest.ceil() + 1.0)
+        } else {
+            Length::Fill
+        };
         let well = row![
             text(shown.clone().or(placeholder).unwrap_or_default())
                 .size(size)
@@ -205,11 +220,7 @@ impl<'a> From<Pick<'a>> for Element<'a, Message> {
                     theme::dim()
                 })
                 .wrapping(Wrapping::None)
-                .width(if matches!(width, Length::Shrink) {
-                    Length::Shrink
-                } else {
-                    Length::Fill
-                }),
+                .width(words),
             // As plain as its words, nearly: dim, it was a few faint pixels
             // on a dark theme, and the well read as a field.
             glyph::icon(Glyph::ChevronDown, theme::fg_muted(), size),

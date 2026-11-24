@@ -39,9 +39,14 @@ struct Voice {
     /// What each part given was answered — whether more was wanted —, in
     /// turn: it gives no more of a sentence once told no.
     answered: Mutex<Vec<bool>>,
+    /// The models it was asked to have loaded ahead, in turn.
+    warmed: Mutex<Vec<&'static str>>,
 }
 
 impl Synthesizer for Voice {
+    fn warm(&self, model: &'static VoiceModel, _dir: &Path) {
+        self.warmed.lock().unwrap().push(model.id);
+    }
     fn say(
         &self,
         model: &'static VoiceModel,
@@ -3109,4 +3114,42 @@ fn what_clew_never_played_is_not_heard_back() {
             .said_within(std::time::Duration::from_secs(60)),
         ahead[..2]
     );
+}
+
+/// A question whose answer will be read aloud has its voice loaded as it is
+/// asked — loaded on the answer's first sentence, it held that sentence for
+/// the seconds the model took (nine, measured) — and one that will not be
+/// read loads nothing.
+#[test]
+fn a_question_read_aloud_loads_its_voice_as_it_is_asked() {
+    let (mut app, voice, _output) = speech_app("speech-warm");
+    let warmed = |voice: &Voice| -> Vec<&'static str> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while voice.warmed.lock().unwrap().is_empty() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        voice.warmed.lock().unwrap().clone()
+    };
+    app.voice.prefs.read_aloud = ReadAloud::Spoken;
+    app.warm_voice_for_question(false);
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    assert!(
+        voice.warmed.lock().unwrap().is_empty(),
+        "typed: not read aloud"
+    );
+    app.warm_voice_for_question(true);
+    assert_eq!(warmed(&voice), ["qwen3-tts"]);
+    voice.warmed.lock().unwrap().clear();
+    app.voice.prefs.read_aloud = ReadAloud::Always;
+    app.warm_voice_for_question(false);
+    assert_eq!(
+        warmed(&voice),
+        ["qwen3-tts"],
+        "every answer read: typed too"
+    );
+    voice.warmed.lock().unwrap().clear();
+    app.voice.prefs.read_aloud = ReadAloud::Never;
+    app.warm_voice_for_question(true);
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    assert!(voice.warmed.lock().unwrap().is_empty(), "none read");
 }

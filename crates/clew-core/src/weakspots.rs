@@ -71,6 +71,9 @@ pub enum Risk {
     RawHtml,
     /// Every exception caught: Python's bare `except:`.
     CatchAll,
+    /// A proof left unfinished: Lean's `sorry` or `admit`. What it states
+    /// is not proved, and everything proved from it rests on it.
+    Sorry,
 }
 
 impl Risk {
@@ -80,7 +83,7 @@ impl Risk {
             Risk::Unwrap => 1,
             Risk::Panic | Risk::CatchAll => 2,
             Risk::Unsafe | Risk::RawHtml => 3,
-            Risk::Eval | Risk::Shell | Risk::UnboundedCopy | Risk::Deserialize => 4,
+            Risk::Eval | Risk::Shell | Risk::UnboundedCopy | Risk::Deserialize | Risk::Sorry => 4,
         }
     }
 }
@@ -179,7 +182,7 @@ pub fn scan_file(rel: &str, source: &str, lang_key: &str) -> Vec<Spot> {
         return Vec::new();
     };
     if lang == Lang::Lean {
-        return Vec::new();
+        return lean_spots(rel, source);
     }
     let Some(tree) = highlight::parse(source, lang) else {
         return Vec::new();
@@ -254,6 +257,189 @@ pub fn scan_file(rel: &str, source: &str, lang_key: &str) -> Vec<Spot> {
         });
     }
     spots
+}
+
+/// A Lean file's weak spots: each declaration with a proof left unfinished
+/// (`sorry`, `admit`), a long one, or notes left in it; and the notes and
+/// unfinished proofs outside every declaration, as one spot of the file.
+/// Read from the text, as Lean's own outline is read (`crate::lean`): its
+/// comments and strings set aside.
+fn lean_spots(rel: &str, source: &str) -> Vec<Spot> {
+    let code = lean_code(source);
+    let unfinished = |range: std::ops::Range<usize>| {
+        let text = &code.0[range];
+        ["sorry", "admit"]
+            .iter()
+            .map(|w| lean_words(text, w))
+            .sum::<usize>()
+    };
+    let notes = |range: std::ops::Range<usize>| -> usize {
+        code.1
+            .iter()
+            .filter(|c| range.start <= c.start && c.start < range.end)
+            .map(|c| markers(&source[c.clone()]))
+            .sum()
+    };
+    let located = outline::extract_located(source, "lean");
+    let mut spots = Vec::new();
+    let mut covered: Vec<(usize, usize)> = Vec::new();
+    for item in &located {
+        let symbol = &item.symbol;
+        if matches!(symbol.kind.as_str(), "module" | "field" | "constructor") {
+            continue;
+        }
+        let (start, end) = item.declaration;
+        let end = end.min(source.len());
+        if start >= end || covered.iter().any(|&(s, e)| s <= start && end <= e) {
+            continue;
+        }
+        covered.push((start, end));
+        let measured = Measured {
+            risks: match unfinished(start..end) {
+                0 => Vec::new(),
+                n => vec![(Risk::Sorry, n)],
+            },
+            markers: notes(start..end),
+            ..Measured::default()
+        };
+        let length = symbol.end_line.saturating_sub(symbol.line) + 1;
+        let (score, reasons) = judge(length, &measured);
+        if score > 0 {
+            spots.push(Spot {
+                rel: rel.to_string(),
+                name: symbol.name.clone(),
+                line: symbol.line,
+                end_line: symbol.end_line,
+                score,
+                reasons,
+            });
+        }
+    }
+    // Outside every declaration: the file's.
+    let outside = |at: usize| !covered.iter().any(|&(s, e)| s <= at && at < e);
+    let loose_notes: Vec<&std::ops::Range<usize>> = code
+        .1
+        .iter()
+        .filter(|c| outside(c.start) && markers(&source[(*c).clone()]) > 0)
+        .collect();
+    let loose_sorries: Vec<usize> = ["sorry", "admit"]
+        .iter()
+        .flat_map(|w| lean_word_starts(&code.0, w))
+        .filter(|&at| outside(at))
+        .collect();
+    if !loose_notes.is_empty() || !loose_sorries.is_empty() {
+        let line_of = |at: usize| source[..at].matches('\n').count() + 1;
+        let lines: Vec<usize> = loose_notes
+            .iter()
+            .map(|c| line_of(c.start))
+            .chain(loose_sorries.iter().map(|&at| line_of(at)))
+            .collect();
+        let measured = Measured {
+            risks: match loose_sorries.len() {
+                0 => Vec::new(),
+                n => vec![(Risk::Sorry, n)],
+            },
+            markers: loose_notes
+                .iter()
+                .map(|c| markers(&source[(*c).clone()]))
+                .sum(),
+            ..Measured::default()
+        };
+        let (score, reasons) = judge(0, &measured);
+        spots.push(Spot {
+            rel: rel.to_string(),
+            name: String::new(),
+            line: lines.iter().copied().min().unwrap_or(1),
+            end_line: lines.iter().copied().max().unwrap_or(1),
+            score,
+            reasons,
+        });
+    }
+    spots
+}
+
+/// Lean `source` with its comments and string literals blanked (newlines
+/// kept, so every position is its own), and the comments' byte ranges.
+fn lean_code(source: &str) -> (String, Vec<std::ops::Range<usize>>) {
+    let b = source.as_bytes();
+    let mut code = b.to_vec();
+    let mut comments = Vec::new();
+    let mut i = 0;
+    let blank = |code: &mut [u8], range: std::ops::Range<usize>| {
+        for c in &mut code[range] {
+            if *c != b'\n' {
+                *c = b' ';
+            }
+        }
+    };
+    while i < b.len() {
+        if b[i..].starts_with(b"--") {
+            let end = b[i..]
+                .iter()
+                .position(|&c| c == b'\n')
+                .map_or(b.len(), |n| i + n);
+            comments.push(i..end);
+            blank(&mut code, i..end);
+            i = end;
+        } else if b[i..].starts_with(b"/-") {
+            let mut depth = 0usize;
+            let mut j = i;
+            while j < b.len() {
+                if b[j..].starts_with(b"/-") {
+                    depth += 1;
+                    j += 2;
+                } else if b[j..].starts_with(b"-/") {
+                    depth -= 1;
+                    j += 2;
+                    if depth == 0 {
+                        break;
+                    }
+                } else {
+                    j += 1;
+                }
+            }
+            comments.push(i..j.min(b.len()));
+            blank(&mut code, i..j.min(b.len()));
+            i = j;
+        } else if b[i] == b'\''
+            && (i == 0 || !(b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_'))
+            && let Some(close) = b[i + 1..(i + 7).min(b.len())]
+                .iter()
+                .skip(1)
+                .position(|&c| c == b'\'')
+        {
+            // A character literal (`'"'`, `'\n'`): no string's start.
+            i += close + 3;
+        } else if b[i] == b'"' {
+            let mut j = i + 1;
+            while j < b.len() && b[j] != b'"' {
+                j += if b[j] == b'\\' { 2 } else { 1 };
+            }
+            let end = (j + 1).min(b.len());
+            blank(&mut code, i..end);
+            i = end;
+        } else {
+            i += 1;
+        }
+    }
+    (String::from_utf8_lossy(&code).into_owned(), comments)
+}
+
+/// Where `word` stands in Lean `code` as a word of its own: not part of a
+/// longer name (`sorryAx`, `my_sorry`, `Foo.sorry`).
+fn lean_word_starts(code: &str, word: &str) -> Vec<usize> {
+    let part = |c: char| c.is_alphanumeric() || matches!(c, '_' | '\'' | '.' | '!' | '?');
+    code.match_indices(word)
+        .filter(|&(at, _)| {
+            !code[..at].chars().next_back().is_some_and(part)
+                && !code[at + word.len()..].chars().next().is_some_and(part)
+        })
+        .map(|(at, _)| at)
+        .collect()
+}
+
+fn lean_words(code: &str, word: &str) -> usize {
+    lean_word_starts(code, word).len()
 }
 
 /// What a function's syntax says of it.
@@ -545,6 +731,40 @@ pub fn rank(mut spots: Vec<Spot>, churn: impl Fn(&str) -> Option<u32>, limit: us
     });
     spots.truncate(limit);
     spots
+}
+
+#[cfg(test)]
+mod lean_tests {
+    use super::*;
+
+    /// A Lean declaration with a proof left unfinished, or a note, is a
+    /// weak spot: `sorry` and `admit` as words of their own, not in a
+    /// comment or a string, nor a longer name's part.
+    #[test]
+    fn lean_unfinished_proofs_and_notes_are_weak_spots() {
+        let src = "/-- Doc saying sorry. -/\ntheorem gap : 1 = 1 := by\n  sorry\n\n\
+                   theorem done : 2 = 2 := rfl\n\n\
+                   -- TODO: prove it properly\ntheorem later (h : True) : True := by admit\n\n\
+                   def name := \"sorry\"\ndef sorryAx' := 1\ndef q := '\"'\n\n\
+                   example : True := sorry\n";
+        let spots = scan_file("Proofs.lean", src, "lean");
+        let found: Vec<(&str, &Vec<Reason>)> = spots
+            .iter()
+            .map(|s| (s.name.as_str(), &s.reasons))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                ("gap", &vec![Reason::Risky(Risk::Sorry, 1)]),
+                ("later", &vec![Reason::Risky(Risk::Sorry, 1)]),
+                ("example", &vec![Reason::Risky(Risk::Sorry, 1)]),
+                ("", &vec![Reason::Marked(1)]),
+            ],
+            "{spots:#?}"
+        );
+        assert_eq!(spots[0].line, 2);
+        assert_eq!(spots[3].line, 7);
+    }
 }
 
 #[cfg(test)]

@@ -59,6 +59,31 @@ pub(crate) enum LocalInstall {
 pub(crate) const MAX_LINE_CHIPS: usize = 256;
 pub(crate) const MAX_LINE_CHIP_CHARS: usize = 4096;
 
+/// The end of the key a language's second server goes by in the
+/// language-keyed slots: `python.also` runs beside `python`'s server (a
+/// linter such as ruff beside pyright), is sent the same documents, and
+/// has its diagnostics shown with the main one's. Everything else asked
+/// of a language (definitions, hover, references) stays the main
+/// server's. Its program is the user's choice under that key, so it
+/// starts, restarts and runs remotely as any chosen server does.
+pub(crate) const ALSO: &str = ".also";
+
+/// The key of the server run beside `language`'s main one.
+pub(crate) fn also_key(language: &str) -> String {
+    [language, ALSO].concat()
+}
+
+/// The language a slot's server reads: `python` for `python.also`, and a
+/// language's own key for its main server.
+pub(crate) fn base_language(key: &str) -> &str {
+    key.strip_suffix(ALSO).unwrap_or(key)
+}
+
+/// Whether `key` is the slot of a server run beside a main one.
+pub(crate) fn is_beside(key: &str) -> bool {
+    base_language(key) != key
+}
+
 impl App {
     /// Whether `language`'s server is left "not set up" when it would ask:
     /// the first open left the servers for later, and the reader has not
@@ -101,7 +126,7 @@ impl App {
     pub(crate) fn sync_lsp_log(&mut self) {
         let lang = self
             .active_viewer()
-            .and_then(|v| v.lang_key)
+            .and_then(|v| v.lsp_lang())
             .filter(|_| self.server_panel);
         let client = match lang.and_then(|l| self.proj.link.lsp.get(l)) {
             Some(LspSlot::Ready(client)) => client,
@@ -157,10 +182,51 @@ impl App {
             })
     }
 
-    /// Ensure a language server is provisioned/started for `language`, and open
-    /// any already-loaded documents once it is ready. Idempotent.
+    /// Whether the user chose a program to run beside `language`'s main
+    /// server.
+    pub(crate) fn has_server_beside(&self, language: &str) -> bool {
+        self.proj
+            .lang_choices
+            .servers
+            .as_ref()
+            .and_then(|servers| servers.get(&also_key(language)))
+            .is_some_and(|choice| !choice.command.trim().is_empty())
+    }
+
+    /// Ensure `language`'s server is provisioned/started, and the one the
+    /// user chose to run beside it, if any; open any already-loaded
+    /// documents in each once it is ready. Idempotent.
     pub(crate) fn ensure_lsp(&mut self, language: &str) -> Task<Message> {
+        let main = self.ensure_one_lsp(language);
+        if is_beside(language) || !self.has_server_beside(language) {
+            return main;
+        }
+        let beside = self.ensure_one_lsp(&also_key(language));
+        Task::batch([main, beside])
+    }
+
+    /// [`App::ensure_lsp`] for one slot: a language's main server, or the
+    /// one beside it.
+    fn ensure_one_lsp(&mut self, language: &str) -> Task<Message> {
         if self.proj.project.is_none() {
+            return Task::none();
+        }
+        // A server beside the main one runs only while it is chosen: one
+        // no longer chosen leaves no slot behind, where resolving it would
+        // have said "no server for this language" of a language that has
+        // one.
+        if is_beside(language) && !self.has_server_beside(base_language(language)) {
+            self.reset_lsp(language);
+            return Task::none();
+        }
+        // Lean's server waits while `lake exe cache get` puts Mathlib's
+        // build in place: it starts again when that ends.
+        if base_language(language) == "lean"
+            && matches!(
+                self.proj.mathlib,
+                crate::app::proof::MathlibCache::Getting(_)
+            )
+        {
             return Task::none();
         }
         match self.proj.link.lsp.get(language) {
@@ -240,7 +306,10 @@ impl App {
             );
             return Task::none();
         };
-        let (provision, dest_dir) = match lsp::store::locate(&server) {
+        // Where the user's own program is looked for: the PATH children get
+        // (a test's, for a test that sets one).
+        let (provision, dest_dir) = match lsp::store::locate_on(&server, path_set_here().as_deref())
+        {
             // A store-installed binary: its install consent already covered it.
             // (The `init_options` half of `lsp.toml` is gated in
             // `start_lsp_with`, the one place every start funnels through.)
@@ -291,6 +360,7 @@ impl App {
         // shell's, asked once and maybe not yet answered), on the PATH a
         // test set for this thread when it set one.
         let path = path_set_here();
+        let root = self.proj.project.as_ref().map(|p| p.root.clone());
         let fetched = provision.clone();
         self.proj.pending_lsp_consent.offer(LspConsent {
             language: language.to_string(),
@@ -310,7 +380,7 @@ impl App {
                 tokio::task::spawn_blocking(move || {
                     let path = path.unwrap_or_else(clew_core::linerpc::child_path);
                     on_path_for(&fetched, Some(&path))
-                        .filter(|program| worth_offering(program, &path))
+                        .filter(|program| worth_offering(program, &path, root.as_deref()))
                 })
                 .await
                 .ok()
@@ -771,11 +841,22 @@ impl App {
         // Lean's server runs in the Lake project of the Lean file being
         // read — a folder of its own, in many a repository — where it finds
         // the project's own modules; started in the opened folder, every
-        // import of them failed.
+        // import of them failed. For a file outside the project, where it
+        // ran last, else the project.
         let root = if language == "lean" && !self.connection.is_remote() {
             let lake = self
                 .lean_file()
-                .map_or_else(|| root.clone(), |file| clew_core::lake_root(&root, &file));
+                .and_then(|file| clew_core::lake_root(&root, &file))
+                .or_else(|| self.proj.link.lean_root.clone())
+                .unwrap_or_else(|| root.clone());
+            self.proj.link.lean_root = Some(lake.clone());
+            lake
+        } else if language == "lean" {
+            // A remote project's files are on its host: its Lake project is
+            // read from its listing, and the server started there.
+            let lake = self
+                .remote_lake_folder()
+                .map_or_else(|| root.clone(), |f| root.join(f));
             self.proj.link.lean_root = Some(lake.clone());
             lake
         } else {
@@ -816,6 +897,10 @@ impl App {
                     proc,
                     language: lang.clone(),
                     choices: self.proj.lang_choices.clone(),
+                    folder: match lang.as_str() {
+                        "lean" => self.remote_lake_folder(),
+                        _ => None,
+                    },
                 }
             } else {
                 clew_protocol::Request::SpawnProcess {
@@ -885,35 +970,58 @@ impl App {
         self.proj.link.lsp.remove(language);
         self.proj.link.lsp_installs.remove(language);
         self.proj.link.remote_installs.remove(language);
-        self.proj
-            .link
-            .lsp_opened
-            .retain(|p| highlight::detect(p) != Some(language));
+        let base = base_language(language);
+        let opened = match is_beside(language) {
+            true => &mut self.proj.link.lsp_opened_also,
+            false => &mut self.proj.link.lsp_opened,
+        };
+        opened.retain(|p| highlight::detect(p) != Some(base));
         self.next_lsp_gen(language);
         self.proj.link.seen_diag_version.remove(language);
         self.proj.link.seen_inlay_epoch.remove(language);
     }
 
-    /// Send `didOpen` for every loaded document of `language` not yet opened.
+    /// Send `didOpen` for every loaded document of `language` not yet opened
+    /// — `language` a slot's key: the server beside a language's main one
+    /// is sent the language's documents, as the language they are in.
     pub(crate) fn open_docs_for_language(
         &mut self,
         language: &str,
         client: &lsp::client::LspClient,
     ) -> Task<Message> {
-        let docs: Vec<(PathBuf, Arc<String>)> = self
+        let base = base_language(language);
+        let beside = is_beside(language);
+        // A notebook is sent as its script, by the script's own path (see
+        // `Viewer::lsp_path`), with what is no code commented out.
+        let docs: Vec<(PathBuf, Arc<String>, bool)> = self
             .proj
             .panes
             .iter()
             .flatten()
-            .filter(|v| v.lang_key == Some(language))
-            .map(|v| (v.abs.clone(), v.source.clone()))
+            .filter(|v| v.lsp_lang() == Some(base))
+            .map(|v| match v.notebook {
+                Some(_) => (
+                    v.lsp_path(),
+                    Arc::new(clew_core::notebook::script_for_server(&v.source)),
+                    true,
+                ),
+                None => (v.abs.clone(), v.source.clone(), false),
+            })
             .collect();
         let mut tasks = Vec::new();
-        for (path, source) in docs {
-            if self.proj.link.lsp_opened.insert(path.clone()) {
-                client.did_open(&path, language, 1, &source);
+        for (path, source, notebook) in docs {
+            let opened = match beside {
+                true => &mut self.proj.link.lsp_opened_also,
+                false => &mut self.proj.link.lsp_opened,
+            };
+            if opened.insert(path.clone()) {
+                client.did_open(&path, base, 1, &source);
             }
-            tasks.push(self.inlay_request(&path, client));
+            // Inlay hints are the main server's to give, in a file's code
+            // view; a notebook's script shows none.
+            if !beside && !notebook {
+                tasks.push(self.inlay_request(&path, client));
+            }
         }
         Task::batch(tasks)
     }
@@ -934,14 +1042,45 @@ impl App {
         let Some(lang) = highlight::detect(path) else {
             return;
         };
-        if !self.proj.link.lsp_opened.contains(path) {
-            return;
+        // The main server, and the one beside it: each holds its own copy.
+        for (key, opened) in [
+            (lang.to_string(), &self.proj.link.lsp_opened),
+            (also_key(lang), &self.proj.link.lsp_opened_also),
+        ] {
+            if !opened.contains(path) {
+                continue;
+            }
+            let Some(LspSlot::Ready(client)) = self.proj.link.lsp.get(&key) else {
+                continue;
+            };
+            self.lsp_doc_rev += 1;
+            client.did_change(path, self.lsp_doc_rev, source);
         }
-        let Some(LspSlot::Ready(client)) = self.proj.link.lsp.get(lang) else {
-            return;
-        };
-        self.lsp_doc_rev += 1;
-        client.did_change(path, self.lsp_doc_rev, source);
+    }
+
+    /// The diagnostics of `path`, a `language` file, from every server that
+    /// reads it — its main one and the one beside it — each with the
+    /// position encoding its server counts columns in; `None` while no
+    /// server of the language can say (none ready, or its state unread).
+    pub(crate) fn file_diagnostics(
+        &self,
+        language: &str,
+        path: &Path,
+    ) -> Option<Vec<(&lsp::client::Diag, lsp::client::PositionEncoding)>> {
+        let mut said = None;
+        for key in [language.to_string(), also_key(language)] {
+            if let Some(LspSlot::Ready(client)) = self.proj.link.lsp.get(&key)
+                && let Some(Ok(snapshot)) = self.proj.link.lsp_snapshots.get(&key)
+            {
+                said.get_or_insert_with(Vec::new).extend(
+                    snapshot
+                        .diagnostics(path)
+                        .iter()
+                        .map(|d| (d, client.encoding)),
+                );
+            }
+        }
+        said
     }
 
     /// The user allowed the consent question `number`, if it is the one
@@ -1634,16 +1773,71 @@ impl App {
                     Ok(client) => {
                         // Open every already-loaded document of this language.
                         let open_task = self.open_docs_for_language(&language, &client);
+                        let rust = language == "rust";
                         self.proj.link.lsp.insert(language, LspSlot::Ready(client));
-                        open_task
+                        match rust {
+                            true => Task::batch([open_task, self.look_for_rust_src()]),
+                            false => open_task,
+                        }
                     }
                     Err(e) => {
                         self.status = tr!(
                             "{language} server failed: {error}",
-                            language = crate::app::languages::language_name(&language),
+                            language = self.server_called(&language),
                             error = e
                         );
                         self.proj.link.lsp.insert(language, LspSlot::Failed(e));
+                        Task::none()
+                    }
+                }
+            }
+            LspMsg::RustSrcFound { found, .. } => {
+                self.proj.rust_src = match found {
+                    Some(Err(toolchain)) => RustSrc::Missing(toolchain),
+                    Some(Ok(())) | None => RustSrc::Present,
+                };
+                Task::none()
+            }
+            LspMsg::AddRustSrc => {
+                let toolchain = match &self.proj.rust_src {
+                    RustSrc::Missing(t) => t.clone(),
+                    RustSrc::Failed { toolchain, .. } => toolchain.clone(),
+                    _ => return Task::none(),
+                };
+                self.proj.rust_src = RustSrc::Adding(toolchain.clone());
+                let stamp = self.stamp();
+                Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            clew_core::cargorun::add_rust_src(toolchain.as_deref())
+                        })
+                        .await
+                        .unwrap_or_else(|e| Err(e.to_string()))
+                    },
+                    move |result| {
+                        Message::Lsp(LspMsg::RustSrcAdded {
+                            stamp: stamp.clone(),
+                            result,
+                        })
+                    },
+                )
+            }
+            LspMsg::RustSrcAdded { result, .. } => {
+                let toolchain = match &self.proj.rust_src {
+                    RustSrc::Adding(t) => t.clone(),
+                    _ => None,
+                };
+                match result {
+                    Ok(()) => {
+                        self.proj.rust_src = RustSrc::Present;
+                        self.status = tr!(
+                            "Rust's sources were added. rust-analyzer starts again to read them."
+                        )
+                        .into();
+                        self.update(Message::Lsp(LspMsg::Restart("rust".into())))
+                    }
+                    Err(error) => {
+                        self.proj.rust_src = RustSrc::Failed { toolchain, error };
                         Task::none()
                     }
                 }
@@ -1715,14 +1909,14 @@ impl App {
                     Ok(exe) => {
                         self.status = tr!(
                             "{language} server installed",
-                            language = crate::app::languages::language_name(&language)
+                            language = self.server_called(&language)
                         );
                         Task::batch([self.start_lsp_with(&language, exe), look])
                     }
                     Err(e) => {
                         self.status = tr!(
                             "{language} server download failed: {error}",
-                            language = crate::app::languages::language_name(&language),
+                            language = self.server_called(&language),
                             error = e
                         );
                         self.proj.link.lsp.insert(language, LspSlot::Failed(e));
@@ -1868,11 +2062,86 @@ pub(crate) fn path_name(provision: &LspProvision) -> Option<&'static str> {
 /// one with no way to ask (pyright's server, VS Code's) is offered as found,
 /// unless it is such a shim: those are kept in a `shims` folder (asdf,
 /// mise, pyenv, rbenv, nodenv), and only running it would tell.
-pub(crate) fn worth_offering(program: &std::path::Path, path: &std::ffi::OsStr) -> bool {
+///
+/// rustup's `rust-analyzer` is asked for the toolchain the project at
+/// `project` pins (`rust-toolchain.toml`): it runs that toolchain's there,
+/// and one that has none failed in the project after it was offered.
+/// Asked by its channel, away from the project: a toolchain the project
+/// names by path is its own program, not to be run for it.
+pub(crate) fn worth_offering(
+    program: &std::path::Path,
+    path: &std::ffi::OsStr,
+    project: Option<&std::path::Path>,
+) -> bool {
     let name = program.file_stem().and_then(|n| n.to_str()).unwrap_or("");
+    let pinned = match name {
+        "rust-analyzer" => project.and_then(clew_core::cargorun::pinned_toolchain),
+        _ => None,
+    };
+    let env: Vec<(&str, &str)> = pinned
+        .iter()
+        .flat_map(|t| {
+            [
+                ("RUSTUP_TOOLCHAIN", t.as_str()),
+                ("RUSTUP_AUTO_INSTALL", "0"),
+            ]
+        })
+        .collect();
     match version_args(name) {
-        Some(args) => runs_here(program, args, path),
+        Some(args) => runs_here(program, args, path, &env),
         None => !program.components().any(|c| c.as_os_str() == "shims"),
+    }
+}
+
+/// Rust's own sources (`rust-src`) for the project's toolchain, which
+/// rust-analyzer reads the standard library from: without them `Vec`,
+/// `Option` and the rest are names it cannot follow, and it says so only
+/// in its log.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum RustSrc {
+    /// Not looked at yet (or a project on another host).
+    #[default]
+    Unknown,
+    /// There, or nothing rustup could add them to.
+    Present,
+    /// Missing from this toolchain (`None`: rustup's default).
+    Missing(Option<String>),
+    /// Being added to it.
+    Adding(Option<String>),
+    /// Adding them failed: rustup's word why.
+    Failed {
+        toolchain: Option<String>,
+        error: String,
+    },
+}
+
+impl App {
+    /// Look, off the UI thread, whether the project's toolchain has Rust's
+    /// own sources: once a project, for one on this computer.
+    pub(crate) fn look_for_rust_src(&mut self) -> Task<Message> {
+        if self.connection.is_remote() || self.proj.rust_src != RustSrc::Unknown {
+            return Task::none();
+        }
+        let Some(root) = self.proj.project.as_ref().map(|p| p.root.clone()) else {
+            return Task::none();
+        };
+        // Asked once, whatever the answer.
+        self.proj.rust_src = RustSrc::Present;
+        let stamp = self.stamp();
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || clew_core::cargorun::rust_src(&root))
+                    .await
+                    .ok()
+                    .flatten()
+            },
+            move |found| {
+                Message::Lsp(LspMsg::RustSrcFound {
+                    stamp: stamp.clone(),
+                    found,
+                })
+            },
+        )
     }
 }
 
@@ -1897,12 +2166,18 @@ pub(crate) fn version_args(name: &str) -> Option<&'static [&'static str]> {
 /// exits in success within a few seconds — run as the server would be, on
 /// the PATH it was found on (a `#!/usr/bin/env node` server finds its
 /// `node` there: an app opened from the Finder has none on its own), and
-/// away from any project.
-pub(crate) fn runs_here(program: &std::path::Path, args: &[&str], path: &std::ffi::OsStr) -> bool {
+/// away from any project — with `env` set for it besides.
+pub(crate) fn runs_here(
+    program: &std::path::Path,
+    args: &[&str],
+    path: &std::ffi::OsStr,
+    env: &[(&str, &str)],
+) -> bool {
     use std::process::Stdio;
     use std::time::{Duration, Instant};
     let Ok(mut child) = clew_core::spawn::command(program)
         .args(args)
+        .envs(env.iter().copied())
         .env("PATH", path)
         .current_dir(clew_core::linerpc::neutral_dir())
         .stdin(Stdio::null())

@@ -1062,7 +1062,11 @@ fn is_pictograph(c: char) -> bool {
 
 /// `text` (as [`speakable`] says it) cut into sentences: at a full stop, a
 /// question or an exclamation mark that ends one, at the end of a line, and
-/// a long one at its commas, so the first is heard soon.
+/// a long one at its commas. The first, if long, is cut at its first pause
+/// that leaves words that stand alone (`first_clause`): a voice slower
+/// than speech holds a sentence until enough of it is made, and a long
+/// first one was silence for seconds before an answer was heard — the
+/// clause is said while the rest is still being written and made.
 pub fn sentences(text: &str) -> Vec<String> {
     let mut out = Vec::new();
     for line in text.lines() {
@@ -1095,12 +1099,19 @@ pub fn sentences(text: &str) -> Vec<String> {
     out
 }
 
-/// A sentence said whole, or at its commas when it is long.
+/// A sentence said whole, or at its commas when it is long; the text's
+/// first, its first clause apart ([`first_clause`]).
 fn push_sentence(out: &mut Vec<String>, sentence: &str) {
     const LONG: usize = 220;
     let sentence = sentence.trim();
     if sentence.is_empty() || !sentence.chars().any(char::is_alphanumeric) {
         return;
+    }
+    if out.is_empty()
+        && let Some(at) = first_clause(sentence)
+    {
+        out.push(sentence[..at].trim().to_string());
+        return push_sentence(out, &sentence[at..]);
     }
     if sentence.chars().count() <= LONG {
         out.push(sentence.to_string());
@@ -1126,6 +1137,47 @@ fn push_sentence(out: &mut Vec<String>, sentence: &str) {
     if !piece.trim().is_empty() {
         out.push(piece.trim().to_string());
     }
+}
+
+/// Where a long first sentence is cut, so it is heard soon: just after its
+/// first pause (a comma, a semicolon, a colon) that ends words able to stand
+/// alone — about a second and a half said — and leaves words to follow,
+/// outside a name in code. None in a sentence short enough to be said whole
+/// at once. The same as more of the sentence comes: a cut once made stays.
+fn first_clause(sentence: &str) -> Option<usize> {
+    /// Weight past which a first sentence is cut: some four seconds said.
+    const CUT_PAST: usize = 48;
+    /// Weight of the words a clause needs.
+    const STANDS: usize = 18;
+    // A letter or digit of a spaced script weighs one; a CJK character,
+    // which says more, two.
+    let weigh = |c: char| match c {
+        _ if !c.is_alphanumeric() => 0,
+        _ if (c as u32) >= 0x2E80 => 2,
+        _ => 1,
+    };
+    if sentence.chars().map(weigh).sum::<usize>() <= CUT_PAST {
+        return None;
+    }
+    let (mut weight, mut in_code) = (0, false);
+    let chars: Vec<(usize, char)> = sentence.char_indices().collect();
+    for (k, &(i, c)) in chars.iter().enumerate() {
+        match c {
+            CODE_OPEN => in_code = true,
+            CODE_CLOSE => in_code = false,
+            _ => weight += weigh(c),
+        }
+        let wide = matches!(c, '，' | '；' | '：' | '、');
+        let pause = wide
+            || (matches!(c, ',' | ';' | ':')
+                && chars.get(k + 1).is_some_and(|&(_, n)| n.is_whitespace()));
+        if pause && !in_code && weight >= STANDS {
+            let at = i + c.len_utf8();
+            let rest = &sentence[at..];
+            return rest.chars().any(char::is_alphanumeric).then_some(at);
+        }
+    }
+    None
 }
 
 /// Whether `text` ends with an abbreviation's full stop, not a sentence's.
@@ -1824,6 +1876,70 @@ mod tests {
         let long = "word, ".repeat(80);
         assert!(sentences(&long).iter().all(|s| s.chars().count() <= 230));
         assert!(sentences("```").is_empty());
+    }
+
+    /// A long first sentence is cut at its first pause that leaves words
+    /// able to stand alone, so it is heard soon; a short one, a pause
+    /// too early, and the sentences after it are said whole.
+    #[test]
+    fn a_long_first_sentence_is_heard_from_its_first_clause() {
+        let first =
+            "The area function returns the square of its side, so a side of two gives four.";
+        let then = "It is used by the report, and by the tests, which check it.";
+        assert_eq!(
+            sentences(&format!("{first} {then}")),
+            [
+                "The area function returns the square of its side,",
+                "so a side of two gives four.",
+                then
+            ]
+        );
+        // Too few words before the comma: the next pause.
+        assert_eq!(
+            sentences("In short, the area function returns the square of the side, as expected."),
+            [
+                "In short, the area function returns the square of the side,",
+                "as expected."
+            ]
+        );
+        // Short: whole.
+        assert_eq!(
+            sentences("Yes, it adds them, then stops."),
+            ["Yes, it adds them, then stops."]
+        );
+        // CJK: its wide pauses, its characters weighed as words.
+        assert_eq!(
+            sentences(
+                "这个函数计算正方形的面积并且返回结果，然后报告会用它来打印总数，最后测试会检查它是否正确。"
+            ),
+            [
+                "这个函数计算正方形的面积并且返回结果，",
+                "然后报告会用它来打印总数，最后测试会检查它是否正确。"
+            ]
+        );
+        // Streamed: the clause is handed out once its pause has come and
+        // words follow, before the sentence ends; the rest, once it has.
+        let mut reader = Reader::default();
+        assert!(
+            reader
+                .next("The area function returns the square of its side", false)
+                .is_empty()
+        );
+        let heard: Vec<String> = reader
+            .next(
+                "The area function returns the square of its side, so a side of",
+                false,
+            )
+            .into_iter()
+            .map(|s| s.text)
+            .collect();
+        assert_eq!(heard, ["The area function returns the square of its side,"]);
+        let rest: Vec<String> = reader
+            .next(&format!("{first} It"), false)
+            .into_iter()
+            .map(|s| s.text)
+            .collect();
+        assert_eq!(rest, ["so a side of two gives four."]);
     }
 
     /// A script says its language; a Latin one leaves it to the caller.

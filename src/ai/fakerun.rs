@@ -50,7 +50,8 @@ impl Target {
 /// The kinds a fake run can start from: what can be called, and the types
 /// whose methods can.
 pub fn runnable(kind: &str) -> bool {
-    clew_core::outline::is_callable(kind)
+    // A theorem is proved, not run.
+    (clew_core::outline::is_callable(kind) && kind != "theorem")
         || matches!(
             kind,
             "class" | "struct" | "enum" | "interface" | "trait" | "impl" | "object" | "record"

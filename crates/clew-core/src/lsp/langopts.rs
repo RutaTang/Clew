@@ -658,14 +658,46 @@ fn candidate(path: PathBuf, name: String, project: bool) -> Option<ToolchainCand
         })
 }
 
+/// The toolchains the project's `lean-toolchain` files name: the opened
+/// folder's, and those of the Lake projects in its folders, two levels
+/// down — a repository's proofs in `verification/`, whose toolchain was
+/// never marked as the project's.
+fn lean_toolchains_wanted(root: &Path) -> Vec<String> {
+    let read = |dir: &Path| {
+        crate::statefile::read_capped(&dir.join("lean-toolchain"), 4096)
+            .and_then(|t| t.lines().next().map(|l| l.trim().to_string()))
+            .filter(|t| !t.is_empty())
+    };
+    // Not into what is no project's own: Lake's checkouts, hidden folders,
+    // build output.
+    let kept = |dir: &Path| {
+        dir.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
+            !n.starts_with('.')
+                && !matches!(n, "node_modules" | "target" | "build" | "lake-packages")
+        })
+    };
+    let mut dirs = vec![root.to_path_buf()];
+    for dir in subdirs(root).into_iter().filter(|d| kept(d)) {
+        dirs.extend(subdirs(&dir).into_iter().filter(|d| kept(d)));
+        dirs.push(dir);
+    }
+    let mut out: Vec<String> = Vec::new();
+    for dir in dirs {
+        if let Some(toolchain) = read(&dir)
+            && !out.contains(&toolchain)
+        {
+            out.push(toolchain);
+        }
+    }
+    out
+}
+
 /// Lean's `lake`: elan's own (which runs the toolchain the project's
 /// `lean-toolchain` names), each toolchain elan has installed, and one on
 /// `PATH`.
 fn lean_toolchains(root: &Path, host: &ToolHost) -> Vec<ToolchainCandidate> {
     let mut out = Vec::new();
-    let wanted = crate::statefile::read_capped(&root.join("lean-toolchain"), 4096)
-        .and_then(|t| t.lines().next().map(|l| l.trim().to_string()))
-        .filter(|t| !t.is_empty());
+    let wanted = lean_toolchains_wanted(root);
     let elan = host
         .elan_home
         .clone()
@@ -674,13 +706,13 @@ fn lean_toolchains(root: &Path, host: &ToolHost) -> Vec<ToolchainCandidate> {
         out.extend(candidate(
             elan.join("bin/lake"),
             "elan — the toolchain the project's lean-toolchain names".into(),
-            wanted.is_some(),
+            !wanted.is_empty(),
         ));
         for dir in subdirs(&elan.join("toolchains")) {
             let folder = dir.file_name().unwrap_or_default().to_string_lossy();
             // elan spells `leanprover/lean4:v4.9.0` as `leanprover--lean4---v4.9.0`.
             let name = folder.replace("---", ":").replace("--", "/");
-            let project = wanted.as_deref() == Some(name.as_str());
+            let project = wanted.contains(&name);
             out.extend(candidate(dir.join("bin/lake"), name, project));
         }
     }
@@ -1381,6 +1413,26 @@ exclude = ["crates/skip"]
             ]
         );
         assert!(found[0].command.ends_with(".elan/bin/lake"));
+        // A Lake project in a folder of the repository: its toolchain is the
+        // project's too.
+        std::fs::remove_file(root.join("lean-toolchain")).unwrap();
+        write(
+            &root.join("verification/lean-toolchain"),
+            "leanprover/lean4:v4.8.0\n",
+        );
+        let found = toolchain_candidates("lean", &root, &host);
+        let names: Vec<(&str, bool)> = found.iter().map(|c| (c.name.as_str(), c.project)).collect();
+        assert_eq!(
+            names,
+            [
+                (
+                    "elan — the toolchain the project's lean-toolchain names",
+                    true
+                ),
+                ("leanprover/lean4:v4.8.0", true),
+                ("leanprover/lean4:v4.9.0", false),
+            ]
+        );
     }
 
     /// Dart SDKs: fvm's versions, the project's pinned one first.

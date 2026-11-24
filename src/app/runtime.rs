@@ -139,6 +139,7 @@ impl App {
             picker: None,
             file_filter: String::new(),
             tree_focused: false,
+            tree_ring: false,
             keymap: keymap::Keymap::load(),
             rebinding: None,
             keymap_notice: None,
@@ -148,6 +149,7 @@ impl App {
             show_minimap: view_pref(VIEW_MINIMAP, false),
             show_inline_blame: view_pref(VIEW_BLAME, false),
             show_indent_guides: view_pref(VIEW_INDENT_GUIDES, false),
+            peek_on_rest: view_pref(VIEW_PEEK_ON_REST, false),
             keep_explanations_fresh: view_pref(KEEP_EXPLANATIONS_FRESH, true),
             suggest_questions: view_pref(SUGGEST_QUESTIONS, true),
             settings: SettingsDraft::default(),
@@ -1060,6 +1062,10 @@ impl App {
             }
             WindowMsg::TreeFocused(focused) => {
                 self.tree_focused = focused;
+                // Brought in by the keys (F6, Tab, ↓ from the filter), the
+                // row they rest on is ringed; a click says so after this
+                // (`TreePointed`) and takes the ring away.
+                self.tree_ring = focused;
                 if focused {
                     // The keys are the tree's now, not the code's.
                     self.code_focused = false;
@@ -1067,7 +1073,15 @@ impl App {
                 }
                 Task::none()
             }
-            WindowMsg::TreeKey(key) => self.on_tree_key(key),
+            WindowMsg::TreePointed => {
+                self.tree_ring = false;
+                Task::none()
+            }
+            WindowMsg::TreeKey(key) => {
+                // A key moved in the tree: its row is ringed from now on.
+                self.tree_ring = true;
+                self.on_tree_key(key)
+            }
             WindowMsg::TabPressed { forward, field } => self.on_tab(forward, field),
             WindowMsg::RingEnd => {
                 let _ = self.end_ring(false);
@@ -1186,6 +1200,11 @@ impl App {
                 self.keep_view_pref(VIEW_INDENT_GUIDES, self.show_indent_guides);
                 Task::none()
             }
+            WindowMsg::TogglePeekOnRest => {
+                self.peek_on_rest = !self.peek_on_rest;
+                self.keep_view_pref(VIEW_PEEK_ON_REST, self.peek_on_rest);
+                Task::none()
+            }
             WindowMsg::NoFileDialog => {
                 self.status =
                     tr!("No file dialog could open here. Install xdg-desktop-portal or zenity.")
@@ -1216,6 +1235,7 @@ pub(crate) const VIEW_INLAY_HINTS: &str = "view_inlay_hints";
 pub(crate) const VIEW_MINIMAP: &str = "view_minimap";
 pub(crate) const VIEW_BLAME: &str = "view_inline_blame";
 pub(crate) const VIEW_INDENT_GUIDES: &str = "view_indent_guides";
+pub(crate) const VIEW_PEEK_ON_REST: &str = "view_peek_on_rest";
 /// Whether explanations are refreshed by themselves as code changes.
 pub(crate) const KEEP_EXPLANATIONS_FRESH: &str = "keep_explanations_fresh";
 /// How far down the trail's list to scroll for the place being read: its

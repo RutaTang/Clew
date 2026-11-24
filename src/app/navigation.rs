@@ -365,10 +365,10 @@ impl App {
             .get(pane)
             .and_then(Option::as_ref)
             .and_then(|v| {
-                v.lang_key.map(|l| {
+                v.lsp_lang().map(|l| {
                     (
                         l,
-                        v.abs.clone(),
+                        v.lsp_path(),
                         v.source_line(line).unwrap_or("").to_string(),
                     )
                 })
@@ -452,7 +452,7 @@ impl App {
         &mut self,
         result: Result<Vec<lsp::client::Target>, String>,
     ) -> Task<Message> {
-        match result {
+        match result.map(in_notebooks) {
             // Several definitions (a trait method's impls, overloads, a
             // symbol defined per platform): jumping to the first one silently
             // hid the rest. List them all in the Search sidebar to pick from,
@@ -498,7 +498,7 @@ impl App {
         &mut self,
         result: Result<Vec<lsp::client::Target>, String>,
     ) -> Task<Message> {
-        match result {
+        match result.map(in_notebooks) {
             Ok(refs) if !refs.is_empty() => {
                 self.status = trn!(
                     "1 reference, shown in Search",
@@ -1343,7 +1343,7 @@ impl App {
     /// the keyboard: the one it was put on, while it shows; else the file
     /// being read; else the first.
     pub(crate) fn tree_cursor_rel(&self) -> Option<String> {
-        if !self.tree_focused {
+        if !self.tree_focused || !self.tree_ring {
             return None;
         }
         let rows = ui::tree_rows(self);
@@ -1865,4 +1865,16 @@ mod location_tests {
             let _ = std::fs::remove_dir_all(d);
         }
     }
+}
+
+/// `targets` as places to go: one in a notebook's script is the notebook's
+/// (its script's lines are the notebook's), where it is read.
+fn in_notebooks(targets: Vec<lsp::client::Target>) -> Vec<lsp::client::Target> {
+    targets
+        .into_iter()
+        .map(|t| lsp::client::Target {
+            path: viewer::from_server_path(t.path),
+            ..t
+        })
+        .collect()
 }

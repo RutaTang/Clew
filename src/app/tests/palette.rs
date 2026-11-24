@@ -530,6 +530,7 @@ fn the_file_picker_keeps_its_symbols_for_a_question() {
     app.proj.symbol_index_by_file.insert(
         lib.clone(),
         std::sync::Arc::new(vec![crate::index::SymbolEntry {
+            owner: None,
             name: "parse_config_file".into(),
             kind: "function".into(),
             rel: "src/lib.rs".into(),

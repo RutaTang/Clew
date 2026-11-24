@@ -345,11 +345,14 @@ pub fn remove(list: &mut Vec<Note>, rel: &str, symbol: &str) {
 }
 
 /// Whether a symbol of `kind` is one a reader works through and ticks off
-/// as understood: not a class's field or a constant, read at a glance —
-/// each had a circle, and a file of models counted its fields as most of
-/// what was left to understand.
+/// as understood: not a class's field, a constant or a module's variable,
+/// read at a glance — each had a circle, and a file of models counted its
+/// fields as most of what was left to understand.
 pub fn is_read_through(kind: &str) -> bool {
-    !matches!(kind, "field" | "constant")
+    !matches!(
+        kind,
+        "field" | "constant" | "static" | "variant" | "variable"
+    )
 }
 
 /// `(understood, total)` symbol counts for one file, given its live symbol

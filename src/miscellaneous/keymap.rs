@@ -47,6 +47,10 @@ pub enum Action {
     CopySelection,
     ToggleBookmark,
     GotoLine,
+    /// The code info of the word at the caret — its docs, its type, the
+    /// diagnostic on it — as the pointer resting there shows it; pressed
+    /// again, put away.
+    ShowInfo,
     ToggleSplit,
     ZoomIn,
     ZoomOut,
@@ -92,7 +96,7 @@ pub enum Action {
 }
 
 impl Action {
-    pub const ALL: [Action; 40] = [
+    pub const ALL: [Action; 41] = [
         Action::OpenFile,
         Action::OpenSymbol,
         Action::ProjectSearch,
@@ -100,6 +104,7 @@ impl Action {
         Action::CopySelection,
         Action::ToggleBookmark,
         Action::GotoLine,
+        Action::ShowInfo,
         Action::ToggleSplit,
         Action::ZoomIn,
         Action::ZoomOut,
@@ -145,6 +150,7 @@ impl Action {
             Action::CopySelection => "copy_selection",
             Action::ToggleBookmark => "toggle_bookmark",
             Action::GotoLine => "goto_line",
+            Action::ShowInfo => "show_info",
             Action::ToggleSplit => "toggle_split",
             Action::ZoomIn => "zoom_in",
             Action::ZoomOut => "zoom_out",
@@ -196,6 +202,7 @@ impl Action {
             Action::CopySelection => tr!("Copy"),
             Action::ToggleBookmark => tr!("Toggle bookmark"),
             Action::GotoLine => tr!("Go to line"),
+            Action::ShowInfo => tr!("Show info"),
             Action::ToggleSplit => tr!("Split view"),
             Action::ZoomIn => tr!("Zoom in"),
             Action::ZoomOut => tr!("Zoom out"),
@@ -252,6 +259,7 @@ impl Action {
             Action::OpenFile => at(MenuSection::Go, tr_noop!("Go to File…")),
             Action::OpenSymbol => at(MenuSection::Go, tr_noop!("Go to Symbol…")),
             Action::GotoLine => at(MenuSection::Go, tr_noop!("Go to Line…")),
+            Action::ShowInfo => at(MenuSection::Go, tr_noop!("Show Info")),
             Action::ToggleBookmark => at(MenuSection::Go, tr_noop!("Toggle Bookmark")),
             Action::TraceValue => at(MenuSection::Go, tr_noop!("Trace Value")),
             Action::FakeRun => at(MenuSection::Tools, tr_noop!("Fake Run…")),
@@ -294,6 +302,9 @@ impl Action {
             Action::CopySelection => Chord::cmd('c'),
             Action::ToggleBookmark => Chord::cmd('d'),
             Action::GotoLine => Chord::cmd('l'),
+            // Info: the first letter free of the reading keys, as VS Code's
+            // "show hover" (⌘K ⌘I) starts.
+            Action::ShowInfo => Chord::cmd('k'),
             Action::ToggleSplit => Chord::cmd('\\'),
             Action::ZoomIn => Chord::cmd('='),
             Action::ZoomOut => Chord::cmd('-'),

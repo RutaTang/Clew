@@ -228,11 +228,13 @@ impl Widget<Message, iced::Theme, iced::Renderer> for TreeKeys<'_> {
         if self.release {
             state.focused = false;
         }
+        let mut pointed = false;
         match event {
             // A press on the tree gives it the keyboard; one anywhere else
             // takes it away, as a text field's does.
             Event::Mouse(mouse::Event::ButtonPressed(_)) => {
                 state.focused = cursor.is_over(layout.bounds());
+                pointed = state.focused;
             }
             Event::Keyboard(keyboard::Event::KeyPressed {
                 key,
@@ -271,6 +273,10 @@ impl Widget<Message, iced::Theme, iced::Renderer> for TreeKeys<'_> {
             state.told = state.focused;
             shell.publish(Message::Window(WindowMsg::TreeFocused(state.focused)));
             shell.request_redraw();
+        }
+        // After it: pressed, not keyed, so its row is not ringed.
+        if pointed {
+            shell.publish(Message::Window(WindowMsg::TreePointed));
         }
         if shell.is_event_captured() {
             return;

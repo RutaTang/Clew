@@ -36,8 +36,20 @@ use crate::lsp::langenv;
 use crate::lsp::registry::{Archive, Download, Sha256};
 use crate::lsp::store;
 
-/// The debugpy release a consented install asks pip for.
-pub const DEBUGPY_VERSION: &str = "1.8.14";
+/// The debugpy release clew downloads, verified by digest: its pure-Python
+/// wheel, the same for every platform and Python 3 release. Run from clew's
+/// data directory, it debugs a program under any interpreter: nothing is
+/// installed into the project's environment, which may have no pip (one uv
+/// made) or refuse to take packages (a system Python, PEP 668).
+pub const DEBUGPY_VERSION: &str = "1.8.22";
+
+static DEBUGPY: Download = Download {
+    url: "https://files.pythonhosted.org/packages/56/3d/c7dc9f35bc9e22cdb53679f844bee40fd5cff871862f60595869a433400d/debugpy-1.8.22-py2.py3-none-any.whl",
+    sha256: Sha256::from_hex("a9e9d3550e15ca479c59333e90845029190531f0cacfedab3b815a57bd913947"),
+    archive: Archive::Zip,
+    // A wheel is a zip of the package: `debugpy/` at its top.
+    binary: "debugpy/adapter/__main__.py",
+};
 
 /// The pytest release a consented install asks pip for: what runs a Python
 /// project's tests when its interpreter has none.
@@ -58,7 +70,7 @@ static JS_DEBUG: Download = Download {
 /// standard library; a probe this slow is a hung interpreter.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// How long `pip install debugpy` may take.
+/// How long `pip install pytest` may take.
 const PIP_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
 /// How long `xcrun -f` may take.
@@ -101,35 +113,59 @@ pub enum Resolution {
 /// A debug-adapter install awaiting the user's consent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AdapterInstall {
-    /// `python -m pip install debugpy==<DEBUGPY_VERSION>` into THIS
-    /// interpreter — the one the adapter will run under; `user` adds
-    /// `--user` (not inside a virtualenv, where pip refuses it).
-    Debugpy { python: PathBuf, user: bool },
-    /// `python -m pip install pytest==<PYTEST_VERSION>` into the interpreter
-    /// a test runs under: without it a test file only defines its tests, and
-    /// one test cannot be run alone at all.
-    Pytest { python: PathBuf, user: bool },
+    /// Download the pinned debugpy, verify its SHA-256, and unpack it into
+    /// clew's data directory. It runs under the program's own interpreter,
+    /// which gets nothing installed.
+    Debugpy,
+    /// Install `pytest==<PYTEST_VERSION>` into the interpreter a test runs
+    /// under, `via` pip or uv: without it a test file only defines its
+    /// tests, and one test cannot be run alone at all.
+    Pytest { python: PathBuf, via: PyInstaller },
     /// Download the pinned vscode-js-debug, verify its SHA-256, and unpack it
     /// into clew's data directory.
     JsDebug,
+    /// Install the packages a script lists in its inline metadata (PEP 723,
+    /// `# /// script`) into the environment `uv` keeps for it
+    /// (`uv sync --script`): what `uv run` would run it in.
+    ScriptEnv { uv: PathBuf, script: PathBuf },
+}
+
+/// What installs a package into a Python environment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PyInstaller {
+    /// `python -m pip install`; `user` adds `--user`, for an interpreter in
+    /// no environment of its own (pip refuses it inside one).
+    Pip { user: bool },
+    /// `uv pip install --python <python>`: an environment uv made has no
+    /// pip of its own.
+    Uv(PathBuf),
 }
 
 impl AdapterInstall {
     /// Short name for the consent prompt ("debugpy").
     pub fn name(&self) -> &'static str {
         match self {
-            AdapterInstall::Debugpy { .. } => "debugpy",
+            AdapterInstall::Debugpy => "debugpy",
             AdapterInstall::Pytest { .. } => "pytest",
             AdapterInstall::JsDebug => "vscode-js-debug",
+            AdapterInstall::ScriptEnv { .. } => "uv",
         }
     }
 
     pub fn version(&self) -> &'static str {
         match self {
-            AdapterInstall::Debugpy { .. } => DEBUGPY_VERSION,
+            AdapterInstall::Debugpy => DEBUGPY_VERSION,
             AdapterInstall::Pytest { .. } => PYTEST_VERSION,
             AdapterInstall::JsDebug => JS_DEBUG_VERSION,
+            // Whatever the script asks for.
+            AdapterInstall::ScriptEnv { .. } => "",
         }
+    }
+
+    /// Whether this installs the packages a script lists (PEP 723): what
+    /// the consent prompt and the status line then say.
+    pub fn is_script_packages(&self) -> bool {
+        matches!(self, AdapterInstall::ScriptEnv { .. })
     }
 
     /// Whether this installs what runs tests rather than a debugger: what
@@ -138,25 +174,32 @@ impl AdapterInstall {
         matches!(self, AdapterInstall::Pytest { .. })
     }
 
+    /// Whether this downloads into clew's own data directory, rather than
+    /// installing into the project's environment.
+    pub fn is_download(&self) -> bool {
+        matches!(self, AdapterInstall::Debugpy | AdapterInstall::JsDebug)
+    }
+
     /// Exactly what [`Self::install_cancellable`] will do, for the consent
     /// prompt: the full command line for pip, the URL and digest for a
     /// download.
     pub fn describe(&self) -> String {
         match self {
-            AdapterInstall::Debugpy { python, user } => format!(
-                "{} {}",
-                python.display(),
-                pip_args(*user, Pip::Debugpy).join(" ")
+            AdapterInstall::Debugpy => format!(
+                "download {} (SHA-256 {}) into Clew's data directory",
+                DEBUGPY.url, DEBUGPY.sha256
             ),
-            AdapterInstall::Pytest { python, user } => format!(
-                "{} {}",
-                python.display(),
-                pip_args(*user, Pip::Pytest).join(" ")
-            ),
+            AdapterInstall::Pytest { python, via } => {
+                let (program, args) = pytest_argv(python, via);
+                format!("{} {}", program.display(), args.join(" "))
+            }
             AdapterInstall::JsDebug => format!(
                 "download {} (SHA-256 {}) into Clew's data directory",
                 JS_DEBUG.url, JS_DEBUG.sha256
             ),
+            AdapterInstall::ScriptEnv { uv, script } => {
+                format!("{} sync --script {}", uv.display(), script.display())
+            }
         }
     }
 
@@ -173,13 +216,10 @@ impl AdapterInstall {
     /// everything it started.
     pub fn install_cancellable(&self, cancel: &AtomicBool) -> Result<(), String> {
         match self {
-            AdapterInstall::Debugpy { python, user } => {
-                install_with_pip(python, *user, Pip::Debugpy, cancel)
-            }
-            AdapterInstall::Pytest { python, user } => {
-                install_with_pip(python, *user, Pip::Pytest, cancel)
-            }
+            AdapterInstall::Debugpy => install_debugpy(cancel).map(|_| ()),
+            AdapterInstall::Pytest { python, via } => install_pytest(python, via, cancel),
             AdapterInstall::JsDebug => install_js_debug(cancel).map(|_| ()),
+            AdapterInstall::ScriptEnv { uv, script } => install_script_env(uv, script, cancel),
         }
     }
 }
@@ -238,13 +278,45 @@ pub fn resolve(
             Ok(Resolution::Ready(spec))
         }
         "python" => {
-            let python = python_for(
-                root,
-                choices.python.as_deref(),
-                std::env::var_os("PATH").as_deref(),
-            )
-            .ok_or("python not found on PATH")?;
-            python_with(&python, program, args, cwd)
+            // A script that lists the packages it needs (PEP 723) runs in
+            // the environment uv keeps for it, as `uv run` runs it: run in
+            // the project's, its imports failed.
+            let script = in_dir(cwd, program);
+            let path = crate::linerpc::spawn_path();
+            let mut notice = None;
+            let own_env = match lists_its_packages(&script) {
+                false => None,
+                true => match path
+                    .as_deref()
+                    .and_then(|path| store::find_in_unresolved(path, "uv"))
+                {
+                    Some(uv) => match script_env(&uv, &script) {
+                        Some(env) => Some(env),
+                        None => {
+                            return Ok(Resolution::NeedsInstall(AdapterInstall::ScriptEnv {
+                                uv,
+                                script,
+                            }));
+                        }
+                    },
+                    None => {
+                        let msg = "This script lists the packages it needs (# /// script), and uv isn't installed to install them, so it runs with the project's Python. Install uv to run it with its own packages."
+                            .to_string();
+                        notice = Some(msg);
+                        None
+                    }
+                },
+            };
+            let python = match own_env {
+                Some(env) => env,
+                None => python_for(root, choices.python.as_deref(), path.as_deref())
+                    .ok_or("python not found on PATH")?,
+            };
+            let mut resolved = python_with(&python, program, args, cwd)?;
+            if let (Some(notice), Resolution::Ready(spec)) = (notice, &mut resolved) {
+                spec.launch[NOTICE] = json!(notice);
+            }
+            Ok(resolved)
         }
         "dart" => {
             let command = match chosen_sdk(choices, "dart") {
@@ -374,6 +446,77 @@ pub fn resolve(
     }
 }
 
+/// Most bytes of a script read for its inline metadata.
+const MAX_SCRIPT_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Whether `script` lists the packages it needs in its inline metadata
+/// (PEP 723): a `# /// script` line, closed by a `# ///` line.
+pub fn lists_its_packages(script: &Path) -> bool {
+    if script.extension().is_none_or(|e| e != "py") {
+        return false;
+    }
+    let Some(text) = crate::statefile::read_capped(script, MAX_SCRIPT_BYTES) else {
+        return false;
+    };
+    let mut lines = text.lines().map(str::trim_end);
+    lines.any(|l| l == "# /// script") && lines.any(|l| l == "# ///")
+}
+
+/// The interpreter of the environment `uv` keeps for `script` (PEP 723),
+/// once it has made one (`uv sync --script`): `uv python find --script`
+/// names it — or, before then, only a base Python, which is no answer.
+fn script_env(uv: &Path, script: &Path) -> Option<PathBuf> {
+    let mut cmd = crate::spawn::command(uv);
+    cmd.args(["python", "find", "--script"]).arg(script);
+    neutral(&mut cmd);
+    let out = store::run_bounded(cmd, PROBE_TIMEOUT).ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let found = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+    is_script_env(&found).then_some(found)
+}
+
+/// Whether `python` is in an environment uv keeps for a script — under its
+/// cache's `environments-v…` folder — and not a base Python.
+fn is_script_env(python: &Path) -> bool {
+    python.is_absolute()
+        && python.ancestors().any(|dir| {
+            dir.file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with("environments-v"))
+        })
+}
+
+/// Install the packages `script` lists into the environment uv keeps for
+/// it, then confirm it is found.
+fn install_script_env(uv: &Path, script: &Path, cancel: &AtomicBool) -> Result<(), String> {
+    let mut cmd = crate::spawn::command(uv);
+    cmd.args(["sync", "--script"]).arg(script);
+    neutral(&mut cmd);
+    let out = store::run_bounded_cancellable(cmd, PIP_TIMEOUT, cancel)?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let last = stderr
+            .lines()
+            .rev()
+            .map(str::trim)
+            .find(|l| !l.is_empty() && !l.starts_with("hint:") && !l.starts_with("warning:"))
+            .unwrap_or("uv failed");
+        return Err(format!(
+            "the script's packages could not be installed: {last}"
+        ));
+    }
+    match script_env(uv, script) {
+        Some(_) => Ok(()),
+        None => {
+            let msg =
+                "uv installed the script's packages, but its environment wasn't found afterwards"
+                    .to_string();
+            Err(msg)
+        }
+    }
+}
+
 /// The SDK program the user chose for `language`'s server, when they chose
 /// where its toolchain is (a program with no arguments of their own: the
 /// toolchain's, run as clew runs it) — the debugger runs the same SDK.
@@ -430,6 +573,15 @@ fn lldb_dap_names() -> Vec<String> {
 /// of the body before sending it.
 pub const NOTICE: &str = "__clewNotice";
 
+/// A key of a `launch` body that is Clew's, not the adapter's: the
+/// exception filters the session stops at instead of the adapter's
+/// defaults (those of them it offers), taken out before the body is sent.
+/// A test run stops where its test fails: debugpy's `userUnhandled`, an
+/// exception leaving the project's code for pytest's, which catches every
+/// one. Its default (`uncaught`) stopped instead at the `SystemExit` pytest
+/// ends with, in pytest's own `__main__`.
+pub const EXCEPTIONS: &str = "__clewExceptions";
+
 /// DWARF's language code for Rust (`DW_LANG_Rust`), which rustc puts on
 /// its compile units.
 const DW_LANG_RUST: u16 = 0x1c;
@@ -440,6 +592,13 @@ const DW_LANG_RUST: u16 = 0x1c;
 /// under the debugger, `noDebug` or not, and stopped a plain Run at its
 /// panic.
 pub const DEBUG_ONLY_KEYS: &[&str] = &["preRunCommands"];
+
+/// What lets Rust's summaries show an enum — `Some(7)`, `Circle(1.5)` — in
+/// an lldb older than 19: they ask a value for `GetSyntheticValue`, which
+/// lldb 18 (a Linux distribution's) has not, and every enum showed a Python
+/// error in its place. Given there, it answers no synthetic value, and the
+/// summary reads the value itself.
+const SYNTHETIC_VALUE_SHIM: &str = "script import lldb; lldb.SBValue.GetSyntheticValue = getattr(lldb.SBValue, 'GetSyntheticValue', None) or (lambda self: lldb.SBValue())";
 
 /// A Rust program debugged as `rust-lldb` sets lldb up for it: the type
 /// summaries Rust's toolchain ships (`Vec`, `String`, `HashMap`, `Option`…
@@ -460,6 +619,7 @@ fn rust_setup(launch: &mut serde_json::Value, sysroot: Option<&Path>, quiet: boo
         };
         (lookup.is_file() && commands.is_file()).then(|| {
             Some(vec![
+                format!("{mark}{SYNTHETIC_VALUE_SHIM}"),
                 format!("{mark}command script import {}", quoted(&lookup)?),
                 format!("{mark}command source -s 1 {}", quoted(&commands)?),
             ])
@@ -469,6 +629,23 @@ fn rust_setup(launch: &mut serde_json::Value, sysroot: Option<&Path>, quiet: boo
         launch["initCommands"] = json!(scripts);
     }
     launch["preRunCommands"] = json!([format!("{mark}breakpoint set --name rust_panic")]);
+}
+
+/// A native launch (lldb-dap's, `adapter` the adapter run) for a program
+/// known to be Rust's — Cargo built it — set up as [`resolve`] sets up one
+/// whose debug information says Rust: Rust's type summaries and the stop at
+/// its panic. `resolve` reads that from the ELF file alone; a Mach-O
+/// program's DWARF stays in its object files (macOS) and a PE one's in its
+/// PDB (Windows), and their runs were left without either. A launch already
+/// set up is left as it is.
+pub fn set_up_for_rust(launch: &mut serde_json::Value, adapter: &Path, cwd: &Path) {
+    if launch.get("initCommands").is_some() || launch.get("preRunCommands").is_some() {
+        return;
+    }
+    let quiet = adapter
+        .file_name()
+        .is_some_and(|n| n.to_string_lossy().starts_with("lldb-dap"));
+    rust_setup(launch, rust_sysroot(cwd).as_deref(), quiet);
 }
 
 /// The sysroot of the Rust toolchain that builds the program in `cwd` —
@@ -904,21 +1081,33 @@ fn csharp_spec(command: PathBuf, program: &str, args: &[String], cwd: &Path) -> 
     }
 }
 
-/// debugpy: `python -m debugpy.adapter` speaks DAP over stdio and debugs the
-/// same interpreter it runs under.
+/// debugpy: its adapter speaks DAP over stdio and debugs the interpreter it
+/// runs under — clew's own copy ([`debugpy_adapter`]), run by path, else the
+/// interpreter's own `python -m debugpy.adapter`.
 fn python_with(
     python: &Path,
     program: &str,
     args: &[String],
     cwd: &Path,
 ) -> Result<Resolution, String> {
+    python_with_adapter(debugpy_adapter(), python, program, args, cwd)
+}
+
+/// [`python_with`], with clew's own debugpy (`bundled`, the adapter's
+/// directory) given: the tests' seam.
+fn python_with_adapter(
+    bundled: Option<PathBuf>,
+    python: &Path,
+    program: &str,
+    args: &[String],
+    cwd: &Path,
+) -> Result<Resolution, String> {
     let probe = probe_python(python)?;
-    if !probe.has_debugpy {
-        return Ok(Resolution::NeedsInstall(AdapterInstall::Debugpy {
-            python: python.to_path_buf(),
-            user: !probe.in_venv,
-        }));
-    }
+    let adapter_args: Vec<String> = match (bundled, probe.has_debugpy) {
+        (Some(dir), _) => vec![dir.to_string_lossy().into_owned()],
+        (None, true) => vec!["-m".into(), "debugpy.adapter".into()],
+        (None, false) => return Ok(Resolution::NeedsInstall(AdapterInstall::Debugpy)),
+    };
     let mut launch = json!({
         "request": "launch",
         "program": program,
@@ -938,7 +1127,7 @@ fn python_with(
     // the package sits in goes on the import path. One that imports its
     // siblings relatively (`from .models import …`) has no package at all
     // as a script, so it runs as Python runs a package's module: `-m`.
-    let package = python_package(&in_dir(cwd, program));
+    let package = python_package(&in_dir(cwd, program), cwd);
     let mut path: Vec<PathBuf> = package.iter().map(|p| p.root.clone()).collect();
     // A `src/` layout not installed (`src/library/…`, the tests beside it):
     // its tests and programs import the package by name, and pytest run
@@ -963,6 +1152,19 @@ fn python_with(
         launch.remove("program");
         launch.insert("module".into(), json!(package.module));
     }
+    // One of a Django project's tests, by Django's runner (`manage.py
+    // test <label>`): debugged as a test is, stopping where it fails —
+    // unittest catches the failure, past the project's own code — and with
+    // Django's templates debugged too.
+    let django_test = Path::new(program)
+        .file_name()
+        .is_some_and(|n| n == "manage.py")
+        && args.first().is_some_and(|a| a == "test");
+    if django_test && let Some(launch) = launch.as_object_mut() {
+        launch.insert("justMyCode".into(), json!(true));
+        launch.insert("django".into(), json!(true));
+        launch.insert(EXCEPTIONS.into(), json!(["userUnhandled"]));
+    }
     // A test file is run as its tests are: under pytest, which collects
     // and runs them. Run as a script it defined its tests and ended, and
     // Run picked the project's program instead, saying the test "does not
@@ -977,10 +1179,18 @@ fn python_with(
         if probe.has_pytest {
             launch.remove("program");
             launch.insert("module".into(), json!("pytest"));
-            let mut test_args = match one_test {
-                true => Vec::new(),
-                false => vec![json!(program)],
-            };
+            // Only the project's code is "the user's": an exception leaving
+            // it for pytest's is the failing test, and stepping stays out
+            // of pytest's machinery.
+            launch.insert("justMyCode".into(), json!(true));
+            launch.insert(EXCEPTIONS.into(), json!(["userUnhandled"]));
+            // pytest's cache (`.pytest_cache`) is not written into the
+            // project: a run to read the code by leaves no trace in it, as
+            // its bytecode is not written either.
+            let mut test_args = vec![json!("-p"), json!("no:cacheprovider")];
+            if !one_test {
+                test_args.push(json!(program));
+            }
             test_args.extend(args.iter().map(|a| json!(a)));
             launch.insert("args".into(), json!(test_args));
         } else if one_test || !runs_its_own_tests(&in_dir(cwd, program)) {
@@ -990,18 +1200,53 @@ fn python_with(
             // ended "passed" having run no test. pytest is asked for, as
             // debugpy is. One that runs its own tests as a script
             // (`unittest.main()`) runs as it is.
-            return Ok(Resolution::NeedsInstall(AdapterInstall::Pytest {
-                python: python.to_path_buf(),
-                user: !probe.in_venv,
-            }));
+            return pytest_install(python, &probe, crate::linerpc::spawn_path().as_deref());
         }
     }
     Ok(Resolution::Ready(AdapterSpec {
         command: python.to_path_buf(),
-        args: vec!["-m".into(), "debugpy.adapter".into()],
+        args: adapter_args,
         launch,
         transport: AdapterTransport::Stdio,
     }))
+}
+
+/// How pytest gets into `python`'s environment, for the consent prompt —
+/// or why it cannot, said before anything is asked: pip refuses a system
+/// Python its distribution manages (PEP 668), and an environment uv made
+/// has no pip, where uv itself installs (`path`, where uv is looked for).
+fn pytest_install(
+    python: &Path,
+    probe: &PythonProbe,
+    path: Option<&std::ffi::OsStr>,
+) -> Result<Resolution, String> {
+    let ask = |via| {
+        Ok(Resolution::NeedsInstall(AdapterInstall::Pytest {
+            python: python.to_path_buf(),
+            via,
+        }))
+    };
+    if probe.managed {
+        return Err(format!(
+            "pytest isn't installed, and {} is managed by the system, which won't \
+             take packages (PEP 668). Create a virtual environment for the project \
+             (python3 -m venv .venv): Clew uses it from then on",
+            python.display()
+        ));
+    }
+    if probe.has_pip {
+        return ask(PyInstaller::Pip {
+            user: !probe.in_venv && !probe.conda,
+        });
+    }
+    match path.and_then(|path| store::find_in_unresolved(path, "uv")) {
+        Some(uv) => ask(PyInstaller::Uv(uv)),
+        None => Err(format!(
+            "pytest isn't installed, and {} has no pip to install it with. \
+             Install pytest into it (uv add --dev pytest, or python -m ensurepip first)",
+            python.display()
+        )),
+    }
 }
 
 /// Whether `arg` is pytest's node id of a test in `program`: the file as
@@ -1025,7 +1270,8 @@ pub fn is_python_test(file: &Path) -> bool {
 /// The package a Python file is a module of: the folder the outermost
 /// package sits in (what goes on the import path), the module's dotted
 /// name, and whether it imports relatively. `None` for a file outside any
-/// package (no `__init__.py` beside it), or a package's own `__init__.py`.
+/// package (no `__init__.py` beside it, and no relative import making a
+/// namespace package's module of it), or a package's own `__init__.py`.
 #[derive(Debug, PartialEq)]
 struct PythonPackage {
     root: PathBuf,
@@ -1033,24 +1279,10 @@ struct PythonPackage {
     relative_imports: bool,
 }
 
-fn python_package(file: &Path) -> Option<PythonPackage> {
+fn python_package(file: &Path, cwd: &Path) -> Option<PythonPackage> {
     let stem = file.file_stem()?.to_str()?;
     if stem == "__init__" || file.extension()? != "py" {
         return None;
-    }
-    let mut dir = file.parent()?;
-    let mut parts = Vec::new();
-    while dir.join("__init__.py").is_file() {
-        parts.push(dir.file_name()?.to_str()?.to_string());
-        dir = dir.parent()?;
-    }
-    if parts.is_empty() {
-        return None;
-    }
-    parts.reverse();
-    // `python -m pkg` runs `pkg/__main__.py`.
-    if stem != "__main__" {
-        parts.push(stem.to_string());
     }
     let source = std::fs::read_to_string(file).unwrap_or_default();
     let relative_imports = source.lines().any(|line| {
@@ -1059,10 +1291,64 @@ fn python_package(file: &Path) -> Option<PythonPackage> {
             rest.trim_start().starts_with('.') && rest.starts_with(char::is_whitespace)
         })
     });
+    let mut dir = file.parent()?;
+    let mut parts = Vec::new();
+    while dir.join("__init__.py").is_file() {
+        parts.push(dir.file_name()?.to_str()?.to_string());
+        dir = dir.parent()?;
+    }
+    if parts.is_empty() {
+        // A namespace package's module (PEP 420: no `__init__.py`) that
+        // imports its siblings relatively is a package's all the same:
+        // named from the folder it is imported from — the project's `src`
+        // when it is in one, else the folder it runs in.
+        return relative_imports
+            .then(|| namespace_module(file, cwd))
+            .flatten();
+    }
+    parts.reverse();
+    // `python -m pkg` runs `pkg/__main__.py`.
+    if stem != "__main__" {
+        parts.push(stem.to_string());
+    }
     Some(PythonPackage {
         root: dir.to_path_buf(),
         module: parts.join("."),
         relative_imports,
+    })
+}
+
+/// [`python_package`] of a namespace package's `file`: its module named
+/// from the project's `src`, else `cwd` — every folder on the way a name
+/// Python can import — or none outside them.
+fn namespace_module(file: &Path, cwd: &Path) -> Option<PythonPackage> {
+    let src = cwd.join("src");
+    let root = [src, cwd.to_path_buf()]
+        .into_iter()
+        .find(|root| file.starts_with(root))?;
+    let rel = file.strip_prefix(&root).ok()?.with_extension("");
+    let parts: Vec<String> = rel
+        .components()
+        .map(|c| c.as_os_str().to_str().map(str::to_string))
+        .collect::<Option<_>>()?;
+    let importable = |p: &String| {
+        p.chars()
+            .next()
+            .is_some_and(|c| c.is_alphabetic() || c == '_')
+            && p.chars().all(|c| c.is_alphanumeric() || c == '_')
+    };
+    // A module of no package at all is no package's.
+    if parts.len() < 2 || !parts.iter().all(importable) {
+        return None;
+    }
+    let mut parts = parts;
+    if parts.last().is_some_and(|p| p == "__main__") {
+        parts.pop();
+    }
+    Some(PythonPackage {
+        root,
+        module: parts.join("."),
+        relative_imports: true,
     })
 }
 
@@ -1167,12 +1453,21 @@ struct PythonProbe {
     in_venv: bool,
     /// `pytest` is importable: a test file is run under it.
     has_pytest: bool,
+    /// `pip` is importable: an environment uv made has none.
+    has_pip: bool,
+    /// A system Python its distribution manages (PEP 668's
+    /// `EXTERNALLY-MANAGED`, outside any virtualenv): pip refuses it.
+    managed: bool,
+    /// A conda environment (`conda-meta/` in its prefix): packages go into
+    /// it, never `--user`.
+    conda: bool,
 }
 
-const PROBE: &str = "import sys, importlib.util\n\
-print(int(importlib.util.find_spec('debugpy') is not None), \
-int(sys.prefix != getattr(sys, 'base_prefix', sys.prefix)), \
-int(importlib.util.find_spec('pytest') is not None))";
+const PROBE: &str = "import sys, os, importlib.util, sysconfig\n\
+f = lambda m: int(importlib.util.find_spec(m) is not None)\n\
+v = int(sys.prefix != getattr(sys, 'base_prefix', sys.prefix))\n\
+m = int(not v and os.path.isfile(os.path.join(sysconfig.get_path('stdlib'), 'EXTERNALLY-MANAGED')))\n\
+print(f('debugpy'), v, f('pytest'), f('pip'), m, int(os.path.isdir(os.path.join(sys.prefix, 'conda-meta'))))";
 
 /// Ask `python` about itself, time-boxed.
 fn probe_python(python: &Path) -> Result<PythonProbe, String> {
@@ -1195,6 +1490,9 @@ fn probe_python_within(python: &Path, limit: Duration) -> Result<PythonProbe, St
             has_debugpy: debugpy == "1",
             in_venv: venv == "1",
             has_pytest: fields.next() == Some("1"),
+            has_pip: fields.next() != Some("0"),
+            managed: fields.next() == Some("1"),
+            conda: fields.next() == Some("1"),
         }),
         _ => Err(format!("unexpected answer from {}", python.display())),
     }
@@ -1215,90 +1513,114 @@ fn neutral(cmd: &mut Command) {
     cmd.current_dir(dir).env("PYTHONSAFEPATH", "1");
 }
 
-/// pip's arguments for the debugpy install, pinned. Rendered into the
-/// consent prompt as they are passed.
-/// What a consented pip install asks for.
-#[derive(Clone, Copy)]
-enum Pip {
-    Debugpy,
-    Pytest,
-}
-
-impl Pip {
-    /// The requirement pip is given: the package at its pinned release.
-    fn requirement(self) -> String {
-        match self {
-            Pip::Debugpy => format!("debugpy=={DEBUGPY_VERSION}"),
-            Pip::Pytest => format!("pytest=={PYTEST_VERSION}"),
+/// The program and arguments that install pytest, pinned, `via` pip or uv:
+/// rendered into the consent prompt as they are run.
+fn pytest_argv(python: &Path, via: &PyInstaller) -> (PathBuf, Vec<String>) {
+    let pinned = format!("pytest=={PYTEST_VERSION}");
+    match via {
+        PyInstaller::Pip { user } => {
+            let mut args: Vec<String> = [
+                "-m",
+                "pip",
+                "install",
+                "--disable-pip-version-check",
+                "--no-input",
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect();
+            if *user {
+                args.push("--user".into());
+            }
+            args.push(pinned);
+            (python.to_path_buf(), args)
         }
+        PyInstaller::Uv(uv) => (
+            uv.clone(),
+            vec![
+                "pip".into(),
+                "install".into(),
+                "--no-progress".into(),
+                "--python".into(),
+                python.to_string_lossy().into_owned(),
+                pinned,
+            ],
+        ),
     }
 }
 
-fn pip_args(user: bool, package: Pip) -> Vec<String> {
-    let mut args: Vec<String> = [
-        "-m",
-        "pip",
-        "install",
-        "--disable-pip-version-check",
-        "--no-input",
-    ]
-    .into_iter()
-    .map(String::from)
-    .collect();
-    if user {
-        args.push("--user".into());
-    }
-    args.push(package.requirement());
-    args
-}
-
-fn pip_command(python: &Path, user: bool, package: Pip) -> Command {
-    let mut cmd = crate::spawn::command(python);
-    cmd.args(pip_args(user, package));
+fn pytest_command(python: &Path, via: &PyInstaller) -> Command {
+    let (program, args) = pytest_argv(python, via);
+    let mut cmd = crate::spawn::command(&program);
+    cmd.args(args);
     neutral(&mut cmd);
     cmd
 }
 
-fn install_with_pip(
-    python: &Path,
-    user: bool,
-    package: Pip,
-    cancel: &AtomicBool,
-) -> Result<(), String> {
-    let out =
-        store::run_bounded_cancellable(pip_command(python, user, package), PIP_TIMEOUT, cancel)?;
+fn install_pytest(python: &Path, via: &PyInstaller, cancel: &AtomicBool) -> Result<(), String> {
+    let out = store::run_bounded_cancellable(pytest_command(python, via), PIP_TIMEOUT, cancel)?;
     if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr);
-        let last = err
-            .lines()
-            .rev()
-            .find(|l| !l.trim().is_empty())
-            .unwrap_or("pip failed");
-        return Err(format!(
-            "pip install {}: {}",
-            package.requirement(),
-            last.trim()
-        ));
+        return Err(install_failure(&String::from_utf8_lossy(&out.stderr)));
     }
     // Confirm with the interpreter the session will actually run under.
-    let probe = probe_python(python)?;
-    let (importable, name) = match package {
-        Pip::Debugpy => (probe.has_debugpy, "debugpy"),
-        Pip::Pytest => (probe.has_pytest, "pytest"),
-    };
-    if importable {
+    if probe_python(python)?.has_pytest {
         Ok(())
     } else {
         Err(format!(
-            "installed {name} but {} still can't import it",
+            "installed pytest but {} still can't import it",
             python.display()
         ))
     }
 }
 
+/// What a failed install says, in a sentence: pip's last line is often a
+/// hint ("See PEP 668 for the detailed specification.") that names nothing.
+fn install_failure(stderr: &str) -> String {
+    if stderr.contains("externally-managed-environment") {
+        let msg = "this Python is managed by the system and won't take packages (PEP 668). Create a virtual environment for the project (python3 -m venv .venv): Clew uses it from then on".to_string();
+        return msg;
+    }
+    if stderr.contains("No module named pip") {
+        let msg =
+            "this Python has no pip. Install pytest into it another way (uv add --dev pytest)"
+                .to_string();
+        return msg;
+    }
+    let last = stderr
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && !l.starts_with("hint:") && !l.starts_with("note:"))
+        .unwrap_or("the install failed");
+    format!("pytest=={PYTEST_VERSION} could not be installed: {last}")
+}
+
 /// Root under clew's data dir where downloadable debug adapters live.
 fn adapters_root() -> Option<PathBuf> {
     Some(store::data_root()?.join("debug-adapters"))
+}
+
+/// The versioned install directory for clew's own debugpy.
+fn debugpy_dir() -> Option<PathBuf> {
+    Some(adapters_root()?.join("debugpy").join(DEBUGPY_VERSION))
+}
+
+/// The directory of clew's own debugpy adapter, if downloaded: run by path
+/// (`python <dir>`), it puts its own package on the import path, never the
+/// project's folder.
+fn debugpy_adapter() -> Option<PathBuf> {
+    let dir = debugpy_dir()?;
+    dir.join(DEBUGPY.binary)
+        .is_file()
+        .then(|| dir.join("debugpy").join("adapter"))
+}
+
+/// Download, verify (pinned SHA-256), and unpack debugpy. Blocking.
+fn install_debugpy(cancel: &AtomicBool) -> Result<PathBuf, String> {
+    let root = adapters_root().ok_or("no data directory")?;
+    store::create_store_dir(&root)?;
+    let dest = debugpy_dir().ok_or("no data directory")?;
+    store::install_download(&DEBUGPY, &dest, &root, cancel)
 }
 
 /// The versioned install directory for vscode-js-debug.
@@ -1381,6 +1703,20 @@ pub fn resolve_stdio(
     choices: &clew_protocol::LanguageChoices,
     bridge: Option<&Path>,
 ) -> Result<StdioAdapter, String> {
+    resolve_stdio_in(lang, program, args, root, root, choices, bridge)
+}
+
+/// [`resolve_stdio`] for a program run in `cwd`, a folder of the project
+/// at `root`: a Rust test's package, as `cargo test` runs it there.
+pub fn resolve_stdio_in(
+    lang: &str,
+    program: &str,
+    args: &[String],
+    root: &Path,
+    cwd: &Path,
+    choices: &clew_protocol::LanguageChoices,
+    bridge: Option<&Path>,
+) -> Result<StdioAdapter, String> {
     let tcp_refusal = || {
         format!(
             "the {lang} debug adapter speaks DAP over a TCP port on this host, \
@@ -1412,7 +1748,7 @@ pub fn resolve_stdio(
             launch: spec.launch.to_string(),
         });
     }
-    match resolve(lang, program, args, root, root, choices, bridge)
+    match resolve(lang, program, args, root, cwd, choices, bridge)
         .map_err(|e| format!("on the remote host: {e}"))?
     {
         Resolution::Ready(spec) => match (spec.transport, bridge) {
@@ -1428,6 +1764,16 @@ pub fn resolve_stdio(
             }),
             (_, None) => Err(tcp_refusal()),
         },
+        Resolution::NeedsInstall(AdapterInstall::Debugpy) => Err(
+            "debugpy is not installed on the remote host. Install it there \
+             (python3 -m pip install debugpy, or uv pip install debugpy)"
+                .into(),
+        ),
+        Resolution::NeedsInstall(AdapterInstall::ScriptEnv { script, .. }) => Err(format!(
+            "the packages {} lists are not installed on the remote host. Install them there: uv sync --script {}",
+            script.display(),
+            script.display()
+        )),
         Resolution::NeedsInstall(install) => Err(format!(
             "{} is not installed on the remote host. Install it there: {}",
             install.name(),
@@ -1458,12 +1804,121 @@ pub fn bridge_args(transport: AdapterTransport, command: &Path, args: &[String])
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// [`super::python_with`] as though clew's own debugpy were not
+    /// downloaded: the developer's data directory decides nothing here.
+    fn python_with(
+        python: &Path,
+        program: &str,
+        args: &[String],
+        cwd: &Path,
+    ) -> Result<Resolution, String> {
+        python_with_adapter(None, python, program, args, cwd)
+    }
     #[cfg(unix)]
     use crate::lsp::store::testing::script;
     use crate::lsp::store::testing::with_store;
     #[cfg(unix)]
     use crate::testutil::EnvVars;
     use crate::testutil::TempDir;
+
+    /// A script that lists the packages it needs (PEP 723) is told apart by
+    /// its `# /// script` block, closed; the environment uv keeps for it is
+    /// told apart from a base Python; and its install is what is shown.
+    #[test]
+    fn a_script_that_lists_its_packages_runs_in_its_own_environment() {
+        let dir = TempDir::new("dap-pep723");
+        let script = dir.path().join("tool.py");
+        std::fs::write(
+            &script,
+            "# /// script\n# dependencies = [\"six\"]\n# ///\nimport six\n",
+        )
+        .unwrap();
+        assert!(lists_its_packages(&script));
+        let open = dir.path().join("open.py");
+        std::fs::write(&open, "# /// script\n# dependencies = []\nimport os\n").unwrap();
+        assert!(!lists_its_packages(&open), "never closed");
+        let plain = dir.path().join("plain.py");
+        std::fs::write(&plain, "import os\n").unwrap();
+        assert!(!lists_its_packages(&plain));
+        assert!(is_script_env(Path::new(
+            "/home/u/.cache/uv/environments-v2/tool-6e053ea93277214d/bin/python3"
+        )));
+        assert!(!is_script_env(Path::new("/usr/bin/python3")));
+        assert!(!is_script_env(Path::new("environments-v2/x/bin/python3")));
+        let install = AdapterInstall::ScriptEnv {
+            uv: PathBuf::from("/u/bin/uv"),
+            script: script.clone(),
+        };
+        assert!(install.is_script_packages());
+        assert!(!install.is_test_runner() && !install.is_download());
+        assert_eq!(
+            install.describe(),
+            format!("/u/bin/uv sync --script {}", script.display())
+        );
+    }
+
+    /// One of a Django project's tests, run by its own runner, is debugged
+    /// as a test is: stopping where it fails (unittest catches the
+    /// failure), stepping only through the project's code, with Django's
+    /// templates debugged. A plain `manage.py` command is not a test.
+    #[cfg(unix)]
+    #[test]
+    fn a_django_test_is_debugged_as_a_test() {
+        let dir = TempDir::new("dap-django-test");
+        let python = fake_python(&dir, "echo '1 1 1'");
+        let launch = |args: &[&str]| {
+            let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+            match python_with(&python, "/p/manage.py", &args, Path::new("/p")).unwrap() {
+                Resolution::Ready(spec) => spec.launch,
+                other => panic!("{other:?}"),
+            }
+        };
+        let test = launch(&["test", "shop.tests.CartTests.test_total", "--noinput"]);
+        assert_eq!(test["program"], "/p/manage.py");
+        assert_eq!(test["justMyCode"], true);
+        assert_eq!(test["django"], true);
+        assert_eq!(test[EXCEPTIONS], json!(["userUnhandled"]));
+        let serve = launch(&["runserver"]);
+        assert!(serve.get(EXCEPTIONS).is_none(), "{serve}");
+        assert_eq!(serve["justMyCode"], false);
+    }
+
+    /// A namespace package's module (no `__init__.py`) that imports its
+    /// siblings relatively runs as `python -m`, named from the project's
+    /// `src`, else its folder: as a script it had no package at all. One at
+    /// the top, or under a folder Python cannot import, does not.
+    #[test]
+    fn a_namespace_packages_module_runs_as_a_module() {
+        let dir = TempDir::new("dap-namespace-pkg");
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("shop/orders")).unwrap();
+        let module = root.join("shop/orders/totals.py");
+        std::fs::write(&module, "from .prices import PRICES\n").unwrap();
+        let found = python_package(&module, root).expect("a package's module");
+        assert_eq!(found.module, "shop.orders.totals");
+        assert_eq!(found.root, root);
+        assert!(found.relative_imports);
+        std::fs::create_dir_all(root.join("src/lib")).unwrap();
+        let in_src = root.join("src/lib/core.py");
+        std::fs::write(&in_src, "from . import util\n").unwrap();
+        let found = python_package(&in_src, root).unwrap();
+        assert_eq!(
+            (found.module.as_str(), found.root),
+            ("lib.core", root.join("src"))
+        );
+        // Imports only absolutely: run as the script it is.
+        let absolute = root.join("shop/cli.py");
+        std::fs::write(&absolute, "import shop.orders\n").unwrap();
+        assert_eq!(python_package(&absolute, root), None);
+        let top = root.join("main.py");
+        std::fs::write(&top, "from . import x\n").unwrap();
+        assert_eq!(python_package(&top, root), None);
+        std::fs::create_dir_all(root.join("my-tools")).unwrap();
+        let dashed = root.join("my-tools/run.py");
+        std::fs::write(&dashed, "from . import x\n").unwrap();
+        assert_eq!(python_package(&dashed, root), None);
+    }
 
     /// A Rust program is debugged as rust-lldb sets lldb up for it: the
     /// toolchain's type summaries read silently from its sysroot, and a stop
@@ -1480,6 +1935,7 @@ mod tests {
         assert_eq!(
             launch["initCommands"],
             json!([
+                SYNTHETIC_VALUE_SHIM,
                 format!(
                     "command script import \"{}\"",
                     etc.join("lldb_lookup.py").display()
@@ -1514,6 +1970,17 @@ mod tests {
         let mut launch = json!({});
         rust_setup(&mut launch, None, false);
         assert!(launch.get("initCommands").is_none());
+        // A program Cargo built is Rust's, whatever its file says: set up
+        // once, and a launch already set up is left alone.
+        let mut launch = json!({"program": "/p/target/debug/app"});
+        set_up_for_rust(&mut launch, Path::new("/usr/bin/lldb-dap"), dir.path());
+        assert_eq!(
+            launch["preRunCommands"],
+            json!(["?breakpoint set --name rust_panic"])
+        );
+        let set_up = launch.clone();
+        set_up_for_rust(&mut launch, Path::new("/usr/bin/lldb-dap"), dir.path());
+        assert_eq!(launch, set_up);
         // rustc's own DWARF language code.
         let (info, abbrev) = dwarf_unit(5, DW_LANG_RUST, 0x0b);
         let app = dir.path().join("app");
@@ -1851,31 +2318,31 @@ mod tests {
         assert!(err.contains("TCP"), "{err}");
     }
 
-    /// F3: consent is given to the prompt's text, so every argument pip runs
-    /// with must be in it — including the pin, which used to be absent (an
-    /// unpinned `pip install --user debugpy`, run with no prompt at all).
+    /// F3: consent is given to the prompt's text, so every argument the
+    /// install runs with must be in it, the pin included: pip's, with
+    /// `--user` outside an environment, and uv's for one that has no pip.
+    /// debugpy is a download, its URL and digest shown.
     #[test]
-    fn the_pip_argv_is_what_the_consent_prompt_describes() {
-        for (user, package) in [true, false]
-            .into_iter()
-            .flat_map(|user| [(user, Pip::Debugpy), (user, Pip::Pytest)])
-        {
-            let python = PathBuf::from("/opt/py/bin/python3");
-            let install = match package {
-                Pip::Debugpy => AdapterInstall::Debugpy {
-                    python: python.clone(),
-                    user,
-                },
-                Pip::Pytest => AdapterInstall::Pytest {
-                    python: python.clone(),
-                    user,
-                },
+    fn the_install_argv_is_what_the_consent_prompt_describes() {
+        let python = PathBuf::from("/opt/py/bin/python3");
+        for via in [
+            PyInstaller::Pip { user: true },
+            PyInstaller::Pip { user: false },
+            PyInstaller::Uv(PathBuf::from("/home/u/.local/bin/uv")),
+        ] {
+            let install = AdapterInstall::Pytest {
+                python: python.clone(),
+                via: via.clone(),
             };
             let describe = install.describe();
             let described: Vec<&str> = describe.split_whitespace().collect();
-            let cmd = pip_command(&python, user, package);
-            assert_eq!(cmd.get_program(), python.as_os_str());
-            assert_eq!(described.first(), Some(&"/opt/py/bin/python3"));
+            let cmd = pytest_command(&python, &via);
+            let program = match &via {
+                PyInstaller::Pip { .. } => python.clone(),
+                PyInstaller::Uv(uv) => uv.clone(),
+            };
+            assert_eq!(cmd.get_program(), program.as_os_str());
+            assert_eq!(described.first().copied(), program.to_str());
             for arg in cmd.get_args() {
                 let arg = arg.to_str().unwrap();
                 assert!(
@@ -1884,13 +2351,19 @@ mod tests {
                 );
             }
             let args: Vec<_> = cmd.get_args().map(|a| a.to_str().unwrap()).collect();
-            let pinned = match package {
-                Pip::Debugpy => format!("debugpy=={DEBUGPY_VERSION}"),
-                Pip::Pytest => format!("pytest=={PYTEST_VERSION}"),
-            };
+            let pinned = format!("pytest=={PYTEST_VERSION}");
             assert!(args.contains(&pinned.as_str()), "{args:?}");
-            assert_eq!(install.is_test_runner(), matches!(package, Pip::Pytest));
-            assert_eq!(args.contains(&"--user"), user);
+            assert!(install.is_test_runner() && !install.is_download());
+            assert_eq!(
+                args.contains(&"--user"),
+                via == PyInstaller::Pip { user: true }
+            );
+            if let PyInstaller::Uv(_) = via {
+                assert!(
+                    args.windows(2)
+                        .any(|w| w == ["--python", "/opt/py/bin/python3"])
+                );
+            }
             // Never run from the project: `-m pip` imports from the cwd.
             let neutral = if cfg!(unix) {
                 PathBuf::from("/")
@@ -1899,10 +2372,93 @@ mod tests {
             };
             assert_eq!(cmd.get_current_dir(), Some(neutral.as_path()));
         }
-        let js = AdapterInstall::JsDebug.describe();
+        for (install, download) in [
+            (AdapterInstall::Debugpy, &DEBUGPY),
+            (AdapterInstall::JsDebug, &JS_DEBUG),
+        ] {
+            let text = install.describe();
+            assert!(
+                text.contains(download.url) && text.contains(&download.sha256.to_hex()),
+                "{text}"
+            );
+            assert!(install.is_download() && !install.is_test_runner());
+        }
         assert!(
-            js.contains(JS_DEBUG.url) && js.contains(&JS_DEBUG.sha256.to_hex()),
-            "{js}"
+            DEBUGPY
+                .url
+                .contains(&format!("debugpy-{DEBUGPY_VERSION}-py2.py3-none-any.whl"))
+        );
+    }
+
+    /// pytest goes in by pip, `--user` only outside any environment (a conda
+    /// one included); by uv where the environment has no pip; and not at all
+    /// into a system Python its distribution manages, which says why first.
+    #[test]
+    fn pytest_is_installed_the_way_the_environment_takes_it() {
+        let dir = TempDir::new("dap-pytest-via");
+        let uv = script(&dir.join("bin/uv"), "exit 0");
+        let path = dir.join("bin").into_os_string();
+        let python = Path::new("/opt/py/bin/python3");
+        let probe = |pip, managed, venv, conda| PythonProbe {
+            has_debugpy: true,
+            in_venv: venv,
+            has_pytest: false,
+            has_pip: pip,
+            managed,
+            conda,
+        };
+        let via =
+            |p: PythonProbe, path: Option<&std::ffi::OsStr>| match pytest_install(python, &p, path)
+            {
+                Ok(Resolution::NeedsInstall(AdapterInstall::Pytest { via, .. })) => Ok(via),
+                Ok(other) => panic!("{other:?}"),
+                Err(e) => Err(e),
+            };
+        assert_eq!(
+            via(probe(true, false, false, false), None),
+            Ok(PyInstaller::Pip { user: true })
+        );
+        assert_eq!(
+            via(probe(true, false, true, false), None),
+            Ok(PyInstaller::Pip { user: false })
+        );
+        assert_eq!(
+            via(probe(true, false, false, true), None),
+            Ok(PyInstaller::Pip { user: false })
+        );
+        assert_eq!(
+            via(probe(false, false, true, false), Some(&path)),
+            Ok(PyInstaller::Uv(uv))
+        );
+        let no_pip = via(probe(false, false, true, false), None).unwrap_err();
+        assert!(
+            no_pip.contains("no pip") && no_pip.contains("uv add --dev pytest"),
+            "{no_pip}"
+        );
+        let managed = via(probe(true, true, false, false), Some(&path)).unwrap_err();
+        assert!(
+            managed.contains("PEP 668") && managed.contains("venv"),
+            "{managed}"
+        );
+    }
+
+    /// A failed install says what failed in a sentence, not pip's last hint.
+    #[test]
+    fn a_failed_install_names_the_cause() {
+        let pep668 = "error: externally-managed-environment\n\n× This environment is externally managed\n\
+                      note: If you believe this is a mistake...\nhint: See PEP 668 for the detailed specification.\n";
+        let said = install_failure(pep668);
+        assert!(
+            said.contains("managed by the system") && !said.contains("hint"),
+            "{said}"
+        );
+        let said = install_failure("/p/.venv/bin/python: No module named pip\n");
+        assert!(said.contains("has no pip"), "{said}");
+        let said =
+            install_failure("ERROR: No matching distribution found for pytest==8.3.5\nhint: x\n");
+        assert!(
+            said.ends_with("No matching distribution found for pytest==8.3.5"),
+            "{said}"
         );
     }
 
@@ -1948,10 +2504,19 @@ mod tests {
         let test = launch(&with_pytest, "/p/tests/test_pricing.py");
         assert_eq!(test["module"], "pytest");
         assert!(test.get("program").is_none(), "{test}");
-        assert_eq!(test["args"], json!(["/p/tests/test_pricing.py", "-q"]));
+        // It stops where a test fails, not at pytest's exit, and steps only
+        // through the project's code.
+        assert_eq!(test[EXCEPTIONS], json!(["userUnhandled"]));
+        assert_eq!(test["justMyCode"], true);
+        // pytest's cache folder is not written into the project.
+        assert_eq!(
+            test["args"],
+            json!(["-p", "no:cacheprovider", "/p/tests/test_pricing.py", "-q"])
+        );
         let script = launch(&with_pytest, "/p/main.py");
         assert_eq!(script["program"], "/p/main.py");
         assert!(script.get("module").is_none());
+        assert!(script.get(EXCEPTIONS).is_none(), "{script}");
         // One test, by its node id: alone, the file not given again — in a
         // file named as tests are or not.
         let one = |program: &str, node: &str| {
@@ -1969,11 +2534,18 @@ mod tests {
         assert_eq!(test["module"], "pytest");
         assert_eq!(
             test["args"],
-            json!(["/p/tests/test_pricing.py::TestTotal::test_adds"])
+            json!([
+                "-p",
+                "no:cacheprovider",
+                "/p/tests/test_pricing.py::TestTotal::test_adds"
+            ])
         );
         let test = one("/p/checks.py", "/p/checks.py::test_ok");
         assert_eq!(test["module"], "pytest");
-        assert_eq!(test["args"], json!(["/p/checks.py::test_ok"]));
+        assert_eq!(
+            test["args"],
+            json!(["-p", "no:cacheprovider", "/p/checks.py::test_ok"])
+        );
         assert!(!names_a_test_of("/p/checks.py::", "/p/checks.py"));
         assert!(!names_a_test_of("/p/other.py::test_ok", "/p/checks.py"));
         let dir = TempDir::new("dap-py-no-pytest");
@@ -1988,9 +2560,13 @@ mod tests {
         )
         .unwrap()
         {
-            Resolution::NeedsInstall(AdapterInstall::Pytest { python, user }) => {
+            Resolution::NeedsInstall(AdapterInstall::Pytest { python, via }) => {
                 assert_eq!(python, without);
-                assert!(user, "--user outside a virtualenv");
+                assert_eq!(
+                    via,
+                    PyInstaller::Pip { user: true },
+                    "--user outside a virtualenv"
+                );
                 true
             }
             _ => false,
@@ -2020,19 +2596,16 @@ mod tests {
         assert!(!is_python_test(Path::new("a/test_x.txt")));
     }
 
-    /// F3/F14: a missing debugpy is a consent request, not an install; the
-    /// venv decides `--user`; the interpreter path is kept exactly as found.
+    /// F3: a missing debugpy is a consent request, not an install: to
+    /// download clew's own copy, whatever the interpreter (no pip needed).
     #[test]
     #[cfg(unix)]
     fn a_missing_debugpy_is_a_consent_request() {
         let dir = TempDir::new("dap-py");
-        let python = fake_python(&dir, "echo '0 1'");
+        let python = fake_python(&dir, "echo '0 1 0 0'");
         let got = python_with(&python, "/p/main.py", &[], Path::new("/p")).unwrap();
         match got {
-            Resolution::NeedsInstall(AdapterInstall::Debugpy { python: p, user }) => {
-                assert_eq!(p, python, "the interpreter as found, not resolved");
-                assert!(!user, "no --user inside a virtualenv");
-            }
+            Resolution::NeedsInstall(AdapterInstall::Debugpy) => {}
             other => panic!("expected a consent request, got {other:?}"),
         }
         assert!(
@@ -2042,6 +2615,29 @@ mod tests {
         // The probe ran from `/`, with the safe-path flag, never the project.
         let log = std::fs::read_to_string(dir.join("log")).unwrap();
         assert!(log.starts_with("/ 1 -c "), "{log}");
+    }
+
+    /// Clew's own debugpy, once downloaded, is the adapter, run by its
+    /// path under the program's interpreter, which needs no debugpy.
+    #[test]
+    #[cfg(unix)]
+    fn a_downloaded_debugpy_runs_under_the_programs_interpreter() {
+        let dir = TempDir::new("dap-py-own");
+        let python = fake_python(&dir, "echo '0 1'");
+        let own = dir.join("data/debugpy/adapter");
+        let Resolution::Ready(spec) = python_with_adapter(
+            Some(own.clone()),
+            &python,
+            "/p/main.py",
+            &[],
+            Path::new("/p"),
+        )
+        .unwrap() else {
+            panic!("clew's own debugpy is there");
+        };
+        assert_eq!(spec.command, python);
+        assert_eq!(spec.args, [own.to_string_lossy()]);
+        assert_eq!(spec.launch["python"][0], python.to_string_lossy().as_ref());
     }
 
     /// A module of a package runs with the folder its package sits in on
@@ -2093,7 +2689,10 @@ mod tests {
         for launch in [&absolute, &relative, &lone] {
             assert_eq!(launch["env"]["PYTHONDONTWRITEBYTECODE"], "1", "{launch}");
         }
-        assert_eq!(python_package(&root.join("teashop/__init__.py")), None);
+        assert_eq!(
+            python_package(&root.join("teashop/__init__.py"), &root),
+            None
+        );
     }
 
     /// A `src` layout's tests and programs import its package by name: run
@@ -2173,19 +2772,19 @@ mod tests {
         let python = fake_python(
             &dir,
             &format!(
-                "if [ -f '{}' ]; then echo '1 0'; else echo '0 0'; fi",
+                "if [ -f '{}' ]; then echo '1 0 1'; else echo '1 0 0'; fi",
                 mark.display()
             ),
         );
-        let install = AdapterInstall::Debugpy {
+        let install = AdapterInstall::Pytest {
             python: python.clone(),
-            user: true,
+            via: PyInstaller::Pip { user: true },
         };
         install.install().unwrap();
         assert!(mark.exists());
         let log = std::fs::read_to_string(dir.join("log")).unwrap();
         assert!(
-            log.contains(&format!("-m pip install --disable-pip-version-check --no-input --user debugpy=={DEBUGPY_VERSION}")),
+            log.contains(&format!("-m pip install --disable-pip-version-check --no-input --user pytest=={PYTEST_VERSION}")),
             "{log}"
         );
     }
@@ -2268,11 +2867,11 @@ mod tests {
         assert_eq!(spec.launch["args"][0], "--fast");
     }
 
-    /// F10: a debugpy install stops when cancelled, with what it started,
+    /// F10: a pytest install stops when cancelled, with what it started,
     /// instead of running out its ten-minute limit.
     #[test]
     #[cfg(unix)]
-    fn a_cancelled_debugpy_install_stops() {
+    fn a_cancelled_pytest_install_stops() {
         let dir = TempDir::new("dap-pip-cancel");
         let python = script(
             &dir.join("bin/python3"),
@@ -2287,7 +2886,10 @@ mod tests {
             })
         };
         let started = std::time::Instant::now();
-        let install = AdapterInstall::Debugpy { python, user: true };
+        let install = AdapterInstall::Pytest {
+            python,
+            via: PyInstaller::Pip { user: true },
+        };
         let err = install.install_cancellable(&cancel).unwrap_err();
         flip.join().unwrap();
         assert!(err.contains("cancelled"), "{err}");

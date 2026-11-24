@@ -1867,19 +1867,22 @@ pub(crate) enum ViewRow {
     InlayHints,
     InlineBlame,
     IndentGuides,
+    /// Code info as the pointer rests on a word, not only when asked.
+    PeekOnRest,
     Minimap,
     /// The margin beside the code: its notes, calls and history.
     Margin,
 }
 
 /// The View menu's rows, top to bottom.
-pub(crate) const VIEW_MENU_ROWS: [ViewRow; 8] = [
+pub(crate) const VIEW_MENU_ROWS: [ViewRow; 9] = [
     ViewRow::OutlineSummaries,
     ViewRow::FileSummary,
     ViewRow::Blocks,
     ViewRow::InlayHints,
     ViewRow::InlineBlame,
     ViewRow::IndentGuides,
+    ViewRow::PeekOnRest,
     ViewRow::Minimap,
     ViewRow::Margin,
 ];
@@ -1894,6 +1897,7 @@ impl ViewRow {
             ViewRow::InlayHints => Message::Lsp(LspMsg::ToggleInlayHints),
             ViewRow::InlineBlame => Message::Window(WindowMsg::ToggleInlineBlame),
             ViewRow::IndentGuides => Message::Window(WindowMsg::ToggleIndentGuides),
+            ViewRow::PeekOnRest => Message::Window(WindowMsg::TogglePeekOnRest),
             ViewRow::Minimap => Message::Window(WindowMsg::ToggleMinimap),
             ViewRow::Margin => Message::Window(WindowMsg::ToggleRightPanel),
         }
@@ -1995,6 +1999,11 @@ pub(crate) fn view_menu(app: &App) -> Element<'_, Message> {
                     Glyph::TextLines,
                     tr!("Indent guides"),
                     app.show_indent_guides,
+                ),
+                ViewRow::PeekOnRest => (
+                    Glyph::Info,
+                    tr!("Info when the pointer rests"),
+                    app.peek_on_rest,
                 ),
                 ViewRow::Minimap => (Glyph::Minimap, tr!("Minimap"), app.show_minimap),
                 ViewRow::Margin => (Glyph::PanelRight, tr!("Margin"), app.show_right_panel),

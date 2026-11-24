@@ -232,6 +232,9 @@ pub struct DebugState {
     pub watches: Vec<String>,
     /// The add-watch input box.
     pub watch_input: String,
+    /// What is being typed for the running program's input (see
+    /// [`DebugSession::takes_input`]).
+    pub program_input: String,
     /// The functions this run has stopped in, by file and name: entering
     /// one for the first time records one reading-trail entry — not one per
     /// line step, nor one each time it is entered again (stepping between
@@ -1702,6 +1705,11 @@ pub struct App {
     pub file_filter: String,
     /// Whether the Files view's tree has the keyboard (`ui::tree_keys`).
     pub tree_focused: bool,
+    /// Whether the row the tree's keys rest on is ringed: once keys moved
+    /// there or brought the keyboard in (an arrow, Tab, F6, ↓ from the
+    /// filter), not after a click — a ring round the folder just clicked,
+    /// beside the open file's own mark, was a second "here" for nothing.
+    pub tree_ring: bool,
     /// The customizable command keymap (loaded from the global config).
     pub keymap: keymap::Keymap,
     /// The action currently awaiting a new chord (capture mode), if any.
@@ -1723,6 +1731,13 @@ pub struct App {
     /// Lines down the code's indentation (the View menu's "Indent guides").
     /// Off as the design has it.
     pub show_indent_guides: bool,
+    /// Code info (the peek: a word's docs, type, diagnostic) shows when the
+    /// pointer rests on a word (the View menu's "Info when the pointer
+    /// rests"). Off as shipped: it shows when asked — the pointer on a word
+    /// with ⌥ (Alt) held, or Show Info (⌘K, `K`) for the word at the caret —
+    /// and a card the size of a crate's docs no longer opens over the code
+    /// wherever the pointer pauses.
+    pub peek_on_rest: bool,
     /// Explain again, by itself, the code a change on disk made new or
     /// different — a few AI calls at a time (Settings → Usage and cost).
     /// Off, the status bar says the explanations are out of date, and
@@ -2403,6 +2418,32 @@ pub struct ProjectSession {
     /// The cursor is inside the hover tooltip — keep it open (so you can move into
     /// it and scroll it) and ignore code-view hover events until it leaves.
     pub hover_pinned: bool,
+    /// The pointer has left the open peek's word for elsewhere in the code:
+    /// the peek goes once [`HoverMsg::Left`] says the grace is over, unless
+    /// the pointer is back on the word (or in the peek) by then.
+    ///
+    /// [`HoverMsg::Left`]: crate::app::message::HoverMsg::Left
+    pub hover_leaving: bool,
+    /// Bumped each time the pointer leaves the open peek's word: a
+    /// [`HoverMsg::Left`] of an earlier leaving does not cut a later one's
+    /// grace short.
+    ///
+    /// [`HoverMsg::Left`]: crate::app::message::HoverMsg::Left
+    pub hover_leave: u64,
+    /// When a peek was last showing, as the pointer moved on from it: the
+    /// next peek within [`HOVER_WARM`] of it is reading along, and waits
+    /// less ([`App::peek_delay`]).
+    ///
+    /// [`HOVER_WARM`]: crate::app::hover::HOVER_WARM
+    /// [`App::peek_delay`]: crate::App::peek_delay
+    pub hover_seen: Option<std::time::Instant>,
+    /// Where the pointer last was over the code — pane, line, column, and
+    /// its point in the window — while nothing was shown for it: ⌥ pressed
+    /// there shows its peek at once.
+    pub hover_point: Option<(usize, usize, usize, f32, f32)>,
+    /// Rust's own sources for the project's toolchain, as rust-analyzer
+    /// wants them ([`crate::app::RustSrc`]).
+    pub rust_src: crate::app::RustSrc,
     /// The gutter line the pointer rests on, and whether its tip is due:
     /// what a breakpoint or a bookmark there says (`ui::gutter_tip`).
     pub gutter_tip: Option<GutterTip>,
@@ -2641,7 +2682,12 @@ pub struct ProjectSession {
     pub mathlib_root: Option<PathBuf>,
     /// The Lake project of the Lean file last asked about: worked out once
     /// per file, not with a look at the disk on every message.
-    pub lean_lake: Option<(PathBuf, PathBuf)>,
+    pub lean_lake: Option<(PathBuf, Option<PathBuf>)>,
+    /// The Lake project the opened folder is in, above it, where the folder
+    /// has no lakefile of its own (`clew_core::lake_project_above`): looked
+    /// for once, the first time a Lean file of it is read. `Some(None)`
+    /// once looked for and none is.
+    pub lean_outer: Option<Option<PathBuf>>,
     /// Restart File was asked for this file at this diagnostics version:
     /// until Lean says more of it, the Goals tab says it is checking the
     /// imports again, and offers no second restart.
@@ -2937,6 +2983,11 @@ impl Default for ProjectSession {
             hover: Default::default(),
             hover_gen: Default::default(),
             hover_pinned: Default::default(),
+            hover_leaving: Default::default(),
+            hover_leave: Default::default(),
+            hover_seen: None,
+            hover_point: None,
+            rust_src: Default::default(),
             gutter_tip: None,
             gutter_seq: 0,
             context_menu: Default::default(),
@@ -3014,6 +3065,7 @@ impl Default for ProjectSession {
             mathlib: Default::default(),
             mathlib_root: None,
             lean_lake: None,
+            lean_outer: None,
             lean_restarting: None,
             weak: Default::default(),
             docs: Default::default(),
@@ -3239,6 +3291,9 @@ pub struct ProjectLink {
     pub lsp_log: Option<LspLogTail>,
     /// Documents already sent to a server via didOpen.
     pub lsp_opened: HashSet<PathBuf>,
+    /// Documents already sent to the server run beside their language's
+    /// main one (`python.also`, see [`crate::app::lsp::ALSO`]).
+    pub lsp_opened_also: HashSet<PathBuf>,
     /// The Lake project the Lean server was started in
     /// ([`clew_core::lake_root`]): a Lean file of another has it started
     /// again there.
@@ -3336,6 +3391,9 @@ pub struct LanguageDrafts {
     /// The language a server program is being chosen for; `None` until
     /// one is picked.
     pub server_language: Option<String>,
+    /// Whether the program is to run beside the language's main server
+    /// (a linter such as ruff beside pyright) rather than in its place.
+    pub server_beside: bool,
     pub server_command: String,
     pub server_args: String,
 }

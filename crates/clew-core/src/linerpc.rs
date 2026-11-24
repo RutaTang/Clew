@@ -621,19 +621,37 @@ pub fn launched_in(program: PathBuf, args: Vec<String>, dir: &Path) -> (PathBuf,
 /// installed as their own guides say.
 pub fn spawn_path() -> Option<OsString> {
     static PATH: OnceLock<Option<OsString>> = OnceLock::new();
-    PATH.get_or_init(|| {
-        let own = std::env::var_os("PATH");
-        let login = if cfg!(target_os = "macos") && launched_without_shell() {
-            login_shell_path()
-        } else {
-            None
-        };
-        let tools = user_tool_dirs(crate::home_dir().as_deref(), &|name| std::env::var_os(name))
-            .into_iter()
-            .filter(|dir| dir.is_dir());
-        merge_paths(merge_paths(login, own), std::env::join_paths(tools).ok())
-    })
-    .clone()
+    PATH.get_or_init(search_path).clone()
+}
+
+/// The directories a program Clew looks for by name is looked for in: those
+/// of [`spawn_path`], in its order, with this process's own `PATH` as it is
+/// now. A program is found where the children Clew starts would find it —
+/// an app opened from the Finder found no `cargo` to install a server with
+/// while the shell that `cargo` was installed from had it.
+pub fn search_path() -> Option<OsString> {
+    let tools = user_tool_dirs(crate::home_dir().as_deref(), &|name| std::env::var_os(name))
+        .into_iter()
+        .filter(|dir| dir.is_dir());
+    merge_paths(
+        merge_paths(login_path(), std::env::var_os("PATH")),
+        std::env::join_paths(tools).ok(),
+    )
+}
+
+/// The login shell's `PATH`, for an app opened from the Finder on macOS —
+/// asked once — and nothing for a process started from a shell.
+fn login_path() -> Option<OsString> {
+    static LOGIN: OnceLock<Option<OsString>> = OnceLock::new();
+    LOGIN
+        .get_or_init(|| {
+            if cfg!(target_os = "macos") && launched_without_shell() {
+                login_shell_path()
+            } else {
+                None
+            }
+        })
+        .clone()
 }
 
 /// Where the usual installers put a user's own toolchains, in `home` or

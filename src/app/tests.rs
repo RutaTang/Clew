@@ -1694,7 +1694,8 @@ fn a_functions_explain_writes_its_own_explanation() {
             served: true,
             by_pointer: true,
             line_top: None,
-            in_test: false,
+            test: None,
+            gutter: None,
         });
     };
     let origin = explain::Node::Function {
@@ -2430,6 +2431,88 @@ fn a_changed_notebook_is_re_parsed_instead_of_reloaded_as_raw_json() {
         v.source.contains("second()"),
         "and its projection must move with them: {}",
         v.source
+    );
+}
+
+/// A notebook reads as its cells or as one script: its code, read in the
+/// code view, is its language server's — by its script's own path beside
+/// it (`analysis.ipynb.py`, never written), with what is no Python
+/// commented out — so hover, go to definition and the server's warnings
+/// reach its cells. A definition the server finds in the script is the
+/// notebook's, and the view switches where it was read.
+#[test]
+fn a_notebook_reads_as_a_script_its_language_server_knows() {
+    let mut app = scanned_app("nb-as-script");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let abs = root.join("analysis.ipynb");
+    std::fs::write(&abs, "{}").unwrap();
+    let cell = |source: &str, proj_line| clew_protocol::NotebookCell {
+        kind: "code".into(),
+        source: source.to_string(),
+        lines: Vec::new(),
+        proj_line,
+        outputs: Vec::new(),
+        execution_count: None,
+    };
+    let projection =
+        "# %%\n%matplotlib inline\nfrom helpers import scale\n\n# %%\nvalue = scale(3)\n";
+    let _ = app.apply_notebook_content(
+        &[0],
+        None,
+        "analysis.ipynb".into(),
+        "python".into(),
+        vec![
+            cell("%matplotlib inline\nfrom helpers import scale", 2),
+            cell("value = scale(3)", 6),
+        ],
+        Vec::new(),
+        projection.into(),
+        false,
+    );
+    let v = app.proj.panes[0].as_ref().unwrap();
+    assert_eq!(v.lang_key, None, "a notebook is no program to run");
+    assert_eq!(v.lsp_lang(), Some("python"));
+    assert_eq!(v.lsp_path(), root.join("analysis.ipynb.py"));
+    assert!(v.shows_cells().is_some(), "cells first");
+    assert_eq!(
+        clew_core::notebook::script_for_server(&v.source),
+        "# %%\n#matplotlib inline\nfrom helpers import scale\n\n# %%\nvalue = scale(3)\n"
+    );
+    // Read as its script, in the code view; and back.
+    let _ = app.update(Message::Editor(EditorMsg::ToggleMarkdownSource(0)));
+    let v = app.proj.panes[0].as_ref().unwrap();
+    assert!(v.show_source && v.shows_cells().is_none());
+    let _ = app.update(Message::Editor(EditorMsg::ToggleMarkdownSource(0)));
+    assert!(app.proj.panes[0].as_ref().unwrap().shows_cells().is_some());
+    // A definition in the script lands in the notebook, at its line.
+    let _ = app.update(Message::Editor(EditorMsg::ToggleMarkdownSource(0)));
+    let _ = app.on_definition_result(Ok(vec![lsp::client::Target {
+        path: root.join("analysis.ipynb.py"),
+        line: 5,
+        character: 0,
+    }]));
+    let v = app.proj.panes[0].as_ref().unwrap();
+    assert_eq!(v.abs, abs);
+    assert_eq!(v.caret.map(|(line, _)| line), Some(5));
+    // A reload keeps it read as a script.
+    let _ = app.apply_notebook_content(
+        &[0],
+        None,
+        "analysis.ipynb".into(),
+        "python".into(),
+        vec![
+            cell("from helpers import scale", 2),
+            cell("value = scale(4)", 5),
+        ],
+        Vec::new(),
+        "# %%\nfrom helpers import scale\n\n# %%\nvalue = scale(4)\n".into(),
+        true,
+    );
+    assert!(app.proj.panes[0].as_ref().unwrap().show_source);
+    // Any other path a server answers with is as it is.
+    assert_eq!(
+        crate::viewer::from_server_path(root.join("helpers.py")),
+        root.join("helpers.py")
     );
 }
 
@@ -3290,7 +3373,8 @@ fn the_context_menu_bookmarks_its_line_with_a_note() {
             served: true,
             by_pointer: true,
             line_top: None,
-            in_test: false,
+            test: None,
+            gutter: None,
         });
     };
     // Toggle Bookmark: on the menu's line (0-based 3: line 4), the caret
@@ -3351,7 +3435,7 @@ fn the_context_menu_bookmarks_its_line_with_a_note() {
 
     // On a bookmarked line, the menu says it edits the note.
     menu_on(&mut app, 5);
-    let menu = app.proj.context_menu.unwrap();
+    let menu = app.proj.context_menu.clone().unwrap();
     let (targets, _) = crate::ui::heard::gather_all_of(|| crate::ui::context_menu(&app, &menu));
     assert!(
         targets.iter().any(|t| t.shown == "Edit Bookmark Note…"),
@@ -3855,19 +3939,25 @@ fn a_program_on_path_is_offered_only_if_it_runs() {
     let path = path.as_os_str();
 
     let works = write("bin", "works", &answers("--version"));
-    assert!(runs_here(&works, &["--version"], path));
-    assert!(!runs_here(&works, &["version"], path));
-    assert!(!runs_here(&root.join("bin/missing"), &["--version"], path));
+    assert!(runs_here(&works, &["--version"], path, &[]));
+    assert!(!runs_here(&works, &["version"], path, &[]));
+    assert!(!runs_here(
+        &root.join("bin/missing"),
+        &["--version"],
+        path,
+        &[]
+    ));
     // Run as the server is: on that PATH — a `#!/usr/bin/env node` server
     // finds its `node` there, where Clew's own PATH (an app opened from the
     // Finder) has none — and away from any project.
     write("bin", "fake-node", "#!/bin/sh\nexit 0\n");
     let needs_node = write("bin", "needs-node", "#!/bin/sh\nexec fake-node \"$@\"\n");
-    assert!(runs_here(&needs_node, &["--version"], path));
+    assert!(runs_here(&needs_node, &["--version"], path, &[]));
     assert!(!runs_here(
         &needs_node,
         &["--version"],
-        std::ffi::OsStr::new("/usr/bin:/bin")
+        std::ffi::OsStr::new("/usr/bin:/bin"),
+        &[]
     ));
     let neutral = clew_core::linerpc::neutral_dir();
     let elsewhere = write(
@@ -3879,32 +3969,57 @@ fn a_program_on_path_is_offered_only_if_it_runs() {
         ),
     );
     assert!(
-        runs_here(&elsewhere, &[], path),
+        runs_here(&elsewhere, &[], path, &[]),
         "run from {}",
         neutral.display()
     );
 
     let rust_analyzer = write("bin", "rust-analyzer", &answers("--version"));
-    assert!(worth_offering(&rust_analyzer, path));
+    assert!(worth_offering(&rust_analyzer, path, None));
     let rust_analyzer = write("rustup", "rust-analyzer", shim);
-    assert!(!worth_offering(&rust_analyzer, path), "a shim that fails");
+    assert!(
+        !worth_offering(&rust_analyzer, path, None),
+        "a shim that fails"
+    );
+    // rustup's, for a project that pins a toolchain without it: asked for
+    // that toolchain (by its channel, never installing it), it fails there.
+    let pinned = write(
+        "pins",
+        "rust-analyzer",
+        "#!/bin/sh\n[ \"$RUSTUP_TOOLCHAIN\" = 1.70.0 ] && [ \"$RUSTUP_AUTO_INSTALL\" = 0 ] && exit 1\necho 1.0\n",
+    );
+    let project = root.join("pinned-project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join("rust-toolchain.toml"),
+        "[toolchain]\nchannel = \"1.70.0\"\n",
+    )
+    .unwrap();
+    assert!(worth_offering(&pinned, path, None));
+    assert!(
+        !worth_offering(&pinned, path, Some(&project)),
+        "not for its toolchain"
+    );
     let gopls = write("bin", "gopls", &answers("version"));
     assert!(
-        worth_offering(&gopls, path),
+        worth_offering(&gopls, path, None),
         "gopls is asked `gopls version`"
     );
     let pyright = write("bin", "pyright-langserver", refuses);
     assert!(
-        worth_offering(&pyright, path),
+        worth_offering(&pyright, path, None),
         "no way to ask: offered as found"
     );
     let pyright = write("shims", "pyright-langserver", refuses);
-    assert!(!worth_offering(&pyright, path), "a version manager's shim");
+    assert!(
+        !worth_offering(&pyright, path, None),
+        "a version manager's shim"
+    );
     // npm's taplo answers `--version` and has no language server; the one
     // built with it answers `taplo lsp --help`.
     let taplo = write("npm", "taplo", &answers("--version"));
     assert!(
-        !worth_offering(&taplo, path),
+        !worth_offering(&taplo, path, None),
         "a taplo with no language server"
     );
     let taplo = write(
@@ -3912,7 +4027,7 @@ fn a_program_on_path_is_offered_only_if_it_runs() {
         "taplo",
         "#!/bin/sh\n[ \"$1 $2\" = 'lsp --help' ]\n",
     );
-    assert!(worth_offering(&taplo, path));
+    assert!(worth_offering(&taplo, path, None));
 }
 
 /// Asked to download a server whose own program is on PATH, Clew runs that
@@ -3958,8 +4073,8 @@ fn the_download_question_looks_for_the_program_on_path() {
             assert_eq!(consent.on_path.as_ref(), Some(&program));
         }
     }
-    // Pyright's server refuses `--version` (it will not start without a
-    // connection): asked so, it was never offered. It is offered as found.
+    // A pyright of the user's own on the PATH serves as Clew's would: it
+    // is run as found, with nothing asked or downloaded and no Node.
     let pyright = bin.join("pyright-langserver");
     std::fs::write(
         &pyright,
@@ -3973,9 +4088,13 @@ fn the_download_question_looks_for_the_program_on_path() {
     for message in run_task(looked) {
         let _ = app.update(message);
     }
-    let consent = app.proj.pending_lsp_consent.front().expect("asked");
-    assert_eq!(consent.language, "python");
-    assert_eq!(consent.on_path.as_ref(), Some(&pyright));
+    assert!(
+        app.proj
+            .pending_lsp_consent
+            .iter()
+            .all(|c| c.language != "python"),
+        "pyright on the PATH was asked about"
+    );
     // Not TypeScript's: clew's own install pins the TypeScript it runs, and
     // the user's server in its place would run the repository's
     // `node_modules/typescript` — one click from a question that says
@@ -4142,7 +4261,7 @@ fn context_menu_flow() {
         x: 120.0,
         y: 40.0,
     }));
-    let menu = app.proj.context_menu.expect("menu open");
+    let menu = app.proj.context_menu.clone().expect("menu open");
     assert_eq!((menu.line, menu.col), (2, 7));
 
     // Choosing an action closes the menu and dispatches the goto for the
@@ -6138,6 +6257,7 @@ fn the_debugger_has_its_function_keys() {
         args: Vec::new(),
         cwd: PathBuf::from("/"),
         addr: None,
+        takes_input: false,
     };
     app.debug.session = Some(session(DebugStatus::Stopped));
     let step = |app: &App, n: Named, m: Modifiers| match app.debug_key(&f(n), m) {
@@ -6194,6 +6314,7 @@ fn debug_variables_open_into_their_children_for_the_stop() {
         args: Vec::new(),
         cwd: PathBuf::from("/"),
         addr: None,
+        takes_input: false,
     });
     let child = |name: &str| crate::dap::Variable {
         name: name.into(),
@@ -6253,6 +6374,7 @@ fn a_finished_run_is_no_longer_said_to_be_running() {
         args: Vec::new(),
         cwd: PathBuf::from("/"),
         addr: None,
+        takes_input: false,
     };
     app.debug_run = 1;
     let event = |app: &mut App, event| {
@@ -6318,6 +6440,7 @@ fn stale_debug_events_are_dropped() {
         args: Vec::new(),
         cwd: PathBuf::from("/"),
         addr: None,
+        takes_input: false,
     };
     app.debug.session = Some(session());
     app.debug_run = 1;
@@ -8211,6 +8334,7 @@ fn a_failed_debug_run_stops_what_it_started() {
         args: Vec::new(),
         cwd: PathBuf::from("/"),
         addr: None,
+        takes_input: false,
     });
     app.bump_debug_run();
     let run = app.debug_run;
@@ -8436,6 +8560,7 @@ fn debug_stop_while_launching_cancels_the_startup() {
         args: Vec::new(),
         cwd: PathBuf::from("/"),
         addr: None,
+        takes_input: false,
     });
     app.bump_debug_run();
     let launching = app.debug_run;
@@ -9822,6 +9947,7 @@ fn a_jump_onto_a_type_is_named_in_the_trail() {
     let root = app.proj.project.as_ref().unwrap().root.clone();
     let lib = root.join("src/lib.rs");
     let symbol = |name: &str, kind: &str, line: usize| SymbolEntry {
+        owner: None,
         name: name.into(),
         kind: kind.into(),
         rel: "src/lib.rs".into(),
@@ -10178,7 +10304,8 @@ fn add_to_ask_without_a_selection_adds_the_line_clicked() {
         served: true,
         by_pointer: true,
         line_top: None,
-        in_test: false,
+        test: None,
+        gutter: None,
     };
     // `pub fn origin() -> Point {`, the third line.
     app.proj.context_menu = Some(menu(2));
@@ -10238,7 +10365,8 @@ fn a_popup_asked_from_the_menu_keeps_where_it_was_asked() {
         served: true,
         by_pointer: true,
         line_top: None,
-        in_test: false,
+        test: None,
+        gutter: None,
     };
     app.proj.context_menu = Some(menu(None));
     let _ = app.update(Message::TimeTravel(TimeTravelMsg::WhyIsThisHere));
@@ -10297,7 +10425,8 @@ fn a_popup_asked_from_the_menu_keeps_where_it_was_asked() {
     app.proj.context_menu = Some(ContextMenu {
         by_pointer: false,
         line_top: None,
-        in_test: false,
+        test: None,
+        gutter: None,
         ..menu(Some(crate::InsightKind::ExpandMacro))
     });
     let _ = app.update(Message::Hover(HoverMsg::Insight));
@@ -14122,7 +14251,8 @@ fn a_project_switch_drops_every_anchor_into_the_old_project() {
         served: true,
         by_pointer: true,
         line_top: None,
-        in_test: false,
+        test: None,
+        gutter: None,
     });
     app.proj.find.open = true;
     app.proj.find.query = "Point".into();
@@ -16162,6 +16292,43 @@ fn the_files_view_learns_what_the_working_tree_changes() {
     assert!(app.sync_git_status().is_some(), "read as it shows");
 }
 
+/// The row the tree's keys rest on is ringed only once keys are used
+/// there, as a focus ring shows only where keys moved it: a click gives
+/// the tree the keys without a ring (it ringed the folder just clicked,
+/// beside the open file's own mark), the first arrow rings its row, and
+/// a click takes the ring away again. Brought in by the keys — F6, Tab,
+/// ↓ from the filter — the ring is there at once.
+#[test]
+fn the_files_tree_rings_its_row_for_the_keyboard_only() {
+    use crate::app::message::TreeKey;
+    let mut app = scanned_app("tree-ring");
+    app.show_left_sidebar = true;
+    app.sidebar = SidebarTab::Files;
+    app.proj.expanded.clear();
+    let at = |app: &App| app.tree_cursor_rel();
+    let send = |app: &mut App, m: WindowMsg| {
+        let task = app.update(Message::Window(m));
+        for m in run_task(task) {
+            let _ = app.update(m);
+        }
+    };
+    // Clicked: the keys, no ring.
+    send(&mut app, WindowMsg::TreeFocused(true));
+    send(&mut app, WindowMsg::TreePointed);
+    assert!(app.tree_focused, "the keys are the tree's");
+    assert_eq!(at(&app), None, "a click rings nothing");
+    // A key: its row is ringed.
+    send(&mut app, WindowMsg::TreeKey(TreeKey::Down));
+    assert!(at(&app).is_some(), "the arrow's row is ringed");
+    // Clicked again: gone.
+    send(&mut app, WindowMsg::TreePointed);
+    assert_eq!(at(&app), None);
+    // Left, then brought back by the keys: ringed at once.
+    send(&mut app, WindowMsg::TreeFocused(false));
+    send(&mut app, WindowMsg::TreeFocused(true));
+    assert!(at(&app).is_some(), "keyed in, the row is ringed");
+}
+
 /// The Files view's tree walked by the keyboard: ↑ ↓ from row to row, →
 /// opening a folder and stepping into it, ← closing it and stepping out,
 /// Home and End, Space showing a file with the keyboard still in the tree,
@@ -18052,6 +18219,7 @@ async fn an_incremental_refine_leaves_the_whole_project_to_its_pass() {
         let file = module(i);
         let symbols = (0..FNS)
             .map(|j| SymbolEntry {
+                owner: None,
                 name: format!("f{j}"),
                 kind: "function".into(),
                 rel: format!("gen/m{i}.rs"),
@@ -18149,6 +18317,7 @@ fn index_more_files(app: &mut App, root: &Path, n: usize) {
         let rel = format!("gen/m{i}.rs");
         let abs = root.join(&rel);
         let entry = SymbolEntry {
+            owner: None,
             name: "f".into(),
             kind: "function".into(),
             rel,
@@ -18439,6 +18608,7 @@ fn an_incremental_refine_plans_what_the_window_computed() {
             let entries = symbols
                 .iter()
                 .map(|&(name, kind, line)| SymbolEntry {
+                    owner: None,
                     name: name.into(),
                     kind: kind.into(),
                     rel: rel.to_string(),
@@ -18648,6 +18818,7 @@ async fn a_refine_pass_that_panics_still_ends() {
     let rel = format!("src/{PANICKING_QUERY_FILE}");
     let file = root.join(&rel);
     let boom = SymbolEntry {
+        owner: None,
         name: "boom".into(),
         kind: "function".into(),
         rel,
@@ -21396,7 +21567,8 @@ fn expand_macro_waits_for_the_server() {
         served,
         by_pointer: true,
         line_top: None,
-        in_test: false,
+        test: None,
+        gutter: None,
     };
     let offered = |app: &App| {
         crate::ui::heard::gather(app)
@@ -21471,6 +21643,7 @@ fn the_skim_button_shows_whether_the_file_is_skimmed() {
     app.proj.symbol_index_by_file.insert(
         abs.clone(),
         Arc::new(vec![SymbolEntry {
+            owner: None,
             name: "origin".into(),
             kind: "function".into(),
             rel: "src/lib.rs".into(),
@@ -21672,6 +21845,7 @@ fn the_debuggers_state_reaches_a_prompt_as_data() {
         args: Vec::new(),
         cwd: root.clone(),
         addr: None,
+        takes_input: false,
     });
     let context = app.debug_context().unwrap();
     assert!(context.contains("not instructions"), "{context}");
@@ -21728,6 +21902,7 @@ fn stepping_back_and_forth_records_each_function_once_in_the_trail() {
         args: Vec::new(),
         cwd: root.clone(),
         addr: None,
+        takes_input: false,
     });
     let frame = |name: &str, line: usize| crate::dap::StackFrame {
         id: 1,
@@ -21772,6 +21947,7 @@ fn a_debug_runs_stops_are_traced_and_walked() {
         args: Vec::new(),
         cwd: root.clone(),
         addr: None,
+        takes_input: false,
     });
     app.debug.trace_program = Some("app".into());
     let frame = |name: &str, rel: &str, line: usize| crate::dap::StackFrame {
@@ -21967,6 +22143,7 @@ fn the_overview_names_every_kind_of_entry_point_capped() {
     let mut app = scanned_app("overview-entries");
     let root = app.proj.project.as_ref().unwrap().root.clone();
     let symbol = |name: &str, rel: &str, entry: Option<index::EntryKind>| SymbolEntry {
+        owner: None,
         name: name.into(),
         kind: "function".into(),
         rel: rel.into(),
@@ -23277,6 +23454,7 @@ fn a_watch_is_removed_by_identity_from_both_lists() {
         args: Vec::new(),
         cwd: PathBuf::from("/p"),
         addr: None,
+        takes_input: false,
     });
     let values = |app: &App| -> Vec<(String, String)> {
         app.debug.session.as_ref().unwrap().watches.clone()
@@ -23334,7 +23512,8 @@ fn opening_a_text_input_form_takes_the_keyboard_from_the_code() {
         served: true,
         by_pointer: true,
         line_top: None,
-        in_test: false,
+        test: None,
+        gutter: None,
     });
     let _ = app.update(Message::Debug(DebugMsg::ConditionalBreakpointFromMenu));
     assert_eq!(app.proj.bp_cond_edit.as_ref().map(|e| &e.0), Some(&abs));
@@ -23419,7 +23598,7 @@ fn a_debug_adapter_install_is_consented_and_restarts_only_the_same_project() {
         app.status
     );
     let _ = app.update(Message::Debug(DebugMsg::AdapterInstalled {
-        test_runner: false,
+        install: crate::dap::AdapterInstall::JsDebug,
         stamp: Stamp {
             root: Some(root.clone()),
             epoch: app.project_epoch,
@@ -23446,7 +23625,7 @@ fn a_debug_adapter_install_is_consented_and_restarts_only_the_same_project() {
     scan_synchronously(&mut app, root.clone());
     assert_ne!(app.project_epoch, asked_in);
     let _ = app.update(Message::Debug(DebugMsg::AdapterInstalled {
-        test_runner: false,
+        install: crate::dap::AdapterInstall::JsDebug,
         stamp: Stamp {
             root: Some(root.clone()),
             epoch: asked_in,
@@ -23462,7 +23641,7 @@ fn a_debug_adapter_install_is_consented_and_restarts_only_the_same_project() {
 
     // A failed install says so and starts nothing.
     let _ = app.update(Message::Debug(DebugMsg::AdapterInstalled {
-        test_runner: false,
+        install: crate::dap::AdapterInstall::JsDebug,
         stamp: Stamp {
             root: Some(root),
             epoch: app.project_epoch,
@@ -23976,7 +24155,7 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
             symbols: Vec::new(),
             docs: HashMap::new(),
             inactive: HashSet::new(),
-            target: inactive::Target::host(),
+            target: std::sync::Arc::new(inactive::Target::host()),
             facts: Default::default(),
         }),
         Message::Watch(WatchMsg::StructureBuilt {
@@ -24101,6 +24280,14 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
             name: "rust-analyzer",
             program: PathBuf::from("/stale/rust-analyzer"),
         }),
+        Message::Lsp(LspMsg::RustSrcFound {
+            stamp: s(),
+            found: Some(Err(None)),
+        }),
+        Message::Lsp(LspMsg::RustSrcAdded {
+            stamp: s(),
+            result: Ok(()),
+        }),
         Message::Hover(HoverMsg::Dwell {
             stamp: s(),
             hover_gen: app.proj.hover_gen,
@@ -24126,6 +24313,10 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
         Message::Hover(HoverMsg::GutterDue {
             stamp: s(),
             generation: app.proj.gutter_seq,
+        }),
+        Message::Hover(HoverMsg::Left {
+            stamp: s(),
+            leave: app.proj.hover_leave,
         }),
         Message::Nav(NavMsg::DefinitionResult {
             stamp: s(),
@@ -24779,7 +24970,8 @@ fn fill_project_session(app: &mut App) {
         served: true,
         by_pointer: true,
         line_top: None,
-        in_test: false,
+        test: None,
+        gutter: None,
     });
     p.diff = Some(DiffState::new(
         file.clone(),
@@ -28923,6 +29115,7 @@ fn paused_session_with_fake_adapter(
         args: Vec::new(),
         cwd: PathBuf::from("/p"),
         addr: None,
+        takes_input: false,
     });
     (rt, events, seen)
 }
@@ -29168,6 +29361,7 @@ fn run_swaps_in_only_an_evident_program_start() {
         std::fs::write(root.join(main), "def main():\n    pass\n").unwrap();
     }
     let symbol = |file: &str, name: &str, kind: &str| SymbolEntry {
+        owner: None,
         name: name.into(),
         kind: kind.into(),
         rel: file.into(),
@@ -29228,6 +29422,7 @@ fn run_on_a_module_of_defs_runs_the_projects_main() {
     .unwrap();
     std::fs::write(root.join("pricing.py"), "def price():\n    return 3\n").unwrap();
     let symbol = |file: &str, name: &str, entry| SymbolEntry {
+        owner: None,
         name: name.into(),
         kind: "function".into(),
         rel: file.into(),
@@ -29349,8 +29544,10 @@ fn a_hover_over_a_paused_program_evaluates_only_what_is_safe() {
     let mut app = scanned_app("dap-hover");
     open_synchronously(&mut app, "src/lib.rs", None);
     let (_rt, _events, seen) = paused_session_with_fake_adapter(&mut app);
-    // `origin`, on the line `pub fn origin() -> Point {`.
+    // `origin`, on the line `pub fn origin() -> Point {`, rested on afresh:
+    // what the last rest there opened has gone with the pointer.
     let dwell = |app: &mut App| {
+        app.proj.hover = None;
         app.proj.hover_gen += 1;
         let task = app.update(Message::Hover(HoverMsg::Dwell {
             stamp: app.stamp(),
@@ -29476,6 +29673,7 @@ fn js_debug_run(app: &mut App, parent: crate::dap::DapClient) -> u64 {
         args: Vec::new(),
         cwd: PathBuf::from("/p"),
         addr: None,
+        takes_input: false,
     });
     app.bump_debug_run();
     let run = app.debug_run;
@@ -29537,6 +29735,7 @@ fn js_debug_child_sessions_are_kept_apart() {
         args: Vec::new(),
         cwd: PathBuf::from("/p"),
         addr: None,
+        takes_input: false,
     });
     app.bump_debug_run();
     let run = app.debug_run;
@@ -30025,6 +30224,7 @@ fn a_js_debug_child_session_ends_with_its_run() {
         args: Vec::new(),
         cwd: PathBuf::from("/p"),
         addr: Some(addr),
+        takes_input: false,
     });
     app.bump_debug_run();
     let run = app.debug_run;
@@ -30120,6 +30320,7 @@ fn a_js_debug_child_session_reports_its_failure_and_brings_its_promise() {
             args: Vec::new(),
             cwd: PathBuf::from("/p"),
             addr: Some(addr),
+            takes_input: false,
         });
         app.bump_debug_run();
         let run = app.debug_run;
@@ -30308,6 +30509,7 @@ fn a_tcp_adapters_announced_address_is_kept_whole() {
         args: Vec::new(),
         cwd: PathBuf::from("/p"),
         addr: None,
+        takes_input: false,
     });
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -32098,7 +32300,8 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
                 served: true,
                 by_pointer: true,
                 line_top: None,
-                in_test: false,
+                test: None,
+                gutter: None,
             })
         }),
         Box::new(|a| {
@@ -35544,6 +35747,110 @@ fn the_peek_and_the_menu_open_at_the_pointer_of_a_scrolled_pane() {
     assert_eq!((peek.x, peek.y), (140.0, 210.0));
 }
 
+/// The open peek goes a moment after the pointer leaves its word — it hung
+/// over the code for as long as the pointer kept moving, gone only once it
+/// rested on something else. Back on its word in time, or in the peek, it
+/// stays, and a dwell for what the pointer only crossed shows nothing.
+#[test]
+fn a_peek_goes_a_moment_after_the_pointer_leaves_its_word() {
+    let mut app = scanned_app("peek-leaves");
+    open_synchronously(&mut app, "src/lib.rs", None);
+    // Info when the pointer rests: each word left starts a wait.
+    app.peek_on_rest = true;
+    // Line 2: "pub fn origin() -> Point {", `origin` at 7..13.
+    let peek = || HoverState {
+        line: 2,
+        col: 8,
+        x: 10.0,
+        y: 10.0,
+        text: Some("fn origin()".into()),
+        prepared: Vec::new(),
+        summary: None,
+        diagnostic: None,
+    };
+    let at = |app: &mut App, col: usize| {
+        app.update(Message::Hover(HoverMsg::Requested {
+            pane: 0,
+            line: 2,
+            col,
+            x: 0.0,
+            y: 0.0,
+        }))
+    };
+    let left = |app: &mut App, leave: u64| {
+        let stamp = app.stamp();
+        let _ = app.update(Message::Hover(HoverMsg::Left { stamp, leave }));
+    };
+    app.proj.hover = Some(peek());
+    // Along its own word: it stays, put.
+    let task = at(&mut app, 11);
+    assert_eq!(task.units(), 0, "nothing to fetch or wait out");
+    assert!(!app.proj.hover_leaving);
+    assert_eq!(
+        app.proj.hover.as_ref().map(|h| (h.x, h.y)),
+        Some((10.0, 10.0))
+    );
+    // Off it: it goes once the grace is over, whatever else is under the
+    // pointer by then.
+    let task = at(&mut app, 16);
+    assert!(app.proj.hover_leaving);
+    assert_eq!(
+        task.units(),
+        2,
+        "the grace, and a dwell for where it is now"
+    );
+    let leave = app.proj.hover_leave;
+    let _ = at(&mut app, 19);
+    assert_eq!(
+        app.proj.hover_leave, leave,
+        "one grace per leaving, not per word"
+    );
+    left(&mut app, leave);
+    assert!(app.proj.hover.is_none(), "gone, before the pointer rests");
+    // Back on its word within the grace: it stays, and the dwell for the
+    // spot crossed on the way shows nothing.
+    app.proj.hover = Some(peek());
+    app.proj.hover_leaving = false;
+    let _ = at(&mut app, 16);
+    let crossed = app.proj.hover_gen;
+    let leave = app.proj.hover_leave;
+    let _ = at(&mut app, 9);
+    left(&mut app, leave);
+    assert!(app.proj.hover.is_some(), "back on it in time");
+    let _ = app.on_hover_dwell(crossed, 0, 2, 16, 0.0, 0.0);
+    assert_eq!(
+        app.proj.hover.as_ref().map(|h| h.col),
+        Some(8),
+        "still its own"
+    );
+    // Into the peek within the grace: it stays, to be read.
+    let _ = at(&mut app, 16);
+    let leave = app.proj.hover_leave;
+    let _ = app.update(Message::Hover(HoverMsg::Pin(true)));
+    left(&mut app, leave);
+    assert!(app.proj.hover.is_some(), "kept, to be read");
+    // An earlier leaving's grace does not cut a later one short.
+    let _ = app.update(Message::Hover(HoverMsg::Pin(false)));
+    app.proj.hover = Some(peek());
+    let _ = at(&mut app, 16);
+    let first = app.proj.hover_leave;
+    let _ = at(&mut app, 8);
+    let _ = at(&mut app, 16);
+    left(&mut app, first);
+    assert!(
+        app.proj.hover.is_some(),
+        "the second leaving has its own grace"
+    );
+    // Off it before anything was shown: let go at once.
+    app.proj.hover = Some(HoverState {
+        text: None,
+        ..peek()
+    });
+    app.proj.hover_leaving = false;
+    let _ = at(&mut app, 16);
+    assert!(app.proj.hover.is_none());
+}
+
 /// M4/M5: a gutter line's tip shows once the pointer has rested on it —
 /// not for a line it has moved off since — placed in window space as the
 /// peek is; leaving the gutter puts it away.
@@ -36267,6 +36574,7 @@ fn same_named_functions_agree_on_being_an_entry_point() {
     let root = app.proj.project.as_ref().unwrap().root.clone();
     let abs = root.join("src/handlers.rs");
     let sym = |line: usize, entry: Option<index::EntryKind>| SymbolEntry {
+        owner: None,
         name: "handle".into(),
         kind: "method".into(),
         rel: "src/handlers.rs".into(),
@@ -37622,6 +37930,143 @@ fn debug_suggests_a_launch_config_in_the_projects_language() {
     assert!(crate::app::tasks::launch_example(&root, Some("ruby")).contains("main.rb"));
 }
 
+/// Code info shows when asked for, as shipped: the pointer resting on a word
+/// opens nothing; with ⌥ (Alt) held it does, and ⌥ pressed over the word
+/// shows it at once; let go of ⌥, it stays to be read. Show Info (⌘K, or `K`
+/// in the code) shows the caret's, and puts it away again; Esc puts it away.
+/// Switched to "Info when the pointer rests", a pause shows it again.
+#[test]
+fn code_info_shows_when_asked_for() {
+    let mut app = scanned_app("info-when-asked");
+    open_synchronously(&mut app, "src/lib.rs", Some(3));
+    // The language server's offer, put away: Esc goes to what is on top.
+    if crate::ui::escape_message(&app).is_some() {
+        let _ = app.update(esc_press());
+    }
+    assert!(crate::ui::escape_message(&app).is_none());
+    assert!(!app.peek_on_rest, "asked for, as shipped");
+    let rest = |app: &mut App| {
+        app.update(Message::Hover(HoverMsg::Requested {
+            pane: 0,
+            line: 2,
+            col: 8,
+            x: 40.0,
+            y: 30.0,
+        }))
+    };
+    // A pause: nothing on its way.
+    let task = rest(&mut app);
+    assert_eq!(task.units(), 0, "no dwell without ⌥");
+    assert!(app.proj.hover.is_none());
+    // ⌥ pressed where the pointer rests: shown at once.
+    let alt = keyboard::Modifiers::ALT;
+    let _ = app.update(Message::Editor(EditorMsg::ModifiersChanged(alt)));
+    assert_eq!(
+        app.proj.hover.as_ref().map(|h| (h.line, h.col)),
+        Some((2, 8))
+    );
+    // Let go: it stays.
+    let _ = app.update(Message::Editor(EditorMsg::ModifiersChanged(
+        keyboard::Modifiers::empty(),
+    )));
+    assert!(app.proj.hover.is_some(), "let go of ⌥, it stays to be read");
+    // Esc puts it away.
+    let _ = app.update(esc_press());
+    assert!(app.proj.hover.is_none());
+    // With ⌥ held, coming onto a word: soon met.
+    let _ = app.update(Message::Hover(HoverMsg::Cleared));
+    let _ = app.update(Message::Editor(EditorMsg::ModifiersChanged(alt)));
+    assert!(app.proj.hover.is_none(), "the pointer is off the code");
+    let task = rest(&mut app);
+    assert_eq!(task.units(), 1, "a dwell, ⌥ held");
+    let _ = app.update(Message::Editor(EditorMsg::ModifiersChanged(
+        keyboard::Modifiers::empty(),
+    )));
+    // Show Info: the caret's word, then put away.
+    app.proj.hover = None;
+    let _ = app.update(Message::Editor(EditorMsg::RunAction(
+        crate::keymap::Action::ShowInfo,
+    )));
+    let caret = app.active_viewer().and_then(|v| v.caret).unwrap();
+    assert_eq!(
+        app.proj.hover.as_ref().map(|h| (h.line, h.col)),
+        Some(caret)
+    );
+    let _ = app.update(Message::Editor(EditorMsg::RunAction(
+        crate::keymap::Action::ShowInfo,
+    )));
+    assert!(app.proj.hover.is_none(), "pressed again, put away");
+    // Vim's `K` in the code: the same.
+    app.code_focused = true;
+    let _ = app.update(key_press(
+        keyboard::Key::Character("K".into()),
+        keyboard::Modifiers::SHIFT,
+    ));
+    assert!(app.proj.hover.is_some(), "K shows it");
+    app.invalidate_hover();
+    // Info when the pointer rests: a pause starts its wait again.
+    let _ = app.update(Message::Window(WindowMsg::TogglePeekOnRest));
+    assert!(app.peek_on_rest);
+    let task = rest(&mut app);
+    assert_eq!(task.units(), 1, "a dwell on a pause");
+}
+
+/// The first peek waits as long as a tooltip, so a pointer crossing the code
+/// opens no card over it; reading along from one, the next waits less — and
+/// after a pause, the full wait again.
+#[test]
+fn a_peek_waits_longer_the_first_time_than_reading_along() {
+    use crate::app::hover::{HOVER_DELAY, HOVER_WARM, HOVER_WARM_DELAY};
+    let mut app = scanned_app("peek-delay");
+    let now = std::time::Instant::now();
+    assert_eq!(app.peek_delay(now), HOVER_DELAY);
+    assert!(HOVER_DELAY > HOVER_WARM_DELAY);
+    app.proj.hover = Some(crate::HoverState {
+        line: 2,
+        col: 4,
+        x: 0.0,
+        y: 0.0,
+        text: Some("pub fn origin()".into()),
+        prepared: Vec::new(),
+        summary: None,
+        diagnostic: None,
+    });
+    assert_eq!(app.peek_delay(now), HOVER_WARM_DELAY, "a peek showing");
+    app.proj.hover = None;
+    let soon = now + HOVER_WARM / 2;
+    assert_eq!(app.peek_delay(soon), HOVER_WARM_DELAY, "a moment after");
+    let later = now + HOVER_WARM * 2;
+    assert_eq!(app.peek_delay(later), HOVER_DELAY, "after a pause");
+}
+
+/// Run from a library's file runs what `cargo run` would: the package's
+/// only binary, wherever Cargo finds it, or its `default-run`; with
+/// several and none named, it says which there are and how to pick.
+#[test]
+fn run_from_a_library_runs_what_cargo_run_would() {
+    let mut app = scanned_app("run-library-program");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
+    std::fs::create_dir_all(root.join("src/bin")).unwrap();
+    std::fs::write(root.join("src/bin/tool.rs"), "fn main() {}\n").unwrap();
+    open_synchronously(&mut app, "src/lib.rs", None);
+    let _ = app.update(Message::Debug(DebugMsg::Start));
+    assert_eq!(app.status, "Building tool with Cargo…");
+    std::fs::write(root.join("src/bin/serve.rs"), "fn main() {}\n").unwrap();
+    let _ = app.update(Message::Debug(DebugMsg::Start));
+    assert_eq!(
+        app.status,
+        "This package has several programs: serve and tool. Open the one you want and Run it, or name it as default-run in Cargo.toml."
+    );
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"x\"\ndefault-run = \"serve\"\n",
+    )
+    .unwrap();
+    let _ = app.update(Message::Debug(DebugMsg::Start));
+    assert_eq!(app.status, "Building serve with Cargo…");
+}
+
 /// The binary a crate builds is the one Cargo names: `src/bin/<name>.rs`
 /// is `<name>`, not the package; and a workspace's root library is not
 /// "nothing to run" — its members may well run.
@@ -38105,6 +38550,7 @@ fn skim_keeps_no_more_scroll_than_the_folded_file_has() {
     app.proj.symbol_index_by_file.insert(
         abs.clone(),
         Arc::new(vec![SymbolEntry {
+            owner: None,
             name: "long".into(),
             kind: "function".into(),
             rel: "long.py".into(),
@@ -38139,6 +38585,7 @@ fn the_files_views_take_turns() {
     app.proj.symbol_index_by_file.insert(
         abs.clone(),
         Arc::new(vec![SymbolEntry {
+            owner: None,
             name: "origin".into(),
             kind: "function".into(),
             rel: "src/lib.rs".into(),
@@ -39020,6 +39467,7 @@ fn a_stop_inside_a_function_says_its_line() {
     app.proj.symbol_index_by_file.insert(
         file.clone(),
         std::sync::Arc::new(vec![crate::index::SymbolEntry {
+            owner: None,
             name: "give_back".into(),
             kind: "method".into(),
             rel: "src/lib.rs".into(),
@@ -40662,9 +41110,10 @@ fn a_plugins_code_command_is_in_the_code_menu_and_runs_at_the_line_clicked() {
         served: true,
         by_pointer: true,
         line_top: None,
-        in_test: false,
+        test: None,
+        gutter: None,
     };
-    app.proj.context_menu = Some(menu);
+    app.proj.context_menu = Some(menu.clone());
     let (targets, _) = crate::ui::heard::gather_all_of(|| crate::ui::context_menu(&app, &menu));
     let row = targets
         .iter()
@@ -43686,4 +44135,697 @@ fn settings_say_whether_plugins_can_be_built_and_offer_the_fix() {
     checked(&mut app, Ok(("1.95.0".into(), false)), false);
     assert!(says(&app, "Rust 1.95.0 is ready"));
     assert!(!says(&app, "Clew's own Rust"));
+}
+
+/// Choices with `program` run beside Python's main server (`python.also`).
+fn python_beside(program: &str) -> clew_protocol::LanguageChoices {
+    clew_protocol::LanguageChoices {
+        servers: Some(
+            [(
+                crate::app::lsp::also_key("python"),
+                clew_protocol::ServerChoice {
+                    command: program.into(),
+                    args: None,
+                },
+            )]
+            .into_iter()
+            .collect(),
+        ),
+        ..Default::default()
+    }
+}
+
+/// A publishDiagnostics for `path`: one diagnostic on `line`, columns
+/// `from..to`, of `severity`, said by `source` under `code`.
+fn published(
+    path: &Path,
+    line: u64,
+    (from, to): (u64, u64),
+    severity: u64,
+    (source, code): (&str, &str),
+) -> serde_json::Value {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/publishDiagnostics",
+        "params": {
+            "uri": lsp::client::path_to_uri(path),
+            "diagnostics": [{
+                "range": {
+                    "start": {"line": line, "character": from},
+                    "end": {"line": line, "character": to}
+                },
+                "severity": severity,
+                "source": source,
+                "code": code,
+                "message": "said"
+            }]
+        }
+    })
+}
+
+/// A server run beside Python's main one (ruff beside pyright) is sent the
+/// open files as Python, as the main one is, and keeps its own record of
+/// them: a document opened in one server was never sent to the other.
+#[tokio::test]
+async fn a_server_beside_the_main_one_is_sent_the_files_as_their_language() {
+    let mut app = scanned_app("lsp-beside-open");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    std::fs::write(root.join("app.py"), "import os\nx = 1\n").unwrap();
+    open_synchronously(&mut app, "app.py", None);
+    let file = root.join("app.py");
+    app.proj.lang_choices = python_beside("ruff");
+    let (main, main_wire) = recording_lsp_client(&root).await;
+    let (beside, beside_wire) = recording_lsp_client(&root).await;
+    app.proj
+        .link
+        .lsp
+        .insert("python".into(), LspSlot::Ready(main));
+    app.proj
+        .link
+        .lsp
+        .insert("python.also".into(), LspSlot::Ready(beside));
+
+    let _ = app.ensure_lsp("python");
+
+    for wire in [&main_wire, &beside_wire] {
+        let seen = wire_containing(wire, "textDocument/didOpen").await;
+        assert!(
+            seen.contains("\"languageId\":\"python\""),
+            "sent as Python, not as the slot's key: {seen:?}"
+        );
+    }
+    assert!(app.proj.link.lsp_opened.contains(&file));
+    assert!(app.proj.link.lsp_opened_also.contains(&file));
+
+    // Changed on disk: both servers' copies follow.
+    app.resync_open_doc(&file, "import os\nx = 2  # changed\n");
+    for wire in [&main_wire, &beside_wire] {
+        let seen = wire_containing(wire, "textDocument/didChange").await;
+        assert!(seen.contains("changed"), "{seen:?}");
+    }
+
+    // Restarting the one beside forgets its documents only.
+    app.reset_lsp("python.also");
+    assert!(app.proj.link.lsp_opened.contains(&file));
+    assert!(!app.proj.link.lsp_opened_also.contains(&file));
+    assert!(matches!(
+        app.proj.link.lsp.get("python"),
+        Some(LspSlot::Ready(_))
+    ));
+}
+
+/// What the server beside the main one finds is shown with what the main
+/// one finds: counted in the status bar, underlined, and said on hover,
+/// each at the columns its own server counts in.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_server_beside_the_main_one_adds_its_diagnostics() {
+    let mut app = scanned_app("lsp-beside-diags");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    std::fs::write(root.join("app.py"), "import os\nx = undefined\n").unwrap();
+    open_synchronously(&mut app, "app.py", None);
+    let file = root.join("app.py");
+    app.proj.lang_choices = python_beside("ruff");
+    let (main, main_server) = stub_lsp_server(&root, StubAnswers::Nothing).await;
+    let (beside, beside_server) = stub_lsp_server(&root, StubAnswers::Nothing).await;
+    app.proj
+        .link
+        .lsp
+        .insert("python".into(), LspSlot::Ready(main.clone()));
+    app.proj
+        .link
+        .lsp
+        .insert("python.also".into(), LspSlot::Ready(beside.clone()));
+    let before = (
+        main.snapshot().unwrap().diag_version,
+        beside.snapshot().unwrap().diag_version,
+    );
+    main_server
+        .notify
+        .send(published(
+            &file,
+            1,
+            (4, 13),
+            1,
+            ("Pyright", "reportUndefinedVariable"),
+        ))
+        .unwrap();
+    beside_server
+        .notify
+        .send(published(&file, 0, (7, 9), 2, ("Ruff", "F401")))
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while main.snapshot().unwrap().diag_version == before.0
+        || beside.snapshot().unwrap().diag_version == before.1
+    {
+        assert!(std::time::Instant::now() < deadline, "never published");
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    app.sync_lsp_snapshots();
+
+    let said = app.file_diagnostics("python", &file).expect("both read");
+    assert_eq!(said.len(), 2, "the main server's and the one beside it");
+
+    let pane = app.proj.active;
+    let v = app.proj.panes[pane].as_ref().unwrap();
+    let marks = app.code_highlights(pane, v);
+    let underlined = |line: usize, kind: fn(&codeview::HlKind) -> bool| {
+        marks.iter().any(|h| h.line == line && kind(&h.kind))
+    };
+    assert!(underlined(0, |k| matches!(k, codeview::HlKind::DiagWarn)));
+    assert!(underlined(1, |k| matches!(k, codeview::HlKind::DiagError)));
+
+    let hover = app
+        .diagnostic_at(pane, 0, 8)
+        .expect("ruff's warning on hover");
+    assert!(hover.contains("Ruff(F401)"), "{hover:?}");
+    let hover = app
+        .diagnostic_at(pane, 1, 6)
+        .expect("pyright's error on hover");
+    assert!(hover.contains("reportUndefinedVariable"), "{hover:?}");
+
+    // With the one beside gone, the main server's alone.
+    app.reset_lsp("python.also");
+    app.sync_lsp_snapshots();
+    assert_eq!(app.file_diagnostics("python", &file).unwrap().len(), 1);
+}
+
+/// Chosen in Settings while Python's server runs, a program to run beside
+/// it starts then; no longer chosen, it stops and leaves no slot that would
+/// read "no server for this language" in the list.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_server_beside_the_main_one_starts_and_stops_with_its_choice() {
+    let mut app = scanned_app("lsp-beside-choice");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let (main, _wire) = recording_lsp_client(&root).await;
+    app.proj
+        .link
+        .lsp
+        .insert("python".into(), LspSlot::Ready(main));
+    // Any program that is there: it is started, not run, in a test.
+    let program = std::path::PathBuf::from("/bin/cat");
+    let _ = app.update(Message::Languages(LanguagesMsg::Choose(Box::new(
+        python_beside(&program.to_string_lossy()),
+    ))));
+    assert!(
+        matches!(
+            app.proj.link.lsp.get("python.also"),
+            Some(LspSlot::Starting)
+        ),
+        "started beside the running server, not at the next file opened"
+    );
+
+    let _ = app.update(Message::Languages(LanguagesMsg::Choose(Box::default())));
+    assert!(!app.proj.link.lsp.contains_key("python.also"));
+    assert!(matches!(
+        app.proj.link.lsp.get("python"),
+        Some(LspSlot::Ready(_))
+    ));
+}
+
+/// The form for a server program says whether it runs beside the
+/// language's server or in its place, and Use files it under the key that
+/// says which; Edit on a second server's row brings it back as it was.
+#[test]
+fn the_server_program_form_files_a_second_server_beside_the_main_one() {
+    let mut app = scanned_app("lsp-beside-form");
+    let _ = app.update(Message::Languages(LanguagesMsg::ServerLanguage(
+        "python".into(),
+    )));
+    let _ = app.update(Message::Languages(LanguagesMsg::Draft(
+        crate::LangField::ServerCommand,
+        "ruff".into(),
+    )));
+    // Turned on after the program is typed: what is typed stays.
+    let _ = app.update(Message::Languages(LanguagesMsg::ServerBeside(true)));
+    assert_eq!(app.proj.lang_drafts.server_command, "ruff");
+    let _ = app.update(Message::Languages(LanguagesMsg::UseDraft(
+        crate::LangField::ServerCommand,
+    )));
+    let servers = app.proj.lang_choices.servers.clone().unwrap_or_default();
+    assert!(servers.contains_key("python.also"), "{servers:?}");
+    assert!(
+        !servers.contains_key("python"),
+        "beside pyright, not in its place"
+    );
+    assert!(!app.proj.lang_drafts.server_beside, "the form starts over");
+
+    let _ = app.update(Message::Languages(LanguagesMsg::ServerLanguage(
+        "python.also".into(),
+    )));
+    let drafts = &app.proj.lang_drafts;
+    assert_eq!(drafts.server_language.as_deref(), Some("python"));
+    assert!(drafts.server_beside);
+    assert_eq!(drafts.server_command, "ruff");
+    assert_eq!(
+        crate::app::languages::slot_label("python.also"),
+        "Python, second server"
+    );
+    assert_eq!(app.server_called("python.also"), "ruff");
+    assert_eq!(app.server_called("python"), "Python");
+}
+
+/// Live: a real `ruff server`, run beside Python's main server as Settings
+/// runs it (`ruff` with Clew's known arguments), is sent an open file and
+/// says what it finds there — pushed, since Clew asks for no pulls — and
+/// that shows with the file's other diagnostics. Needs `ruff` on the PATH:
+/// `cargo test -- --ignored a_real_ruff_beside`.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ruff on the PATH"]
+async fn a_real_ruff_beside_the_main_server_reports_an_unused_import() {
+    let mut app = scanned_app("lsp-beside-ruff-live");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    std::fs::write(root.join("app.py"), "import os\n\nx = 1\n").unwrap();
+    open_synchronously(&mut app, "app.py", None);
+    let file = root.join("app.py");
+    app.proj.lang_choices = python_beside("ruff");
+    let server = app
+        .effective_server("python.also")
+        .expect("the choice resolves");
+    assert_eq!(server.args, ["server"], "ruff serves as `ruff server`");
+    let exe = match lsp::store::locate(&server) {
+        lsp::store::Located::Ready(exe) => exe,
+        other => panic!("ruff is run as found: {other:?}"),
+    };
+    let ruff = lsp::client::LspClient::start(&exe, &server.args, &root, None)
+        .await
+        .expect("ruff starts");
+    app.proj
+        .link
+        .lsp
+        .insert("python.also".into(), LspSlot::Ready(ruff.clone()));
+    let _ = app.ensure_lsp("python.also");
+    assert!(app.proj.link.lsp_opened_also.contains(&file));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        app.sync_lsp_snapshots();
+        if let Some(said) = app.file_diagnostics("python", &file)
+            && let Some((d, _)) = said.first()
+        {
+            assert_eq!(d.line, 0, "{:?}", d.message);
+            assert!(
+                d.origin().is_some_and(|o| o.contains("F401")),
+                "{:?}",
+                d.origin()
+            );
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "ruff never said");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    ruff.stop();
+}
+
+/// A program that takes an input is sent the line typed in its run's input
+/// with Return, and the line shows in its output, set apart as typed: the
+/// program's input is no terminal, which would echo it. Once the program
+/// has ended there is no input to send to, and that is said.
+#[test]
+fn the_runs_input_line_sends_what_is_typed_to_the_program() {
+    let mut app = scanned_app("program-input");
+    app.debug.session = Some(DebugSession {
+        client: None,
+        status: DebugStatus::Running,
+        exit_code: None,
+        thread_id: None,
+        frames: Vec::new(),
+        scopes: Vec::new(),
+        watches: Vec::new(),
+        output: vec![("stdout".into(), "Name: ".into())],
+        current: None,
+        program: PathBuf::from("/p/greet.py"),
+        args: Vec::new(),
+        cwd: PathBuf::from("/p"),
+        addr: None,
+        takes_input: false,
+    });
+    let _ = app.update(Message::Debug(DebugMsg::DapEvent {
+        stamp: app.transport_stamp(),
+        run: app.debug_run,
+        event: dap::DapEvent::TakesInput,
+    }));
+    assert!(app.debug.session.as_ref().unwrap().takes_input);
+    let _ = app.update(Message::Debug(DebugMsg::ProgramInput("Ada".into())));
+    assert_eq!(app.debug.program_input, "Ada");
+    // No adapter to take it (this session has none): kept, and said why.
+    let _ = app.update(Message::Debug(DebugMsg::ProgramInputSent));
+    assert_eq!(app.debug.program_input, "Ada", "what was typed is kept");
+    assert!(app.status.contains("no more input"), "{}", app.status);
+    assert!(
+        !app.debug
+            .session
+            .as_ref()
+            .unwrap()
+            .output
+            .iter()
+            .any(|(c, _)| c == "stdin"),
+        "nothing shown as sent that was not"
+    );
+}
+
+/// A Python launch file is read as VS Code's are: a `module` to run in
+/// place of a program (Python's, with no `type`), `${workspaceFolder}`,
+/// `${file}` and `${env:…}` in its strings, its `env` over its
+/// `envFile`'s, debugpy's own fields kept — and nothing Clew decides
+/// itself (`console`) or that it will not do (`sudo`).
+#[test]
+fn a_python_launch_file_is_read_as_vs_codes_are() {
+    use crate::app::tasks::parse_launch_config;
+    let root = test_dir("launch-python-fields");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+        root.join(".env"),
+        "# the app's\nexport GREETING='hi there'\nNAME=\"Ada\\nL\"\nPORT=8000 # local\nURL=http://${HOST}:${PORT}\nHOST=ignored\n",
+    )
+    .unwrap();
+    let text = r#"{
+        "module": "shop.cli",
+        "args": ["--root", "${workspaceFolder}", "${fileBasename}"],
+        "cwd": "${workspaceFolder}/web",
+        "env": {"PORT": "9000", "DEBUG": 1, "BAD": {"x": 1}},
+        "envFile": "${workspaceFolder}/.env",
+        "justMyCode": false,
+        "django": true,
+        "console": "internalConsole",
+        "sudo": true
+    }"#;
+    let file = root.join("shop/cli.py");
+    let cfg = parse_launch_config(&root, text, Some(&file), true).unwrap();
+    assert_eq!(cfg.extras.module.as_deref(), Some("shop.cli"));
+    assert_eq!(cfg.type_hint.as_deref(), Some("python"));
+    assert_eq!(
+        cfg.program,
+        root.join("web/shop.cli"),
+        "named for its module"
+    );
+    assert_eq!(cfg.cwd, root.join("web"));
+    assert_eq!(
+        cfg.args,
+        ["--root", root.to_str().unwrap(), "cli.py"],
+        "variables in its arguments"
+    );
+    let fields = &cfg.extras.fields;
+    assert_eq!(fields["justMyCode"], false);
+    assert_eq!(fields["django"], true);
+    assert!(!fields.contains_key("console"), "Clew runs the program");
+    assert!(!fields.contains_key("sudo"));
+    let env = fields["env"].as_object().unwrap();
+    assert_eq!(env["GREETING"], "hi there");
+    assert_eq!(env["NAME"], "Ada\nL");
+    assert_eq!(env["PORT"], "9000", "the file's env over its envFile's");
+    assert_eq!(
+        env["URL"], "http://:8000",
+        "an earlier variable, or nothing"
+    );
+    assert_eq!(env["DEBUG"], "1", "every variable a string");
+    assert!(!env.contains_key("BAD"));
+    assert!(cfg.notes.is_empty(), "{:?}", cfg.notes);
+
+    // A remote project's envFile is not read here, and it is said.
+    let remote = parse_launch_config(&root, text, None, false).unwrap();
+    let env = remote.extras.fields["env"].as_object().unwrap();
+    assert!(!env.contains_key("GREETING"));
+    assert_eq!(remote.notes.len(), 1, "{:?}", remote.notes);
+    // One not there is said, and the run goes on.
+    let missing = parse_launch_config(
+        &root,
+        r#"{"program": "app.py", "envFile": "missing.env"}"#,
+        None,
+        true,
+    )
+    .unwrap();
+    assert!(
+        missing.notes[0].contains("missing.env"),
+        "{:?}",
+        missing.notes
+    );
+    assert!(missing.extras.module.is_none());
+    // Neither a program nor a module: what to write.
+    let err = parse_launch_config(&root, r#"{"args": []}"#, None, true)
+        .err()
+        .unwrap();
+    assert!(err.contains("module"), "{err}");
+}
+
+/// A launch file's fields go into debugpy's launch over Clew's own: its
+/// module in place of the program, its environment added to Clew's, its
+/// `justMyCode` over the one Clew picked.
+#[test]
+fn a_launch_files_fields_go_into_the_python_launch() {
+    let mut launch = serde_json::json!({
+        "program": "/p/shop/cli.py",
+        "justMyCode": false,
+        "env": {"PYTHONDONTWRITEBYTECODE": "1", "PYTHONPATH": "/p/src"},
+    });
+    let mut fields = serde_json::Map::new();
+    fields.insert("justMyCode".into(), serde_json::json!(true));
+    fields.insert(
+        "env".into(),
+        serde_json::json!({"PYTHONPATH": "/x", "MODE": "dev"}),
+    );
+    crate::app::tasks::with_launch_file(
+        &mut launch,
+        &crate::app::tasks::LaunchExtras {
+            module: Some("shop.cli".into()),
+            fields,
+        },
+    );
+    assert!(launch.get("program").is_none());
+    assert_eq!(launch["module"], "shop.cli");
+    assert_eq!(launch["justMyCode"], true);
+    assert_eq!(launch["env"]["PYTHONDONTWRITEBYTECODE"], "1");
+    assert_eq!(launch["env"]["PYTHONPATH"], "/x", "the file's over Clew's");
+    assert_eq!(launch["env"]["MODE"], "dev");
+}
+
+/// A remote project's Lean `main`, Lake's build and a Rust test run on its
+/// host: each a `RunTask` naming the file relative to the project — never
+/// a command line — and no launch file is read; a Rust test debugged is
+/// built and debugged there (`DebugTask`). Remote projects used to be told
+/// none of this ran.
+#[test]
+fn a_remote_projects_lean_and_rust_run_on_its_host() {
+    use clew_protocol::{ProjectTask, Request};
+    let (mut app, root, mut rx) = remote_app("remote-run-tasks");
+    let open = |app: &mut App, rel: &str, lang: &'static str, source: &str| {
+        let lines = crate::highlight::plain_lines(source);
+        app.proj.panes[0] = Some(crate::viewer::Viewer::new(
+            root.join(rel),
+            rel.into(),
+            Some(lang),
+            Arc::new(source.to_string()),
+            lines,
+        ));
+        app.proj.active = 0;
+    };
+    let asked = |rx: &mut tokio::sync::mpsc::Receiver<clew_protocol::ClientMessage>| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no task was asked for"
+            );
+            match rx.try_recv() {
+                Ok(msg) => match msg.request {
+                    Request::RunTask { task, .. } => break (task, false),
+                    Request::DebugTask { task, .. } => break (task, true),
+                    Request::ReadState { rel, .. } if rel == "launch.json" => {
+                        panic!("a task needs no launch file")
+                    }
+                    _ => {}
+                },
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(5)),
+            }
+        }
+    };
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let _guard = rt.enter();
+    open(
+        &mut app,
+        "proofs/Main.lean",
+        "lean",
+        "def main : IO Unit := pure ()\n",
+    );
+    let _ = app.update(Message::Debug(DebugMsg::RunMain {
+        line: 1,
+        no_debug: true,
+    }));
+    assert_eq!(
+        asked(&mut rx),
+        (
+            ProjectTask::LeanMain {
+                file: "proofs/Main.lean".into()
+            },
+            false
+        )
+    );
+    assert!(app.status.contains("remote"), "{}", app.status);
+    let _ = app.update(Message::Debug(DebugMsg::RunLake(
+        crate::app::runplan::LakeTask::Build,
+    )));
+    assert_eq!(
+        asked(&mut rx),
+        (
+            ProjectTask::Lake {
+                file: "proofs/Main.lean".into(),
+                test: false
+            },
+            false
+        )
+    );
+    open(
+        &mut app,
+        "src/lib.rs",
+        "rust",
+        "pub fn a() {}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn adds() {}\n}\n",
+    );
+    let pane = app.proj.active;
+    let v = app.proj.panes[pane].as_ref().unwrap();
+    assert!(app.run_marks(v).contains(&6), "the test's ▶ is there");
+    let _ = app.update(Message::Debug(DebugMsg::RunTest {
+        line: Some(6),
+        no_debug: true,
+    }));
+    assert_eq!(
+        asked(&mut rx),
+        (
+            ProjectTask::RustTest {
+                file: "src/lib.rs".into(),
+                line: 6
+            },
+            false
+        )
+    );
+    // Debugged: the session's own stream asks the host to build and debug.
+    let start = app.update(Message::Debug(DebugMsg::RunTest {
+        line: Some(6),
+        no_debug: false,
+    }));
+    let session = rt.spawn(async move {
+        use iced::futures::StreamExt;
+        if let Some(actions) = iced_test::runtime::task::into_stream(start) {
+            actions.for_each(|_| std::future::ready(())).await;
+        }
+    });
+    assert_eq!(
+        asked(&mut rx),
+        (
+            ProjectTask::RustTest {
+                file: "src/lib.rs".into(),
+                line: 6
+            },
+            true
+        ),
+        "debugged there"
+    );
+    session.abort();
+    assert!(app.status.contains("debugger"), "{}", app.status);
+    assert_eq!(
+        app.debug.plan.as_ref().and_then(|p| p.verdict(0)),
+        Some("Test adds passed".into())
+    );
+}
+
+/// What a remote task writes comes through its stream, line by line, and
+/// its exit code to whoever waits for its end.
+#[test]
+fn a_remote_tasks_output_and_end_reach_the_run() {
+    use tokio::io::AsyncBufReadExt;
+    let (mut app, _root, _rx) = remote_app("remote-task-stream");
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let _guard = rt.enter();
+    let proc = app.next_proc_id;
+    let remote = app
+        .remote_run(clew_protocol::ProjectTask::LeanMain {
+            file: "Main.lean".into(),
+        })
+        .expect("started");
+    let _ = app.handle_server_event(clew_protocol::Event::ProcessOutput {
+        proc,
+        data: b"two is 2\n".to_vec(),
+    });
+    let _ = app.handle_server_event(clew_protocol::Event::ProcessExited {
+        proc,
+        code: Some(0),
+    });
+    let crate::app::debug::RemoteRun { stdout, end, .. } = remote;
+    let (lines, code) = rt.block_on(async move {
+        let mut lines = tokio::io::BufReader::new(stdout).lines();
+        let mut got = Vec::new();
+        while let Ok(Some(line)) = lines.next_line().await {
+            got.push(line);
+        }
+        (got, end.await.ok().flatten())
+    });
+    assert_eq!(lines, ["two is 2"]);
+    assert_eq!(code, Some(0));
+    assert!(app.server.task_ends.is_empty());
+}
+
+/// Run Test on a Python test of a remote project runs it there: no launch
+/// file is read, and the server is asked for Python's adapter on the test's
+/// file with its pytest node id — which it runs under pytest, on the host.
+/// Remote projects used to be told to write a launch file instead.
+#[test]
+fn a_remote_python_test_runs_on_its_host() {
+    use clew_protocol::Request;
+    use std::time::{Duration, Instant};
+    let (mut app, root, mut rx) = remote_app("remote-run-test");
+    let file = root.join("tests/test_sum.py");
+    let node = format!("{}::test_sum", file.display());
+    let plan = crate::app::runplan::RunPlan::Pytest {
+        file: file.clone(),
+        node: node.clone(),
+        name: "test_sum".into(),
+        tested: crate::app::runplan::Tested::One,
+    };
+    let start = app.start_session(true, Some(plan));
+    assert!(
+        app.status.contains("test_sum") && app.status.contains("remote"),
+        "{}",
+        app.status
+    );
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let run = rt.spawn(async move {
+        use iced::futures::StreamExt;
+        if let Some(actions) = iced_test::runtime::task::into_stream(start) {
+            actions.for_each(|_| std::future::ready(())).await;
+        }
+    });
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let asked = loop {
+        assert!(Instant::now() < deadline, "nothing was asked of the server");
+        match rx.try_recv() {
+            Ok(msg) => match msg.request {
+                Request::ReadState { rel, .. } if rel == "launch.json" => {
+                    panic!("a test needs no launch file")
+                }
+                Request::SpawnAdapter {
+                    lang,
+                    program,
+                    args,
+                    ..
+                } => break (lang, program, args),
+                _ => {}
+            },
+            Err(_) => std::thread::sleep(Duration::from_millis(5)),
+        }
+    };
+    assert_eq!(asked.0, "python");
+    assert_eq!(asked.1, file.to_string_lossy());
+    assert_eq!(asked.2, [node]);
+    run.abort();
 }

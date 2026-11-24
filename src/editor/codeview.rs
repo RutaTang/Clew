@@ -782,6 +782,13 @@ pub struct CodeView<'a, Message> {
     /// Click in the line-number gutter margin: toggle a breakpoint on that
     /// 1-based line (the conventional editor gesture).
     on_breakpoint: Option<Box<dyn Fn(usize) -> Message + 'a>>,
+    /// 1-based lines something runs from — a test, a test group, a
+    /// program's start — marked ▶ where a breakpoint's dot goes.
+    run_marks: HashSet<usize>,
+    /// A click on a line's ▶ (one with no breakpoint, which is drawn and
+    /// clicked instead): its 1-based line and the window point, where Run
+    /// and Debug are offered.
+    on_run_mark: Option<Box<dyn Fn(usize, Point) -> Message + 'a>>,
     /// Draw vertical indentation guides.
     indent_guides: bool,
     /// Minimap click/drag: the fraction `[0,1]` of the content to scroll to.
@@ -845,6 +852,8 @@ impl<'a, Message> CodeView<'a, Message> {
             on_gutter: None,
             on_fold: None,
             on_breakpoint: None,
+            run_marks: HashSet::new(),
+            on_run_mark: None,
             indent_guides: false,
             on_minimap: None,
             git_status: None,
@@ -921,6 +930,26 @@ impl<'a, Message> CodeView<'a, Message> {
     pub fn on_breakpoint(mut self, f: impl Fn(usize) -> Message + 'a) -> Self {
         self.on_breakpoint = Some(Box::new(f));
         self
+    }
+
+    /// The lines with something to run from (1-based), each marked ▶, and
+    /// what a click on one does ([`CodeView::on_run_mark`]'s field).
+    pub fn run_marks(
+        mut self,
+        lines: HashSet<usize>,
+        f: impl Fn(usize, Point) -> Message + 'a,
+    ) -> Self {
+        self.run_marks = lines;
+        self.on_run_mark = Some(Box::new(f));
+        self
+    }
+
+    /// Whether 1-based `line` shows its ▶: it has one, and no breakpoint
+    /// is drawn (and clicked) there instead.
+    fn shows_run_mark(&self, line: usize) -> bool {
+        self.on_run_mark.is_some()
+            && self.run_marks.contains(&line)
+            && !self.breakpoints.contains(&line)
     }
 
     /// Folding inputs: the row→line projection (`None` when nothing is folded),
@@ -1835,6 +1864,18 @@ where
                 };
                 let arrow_x0 = FOLD_ARROW_COL as f32 * state.char_width;
                 let gutter_px = gutter_width(state.char_width, self.font_size);
+                // On a line's ▶, the margin offers running what starts
+                // there: Run, Debug, and the breakpoint it stands in for.
+                if let Some(on_run) = &self.on_run_mark
+                    && point.x < arrow_x0
+                    && let Some(line) = self.line_at_row((point.y / self.line_height) as usize)
+                    && self.shows_run_mark(line + 1)
+                {
+                    let at = cursor.position().unwrap_or(Point::new(bounds.x, bounds.y));
+                    shell.publish(on_run(line + 1, at));
+                    shell.capture_event();
+                    return;
+                }
                 // A click in the line-number gutter margin (left of the fold
                 // arrow) toggles a breakpoint on that line — the conventional
                 // editor gesture, so users don't have to reach the context menu.
@@ -1976,13 +2017,35 @@ where
         _renderer: &Renderer,
     ) -> mouse::Interaction {
         let state = tree.state.downcast_ref::<State<Renderer::Paragraph>>();
-        match cursor.position_in(layout.bounds()) {
+        let Some(p) = cursor.position_in(layout.bounds()) else {
+            return mouse::Interaction::None;
+        };
+        let gutter_px = gutter_width(state.char_width, self.font_size);
+        if p.x >= gutter_px {
             // Cmd/Ctrl over the code text is "click to go to definition".
-            Some(p) if state.cmd_held && p.x > gutter_width(state.char_width, self.font_size) => {
+            return if state.cmd_held {
                 mouse::Interaction::Pointer
-            }
-            Some(_) => mouse::Interaction::Text,
-            None => mouse::Interaction::None,
+            } else {
+                mouse::Interaction::Text
+            };
+        }
+        // The gutter: what a click there does is a pointer's — a breakpoint
+        // set left of the fold arrow, a fold opened or closed on it — and
+        // the rest of it takes no text, so no text cursor.
+        let row = (p.y / self.line_height) as usize;
+        let Some(line) = self.line_at_row(row) else {
+            return mouse::Interaction::Idle;
+        };
+        let arrow_x0 = FOLD_ARROW_COL as f32 * state.char_width;
+        let clicks = if p.x < arrow_x0 {
+            self.on_breakpoint.is_some() || self.shows_run_mark(line + 1)
+        } else {
+            self.on_fold.is_some() && self.is_fold_header(line)
+        };
+        if clicks {
+            mouse::Interaction::Pointer
+        } else {
+            mouse::Interaction::Idle
         }
     }
 
@@ -2082,10 +2145,13 @@ where
         // The row of the gutter the pointer is over, where a click sets a
         // breakpoint: shown there, faintly, before it is set — with nothing
         // to see, click-to-set was found only by chance.
-        let hover_gutter_row = self.on_breakpoint.as_ref().and_then(|_| {
-            let point = cursor.position_in(bounds)?;
-            (point.x < FOLD_ARROW_COL as f32 * state.char_width).then(|| (point.y / lh) as usize)
-        });
+        let hover_gutter_row = (self.on_breakpoint.is_some() || self.on_run_mark.is_some())
+            .then(|| {
+                let point = cursor.position_in(bounds)?;
+                (point.x < FOLD_ARROW_COL as f32 * state.char_width)
+                    .then(|| (point.y / lh) as usize)
+            })
+            .flatten();
         for row in first..last {
             if row < first_shown_row {
                 continue;
@@ -2151,15 +2217,20 @@ where
                     conditional: self.cond_breakpoints.contains(&(i + 1)),
                     refused: self.unverified_breakpoints.contains(&(i + 1)),
                 }),
+                self.shows_run_mark(i + 1),
                 hover_gutter_row == Some(row),
                 bounds.x,
                 y,
                 lh,
                 mark_room,
             ) {
-                if mark.ribbon {
+                if mark.ribbon || mark.play {
+                    let handle = match mark.play {
+                        true => play_handle(mark.color),
+                        false => ribbon_handle(mark.color),
+                    };
                     renderer.draw_svg(
-                        iced::advanced::svg::Svg::new(ribbon_handle(mark.color)),
+                        iced::advanced::svg::Svg::new(handle),
                         mark.bounds,
                         mark.bounds,
                     );
@@ -2771,6 +2842,8 @@ struct GutterMark {
     color: Color,
     filled: bool,
     ribbon: bool,
+    /// A ▶: something runs from the line.
+    play: bool,
 }
 
 /// The width of a bookmark's ribbon at the gutter's left edge: a
@@ -2815,6 +2888,7 @@ fn gutter_marks(
             color: theme::accent(),
             filled: true,
             ribbon: true,
+            play: false,
         });
     }
     if let Some(bp) = breakpoint {
@@ -2851,6 +2925,7 @@ fn gutter_marks(
             },
             filled: !bp.refused,
             ribbon: false,
+            play: false,
         });
     }
     marks
@@ -2872,26 +2947,55 @@ fn ribbon_handle(color: Color) -> iced::advanced::svg::Handle {
 /// A line's gutter marks ([`gutter_marks`]), and where the pointer is over
 /// its gutter (`hovered`) with no breakpoint set there, the one a click
 /// would set: its dot, faint. With nothing shown before it was set,
-/// click-to-set was found only by chance.
+/// click-to-set was found only by chance. A line something runs from
+/// (`run`, no breakpoint there) has its ▶ in the dot's place instead, lit
+/// fully under the pointer.
+#[allow(clippy::too_many_arguments)]
 fn line_marks(
     bookmark: bool,
     breakpoint: Option<BreakpointMark>,
+    run: bool,
     hovered: bool,
     x: f32,
     y: f32,
     lh: f32,
     room: f32,
 ) -> Vec<GutterMark> {
-    let ghost = hovered && breakpoint.is_none();
-    let shown = breakpoint.or(ghost.then_some(BreakpointMark {
+    let ghost = hovered && breakpoint.is_none() && !run;
+    let shown = breakpoint.or((ghost || run).then_some(BreakpointMark {
         conditional: false,
         refused: false,
     }));
     let mut marks = gutter_marks(bookmark, shown, x, y, lh, room);
-    if ghost && let Some(dot) = marks.last_mut() {
-        dot.color = theme::with_alpha(dot.color, 0.35);
+    if let Some(dot) = marks.last_mut().filter(|m| !m.ribbon) {
+        if run && breakpoint.is_none() {
+            // A triangle a little taller than the dot, on its centre line.
+            let h = (dot.bounds.height * 1.2).min(lh);
+            dot.bounds = Rectangle {
+                y: dot.bounds.y - (h - dot.bounds.height) / 2.0,
+                height: h,
+                ..dot.bounds
+            };
+            dot.play = true;
+            dot.color = theme::with_alpha(theme::success(), if hovered { 1.0 } else { 0.75 });
+        } else if ghost {
+            dot.color = theme::with_alpha(dot.color, 0.35);
+        }
     }
     marks
+}
+
+/// A ▶ in `color`, stretched to the box it is drawn in.
+fn play_handle(color: Color) -> iced::advanced::svg::Handle {
+    let u = |x: f32| (x.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let fill = format!("#{:02x}{:02x}{:02x}", u(color.r), u(color.g), u(color.b));
+    let doc = format!(
+        "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 12' preserveAspectRatio='none'>\
+         <path d='M1 0.6L9.4 6L1 11.4Z' fill='{fill}' fill-opacity='{}' stroke='{fill}' \
+         stroke-opacity='{}' stroke-width='1.2' stroke-linejoin='round'/></svg>",
+        color.a, color.a
+    );
+    iced::advanced::svg::Handle::from_memory(doc.into_bytes())
 }
 
 /// The box a text the code view draws is clipped to: its own, `width`
@@ -3327,11 +3431,11 @@ mod tests {
             conditional: false,
             refused: false,
         };
-        assert!(line_marks(false, None, false, 0.0, 0.0, 20.0, 0.0).is_empty());
-        let ghost = line_marks(false, None, true, 0.0, 0.0, 20.0, 0.0);
+        assert!(line_marks(false, None, false, false, 0.0, 0.0, 20.0, 0.0).is_empty());
+        let ghost = line_marks(false, None, false, true, 0.0, 0.0, 20.0, 0.0);
         assert_eq!(ghost.len(), 1, "the dot a click would set");
         assert!(ghost[0].color.a < 0.5 && ghost[0].filled, "{ghost:?}");
-        let real = line_marks(false, Some(set), true, 0.0, 0.0, 20.0, 0.0);
+        let real = line_marks(false, Some(set), false, true, 0.0, 0.0, 20.0, 0.0);
         assert_eq!(real.len(), 1);
         assert_eq!(
             real[0].color.a, 1.0,
@@ -3339,10 +3443,38 @@ mod tests {
         );
         assert_eq!(real[0].bounds, ghost[0].bounds, "where it would be set");
         // With a bookmark: its ribbon as it is, the faint dot beside it.
-        let both = line_marks(true, None, true, 0.0, 0.0, 20.0, 0.0);
+        let both = line_marks(true, None, false, true, 0.0, 0.0, 20.0, 0.0);
         assert_eq!(both.len(), 2);
         assert_eq!(both[0].color.a, 1.0, "the ribbon is not faint");
         assert!(both[1].color.a < 0.5);
+    }
+
+    /// A line something runs from has its ▶ where the breakpoint's dot
+    /// goes — always, brighter under the pointer, and no faint dot over it:
+    /// a click there offers Run and Debug. A breakpoint set there is drawn
+    /// instead, as it is anywhere.
+    #[test]
+    fn a_runnable_line_has_its_play_mark_where_the_dot_goes() {
+        use super::{BreakpointMark, line_marks};
+        let dot = line_marks(false, None, false, true, 0.0, 0.0, 20.0, 0.0);
+        let rest = line_marks(false, None, true, false, 0.0, 0.0, 20.0, 0.0);
+        assert_eq!(rest.len(), 1);
+        assert!(rest[0].play && !rest[0].ribbon, "{rest:?}");
+        assert!(rest[0].color.a < 1.0, "quiet at rest");
+        let lit = line_marks(false, None, true, true, 0.0, 0.0, 20.0, 0.0);
+        assert!(
+            lit[0].play && lit[0].color.a == 1.0,
+            "lit under the pointer"
+        );
+        assert_eq!(lit[0].bounds.x, dot[0].bounds.x, "in the dot's column");
+        let centre = |b: iced::Rectangle| b.y + b.height / 2.0;
+        assert_eq!(centre(lit[0].bounds), centre(dot[0].bounds), "on its line");
+        let set = BreakpointMark {
+            conditional: false,
+            refused: false,
+        };
+        let stopped = line_marks(false, Some(set), true, true, 0.0, 0.0, 20.0, 0.0);
+        assert!(!stopped[0].play, "the breakpoint is drawn, not the ▶");
     }
 
     /// A bookmark and a conditional breakpoint each say so by a shape, not
@@ -4840,6 +4972,66 @@ mod font_tests {
         assert!(faint_rows(iced::mouse::Cursor::Unavailable).is_empty());
         let over_code = iced::mouse::Cursor::Available(iced::Point::new(400.0, 6.0 * lh + 5.0));
         assert!(faint_rows(over_code).is_empty(), "not over the code");
+    }
+
+    /// What a click in the gutter does shows in the pointer: a hand over a
+    /// fold arrow and over the margin a click sets a breakpoint in, an arrow
+    /// over the gutter that takes no click (a line that folds nothing), the
+    /// text cursor over the code. Over the whole gutter
+    /// it was the text cursor, and a fold arrow did not look clickable.
+    #[test]
+    fn the_pointer_says_what_a_gutter_click_does() {
+        use iced::advanced::Widget;
+        use iced::advanced::widget::Tree;
+        use iced::mouse::{Cursor, Interaction};
+        let lines = crate::highlight::plain_lines("mod tests {\n    fn a() {}\n}\n");
+        let lh = 20.0;
+        let headers: std::collections::HashSet<usize> = [0].into();
+        let collapsed = std::collections::HashSet::new();
+        let mut view = crate::codeview::CodeView::new(
+            &lines,
+            20,
+            13.0,
+            lh,
+            iced::Color::WHITE,
+            |_| (),
+            |_| (),
+            |_, _| (),
+        )
+        .folds(None, &headers, &collapsed)
+        .on_fold(|_| ())
+        .on_breakpoint(|_| ());
+        let widget: &mut dyn Widget<(), iced::Theme, Recorder> = &mut view;
+        let mut tree = Tree::new(&*widget);
+        let renderer = Recorder::default();
+        let node = widget.layout(
+            &mut tree,
+            &renderer,
+            &iced::advanced::layout::Limits::new(
+                iced::Size::ZERO,
+                iced::Size::new(800.0, f32::INFINITY),
+            ),
+        );
+        let viewport = iced::Rectangle::new(iced::Point::ORIGIN, iced::Size::new(800.0, 400.0));
+        let state = tree
+            .state
+            .downcast_ref::<super::State<<Recorder as iced::advanced::text::Renderer>::Paragraph>>(
+            );
+        let arrow_x = (super::FOLD_ARROW_COL as f32 + 0.5) * state.char_width;
+        let at = |x: f32, row: f32| {
+            widget.mouse_interaction(
+                &tree,
+                iced::advanced::Layout::new(&node),
+                Cursor::Available(iced::Point::new(x, row * lh + lh / 2.0)),
+                &viewport,
+                &renderer,
+            )
+        };
+        assert_eq!(at(arrow_x, 0.0), Interaction::Pointer, "the fold arrow");
+        assert_eq!(at(arrow_x, 1.0), Interaction::Idle, "no fold on this line");
+        assert_eq!(at(4.0, 1.0), Interaction::Pointer, "a breakpoint's margin");
+        let code_x = super::gutter_width(state.char_width, 13.0) + state.char_width;
+        assert_eq!(at(code_x, 1.0), Interaction::Text, "the code");
     }
 
     /// A folded line's blame starts past its `⋯`, with the gap a line that

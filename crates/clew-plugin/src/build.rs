@@ -1307,6 +1307,14 @@ fn dep_info_root(text: &str) -> Option<String> {
 /// and what it was made from. rustc's `# env-dep:` and `# checksum:` lines
 /// name no file; any other line is read for files — a path with a line
 /// break in it is not taken for one of those, its rest unread.
+///
+/// A rule is what was made, `: `, then what it was made from. rustc writes
+/// a space in a file it read as `\ `, but not in what it made: on macOS,
+/// where a plugin is built under `~/Library/Application Support`, the made
+/// file's path was split at its space, its first half taken for a file
+/// read outside the build, and every build refused. What was made is taken
+/// whole, up to the `: ` that ends it — the last on its line, as no file
+/// read holds one unescaped.
 fn dep_info_files(text: &str) -> Vec<String> {
     // rustc's `#` lines are the last ones, after an empty line (a nightly's
     // checksums alone may follow no empty line: read for files then, they
@@ -1329,8 +1337,20 @@ fn dep_info_files(text: &str) -> Vec<String> {
     }
     let mut out = Vec::new();
     for line in &lines[..notes] {
+        // What was made, and what it was made from.
+        let (made, from) = match line.rfind(": ") {
+            Some(at) => (&line[..at], &line[at + 2..]),
+            None => match line.strip_suffix(':') {
+                Some(made) => (made, ""),
+                None => ("", *line),
+            },
+        };
+        let made = made.trim_start_matches([' ', '\t']).replace("\\ ", " ");
+        if !made.is_empty() {
+            out.push(made);
+        }
         let mut word = String::new();
-        let mut chars = line.chars().peekable();
+        let mut chars = from.chars().peekable();
         let mut push = |word: &mut String| {
             let file = word.strip_suffix(':').unwrap_or(word);
             if !file.is_empty() {
@@ -2042,6 +2062,29 @@ mod tests {
                 "src/lib.rs",
                 "/x y/z.rs"
             ]
+        );
+        // What was made, as rustc writes it: its spaces not escaped, as the
+        // files it read have theirs. Under macOS's `Application Support`,
+        // its first half was taken for a file read outside the build.
+        let app = "/Users/u/Library/Application Support/clew/plugins/build";
+        assert_eq!(
+            dep_info_files(&format!(
+                "{app}/target/deps/a-1.d: /Users/u/Library/Application\\ Support/clew/plugins/build/src/lib.rs\n\n\
+                 {app}/target/deps/liba-1.rmeta: src/lib.rs\n\n\
+                 /Users/u/Library/Application\\ Support/clew/plugins/build/src/lib.rs:\n"
+            )),
+            [
+                format!("{app}/target/deps/a-1.d"),
+                format!("{app}/src/lib.rs"),
+                format!("{app}/target/deps/liba-1.rmeta"),
+                "src/lib.rs".to_string(),
+                format!("{app}/src/lib.rs"),
+            ]
+        );
+        // Windows' too: a drive's colon is no rule's.
+        assert_eq!(
+            dep_info_files("C:\\Users\\A B\\t\\a-1.d: C:\\Users\\A\\ B\\src\\lib.rs\n"),
+            ["C:\\Users\\A B\\t\\a-1.d", "C:\\Users\\A B\\src\\lib.rs"]
         );
         let message: serde_json::Value = serde_json::json!({
             "spans": [{"file_name": "src/lib.rs", "expansion": {"span": {"file_name": "/a/macro.rs"}}}],
