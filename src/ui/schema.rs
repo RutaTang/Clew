@@ -42,7 +42,8 @@ const BADGE_SIZE: f32 = 9.5;
 /// Below this zoom a card shows its name alone: the columns' words would
 /// be too small to read.
 const DETAIL_ZOOM: f32 = 0.45;
-const MIN_ZOOM: f32 = 0.06;
+/// Small enough to fit a schema of thousands of tables.
+const MIN_ZOOM: f32 = 0.01;
 const MAX_ZOOM: f32 = 2.5;
 /// How far a press may move and still be a click.
 const CLICK_SLOP: f32 = 4.0;
@@ -1072,6 +1073,10 @@ fn draw_card(
     }
     let room = b.x + b.width - pad - badge_w - x;
     let shown_name = name;
+    // Too small for a name to read: the card alone.
+    if !detail && b.width < 36.0 {
+        return;
+    }
     text_at(
         frame,
         fit_text(shown_name, title_size, crate::fonts::UI_SEMIBOLD, room),
@@ -1433,7 +1438,8 @@ fn draw_line(
     let mut stroke = Stroke::default()
         .with_width(width * zoom.clamp(0.6, 1.3))
         .with_color(color);
-    if !lit {
+    // Small, a dash is too short to see, and costs the most to draw.
+    if !lit && zoom >= 0.2 {
         stroke.line_dash = LineDash {
             segments: &[5.0, 4.0],
             offset: 0,

@@ -313,7 +313,11 @@ fn schema_map(schema: &Schema, whose: Option<&str>) -> Option<ProjectMap> {
     for (k, view) in &schema.views {
         let from = map.node("view", k, &view.name.label());
         for source in &view.sources {
-            let to = if let Some(t) = schema.view_key(source, view.search.as_deref()) {
+            let to = if is_system(source) {
+                // The database's own catalogs (`pg_class`): no table of
+                // the project's.
+                continue;
+            } else if let Some(t) = schema.view_key(source, view.search.as_deref()) {
                 map.node("view", &t, &schema.views[&t].name.label())
             } else if let Some(t) = schema.table_key(source, view.search.as_deref()) {
                 map.node("table", &t, &schema.tables[&t].name.label())
@@ -336,6 +340,18 @@ fn schema_map(schema: &Schema, whose: Option<&str>) -> Option<ProjectMap> {
         }
     }
     map.finish()
+}
+
+/// Whether `name` is one of the database's own catalogs: PostgreSQL's
+/// `pg_class` and `information_schema`, SQL Server's `sys`, MySQL's and
+/// SQLite's.
+fn is_system(name: &QName) -> bool {
+    let lower = name.name.to_ascii_lowercase();
+    let schema = name.schema.as_deref().map(str::to_ascii_lowercase);
+    matches!(
+        schema.as_deref(),
+        Some("pg_catalog" | "information_schema" | "sys" | "mysql" | "performance_schema")
+    ) || (schema.is_none() && (lower.starts_with("pg_") || lower.starts_with("sqlite_")))
 }
 
 // -- history ------------------------------------------------------------------------

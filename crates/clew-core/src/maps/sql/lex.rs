@@ -288,10 +288,14 @@ fn delimiter_regions(text: &str) -> Vec<(&str, usize, String)> {
     out
 }
 
-/// Split `tokens` into statements on `;` and `GO` lines, reading into `DO`
-/// blocks.
+/// Split `tokens` into statements on `;`, SQL Server's `GO` lines and
+/// Oracle's `/` lines, reading into `DO` blocks. A statement that starts a
+/// line at the top level of another with no `;` between them (SQL Server
+/// runs a batch so) starts one of its own — unless the one before has a
+/// body of its own (a function, a procedure, a trigger).
 fn split(tokens: &[Token], text: &str, out: &mut Vec<Statement>) {
     let mut current: Vec<Token> = Vec::new();
+    let mut depth = 0i32;
     let flush = |current: &mut Vec<Token>, out: &mut Vec<Statement>| {
         if current.is_empty() {
             return;
@@ -306,9 +310,34 @@ fn split(tokens: &[Token], text: &str, out: &mut Vec<Statement>) {
     let mut i = 0;
     while i < tokens.len() {
         let token = &tokens[i];
-        if token.is(';') {
+        if token.is('(') {
+            depth += 1;
+        } else if token.is(')') {
+            depth -= 1;
+        }
+        // An `ALTER TABLE`'s actions start lines with `ALTER` and `DROP`
+        // of their own; MySQL's `COMMENT = '…'` follows a table's `)`.
+        let starter = match current.first() {
+            Some(first) if first.is_word("ALTER") => token.is_word("CREATE"),
+            _ => {
+                token.is_any(&["CREATE", "ALTER", "DROP"])
+                    || (token.is_word("COMMENT")
+                        && tokens.get(i + 1).is_some_and(|n| n.is_word("ON")))
+            }
+        };
+        let starts_another = depth == 0
+            && !current.is_empty()
+            && starter
+            && starts_line(text.as_bytes(), token.at.min(text.len()))
+            && !has_body(&current);
+        if starts_another {
             flush(&mut current, out);
+        }
+        if token.is(';') || (token.is('/') && alone_on_its_line(text, token)) {
+            flush(&mut current, out);
+            depth = 0;
         } else if token.is_word("GO") && alone_on_its_line(text, token) {
+            depth = 0;
             flush(&mut current, out);
             // `GO 2`: the count is the batch's, not the next statement's.
             if tokens.get(i + 1).is_some_and(|n| {
@@ -323,6 +352,22 @@ fn split(tokens: &[Token], text: &str, out: &mut Vec<Statement>) {
         i += 1;
     }
     flush(&mut current, out);
+}
+
+/// Whether a statement has a body of its own, whose lines may start with
+/// DDL: a function, a procedure, a trigger, a package.
+fn has_body(statement: &[Token]) -> bool {
+    statement.first().is_some_and(|t| t.is_word("CREATE"))
+        && statement.iter().take(6).any(|t| {
+            t.is_any(&[
+                "FUNCTION",
+                "PROCEDURE",
+                "PROC",
+                "TRIGGER",
+                "PACKAGE",
+                "EVENT",
+            ])
+        })
 }
 
 /// Whether `token` is the only thing on its line (SQL Server's `GO`, which
@@ -442,6 +487,31 @@ mod tests {
                 "DROP TABLE a"
             ]
         );
+    }
+
+    #[test]
+    fn a_batch_without_semicolons_and_oracles_slash_split_statements() {
+        let tsql = "CREATE TABLE a (\n  x INT,\n)\n\n--\nCREATE TABLE b (\n  y INT\n)\nGO\n ALTER TABLE b ADD z INT\nGO\n";
+        let s: Vec<String> = statements(tsql).iter().map(words).collect();
+        assert_eq!(
+            s,
+            [
+                "CREATE TABLE a ( x INT , )",
+                "CREATE TABLE b ( y INT )",
+                "ALTER TABLE b ADD z INT"
+            ]
+        );
+        let oracle = "CREATE INDEX i ON a(x);\n/\n\nCREATE OR REPLACE TRIGGER t\nBEFORE INSERT ON a FOR EACH ROW\nBEGIN\n  :NEW.x := 1;\nEND;\n/\n\nCREATE TABLE c (\n  z INT\n);\n";
+        let s: Vec<String> = statements(oracle).iter().map(words).collect();
+        assert_eq!(s[0], "CREATE INDEX i ON a ( x )");
+        assert!(s[1].starts_with("CREATE OR REPLACE TRIGGER t"), "{s:?}");
+        assert_eq!(s.last().unwrap(), "CREATE TABLE c ( z INT )", "{s:?}");
+        // An ALTER TABLE's actions on lines of their own stay in it.
+        let alter = "ALTER TABLE t\n  DROP COLUMN a,\n  ALTER COLUMN b TYPE int\n";
+        assert_eq!(statements(alter).len(), 1);
+        // A body's lines that start with DDL stay in it.
+        let body = "CREATE PROCEDURE p AS\nBEGIN\nCREATE TABLE #t (x int)\nEND\nGO\n";
+        assert_eq!(statements(body).len(), 1);
     }
 
     #[test]

@@ -42,6 +42,10 @@ use crate::highlight::{self, Lang};
 /// The largest file read for a map.
 const MAX_FILE_BYTES: u64 = 2 << 20;
 
+/// The largest SQL file read: a large application's schema dump (GitLab's
+/// `structure.sql` is 3 MB) is read whole; a dump of data past this is not.
+const MAX_SQL_BYTES: u64 = 16 << 20;
+
 /// The most nodes one map keeps: past it, the map says how many it left out.
 pub const MAX_NODES: usize = 4000;
 
@@ -101,7 +105,11 @@ impl Corpus {
             let Ok(meta) = std::fs::metadata(&entry.abs) else {
                 continue;
             };
-            if !meta.is_file() || meta.len() > MAX_FILE_BYTES {
+            let cap = match lang {
+                Some(Lang::Sql) => MAX_SQL_BYTES,
+                _ => MAX_FILE_BYTES,
+            };
+            if !meta.is_file() || meta.len() > cap {
                 continue;
             }
             let Ok(bytes) = std::fs::read(&entry.abs) else {

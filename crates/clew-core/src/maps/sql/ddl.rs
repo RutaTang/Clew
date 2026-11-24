@@ -949,7 +949,8 @@ impl Parser<'_> {
                     if value.to_ascii_lowercase().starts_with("nextval(") {
                         column.identity = true;
                     }
-                    column.default = Some(value);
+                    // `DEFAULT NULL` says what no default says.
+                    column.default = (!value.eq_ignore_ascii_case("null")).then_some(value);
                     k = end;
                 }
                 "PRIMARY" if self.is_word(k + 1, "KEY") => {
@@ -1364,6 +1365,22 @@ impl Parser<'_> {
                 {
                     return vec![Action::AddConstraint(c)];
                 }
+                // SQL Server's `ADD [CONSTRAINT x] DEFAULT (expr) FOR column`.
+                let default_at = match self.is_word(1, "CONSTRAINT") {
+                    true => self.name_at(2).map_or(3, |(_, k)| k),
+                    false => 1,
+                };
+                if self.is_word(default_at, "DEFAULT")
+                    && let Some(for_at) =
+                        (default_at + 1..self.t.len()).find(|&j| self.is_word(j, "FOR"))
+                    && let Some((column, _)) = self.name_at(for_at + 1)
+                {
+                    let value = render(&self.t[default_at + 1..for_at], false);
+                    return vec![Action::AlterColumn {
+                        column,
+                        change: Change::Default(Some(unwrap_parens(&value))),
+                    }];
+                }
                 let column_at = self.skip(1, &["COLUMN"]);
                 let if_not_exists = self.is_word(column_at, "IF");
                 let j = self.skip(column_at, &["IF", "NOT", "EXISTS"]);
@@ -1738,6 +1755,28 @@ impl Parser<'_> {
         let (ctes, j) = self.with_clause(i);
         (ctes, from_tables(&self.t[j.min(self.t.len())..]))
     }
+}
+
+/// `(getdate())` → `getdate()`: SQL Server writes a default in brackets.
+fn unwrap_parens(value: &str) -> String {
+    let mut v = value.trim();
+    while let Some(inner) = v.strip_prefix('(').and_then(|r| r.strip_suffix(')')) {
+        // Only one pair round the whole: `(a) + (b)` is no such pair.
+        let mut depth = 0;
+        let whole = inner.chars().all(|c| {
+            match c {
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                _ => {}
+            }
+            depth >= 0
+        });
+        if !whole {
+            break;
+        }
+        v = inner.trim();
+    }
+    v.to_string()
 }
 
 /// Whether `part` is a name with a prefix length (`email(20)`).

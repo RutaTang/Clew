@@ -172,8 +172,22 @@ fn resolve<'a, T>(
     search: Option<&str>,
     name_of: impl Fn(&T) -> &QName,
 ) -> Option<&'a str> {
-    if name.schema.is_some() {
-        return items.get_key_value(&name.key()).map(|(k, _)| k.as_str());
+    if let Some(schema) = &name.schema {
+        if let Some((k, _)) = items.get_key_value(&name.key()) {
+            return Some(k);
+        }
+        // A qualifier no object has is a database's name (MySQL's
+        // `sakila.film`), not a schema's: the name alone.
+        let known = items.values().any(|item| {
+            name_of(item)
+                .schema
+                .as_deref()
+                .is_some_and(|s| s.eq_ignore_ascii_case(schema))
+        });
+        if known {
+            return None;
+        }
+        return resolve(items, &QName::bare(&name.name), search, name_of);
     }
     if let Some(s) = search
         && let Some((k, _)) = items.get_key_value(&name.in_schema(Some(s)).key())
@@ -729,7 +743,7 @@ fn alter_in(t: &mut Table, action: Action, file: &str, search: Option<&str>) {
                     {
                         c.identity = true;
                     }
-                    c.default = value;
+                    c.default = value.filter(|v| !v.eq_ignore_ascii_case("null"));
                 }
                 Change::Identity(on) => {
                     c.identity = on;

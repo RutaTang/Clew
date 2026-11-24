@@ -150,12 +150,7 @@ fn grid(cards: &[Size], members: &[usize]) -> Block {
 }
 
 /// One group laid out in columns: its cards' places, and its size.
-fn layered(
-    cards: &[Size],
-    members: &[usize],
-    links: &[(usize, usize)],
-    aspect: f32,
-) -> Block {
+fn layered(cards: &[Size], members: &[usize], links: &[(usize, usize)], aspect: f32) -> Block {
     let local: std::collections::HashMap<usize, usize> =
         members.iter().enumerate().map(|(k, &i)| (i, k)).collect();
     let m = members.len();

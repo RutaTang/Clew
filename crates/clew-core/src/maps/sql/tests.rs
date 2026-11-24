@@ -585,7 +585,7 @@ ALTER TABLE `accounts` MODIFY `plan` varchar(16) NOT NULL, CHANGE `key` `api_key
             "id int unsigned [key] [not null] [identity]",
             "email varchar(191) [not null] [unique]",
             "plan varchar(16) [not null]",
-            "updated_at timestamp = NULL",
+            "updated_at timestamp",
             "api_key varchar(64)"
         ]
     );
@@ -634,12 +634,15 @@ fn sqlite_and_sql_server_are_read() {
         "a reference with no columns is to the primary key"
     );
 
-    let tsql = "CREATE TABLE [dbo].[Customers] (\n  [Id] INT IDENTITY(1,1) NOT NULL,\n  [Name] NVARCHAR(MAX) NULL,\n  CONSTRAINT [PK_Customers] PRIMARY KEY CLUSTERED ([Id] ASC)\n)\nGO\nCREATE TABLE [sales].[Orders] ([Id] INT NOT NULL PRIMARY KEY, [CustomerId] INT NOT NULL)\nGO\nALTER TABLE [sales].[Orders] ADD CONSTRAINT [FK_Orders_Customers] FOREIGN KEY ([CustomerId]) REFERENCES [dbo].[Customers] ([Id])\nGO\n";
+    let tsql = "CREATE TABLE [dbo].[Customers] (\n  [Id] INT IDENTITY(1,1) NOT NULL,\n  [Name] NVARCHAR(MAX) NULL,\n  CONSTRAINT [PK_Customers] PRIMARY KEY CLUSTERED ([Id] ASC)\n)\nGO\nALTER TABLE Customers ADD CONSTRAINT [DF_Customers_Name] DEFAULT (('none')) FOR Name\nGO\nCREATE TABLE [sales].[Orders] ([Id] INT NOT NULL PRIMARY KEY, [CustomerId] INT NOT NULL)\nGO\nALTER TABLE [sales].[Orders] ADD CONSTRAINT [FK_Orders_Customers] FOREIGN KEY ([CustomerId]) REFERENCES [dbo].[Customers] ([Id])\nGO\n";
     let built = maps(&Corpus::of(&[("db/schema.sql", tsql)]));
     let schema = map(&built, "sql.schema");
     assert_eq!(
         columns(schema, "Customers"),
-        ["Id int [key] [not null] [identity]", "Name nvarchar(max)"]
+        [
+            "Id int [key] [not null] [identity]",
+            "Name nvarchar(max) = 'none'"
+        ]
     );
     assert_eq!(joins(schema), ["sales.Orders.CustomerId → Customers.Id"]);
 }
@@ -804,4 +807,32 @@ fn live_a_projects_sql_reads_whole() {
     }
     println!("read in {took:?}");
     assert!(took < std::time::Duration::from_secs(20), "slow: {took:?}");
+}
+
+#[test]
+#[ignore = "times every map over a project (CLEW_TEST_SQL_PROJECT=path)"]
+fn live_every_map_over_a_project_in_time() {
+    let root = std::path::PathBuf::from(std::env::var("CLEW_TEST_SQL_PROJECT").unwrap());
+    let scanned = crate::fs_scan::scan(root);
+    let corpus = Corpus::read(&scanned.files);
+    for (name, extract) in [
+        ("sql", super::maps as fn(&Corpus) -> Vec<ProjectMap>),
+        ("routes", crate::maps::routes::maps),
+        ("frameworks", crate::maps::frameworks::maps),
+        ("python", crate::maps::python::maps),
+        ("go", crate::maps::go::maps),
+        ("js", crate::maps::js::maps),
+        ("rust", crate::maps::rust::maps),
+        ("cfamily", crate::maps::cfamily::maps),
+        ("erlang", crate::maps::erlang::maps),
+        ("haskell", crate::maps::haskell::maps),
+        ("zig", crate::maps::zig::maps),
+        ("ruby", crate::maps::ruby::maps),
+        ("dart", crate::maps::dart::maps),
+        ("lean", crate::maps::lean::maps),
+    ] {
+        let started = std::time::Instant::now();
+        let n = extract(&corpus).len();
+        println!("{name}: {n} maps in {:?}", started.elapsed());
+    }
 }
