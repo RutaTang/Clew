@@ -10053,6 +10053,35 @@ async fn goals_are_asked_once_lean_has_checked_as_far_as_the_cursor() {
     assert!(goals.token > token, "asked again");
 }
 
+/// A folder of a Lake project's sources, opened on its own, is told so in
+/// the Goals margin, with the project's folder to open.
+#[test]
+fn the_goals_margin_says_the_folder_is_in_a_lake_project() {
+    let mut app = reader_app();
+    app.show_right_panel = true;
+    app.proj.panes[0].as_mut().unwrap().lang_key = Some("lean");
+    app.margin_tab = crate::MarginTab::Goals;
+    app.proj
+        .link
+        .lsp
+        .insert("lean".into(), crate::LspSlot::Starting);
+    assert!(!shows(&mut sim_of(&app), "part of a Lake project"));
+    let outer = std::path::PathBuf::from("/work/proofs");
+    app.proj.lean_outer = Some(Some(outer.clone()));
+    assert!(shows(
+        &mut sim_of(&app),
+        "This folder is part of a Lake project"
+    ));
+    let sent = click(sim_of(&app), "Open proofs");
+    assert!(
+        sent.iter().any(|m| matches!(
+            m,
+            Message::Project(crate::ProjectMsg::FolderPicked(Some(p))) if *p == outer
+        )),
+        "{sent:?}"
+    );
+}
+
 /// The Goals margin offers a Mathlib project its build cache, says how
 /// the fetch goes, and offers it again when it failed.
 #[test]

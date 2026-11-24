@@ -2683,6 +2683,11 @@ pub struct ProjectSession {
     /// The Lake project of the Lean file last asked about: worked out once
     /// per file, not with a look at the disk on every message.
     pub lean_lake: Option<(PathBuf, Option<PathBuf>)>,
+    /// The Lake project the opened folder is in, above it, where the folder
+    /// has no lakefile of its own (`clew_core::lake_project_above`): looked
+    /// for once, the first time a Lean file of it is read. `Some(None)`
+    /// once looked for and none is.
+    pub lean_outer: Option<Option<PathBuf>>,
     /// Restart File was asked for this file at this diagnostics version:
     /// until Lean says more of it, the Goals tab says it is checking the
     /// imports again, and offers no second restart.
@@ -3060,6 +3065,7 @@ impl Default for ProjectSession {
             mathlib: Default::default(),
             mathlib_root: None,
             lean_lake: None,
+            lean_outer: None,
             lean_restarting: None,
             weak: Default::default(),
             docs: Default::default(),

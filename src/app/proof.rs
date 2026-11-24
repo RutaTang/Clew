@@ -477,6 +477,15 @@ impl App {
                 self.proj.mathlib_root = Some(lake);
             }
         }
+        // A folder of a Lake project's sources, opened on its own: Lean finds
+        // none of the project's modules. Looked for once.
+        if self.reading_lean()
+            && self.proj.lean_outer.is_none()
+            && !self.connection.is_remote()
+            && let Some(root) = self.proj.project.as_ref().map(|p| p.root.clone())
+        {
+            self.proj.lean_outer = Some(clew_core::lake_project_above(&root));
+        }
         if self.reading_lean() && !self.lean_goals_offered {
             self.lean_goals_offered = true;
             if self.margin_tab == crate::MarginTab::Notes {

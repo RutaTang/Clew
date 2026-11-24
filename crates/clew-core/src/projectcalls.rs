@@ -292,7 +292,11 @@ impl FileCalls {
         let tree = crate::highlight::parse(source, lang)?;
         let symbols = crate::outline::located_in(&tree, source, lang);
         let calls = calls_in(&tree, source, lang, &symbols);
-        let owners = owners_in(&tree, source, lang, &symbols);
+        // A Lean declaration's is its namespace, read as `analyze` reads it.
+        let owners = match lang {
+            Lang::Lean => crate::outline::lean_owners(source, &symbols),
+            _ => owners_in(&tree, source, lang, &symbols),
+        };
         FileCalls::of(file.to_path_buf(), lang, calls, &symbols, owners)
     }
 
@@ -526,12 +530,20 @@ impl ProjectCallGraph {
                     Some(Receiver::Type(ty)) => Some(ty.as_str()),
                     None => None,
                 };
+                // A Lean namespace is named from where the call is: `Voice`
+                // for `Clew.Extracted.Voice`, opened.
+                let owned_by = |c: usize, ty: &str| match owner[c] {
+                    Some(o) if fc.lang == Lang::Lean => {
+                        o == ty || o.strip_suffix(ty).is_some_and(|o| o.ends_with('.'))
+                    }
+                    o => o == Some(ty),
+                };
                 let mut narrowed: Vec<usize> = wanted
                     .map(|ty| {
                         callees
                             .iter()
                             .copied()
-                            .filter(|&c| owner[c] == Some(ty))
+                            .filter(|&c| owned_by(c, ty))
                             .collect()
                     })
                     .unwrap_or_default();
@@ -555,8 +567,15 @@ impl ProjectCallGraph {
                 // functions: `haystack.len()` on a `&str` drew an edge to
                 // every `len` there was. (A language with inheritance keeps
                 // them: the method may be a base class's.)
-                let foreign = fc.lang == Lang::Rust
-                    && matches!(&cs.receiver, Some(Receiver::Type(ty)) if !project_types.contains(ty.as_str()));
+                // So does a Lean name in a namespace the project has none
+                // of: `Nat.succ` is no project `succ`.
+                let foreign = match (&cs.receiver, fc.lang) {
+                    (Some(Receiver::Type(ty)), Lang::Rust) => !project_types.contains(ty.as_str()),
+                    (Some(Receiver::Type(ty)), Lang::Lean) => {
+                        !(0..nodes.len()).any(|c| owner[c].is_some() && owned_by(c, ty))
+                    }
+                    _ => false,
+                };
                 let targets: &[usize] = if foreign {
                     &[]
                 } else if narrowed.is_empty() {
@@ -1016,16 +1035,11 @@ fn lang_spec(lang: Lang) -> Option<LangSpec> {
         // tactics (`rw [h]`, `simp [f]`) far more often than it applies them,
         // so a call graph of applications alone would say a proof uses
         // nothing.
-        Lang::Json
-        | Lang::Bash
-        | Lang::Yaml
-        | Lang::Toml
-        | Lang::Html
-        | Lang::Css
-        | Lang::Sql
-        | Lang::Lean => {
+        Lang::Json | Lang::Bash | Lang::Yaml | Lang::Toml | Lang::Html | Lang::Css | Lang::Sql => {
             return None;
         }
+        // Read from the text (see `crate::lean::calls`): no tree's kinds.
+        Lang::Lean => spec(&[], &[]),
     })
 }
 
@@ -1056,6 +1070,9 @@ pub fn calls_of(source: &str, lang: &str) -> Vec<CallSite> {
 /// name dropped them instead, since no node carries it. For a language
 /// without an outline every function name is accepted.
 pub fn calls_in(tree: &Tree, source: &str, lang: Lang, symbols: &[Located]) -> Vec<CallSite> {
+    if lang == Lang::Lean {
+        return crate::lean::calls(source, symbols);
+    }
     let Some(spec) = lang_spec(lang) else {
         return Vec::new();
     };
@@ -3048,6 +3065,58 @@ void main() {
             file: PathBuf::from(file),
             line,
         }
+    }
+
+    /// Lean's calls: across the files a file imports, a namespace's name
+    /// called by its namespace (`Voice.toModel`, `Voice` being
+    /// `Clew.Voice`), and nothing for a name in a namespace the project has
+    /// none of (`Nat.succ` is no project `succ`).
+    #[test]
+    fn lean_calls_link_across_imports_and_namespaces() {
+        let basic = PathBuf::from("/p/Demo/Basic.lean");
+        let voice = PathBuf::from("/p/Demo/Voice.lean");
+        let usef = PathBuf::from("/p/Demo/Use.lean");
+        let sources = vec![
+            (
+                basic.clone(),
+                "def double (n : Nat) : Nat := n + n\n\ndef succ (n : Nat) : Nat := n\n".to_string(),
+            ),
+            (
+                voice.clone(),
+                "namespace Clew.Voice\n\ndef toModel (n : Nat) : Nat := n\n\nend Clew.Voice\n".to_string(),
+            ),
+            (
+                usef.clone(),
+                "import Demo.Basic\nimport Demo.Voice\n\ndef quad (n : Nat) : Nat :=\n  double (double n)\n\ndef speak (n : Nat) : Nat :=\n  Voice.toModel (Nat.succ n)\n".to_string(),
+            ),
+        ];
+        let mut defs = Vec::new();
+        for (file, src) in &sources {
+            for l in crate::outline::extract_located(src, "lean") {
+                defs.push(Def {
+                    name: l.symbol.name,
+                    kind: l.symbol.kind,
+                    file: file.clone(),
+                    line: l.symbol.line,
+                });
+            }
+        }
+        let scope: HashMap<PathBuf, HashSet<PathBuf>> =
+            HashMap::from([(usef.clone(), HashSet::from([basic.clone(), voice.clone()]))]);
+        let g = ProjectCallGraph::build(defs, &sources, &scope);
+        let callees = |name: &str| -> Vec<String> {
+            let id = g.id_of(&usef, name).expect(name);
+            let mut out: Vec<String> = g
+                .node(id)
+                .callees
+                .iter()
+                .map(|&c| g.node(c).name.clone())
+                .collect();
+            out.sort();
+            out
+        };
+        assert_eq!(callees("quad"), ["double"]);
+        assert_eq!(callees("speak"), ["toModel"]);
     }
 
     #[test]

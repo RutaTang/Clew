@@ -62,6 +62,15 @@ pub enum RunPlan {
         /// The item it documents (`add`); empty for a module's own.
         item: String,
     },
+    /// A Lake project built, or its tests run (`lake build`, `lake test`):
+    /// no debugger, its output and how it ended.
+    Lake {
+        /// The Lake project: the folder of its lakefile.
+        project: PathBuf,
+        /// The `lake` it runs with.
+        lake: PathBuf,
+        task: LakeTask,
+    },
     /// A Lean file's `main`, run by Lean in its Lake project (`lake env
     /// lean --run`): no debugger, its output and how it ended.
     Lean {
@@ -71,6 +80,25 @@ pub enum RunPlan {
         /// The `lake` it runs with.
         lake: PathBuf,
     },
+}
+
+/// What Lake is asked to do for a project ([`RunPlan::Lake`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LakeTask {
+    /// `lake build`: the project's default targets.
+    Build,
+    /// `lake test`: its test driver.
+    Test,
+}
+
+impl LakeTask {
+    /// Lake's words for it.
+    pub(crate) fn args(self) -> &'static [&'static str] {
+        match self {
+            LakeTask::Build => &["build"],
+            LakeTask::Test => &["test"],
+        }
+    }
 }
 
 /// How much of a test file a test run runs.
@@ -123,6 +151,8 @@ impl RunPlan {
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default(),
+            // As it is typed: `lake build`, `lake test`.
+            RunPlan::Lake { task, .. } => ["lake", task.args()[0]].join(" "),
         }
     }
 
@@ -136,6 +166,7 @@ impl RunPlan {
             RunPlan::Cargo { test: None, .. }
             | RunPlan::Script { .. }
             | RunPlan::Lean { .. }
+            | RunPlan::Lake { .. }
             | RunPlan::Doctest { .. } => None,
         }
     }
@@ -147,6 +178,18 @@ impl RunPlan {
     /// said it had. A group's run says the same of its tests. `None` for
     /// a run of anything but tests.
     pub(crate) fn verdict(&self, code: i64) -> Option<String> {
+        if let RunPlan::Lake {
+            project,
+            task: LakeTask::Test,
+            ..
+        } = self
+        {
+            let name = file_name(project);
+            return Some(match code {
+                0 => tr!("Tests in {name} passed", name = name),
+                _ => tr!("Some tests in {name} failed", name = name),
+            });
+        }
         if let RunPlan::Doctest { item, file, .. } = self {
             let item = doctest_item(item, file);
             return Some(match code {
@@ -211,6 +254,7 @@ impl RunPlan {
             | RunPlan::Django { .. }
             | RunPlan::Script { .. }
             | RunPlan::Lean { .. }
+            | RunPlan::Lake { .. }
             | RunPlan::Doctest { .. } => false,
         }
     }
@@ -260,6 +304,12 @@ impl RunPlan {
             RunPlan::Lean { file, project, .. } => {
                 (file.clone(), Vec::new(), project.clone(), None)
             }
+            RunPlan::Lake { project, task, .. } => (
+                project.clone(),
+                task.args().iter().map(|a| a.to_string()).collect(),
+                project.clone(),
+                None,
+            ),
             RunPlan::Doctest { target, file, .. } => (
                 file.clone(),
                 Vec::new(),
@@ -283,6 +333,7 @@ impl RunPlan {
             | RunPlan::Lean { file, .. } => {
                 file.parent().map(Path::to_path_buf).unwrap_or_default()
             }
+            RunPlan::Lake { project, .. } => project.clone(),
         };
         beside.join(self.label())
     }

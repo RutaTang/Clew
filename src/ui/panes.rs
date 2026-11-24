@@ -2966,6 +2966,34 @@ fn margin_goals(app: &App) -> Element<'_, Message> {
         }
         _ => {}
     }
+    // The folder opened is a folder of a Lake project's, whose lakefile is
+    // above it: Lean finds none of the project's modules from here. Said,
+    // with the folder to open — asked about as any folder opened is.
+    if let Some(Some(outer)) = &app.proj.lean_outer {
+        let name = outer
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| outer.display().to_string());
+        let open = tr!("Open {folder}", folder = name);
+        let press = super::heard::said(
+            &open,
+            Message::Project(crate::ProjectMsg::FolderPicked(Some(outer.clone()))),
+        );
+        rows = rows.push(card(
+            tr!("This folder is part of a Lake project").into(),
+            tr!(
+                "Its lakefile is in {folder}, above the folder open here, so Lean can't find the project's modules. Open {folder} to check them.",
+                folder = outer.display()
+            ),
+            vec![
+                button(text(open).size(ts::SMALL).wrapping(Wrapping::None))
+                    .style(theme::primary_button)
+                    .padding([4, 10])
+                    .on_press(press)
+                    .into(),
+            ],
+        ));
+    }
     // The server's state, under the Mathlib card: a project whose Lean
     // would build all of Mathlib wants the card most while Lean starts.
     // Each said as it is — a failure, no Lean, a "no" — with the way on.

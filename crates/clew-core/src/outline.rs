@@ -694,7 +694,9 @@ fn lean_where_helpers(command: &str, line: usize) -> Vec<Located> {
                     end_line: last,
                 },
                 declaration: (start, end),
-                signature_end: start + lines[i].len(),
+                // At its `:=`, as a declaration's statement ends; its line's
+                // end where its equations are below it.
+                signature_end: start + lines[i].find(":=").unwrap_or(lines[i].len()),
                 cpp_public: None,
                 decl_line: i + 1,
                 body: Some((i + 1, last)),

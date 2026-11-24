@@ -318,6 +318,27 @@ impl Identity {
     }
 }
 
+/// How to get what `server` runs from, when Clew runs it from a toolchain
+/// of the machine's (Lean's `lake`, Dart's `dart`) and the toolchain is not
+/// installed: what the setup sheet says of it ("install Lean with elan").
+/// `None` for a server Clew provides, one chosen or named by the project,
+/// and a toolchain that is there.
+pub fn missing_toolchain(server: &EffectiveServer, path: Option<&OsStr>) -> Option<&'static str> {
+    if server.chosen.is_some() || server.command.is_some() {
+        return None;
+    }
+    let spec = registry::by_name(&server.server_name)?;
+    let Provision::Toolchain { binary } = spec.provision(&server.version, Platform::current()?)?
+    else {
+        return None;
+    };
+    let found = match path {
+        Some(path) => find_in_unresolved(path, binary),
+        None => find_on_path_unresolved(binary),
+    };
+    found.is_none().then(|| install_hint(binary))
+}
+
 /// Decide how to obtain the binary for `server` without touching the network.
 pub fn locate(server: &EffectiveServer) -> Located {
     locate_on(server, None)

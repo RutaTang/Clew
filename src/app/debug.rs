@@ -512,6 +512,40 @@ impl App {
         )
     }
 
+    /// Build the Lake project of the Lean file read, or run its tests, in
+    /// the run panel: Lake's own output, and how it ended.
+    fn start_lake_task(&mut self, task: crate::app::runplan::LakeTask) -> Task<Message> {
+        if self.connection.is_remote() {
+            self.status = tr!("Lake runs only for a project on this computer.").into();
+            return Task::none();
+        }
+        let Some(root) = self.proj.project.as_ref().map(|p| p.root.clone()) else {
+            return Task::none();
+        };
+        let lake = match self
+            .effective_server("lean")
+            .map(|server| clew_core::lsp::store::locate(&server))
+        {
+            Some(clew_core::lsp::store::Located::Ready(lake)) => lake,
+            _ => {
+                self.status = tr!("Lean's lake wasn't found. Install Lean with elan.").into();
+                return Task::none();
+            }
+        };
+        let project = self
+            .lean_file()
+            .and_then(|file| clew_core::lake_root(&root, &file))
+            .unwrap_or(root);
+        self.start_session(
+            true,
+            Some(crate::app::runplan::RunPlan::Lake {
+                project,
+                lake,
+                task,
+            }),
+        )
+    }
+
     /// Whether running `file` does something: it has a program start (a
     /// `main`) or code at its top level, in no function. Not read yet: taken
     /// to, as before.
@@ -1111,6 +1145,10 @@ impl App {
             None if matches!(plan, Some(RunPlan::Lean { .. })) => {
                 tr!("Running {file} with Lean…", file = program_name)
             }
+            None if matches!(plan, Some(RunPlan::Lake { .. })) => tr!(
+                "Running {file}…",
+                file = plan.as_ref().map(RunPlan::label).unwrap_or_default()
+            ),
             None if matches!(plan, Some(RunPlan::Doctest { .. })) => tr!(
                 "Running {doctest} with Cargo…",
                 doctest = plan.as_ref().map(RunPlan::label).unwrap_or_default()
@@ -1131,7 +1169,10 @@ impl App {
         // No adapter comes to say a Lean run is running: what is said now
         // is its running state, taken down when the program ends — it
         // said "Running Main.lean with Lean…" long after Main.lean exited.
-        if matches!(plan, Some(RunPlan::Lean { .. } | RunPlan::Doctest { .. })) {
+        if matches!(
+            plan,
+            Some(RunPlan::Lean { .. } | RunPlan::Lake { .. } | RunPlan::Doctest { .. })
+        ) {
             self.say_debug_state(self.status.clone());
         }
         // This run's identity: every message the adapter stream produces carries
@@ -1378,6 +1419,22 @@ impl App {
                         None,
                         true,
                     )
+                } else if let Some(crate::app::runplan::RunPlan::Lake {
+                    project,
+                    lake,
+                    task,
+                }) = &plan
+                {
+                    // Lake building the project, or running its tests.
+                    let (lake, project, task) = (lake.clone(), project.clone(), *task);
+                    run_plain(&mut output, &stamp, run, &live, move |said, cancel| {
+                        clew_core::lean_run_lake(&lake, &project, task.args(), said, cancel)
+                            .map_err(|e| {
+                                tr!("Lake could not be started: {error}", error = e).to_string()
+                            })
+                    })
+                    .await;
+                    return;
                 } else if let Some(crate::app::runplan::RunPlan::Lean {
                     file,
                     project,
@@ -3654,6 +3711,7 @@ impl App {
                 self.proj.context_menu = None;
                 self.run_main_at(line, no_debug)
             }
+            DebugMsg::RunLake(task) => self.start_lake_task(task),
             DebugMsg::ShowTab(tab) => self.show_run_tab(tab),
             DebugMsg::CloseTab(tab) => self.close_run_tab(tab),
             DebugMsg::Again => self.on_debug_again(),

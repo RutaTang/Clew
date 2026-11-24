@@ -32,7 +32,7 @@ pub fn maps(corpus: &Corpus) -> Vec<ProjectMap> {
 
 /// `text` with comments blanked (offsets kept), and strings too when
 /// `strings` is set.
-fn blank(text: &str, strings: bool) -> String {
+pub(crate) fn blank(text: &str, strings: bool) -> String {
     let b = text.as_bytes();
     let mut out = b.to_vec();
     let mut i = 0;
@@ -94,7 +94,7 @@ fn ident_char(c: char) -> bool {
 }
 
 /// The identifiers in `text`, with their byte offsets.
-fn idents(text: &str) -> Vec<(usize, &str)> {
+pub(crate) fn idents(text: &str) -> Vec<(usize, &str)> {
     let mut out = Vec::new();
     let mut start = None;
     for (i, c) in text

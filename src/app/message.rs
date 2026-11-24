@@ -1870,6 +1870,10 @@ pub enum DebugMsg {
     /// of the active file — a gutter ▶'s: a Rust `main`, built by Cargo; a
     /// Python `__main__` block's file, run as a script.
     RunMain { line: usize, no_debug: bool },
+    /// Build the Lake project of the Lean file read, or run its tests
+    /// (`lake build`, `lake test`): the palette's Lean: Build Project and
+    /// Lean: Run Project Tests.
+    RunLake(crate::app::runplan::LakeTask),
     /// The adapter is ready; carry its handle + the TCP address it announced
     /// (for child sessions).
     /// Every DAP-side message names the `run` it belongs to (`App::debug_run`):
@@ -3257,6 +3261,7 @@ impl DebugMsg {
             | DebugMsg::Run
             | DebugMsg::RunTest { .. }
             | DebugMsg::RunMain { .. }
+            | DebugMsg::RunLake(..)
             | DebugMsg::Control(..)
             | DebugMsg::Stop
             | DebugMsg::ShowTab(..)

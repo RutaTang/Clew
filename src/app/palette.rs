@@ -1124,6 +1124,22 @@ impl App {
                     None,
                     send(Message::Proof(crate::ProofMsg::RestartFile)),
                 );
+                // Lake's own: the project built, its tests run, in the run
+                // panel.
+                add(
+                    tr_noop!("Lean: Build Project").to_string(),
+                    None,
+                    send(Message::Debug(DebugMsg::RunLake(
+                        crate::app::runplan::LakeTask::Build,
+                    ))),
+                );
+                add(
+                    tr_noop!("Lean: Run Project Tests").to_string(),
+                    None,
+                    send(Message::Debug(DebugMsg::RunLake(
+                        crate::app::runplan::LakeTask::Test,
+                    ))),
+                );
                 if matches!(
                     self.proj.mathlib,
                     crate::app::proof::MathlibCache::Missing

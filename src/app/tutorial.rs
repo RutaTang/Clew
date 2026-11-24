@@ -529,7 +529,7 @@ impl App {
             fetch: census
                 .servers
                 .iter()
-                .filter(|s| s.fetch != crate::app::setup::Fetch::Nothing)
+                .filter(|s| s.fetch.fetches())
                 .map(|s| (s.language.clone(), s.fetch.clone()))
                 .collect(),
         };

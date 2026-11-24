@@ -912,6 +912,28 @@ pub fn lake_root(root: &Path, file: &Path) -> Option<PathBuf> {
     )
 }
 
+/// The Lake project the folder `root` is in, when `root` has no lakefile
+/// of its own and a folder above it has one (short of the home folder):
+/// opened, a folder of a Lake project's sources has Lean find none of its
+/// project's modules, as its lakefile, above, is not the opened folder's to
+/// run. Said, with the folder to open instead.
+pub fn lake_project_above(root: &Path) -> Option<PathBuf> {
+    let lakefile = |dir: &Path| {
+        ["lakefile.lean", "lakefile.toml"]
+            .iter()
+            .any(|name| dir.join(name).is_file())
+    };
+    if lakefile(root) {
+        return None;
+    }
+    let home = crate::home_dir();
+    root.ancestors()
+        .skip(1)
+        .take_while(|dir| dir.parent().is_some() && Some(*dir) != home.as_deref())
+        .find(|dir| lakefile(dir))
+        .map(Path::to_path_buf)
+}
+
 /// Whether a Lean file has a program to run: a `def main` of its own, at
 /// its top level and in no namespace (`partial def main`, `unsafe def
 /// main` too), as `lean --run` needs one.
@@ -945,6 +967,204 @@ pub fn main_lines(source: &str) -> Option<(usize, (usize, usize))> {
 
 /// How a run of a Lean file's `main` ended.
 pub use crate::spawn::RunEnd;
+
+/// The calls of a Lean file's functions and theorems, read from its text
+/// for the project's call graph: each name a declaration's body uses,
+/// under the innermost declaration around it — a `where` helper's under
+/// the helper. A qualified name (`Voice.toModel`) is the namespace's;
+/// one on a value (`xs.map`) and one the declaration binds (`fun x`,
+/// `(n : Nat)`, `intro h`) are none.
+pub(crate) fn calls(
+    source: &str,
+    symbols: &[crate::outline::Located],
+) -> Vec<crate::projectcalls::CallSite> {
+    use crate::projectcalls::{CallSite, Receiver};
+    let code = crate::maps::lean::blank(source, true);
+    let callables: Vec<&crate::outline::Located> = symbols
+        .iter()
+        .filter(|l| matches!(l.symbol.kind.as_str(), "function" | "theorem"))
+        .filter(|l| l.declaration.0 < l.declaration.1 && l.declaration.1 <= code.len())
+        .collect();
+    let mut line_starts = vec![0];
+    line_starts.extend(code.match_indices('\n').map(|(i, _)| i + 1));
+    let line_of = |at: usize| line_starts.partition_point(|&s| s <= at);
+    let mut out: Vec<CallSite> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for l in &callables {
+        let (start, end) = l.declaration;
+        let from = l.signature_end.clamp(start, end);
+        let bound = bound_names(&code[start..from], &code[from..end]);
+        for (at, word) in crate::maps::lean::idents(&code[from..end]) {
+            let at = from + at;
+            // The innermost declaration around it says whose call it is.
+            let inner = callables
+                .iter()
+                .filter(|c| c.declaration.0 <= at && at < c.declaration.1)
+                .min_by_key(|c| c.declaration.1 - c.declaration.0);
+            if inner.is_some_and(|c| c.symbol.line != l.symbol.line || at < c.signature_end) {
+                continue;
+            }
+            if bound.contains(word) || word.chars().count() < 2 || NOT_CALLS.contains(&word) {
+                continue;
+            }
+            let line = line_of(at);
+            let mut push = |callee: &str, receiver: Option<Receiver>| {
+                let method = receiver.is_some();
+                if seen.insert((l.symbol.line, callee.to_string(), method, line)) {
+                    out.push(CallSite {
+                        caller: Some(l.symbol.name.clone()),
+                        callee: callee.to_string(),
+                        method,
+                        receiver,
+                        line,
+                    });
+                }
+            };
+            match word.rsplit_once('.') {
+                None => push(word, None),
+                Some((namespace, name))
+                    if namespace.starts_with(|c: char| c.is_uppercase()) && !name.is_empty() =>
+                {
+                    push(word, None);
+                    push(name, Some(Receiver::Type(namespace.to_string())));
+                }
+                // On a value: its type's, which the text does not say.
+                Some(_) => {}
+            }
+        }
+    }
+    out
+}
+
+/// The names a Lean declaration binds: its parameters, in its signature
+/// (`(n : Nat)`, `{α : Type}`, `⦃x y : T⦄`, `[inst : Monad m]`), and in its
+/// body what `fun`, `λ`, `∀` and `∃` name up to their `=>`, `↦` or `,`, and
+/// `let`, `have`, `intro`, `obtain`, `rcases`, `rintro` and `cases` to the
+/// end of their line. Not a body's brackets: `(double n)` binds nothing.
+fn bound_names<'t>(signature: &'t str, body: &'t str) -> std::collections::HashSet<&'t str> {
+    use crate::maps::lean::idents;
+    let mut bound = std::collections::HashSet::new();
+    for (at, _) in idents(signature) {
+        let before = signature[..at].trim_end();
+        if before.ends_with(['(', '{', '[', '⦃']) {
+            let rest = &signature[at..];
+            let close = rest.find([')', '}', ']', '⦄']).unwrap_or(rest.len());
+            if let Some(colon) = rest[..close].find(':') {
+                bound.extend(idents(&rest[..colon]).into_iter().map(|w| w.1));
+            }
+        }
+    }
+    let words = idents(body);
+    for (n, &(at, word)) in words.iter().enumerate() {
+        let rest = &body[at..];
+        let line_end = rest.find('\n').unwrap_or(rest.len());
+        let names: &str = if matches!(word, "fun" | "∀" | "∃")
+            || body[..at].trim_end().ends_with(['λ', '∀', '∃'])
+        {
+            let from = if matches!(word, "fun") { word.len() } else { 0 };
+            let tail = &rest[from..];
+            let end = [tail.find("=>"), tail.find('↦'), tail.find(',')]
+                .into_iter()
+                .flatten()
+                .min()
+                .unwrap_or(tail.len());
+            &tail[..end]
+        } else if matches!(
+            words.get(n.wrapping_sub(1)).map(|w| w.1),
+            Some("let" | "have" | "intro" | "intros" | "obtain" | "rcases" | "rintro" | "cases")
+        ) {
+            let line = &rest[..line_end];
+            let end = [line.find(":="), line.find(':'), line.find(" with ")]
+                .into_iter()
+                .flatten()
+                .min()
+                .unwrap_or(line.len());
+            &line[..end]
+        } else {
+            continue;
+        };
+        bound.extend(idents(names).into_iter().map(|w| w.1));
+    }
+    bound
+}
+
+/// Lean's keywords, and the tactics every proof uses: words a body has
+/// that call nothing of the project's.
+const NOT_CALLS: &[&str] = &[
+    "fun",
+    "let",
+    "have",
+    "show",
+    "from",
+    "by",
+    "do",
+    "if",
+    "then",
+    "else",
+    "match",
+    "with",
+    "where",
+    "return",
+    "for",
+    "in",
+    "at",
+    "calc",
+    "using",
+    "suffices",
+    "obtain",
+    "intro",
+    "intros",
+    "exact",
+    "apply",
+    "refine",
+    "rfl",
+    "simp",
+    "simp_all",
+    "rw",
+    "rwa",
+    "omega",
+    "decide",
+    "induction",
+    "cases",
+    "rcases",
+    "rintro",
+    "constructor",
+    "exists",
+    "unfold",
+    "assumption",
+    "trivial",
+    "sorry",
+    "termination_by",
+    "decreasing_by",
+    "mut",
+    "unsafe",
+    "Type",
+    "Prop",
+    "Sort",
+    "true",
+    "false",
+    "True",
+    "False",
+];
+
+/// Run `lake <args>` (`build`, `test`) in the Lake project `project`,
+/// each line it writes handed to `said` as it comes, with whether it was
+/// written to stderr. Blocking; stopped, with everything it started, once
+/// `cancel` is set.
+pub fn run_lake(
+    lake: &Path,
+    project: &Path,
+    args: &[&str],
+    said: impl FnMut(&str, bool),
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Result<RunEnd, String> {
+    let mut command = crate::spawn::command(lake);
+    command
+        .args(args)
+        .current_dir(project)
+        .env("PATH", crate::linerpc::child_path());
+    crate::spawn::run_streaming(command, said, cancel)
+}
 
 /// The modules a Lean file's header imports (`import A.B`, `public import
 /// C`, `import all D`, several to a line), in order.
@@ -1075,6 +1295,38 @@ pub fn mathlib_build(root: &Path) -> Option<(PathBuf, bool)> {
 
 #[cfg(test)]
 mod tests {
+
+    /// A Lean declaration's calls are the names its body uses — under the
+    /// innermost declaration around them, a `where` helper's its own — not
+    /// the names it binds, nor a value's dot notation; a namespace's names
+    /// are the namespace's.
+    #[test]
+    fn a_lean_declarations_calls_are_the_names_its_body_uses() {
+        let src = "def double (n : Nat) : Nat := n + n\n\ndef quad (n : Nat) : Nat := double (double n)\nwhere\n  helper (k : Nat) : Nat := double k\n\ntheorem t (xs : List Nat) : True := by\n  have hx := xs.length\n  intro h\n  exact Voice.toModel hx -- double\n";
+        let symbols = crate::outline::extract_located(src, "lean");
+        let calls = calls(src, &symbols);
+        let got: Vec<(&str, &str, bool, usize)> = calls
+            .iter()
+            .map(|c| {
+                (
+                    c.caller.as_deref().unwrap(),
+                    c.callee.as_str(),
+                    c.method,
+                    c.line,
+                )
+            })
+            .collect();
+        assert!(got.contains(&("quad", "double", false, 3)), "{got:?}");
+        assert!(got.contains(&("helper", "double", false, 5)), "{got:?}");
+        assert!(!got.iter().any(|c| c.0 == "quad" && c.3 == 5), "{got:?}");
+        assert!(got.contains(&("t", "Voice.toModel", false, 10)), "{got:?}");
+        assert!(got.contains(&("t", "toModel", true, 10)), "{got:?}");
+        // Bound, on a value, in a comment, or one letter: none.
+        for name in ["n", "xs", "hx", "length", "xs.length", "h"] {
+            assert!(!got.iter().any(|c| c.1 == name), "{name}: {got:?}");
+        }
+        assert_eq!(got.iter().filter(|c| c.1 == "double").count(), 2, "{got:?}");
+    }
 
     /// A namespace written indented has its declarations read one by one —
     /// their docs and attributes with them, its `end` its own — while a
@@ -1660,8 +1912,15 @@ mod tests {
         // lakefile is code Lake runs, of a folder not opened.
         let inner = root.join("scratch");
         at("lakefile.lean");
-        assert_eq!(lake_root(&inner, &loose), Some(inner));
-        assert_eq!(lake_root(&root, &loose), Some(root));
+        assert_eq!(lake_root(&inner, &loose), Some(inner.clone()));
+        assert_eq!(lake_root(&root, &loose), Some(root.clone()));
+        // Which is said: the folder opened is in the project above it.
+        assert_eq!(lake_project_above(&inner), Some(root.clone()));
+        assert_eq!(lake_project_above(&root), None, "its own lakefile");
+        assert_eq!(
+            lake_project_above(&root.join("verification/Proofs")),
+            Some(root.join("verification"))
+        );
     }
 
     #[test]

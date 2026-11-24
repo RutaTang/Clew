@@ -779,6 +779,49 @@ fn a_server_on_this_computer_is_used_not_installed_again() {
     );
 }
 
+/// A project whose server runs from a toolchain that is not installed —
+/// Lean's `lake`, through elan — is told so on the sheet, with how to get
+/// it, and nothing is fetched, nor offered to set up, for it; with the
+/// toolchain there, it is the leave to build that is asked.
+#[cfg(unix)]
+#[test]
+fn a_toolchain_not_installed_is_said_on_the_sheet() {
+    use crate::app::setup::{ServerLook, servers_line};
+    use std::os::unix::fs::PermissionsExt;
+    let root = test_dir("missing-toolchain-project");
+    let empty = test_dir("missing-toolchain-empty");
+    std::fs::create_dir_all(&empty).unwrap();
+    let look = |path: &std::path::Path| ServerLook {
+        path: Some(path.into()),
+        ..Default::default()
+    };
+    let lean = ["lean".to_string()];
+    // No elan here: its folder, where Lean is looked for off PATH, empty.
+    let _no_lean = clew_core::testutil::EnvVars::new().set("ELAN_HOME", empty.join("no-elan"));
+    let servers = look(&empty).servers_for(&root, &lean);
+    assert_eq!(servers.len(), 1, "{servers:?}");
+    assert_eq!(servers[0].fetch, Fetch::Missing("install Lean with elan"));
+    assert!(!servers[0].builds, "nothing to give leave to yet");
+    assert!(!servers[0].fetch.fetches());
+    assert_eq!(
+        servers_line(&servers),
+        "lean: not installed: install Lean with elan"
+    );
+    // Installed: the leave to build is what is asked.
+    drop(_no_lean);
+    let elan = test_dir("missing-toolchain-elan");
+    let bin = elan.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let lake = bin.join("lake");
+    std::fs::write(&lake, "#!/bin/sh\n").unwrap();
+    std::fs::set_permissions(&lake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let _elan = clew_core::testutil::EnvVars::new().set("ELAN_HOME", &elan);
+    let servers = look(&bin).servers_for(&root, &lean);
+    assert_eq!(servers.len(), 1, "{servers:?}");
+    assert_eq!(servers[0].fetch, Fetch::Nothing);
+    assert!(servers[0].builds);
+}
+
 /// Enter on Explain All's sheet presses its Explain, as its "yes" by voice
 /// does: the sheet the shortcut opens took no Enter, the ring having
 /// nothing on it. Not while the project is still being counted, nor before

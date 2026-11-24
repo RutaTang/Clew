@@ -678,6 +678,45 @@ fn a_lean_main_has_a_play_mark_that_runs_it() {
     assert!(app.proj.context_menu.is_none());
 }
 
+/// Lean: Build Project and Lean: Run Project Tests run Lake in the Lake
+/// project of the Lean file read — `lake build`, `lake test` — in the run
+/// panel; without Lean, it is said how to get it.
+#[cfg(unix)]
+#[test]
+fn lake_builds_and_tests_the_lean_files_project() {
+    use crate::app::runplan::LakeTask;
+    use std::os::unix::fs::PermissionsExt;
+    let mut app = scanned_app("runplan-lake-tasks");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    write(&root, "proofs/lakefile.toml", "name = \"proofs\"\n");
+    write(&root, "proofs/Proofs.lean", "theorem t : 1 = 1 := rfl\n");
+    open_synchronously(&mut app, "proofs/Proofs.lean", None);
+    {
+        let _no_lean = clew_core::testutil::EnvVars::new().set("ELAN_HOME", root.join("no-elan"));
+        let _ = app.update(Message::Debug(DebugMsg::RunLake(LakeTask::Build)));
+        assert!(app.status.contains("lake"), "{}", app.status);
+        assert!(app.debug.plan.is_none());
+    }
+    let elan = root.join("elan");
+    std::fs::create_dir_all(elan.join("bin")).unwrap();
+    let lake = elan.join("bin/lake");
+    std::fs::write(&lake, "#!/bin/sh\necho \"lake $*\"\n").unwrap();
+    std::fs::set_permissions(&lake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let _elan = clew_core::testutil::EnvVars::new().set("ELAN_HOME", &elan);
+    for task in [LakeTask::Build, LakeTask::Test] {
+        let _ = app.update(Message::Debug(DebugMsg::RunLake(task)));
+        assert!(
+            matches!(&app.debug.plan, Some(RunPlan::Lake { project, task: t, .. })
+                if *project == root.join("proofs") && *t == task),
+            "{:?}",
+            app.debug.plan
+        );
+    }
+    let plan = app.debug.plan.clone().unwrap();
+    assert_eq!(plan.label(), "lake test");
+    assert_eq!(plan.verdict(0).as_deref(), Some("Tests in proofs passed"));
+}
+
 /// The gutter's ▶: on a Rust file's tests, its test module and its `main`,
 /// and a Python file's test class, tests and `__main__` block — not on a
 /// parametrized test's cases. A click opens the short code menu there:

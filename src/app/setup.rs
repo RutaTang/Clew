@@ -45,6 +45,20 @@ pub enum Fetch {
     /// first open offers it ([`crate::LspMsg::FoundOnPath`]). The tour said
     /// "pyright: install with npm" with pyright on the PATH.
     OnPath(PathBuf),
+    /// Nothing Clew can fetch: the server runs from a toolchain of the
+    /// machine's that is not installed (Lean's, through elan), and how to
+    /// install it. Said on the sheet; a Lean project opened on a machine
+    /// without Lean was not told of it there at all.
+    Missing(&'static str),
+}
+
+impl Fetch {
+    /// Whether setting the server up fetches or picks something: not
+    /// [`Fetch::Nothing`], nor [`Fetch::Missing`], which only the user can
+    /// put in place.
+    pub fn fetches(&self) -> bool {
+        matches!(self, Fetch::Download | Fetch::Install(_) | Fetch::OnPath(_))
+    }
 }
 
 /// A language server the project needs, as the sheet lists it.
@@ -232,7 +246,10 @@ impl ServerLook {
                     lsp::store::Located::NeedsInstall { install, .. } => self
                         .on_path(&server.server_name, install.binary, root)
                         .map_or_else(|| Fetch::Install(install.tool.to_string()), Fetch::OnPath),
-                    lsp::store::Located::Unsupported(_) => return None,
+                    // A toolchain not installed: said, with how to get it.
+                    lsp::store::Located::Unsupported(_) => Fetch::Missing(
+                        lsp::store::missing_toolchain(&server, self.path.as_deref())?,
+                    ),
                     // The user's own program, run as found in place of
                     // Clew's copy (pyright installed with pip): said so, and
                     // set up as theirs, as one a download would replace is.
@@ -247,8 +264,10 @@ impl ServerLook {
                         Fetch::Nothing
                     }
                 };
-                // Let build already: nothing to ask.
+                // Let build already: nothing to ask. Nor of a server that
+                // cannot run here yet.
                 let builds = server.runs_project_code().is_some()
+                    && !matches!(fetch, Fetch::Missing(_))
                     && !self.trust.is_build_trusted(None, root, &server.server_name);
                 Some(SetupServer {
                     language: language.clone(),
@@ -379,6 +398,9 @@ pub(crate) fn servers_line(servers: &[SetupServer]) -> String {
                 Fetch::Download => takes.push(tr!("download").into()),
                 Fetch::Install(tool) => takes.push(tr!("install with {tool}", tool = tool)),
                 Fetch::OnPath(_) => takes.push(tr!("already installed").into()),
+                Fetch::Missing(how) => {
+                    takes.push(tr!("not installed: {how}", how = crate::i18n::message(how)))
+                }
             }
             if s.builds {
                 takes.push(tr!("builds the project (runs its code)").into());
@@ -549,7 +571,7 @@ impl App {
         self.allow_builds(root, &servers);
         let fetch: Vec<(String, Fetch)> = servers
             .iter()
-            .filter(|s| s.fetch != Fetch::Nothing)
+            .filter(|s| s.fetch.fetches())
             .map(|s| (s.language.clone(), s.fetch.clone()))
             .collect();
         let explain = setup.explain && self.llm_available;
@@ -598,7 +620,10 @@ impl App {
         self.allow_builds(root, servers);
         let mut tasks: Vec<Task<Message>> = Vec::new();
         for server in servers {
-            if server.fetch != Fetch::Nothing {
+            if matches!(server.fetch, Fetch::Missing(_)) {
+                continue;
+            }
+            if server.fetch.fetches() {
                 tasks.push(self.set_up_server(&server.language, &server.fetch));
             } else if matches!(
                 self.proj.link.lsp.get(&server.language),
@@ -718,8 +743,10 @@ impl App {
                         | LspSlot::Unsupported(_),
                     ) => false,
                 };
-                open && (s.fetch != Fetch::Nothing
-                    || !self.trust.is_build_trusted(None, root, &s.name))
+                // Nothing to set up of a toolchain not installed: the
+                // sheet said how to get it.
+                open && !matches!(s.fetch, Fetch::Missing(_))
+                    && (s.fetch.fetches() || !self.trust.is_build_trusted(None, root, &s.name))
             })
             .collect()
     }
@@ -741,7 +768,7 @@ impl App {
         let servers: Vec<SetupServer> = self.missing_setup().into_iter().cloned().collect();
         self.proj.setting_up = servers
             .iter()
-            .filter(|s| s.fetch != Fetch::Nothing)
+            .filter(|s| s.fetch.fetches())
             .map(|s| s.language.clone())
             .collect();
         let set_up = self.set_up_servers(&root, &servers);
