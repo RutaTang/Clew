@@ -1101,6 +1101,7 @@
  "Latest calls": "Derniers appels",
  "Laying out the graph…": "Disposition du graphe…",
  "Lean could not be started: {error}": "Impossible de démarrer Lean : {error}",
+ "Lean has no debugger, so a breakpoint here would stop nothing. To follow a proof, use Step Through Proof.": "Lean n’a pas de débogueur : un point d’arrêt ici n’arrêterait rien. Pour suivre une preuve, utilisez Parcourir la preuve pas à pas.",
  "Lean has no debugger. Use Run to run this file's main, or Step Through Proof to go through a proof one tactic at a time.": "Lean n’a pas de débogueur. Utilisez « Exécuter » pour lancer le main de ce fichier, ou « Parcourir la preuve pas à pas » pour parcourir une preuve une tactique à la fois.",
  "Lean is checking line {line} of {total} in this file. The goals at line {cursor} show once it gets there.": "Lean vérifie la ligne {line} sur {total} de ce fichier. Les buts de la ligne {cursor} s’afficheront quand il y sera arrivé.",
  "Lean is checking line {line} of {total} in this file…": "Lean vérifie la ligne {line} sur {total} de ce fichier…",

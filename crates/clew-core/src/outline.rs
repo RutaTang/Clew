@@ -509,7 +509,10 @@ fn lean_located(source: &str) -> Vec<Located> {
             });
             let at = match main {
                 Some(l) => {
-                    if l.symbol.name != name && name.ends_with(l.symbol.name.as_str()) {
+                    // The grammar's name with universe parameters ends in
+                    // their dot (`div.inductionOn.` of `.{u}`).
+                    let grammar = l.symbol.name.trim_end_matches('.');
+                    if l.symbol.name != name && name.ends_with(grammar) {
                         l.symbol.name = name.to_string();
                     }
                     found
@@ -623,9 +626,19 @@ fn lean_where_helpers(command: &str, line: usize) -> Vec<Located> {
     let indent_of = |l: &str| l.len() - l.trim_start().len();
     let mut helpers: Vec<(usize, &str)> = Vec::new();
     let mut indent = None;
+    // Inside a helper's doc comment, over lines: its words name nothing.
+    let mut in_comment = false;
     for (i, l) in lines.iter().enumerate().skip(at + 1) {
         let t = l.trim();
-        if t.is_empty() || t.starts_with("--") || t.starts_with("/-") {
+        if in_comment {
+            in_comment = !t.contains("-/");
+            continue;
+        }
+        if let Some(rest) = t.strip_prefix("/-") {
+            in_comment = !rest.contains("-/");
+            continue;
+        }
+        if t.is_empty() || t.starts_with("--") {
             continue;
         }
         let here = indent_of(l);
@@ -646,7 +659,7 @@ fn lean_where_helpers(command: &str, line: usize) -> Vec<Located> {
         let len = crate::lean::name_len(t);
         let name = &t[..len];
         let follows = t[len..].trim_start();
-        let defines = len > 0
+        let defines = name.chars().next().is_some_and(crate::lean::starts_name)
             && (follows.starts_with(':') && !follows.starts_with(":=")
                 || follows.starts_with('(')
                 || follows.starts_with('{')
@@ -5004,6 +5017,26 @@ def stub_only(x: str) -> str: ...
     /// A declaration spans its `where` helpers and its `termination_by`,
     /// and the helpers are listed; a `def … where` of field values defines
     /// none. Notation, macros and syntax are listed by what they write.
+    #[test]
+    fn lean_attributes_with_a_comment_after_them_keep_their_declaration() {
+        let src = "/-- The map. -/\n@[instance_reducible] -- Not `@[reducible]`: an embedding.\ndef toSubmodule : Nat := 1\n\n@[simp high + 1] -- first\nlemma l : True := trivial\n";
+        let items = extract_located(src, "lean");
+        let got: Vec<(&str, usize)> = items
+            .iter()
+            .map(|l| (l.symbol.name.as_str(), l.symbol.line))
+            .collect();
+        assert_eq!(got, [("toSubmodule", 3), ("l", 6)], "{items:#?}");
+    }
+
+    #[test]
+    fn lean_universe_names_and_helper_docs_read_as_written() {
+        let src = "def div.inductionOn.{u} {motive : Nat → Sort u} : Nat := 0\n\n\
+                   def outer (n : Nat) : Nat := go n\nwhere\n  /--\n  Steps down,\n  ...\n  value.\n  -/\n  go (k : Nat) : Nat := k\n";
+        let items = extract_located(src, "lean");
+        let names: Vec<&str> = items.iter().map(|l| l.symbol.name.as_str()).collect();
+        assert_eq!(names, ["div.inductionOn", "outer", "go"], "{items:#?}");
+    }
+
     #[test]
     fn lean_where_helpers_and_notation_are_outlined() {
         let src = "def w1 (n : Nat) : Nat := go n 0\nwhere\n  go : Nat → Nat → Nat\n    | 0, acc => acc\n    | k + 1, acc => go k (acc + 1)\n  helper (x : Nat) : Nat := x\n\n\

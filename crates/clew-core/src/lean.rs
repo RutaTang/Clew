@@ -34,21 +34,30 @@ const CONTINUATIONS: &[&str] = &[
 /// — outside a block comment, and not right below a line of attributes alone
 /// (`@[simp]`), which belongs to the declaration under it.
 ///
-/// Inside a `mutual … end` block, each declaration at the block's own
-/// indent starts a command too: written indented (as Lean's own sources
-/// and Theorem Proving in Lean write them), the block had no command start
-/// but its `end`, and neither its declarations nor the block were read.
+/// Inside a namespace, a section or a `mutual` block written indented (as
+/// Lean's own sources and Theorem Proving in Lean write them), each
+/// declaration at the block's own indent starts a command too, with the doc
+/// comment and attributes right above it: the block had no command start
+/// but its `end`, and its declarations were read as one. Only a
+/// declaration says what the indent is, and only outside brackets: a
+/// body's line (`if …` under a `def`), a field's doc, or a quotation
+/// (`` `(theorem …) ``) starts nothing.
 pub(crate) fn commands(source: &str) -> Vec<Range<usize>> {
     let mut starts = vec![0];
     // Open `/- … -/` comments (they nest) at the start of the line.
     let mut depth = 0usize;
     // Whether the last line with anything on it held attributes alone.
     let mut attributes_above = false;
-    // In a `mutual` block: its declarations' indent, once its first
-    // indented one says. Only a declaration (or its doc comment or
-    // attributes) says: a body's line at that indent (`if …`, under a
-    // `def` at column 0) starts nothing.
-    let mut mutual: Option<Option<usize>> = None;
+    // The blocks open — namespaces, sections, `mutual` — each with its own
+    // indent, and the indent its commands are written at, once an indented
+    // one says.
+    let mut blocks: Vec<(usize, Option<usize>)> = Vec::new();
+    // Brackets the command's lines so far leave open.
+    let mut open = 0i32;
+    // A doc comment and attributes, indented, right above the line, and at
+    // what indent: the doc a command of its own, as at the top; the
+    // attributes the start of the declaration's under them.
+    let mut lead: Option<Lead> = None;
     // A string literal left open at the end of the line above: the next
     // line is its text, whatever its first column holds.
     let mut in_string = false;
@@ -57,29 +66,61 @@ pub(crate) fn commands(source: &str) -> Vec<Range<usize>> {
         let text = line.trim_end_matches(['\n', '\r']);
         let indent = text.len() - text.trim_start().len();
         let inner = text.trim_start();
-        if depth == 0
-            && !in_string
-            && indent > 0
-            && (declares(inner) || inner.starts_with("/-") || inner.starts_with("@["))
-            && let Some(block) = mutual.as_mut()
-        {
-            let at = *block.get_or_insert(indent);
-            if at == indent && offset > 0 && !attributes_above && starts.last() != Some(&offset) {
-                starts.push(offset);
+        let free = depth == 0 && !in_string;
+        if offset == 0 {
+            enter(&mut blocks, text, 0);
+        } else if free && !attributes_above && starts_command(text) {
+            starts.push(offset);
+            open = 0;
+            lead = None;
+            enter(&mut blocks, text, 0);
+        } else if free && indent > 0 && open <= 0 && !inner.is_empty() {
+            let leads = inner.starts_with("/--") || only_attributes(inner);
+            let ends = matches!(inner.split_whitespace().next(), Some("end"))
+                && blocks.last().is_some_and(|b| b.0 == indent);
+            let declares_here =
+                declares(inner) || matches!(inner.split_whitespace().next(), Some("section"));
+            let fits = |b: &(usize, Option<usize>)| b.1.is_none_or(|at| at == indent);
+            match blocks.last_mut() {
+                Some(block) if leads && fits(block) => {
+                    let above = lead.take().filter(|l| l.indent == indent);
+                    lead = Some(match inner.starts_with("/--") {
+                        true => Lead {
+                            indent,
+                            doc: Some(offset),
+                            attributes: None,
+                        },
+                        false => Lead {
+                            indent,
+                            doc: above.and_then(|l| l.doc),
+                            attributes: above.and_then(|l| l.attributes).or(Some(offset)),
+                        },
+                    });
+                }
+                Some(block) if ends || (declares_here && fits(block)) => {
+                    if !ends {
+                        block.1 = Some(indent);
+                    }
+                    let lead = lead.take().filter(|l| l.indent == indent);
+                    let mut push = |start: usize| {
+                        if starts.last().is_some_and(|&last| last < start) {
+                            starts.push(start);
+                        }
+                    };
+                    if let Some(doc) = lead.and_then(|l| l.doc) {
+                        push(doc);
+                    }
+                    push(lead.and_then(|l| l.attributes).unwrap_or(offset));
+                    open = 0;
+                    enter(&mut blocks, inner, indent);
+                }
+                _ => lead = None,
             }
         }
-        if offset > 0 && depth == 0 && !in_string && !attributes_above && starts_command(text) {
-            starts.push(offset);
-            mutual = match text.split_whitespace().next() {
-                Some("mutual") => Some(None),
-                Some("end") => None,
-                _ => mutual,
-            };
-        } else if offset == 0 && text.split_whitespace().next() == Some("mutual") {
-            mutual = Some(None);
-        }
         let opened = depth == 0;
-        (depth, in_string) = scan_line(text, depth, in_string);
+        let brackets;
+        (depth, in_string, brackets) = scan_line(text, depth, in_string);
+        open += brackets;
         if !text.trim().is_empty() {
             attributes_above = opened && depth == 0 && only_attributes(text);
         }
@@ -91,6 +132,28 @@ pub(crate) fn commands(source: &str) -> Vec<Range<usize>> {
         .filter(|w| w[0] < w[1])
         .map(|w| w[0]..w[1])
         .collect()
+}
+
+/// A doc comment and attributes written, indented, above a declaration
+/// ([`commands`]): where each starts.
+#[derive(Clone, Copy)]
+struct Lead {
+    indent: usize,
+    doc: Option<usize>,
+    attributes: Option<usize>,
+}
+
+/// A command's first line `line`, at `indent`, opening a block
+/// (`namespace`, `section`, `mutual`) or closing one (`end`), on the stack
+/// of those open.
+fn enter(blocks: &mut Vec<(usize, Option<usize>)>, line: &str, indent: usize) {
+    match scoping(line) {
+        Scoping::Namespace(_) | Scoping::Block => blocks.push((indent, None)),
+        Scoping::End => {
+            blocks.pop();
+        }
+        Scoping::Other => {}
+    }
 }
 
 /// What a command does to the scopes of a Lean file.
@@ -267,8 +330,12 @@ fn starts_command(line: &str) -> bool {
 /// string runs on over lines), the line starting inside one (`in_string`)
 /// or not. Block comments nest; a `--` outside one ends the line's code; a
 /// `/-` in a string literal opens nothing.
-fn scan_line(line: &str, mut depth: usize, mut in_string: bool) -> (usize, bool) {
+///
+/// And how many more brackets — `(`, `[`, `{` — the line opens than it
+/// closes, outside comments and literals.
+fn scan_line(line: &str, mut depth: usize, mut in_string: bool) -> (usize, bool, i32) {
     let b = line.as_bytes();
+    let mut brackets = 0;
     let mut i = 0;
     while i < b.len() {
         let pair = |a: u8, c: u8| b[i] == a && b.get(i + 1) == Some(&c);
@@ -296,9 +363,9 @@ fn scan_line(line: &str, mut depth: usize, mut in_string: bool) -> (usize, bool)
         if pair(b'-', b'-') {
             break;
         }
-        // A character literal: `'"'` opens no string.
-        if b[i] == b'\'' && b.get(i + 2) == Some(&b'\'') {
-            i += 3;
+        // A character literal: `'"'`, `'\"'` open no string.
+        if let Some(end) = char_literal_end(b, i) {
+            i = end;
             continue;
         }
         if pair(b'/', b'-') {
@@ -306,12 +373,15 @@ fn scan_line(line: &str, mut depth: usize, mut in_string: bool) -> (usize, bool)
             i += 2;
             continue;
         }
-        if b[i] == b'"' {
-            in_string = true;
+        match b[i] {
+            b'"' => in_string = true,
+            b'(' | b'[' | b'{' => brackets += 1,
+            b')' | b']' | b'}' => brackets -= 1,
+            _ => {}
         }
         i += 1;
     }
-    (depth, in_string)
+    (depth, in_string, brackets)
 }
 
 /// `command` as the grammar can read its declaration: the arguments of its
@@ -420,6 +490,13 @@ pub(crate) fn declares(line: &str) -> bool {
             return false;
         };
         rest = inside[close + 1..].trim_start();
+        // A comment after the attributes: the declaration is below it.
+        if let Some(comment) = rest.strip_prefix("--") {
+            rest = comment
+                .split_once('\n')
+                .map_or("", |(_, below)| below)
+                .trim_start();
+        }
     }
     rest.split_whitespace()
         .find(|w| !LEAN_MODIFIERS.contains(w))
@@ -452,6 +529,12 @@ pub(crate) fn head(command: &str) -> Option<Head> {
         let rest = &command[at..];
         if let Some(inside) = rest.strip_prefix("@[") {
             at += 2 + closing_bracket(inside)? + 1;
+            at += command[at..].len() - command[at..].trim_start().len();
+            continue;
+        }
+        // A comment after the attributes (`@[simp] -- why`): read past.
+        if at > 0 && rest.starts_with("--") {
+            at += rest.find('\n').unwrap_or(rest.len());
             at += command[at..].len() - command[at..].trim_start().len();
             continue;
         }
@@ -612,7 +695,18 @@ fn name_length(text: &str) -> usize {
         }
         len += c.len_utf8();
     }
+    // A name's universe parameters (`def div.inductionOn.{u}`) are no part
+    // of it: read with it, the name ended in a dot.
+    if text[..len].ends_with('.') && text[len..].starts_with('{') {
+        len -= 1;
+    }
     len
+}
+
+/// Whether `c` can start a Lean name: a letter (Greek and letter-like
+/// symbols, `ℕ`, too), `_`, or the `«` of a quoted one.
+pub(crate) fn starts_name(c: char) -> bool {
+    c.is_alphabetic() || c == '_' || c == '«' || ('\u{2100}'..='\u{214F}').contains(&c)
 }
 
 /// Where the statement after a declaration's name (at `from`) ends.
@@ -658,27 +752,62 @@ const LEAN_MODIFIERS: &[&str] = &[
     "nonrec",
 ];
 
-/// How many brackets are open at the end of `text`, string literals aside.
+/// Where the character literal at byte `i` of `b` ends (`'x'`, `'"'`,
+/// `'\"'`, `'\n'`, `'∀'`), when one starts there: a quote no name runs
+/// into (`h'` is a name), closed after one character or one escape.
+/// `'\"'` read as a quote and a string, the string ran on to the end of
+/// the file, and nothing after it was read.
+pub(crate) fn char_literal_end(b: &[u8], i: usize) -> Option<usize> {
+    if b.get(i) != Some(&b'\'') {
+        return None;
+    }
+    if i > 0
+        && (b[i - 1].is_ascii_alphanumeric() || matches!(b[i - 1], b'_' | b'\'' | b'.' | 0x80..))
+    {
+        return None;
+    }
+    let first = *b.get(i + 1)?;
+    if first == b'\\' {
+        let close = b.get(i + 3..)?.iter().take(12).position(|&c| c == b'\'')?;
+        return Some(i + 3 + close + 1);
+    }
+    let width = match first {
+        0x00..=0x7f => 1,
+        0xc0..=0xdf => 2,
+        0xe0..=0xef => 3,
+        _ => 4,
+    };
+    (b.get(i + 1 + width) == Some(&b'\'') && first != b'\'').then_some(i + 2 + width)
+}
+
+/// How many brackets are open at the end of `text`, string and character
+/// literals aside.
 fn bracket_depth(text: &str) -> i32 {
+    let b = text.as_bytes();
     let mut depth = 0;
     let mut in_string = false;
-    let mut escaped = false;
-    for c in text.chars() {
+    let mut i = 0;
+    while i < b.len() {
         if in_string {
-            match c {
-                _ if escaped => escaped = false,
-                '\\' => escaped = true,
-                '"' => in_string = false,
+            match b[i] {
+                b'\\' => i += 1,
+                b'"' => in_string = false,
                 _ => {}
             }
+            i += 1;
             continue;
         }
-        match c {
-            '"' => in_string = true,
-            '(' | '[' | '{' => depth += 1,
-            ')' | ']' | '}' => depth -= 1,
+        if let Some(end) = char_literal_end(b, i) {
+            i = end;
+            continue;
+        }
+        match b[i] {
+            b'"' => in_string = true,
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth -= 1,
             _ => {}
         }
+        i += 1;
     }
     depth
 }
@@ -713,28 +842,34 @@ fn only_attributes(line: &str) -> bool {
 }
 
 /// The byte index of the `]` closing the bracket `text` follows, brackets in
-/// string literals aside.
+/// string and character literals aside.
 fn closing_bracket(text: &str) -> Option<usize> {
+    let b = text.as_bytes();
     let mut depth = 0usize;
     let mut in_string = false;
-    let mut escaped = false;
-    for (i, c) in text.char_indices() {
+    let mut i = 0;
+    while i < b.len() {
         if in_string {
-            match c {
-                _ if escaped => escaped = false,
-                '\\' => escaped = true,
-                '"' => in_string = false,
+            match b[i] {
+                b'\\' => i += 1,
+                b'"' => in_string = false,
                 _ => {}
             }
+            i += 1;
             continue;
         }
-        match c {
-            '"' => in_string = true,
-            '[' => depth += 1,
-            ']' if depth == 0 => return Some(i),
-            ']' => depth -= 1,
+        if let Some(end) = char_literal_end(b, i) {
+            i = end;
+            continue;
+        }
+        match b[i] {
+            b'"' => in_string = true,
+            b'[' => depth += 1,
+            b']' if depth == 0 => return Some(i),
+            b']' => depth -= 1,
             _ => {}
         }
+        i += 1;
     }
     None
 }
@@ -811,18 +946,81 @@ pub fn main_lines(source: &str) -> Option<(usize, (usize, usize))> {
 /// How a run of a Lean file's `main` ended.
 pub use crate::spawn::RunEnd;
 
-/// Run the `main` of the Lean file `file` as Lake runs one: `lake env lean
-/// --run <file>` in its Lake project `project`, with the project's
-/// dependencies on Lean's path. Each line it writes is handed to `said` as
-/// it comes, with whether it was written to stderr. Blocking; stopped, with
+/// The modules a Lean file's header imports (`import A.B`, `public import
+/// C`, `import all D`, several to a line), in order.
+pub(crate) fn header_imports(source: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for range in commands(source) {
+        let command = &source[range];
+        let code: String = command
+            .lines()
+            .map(|l| l.split("--").next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let mut words = code.split_whitespace().peekable();
+        while words
+            .next_if(|w| matches!(*w, "public" | "private" | "meta"))
+            .is_some()
+        {}
+        match words.next() {
+            Some("import") => out.extend(
+                words
+                    .filter(|w| *w != "all")
+                    .take_while(|w| name_len(w) == w.len())
+                    .map(str::to_string),
+            ),
+            Some("module" | "prelude") | None => {}
+            // A comment, or the file's first declaration: the header ends.
+            Some(w) if w.starts_with("/-") => {}
+            Some(_) => break,
+        }
+    }
+    out
+}
+
+/// Whether module `module` is the toolchain's own (Lean's core: `Init`,
+/// `Std`, `Lean`, `Lake`), built with it, and not the project's to build.
+fn core_module(module: &str) -> bool {
+    matches!(
+        module.split('.').next(),
+        Some("Init" | "Std" | "Lean" | "Lake")
+    )
+}
+
+/// Run the `main` of the Lean file `file` as Lake runs one: what it
+/// imports built first (`lake build +A.B`), then `lake env lean --run
+/// <file>` in its Lake project `project`, with the project's dependencies
+/// on Lean's path. Each line either writes is handed to `said` as it comes,
+/// with whether it was written to stderr. Blocking; stopped, with
 /// everything it started, once `cancel` is set.
+///
+/// `lake env` builds nothing: a `main` importing a module of its own
+/// project ran into "unknown module prefix" until the project was built by
+/// hand.
 pub fn run_main(
     lake: &Path,
     project: &Path,
     file: &Path,
-    said: impl FnMut(&str, bool),
+    mut said: impl FnMut(&str, bool),
     cancel: &std::sync::atomic::AtomicBool,
 ) -> Result<RunEnd, String> {
+    let source = crate::statefile::read_capped(file, 8 << 20).unwrap_or_default();
+    let modules: Vec<String> = header_imports(&source)
+        .into_iter()
+        .filter(|m| !core_module(m))
+        .collect();
+    if !modules.is_empty() {
+        let mut build = crate::spawn::command(lake);
+        build
+            .arg("build")
+            .args(modules.iter().map(|m| format!("+{m}")))
+            .current_dir(project)
+            .env("PATH", crate::linerpc::child_path());
+        match crate::spawn::run_streaming(build, &mut said, cancel)? {
+            RunEnd::Exited(0) => {}
+            ended => return Ok(ended),
+        }
+    }
     let mut command = crate::spawn::command(lake);
     command
         .args(["env", "lean", "--run"])
@@ -878,6 +1076,42 @@ pub fn mathlib_build(root: &Path) -> Option<(PathBuf, bool)> {
 #[cfg(test)]
 mod tests {
 
+    /// A namespace written indented has its declarations read one by one —
+    /// their docs and attributes with them, its `end` its own — while a
+    /// structure's field docs, a body's lines and a quotation's
+    /// declarations start nothing.
+    #[test]
+    fn an_indented_namespace_holds_its_declarations() {
+        let src = "namespace A\n  /-- One. -/\n  def one := 1\n\n  @[simp]\n  theorem t : one = 1 := rfl\n\n  namespace B\n    def two := 2\n  end B\n\n  structure S where\n    /-- A field. -/\n    x : Nat\nend A\n\nnamespace C\ndef f (n : Nat) : Nat :=\n  if n = 0 then 0 else n\nmacro \"m\" : command => `(\n  theorem q : True := trivial)\nend C\n";
+        let lines: Vec<usize> = commands(src)
+            .iter()
+            .map(|r| src[..r.start].matches('\n').count())
+            .collect();
+        assert_eq!(lines, [0, 1, 2, 4, 7, 8, 9, 11, 14, 16, 17, 19, 21]);
+        let (paths, _) = scopes(src, &commands(src));
+        assert_eq!(paths[5], "A.B", "{paths:?}");
+        assert_eq!(paths[7], "A");
+    }
+
+    /// A character literal holds a quote without opening a string: an
+    /// escaped one (`'\"'`) read as a string's start, the rest of the file
+    /// was one string, and none of its declarations were read.
+    #[test]
+    fn a_char_literal_opens_no_string() {
+        let src = "def q (c : Char) : Bool := c == '\\\"'\n\ndef r := 'x'\n\ndef s := ['\\'', '∀', '\"']\n\ndef t (h' : Nat) := h'\n";
+        let lines: Vec<usize> = commands(src)
+            .iter()
+            .map(|r| src[..r.start].matches('\n').count())
+            .collect();
+        assert_eq!(lines, [0, 2, 4, 6]);
+        let b = src.as_bytes();
+        let at = |needle: &str| src.find(needle).unwrap();
+        assert_eq!(char_literal_end(b, at("'\\\"'")), Some(at("'\\\"'") + 4));
+        assert_eq!(char_literal_end(b, at("'∀'")), Some(at("'∀'") + 5));
+        assert_eq!(char_literal_end(b, at("' : Nat")), None, "a name's prime");
+        assert_eq!(bracket_depth("f ['(', ')'] (x"), 1);
+    }
+
     /// In a `mutual` block, a declaration starts a command at the block's
     /// own indent, whether at column 0 or indented; the lines of a body
     /// start none, at whatever indent.
@@ -892,6 +1126,7 @@ mod tests {
         let flush = "mutual\ndef f (n : Nat) : Nat :=\n  if n = 0 then 0 else g (n - 1)\ndef g (n : Nat) : Nat :=\n  if n = 0 then 1 else f (n - 1)\nend\n";
         assert_eq!(lines(flush), [0, 1, 3, 5]);
         let indented = "mutual\n  def f (n : Nat) : Nat :=\n    if n = 0 then 0 else g (n - 1)\n  /-- The other. -/\n  def g (n : Nat) : Nat :=\n    f n\nend\n";
+        // The doc comment a command of its own, as at the top.
         assert_eq!(lines(indented), [0, 1, 3, 4, 6]);
     }
 
@@ -936,6 +1171,174 @@ mod tests {
         );
     }
 
+    /// Every Lean file under `CLEW_TEST_LEAN_SRC` (a toolchain's own
+    /// sources: Lean, Lake, Std) read as Clew reads one — its commands,
+    /// scopes, folds, outline, colours and weak spots — without a panic, in
+    /// time; what reads oddly is listed: a declaration the outline lost, a
+    /// name no Lean name is.
+    #[test]
+    #[ignore = "reads a Lean source tree (CLEW_TEST_LEAN_SRC=path); run explicitly"]
+    fn live_a_lean_source_tree_reads_whole() {
+        let root = PathBuf::from(
+            std::env::var("CLEW_TEST_LEAN_SRC").expect("CLEW_TEST_LEAN_SRC names a folder"),
+        );
+        fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+            for entry in std::fs::read_dir(dir).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if path.extension().is_some_and(|e| e == "lean") {
+                    out.push(path);
+                }
+            }
+        }
+        let mut files = Vec::new();
+        walk(&root, &mut files);
+        files.sort();
+        let keywords = [
+            "def",
+            "theorem",
+            "lemma",
+            "abbrev",
+            "structure",
+            "class",
+            "inductive",
+        ];
+        let mut slow = Vec::new();
+        let mut lost = Vec::new();
+        let mut odd = Vec::new();
+        let (mut declared, mut found) = (0usize, 0usize);
+        for file in &files {
+            let source = std::fs::read_to_string(file).unwrap();
+            let started = std::time::Instant::now();
+            let commands = commands(&source);
+            let _ = scopes(&source, &commands);
+            let _ = blocks(&source);
+            let _ = header_imports(&source);
+            let located = crate::outline::extract_located(&source, "lean");
+            let _ = crate::highlight::highlight_lines(&source, Some("lean"));
+            let rel = file
+                .strip_prefix(&root)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
+            let _ = crate::weakspots::scan_file(&rel, &source, "lean");
+            let took = started.elapsed();
+            if took > std::time::Duration::from_secs(2) {
+                slow.push((took, rel.clone()));
+            }
+            // Declarations at the start of a line, by their keyword past
+            // modifiers and attributes, against the outline's.
+            let named: std::collections::HashSet<usize> =
+                located.iter().map(|l| l.symbol.line).collect();
+            let mut in_comment = 0usize;
+            for (i, line) in source.lines().enumerate() {
+                let (depth, _, _) = scan_line(line, in_comment, false);
+                let was = in_comment;
+                in_comment = depth;
+                if was > 0 {
+                    continue;
+                }
+                let t = line.trim_start();
+                // Indented, or written in a macro's quotation (`$typeName`):
+                // no declaration of the file's own.
+                if line.len() - t.len() > 2 || t.contains('$') {
+                    continue;
+                }
+                let Some(h) = head(t) else { continue };
+                let word = &t[h.keyword..].split_whitespace().next().unwrap_or("");
+                if !keywords.contains(word) || h.name.is_empty() {
+                    continue;
+                }
+                declared += 1;
+                if named.contains(&(i + 1)) {
+                    found += 1;
+                } else if lost.len() < 60 {
+                    lost.push(format!(
+                        "{rel}:{}: {}",
+                        i + 1,
+                        t.chars().take(70).collect::<String>()
+                    ));
+                }
+            }
+            for l in &located {
+                let name = &l.symbol.name;
+                let checked = matches!(
+                    l.symbol.kind.as_str(),
+                    "function"
+                        | "theorem"
+                        | "struct"
+                        | "class"
+                        | "inductive"
+                        | "field"
+                        | "constructor"
+                        | "namespace"
+                        | "axiom"
+                );
+                let ok = name
+                    .split('.')
+                    .all(|part| !part.is_empty() && name_len(part) == part.len())
+                    || name.starts_with('«');
+                if checked && !ok && odd.len() < 60 {
+                    odd.push(format!(
+                        "{rel}:{}: {} {name:?}",
+                        l.symbol.line, l.symbol.kind
+                    ));
+                }
+            }
+        }
+        eprintln!(
+            "{} files; {found} of {declared} declarations outlined",
+            files.len()
+        );
+        eprintln!("slow: {slow:#?}");
+        eprintln!("lost ({}): {lost:#?}", lost.len());
+        eprintln!("odd names ({}): {odd:#?}", odd.len());
+        assert!(slow.is_empty(), "{slow:?}");
+    }
+
+    /// A `main` importing a module of its own project runs, against a real
+    /// Lake (the one `CLEW_TEST_LAKE` names): the import is built first.
+    #[test]
+    #[ignore = "needs Lean's lake (CLEW_TEST_LAKE=path/to/lake); run explicitly"]
+    fn live_a_main_importing_its_project_runs() {
+        let lake = PathBuf::from(
+            std::env::var("CLEW_TEST_LAKE").expect("CLEW_TEST_LAKE names the lake binary"),
+        );
+        let dir = crate::testutil::TempDir::new("lean-run-live");
+        let project = dir.to_path_buf();
+        let write = |rel: &str, text: &str| {
+            let path = project.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, text).unwrap();
+            path
+        };
+        write(
+            "lakefile.toml",
+            "name = \"demo\"\n\n[[lean_lib]]\nname = \"Demo\"\n",
+        );
+        if let Ok(toolchain) = std::env::var("CLEW_TEST_LEAN_TOOLCHAIN") {
+            write("lean-toolchain", &format!("{toolchain}\n"));
+        }
+        write("Demo/Basic.lean", "def two : Nat := 2\n");
+        let main = write(
+            "Main.lean",
+            "import Demo.Basic\n\ndef main : IO Unit :=\n  IO.println s!\"two is {two}\"\n",
+        );
+        let mut said = Vec::new();
+        let end = run_main(
+            &lake,
+            &project,
+            &main,
+            |line, _| said.push(line.to_string()),
+            &std::sync::atomic::AtomicBool::new(false),
+        )
+        .unwrap();
+        eprintln!("{said:#?}");
+        assert_eq!(end, RunEnd::Exited(0), "{said:?}");
+        assert!(said.iter().any(|l| l == "two is 2"), "{said:?}");
+    }
+
     /// A Lean file's `main` runs through `lake env lean --run`, in its
     /// project, its lines said as they come from either stream, its exit
     /// code kept; stopped, it is stopped.
@@ -977,6 +1380,43 @@ mod tests {
             "{said:?}"
         );
         assert!(said.contains(&("oops".to_string(), true)), "{said:?}");
+        // What it imports of its own is built first; Lean's own is not. A
+        // build that fails runs nothing.
+        std::fs::write(
+            &file,
+            "/- A program. -/\nimport Lean\npublic import Proj.Basic Proj.More -- two\n\ndef main : IO Unit := pure ()\nimport Not.This\n",
+        )
+        .unwrap();
+        let mut said = Vec::new();
+        let end = run_main(
+            &lake,
+            &project,
+            &file,
+            |line, _| said.push(line.to_string()),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert_eq!(end, RunEnd::Exited(3));
+        assert_eq!(said[0], "args: build +Proj.Basic +Proj.More", "{said:?}");
+        assert!(!said.iter().any(|l| l.contains("--run")), "{said:?}");
+        std::fs::write(&lake, "#!/bin/sh\necho \"args: $*\"\n").unwrap();
+        let mut said = Vec::new();
+        let end = run_main(
+            &lake,
+            &project,
+            &file,
+            |line, _| said.push(line.to_string()),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert_eq!(end, RunEnd::Exited(0));
+        assert_eq!(
+            said,
+            [
+                "args: build +Proj.Basic +Proj.More".to_string(),
+                format!("args: env lean --run {}", file.display())
+            ]
+        );
         // Stopped while it runs.
         std::fs::write(&lake, "#!/bin/sh\necho started\nsleep 30\n").unwrap();
         let cancel = AtomicBool::new(false);

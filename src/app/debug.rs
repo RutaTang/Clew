@@ -3511,6 +3511,20 @@ impl App {
     }
 
     pub(crate) fn on_breakpoint_toggle(&mut self, path: PathBuf, line: usize) -> Task<Message> {
+        // Lean runs no debugger: a breakpoint there would stop nothing.
+        if crate::highlight::detect(&path) == Some("lean")
+            && !self
+                .debug
+                .breakpoints
+                .get(&path)
+                .is_some_and(|m| m.contains_key(&line))
+        {
+            self.status = tr!(
+                "Lean has no debugger, so a breakpoint here would stop nothing. To follow a proof, use Step Through Proof."
+            )
+            .into();
+            return Task::none();
+        }
         let map = self.debug.breakpoints.entry(path.clone()).or_default();
         if map.remove(&line).is_none() {
             map.insert(line, Bp::default());
@@ -3630,8 +3644,16 @@ impl App {
         match message {
             DebugMsg::Start => self.start_debug(),
             DebugMsg::Run => self.start_run(),
-            DebugMsg::RunTest { line, no_debug } => self.run_test_at(line, no_debug),
-            DebugMsg::RunMain { line, no_debug } => self.run_main_at(line, no_debug),
+            // Picked from the code menu, or a ▶'s: the menu goes as the run
+            // starts. It stayed up over the run it had started.
+            DebugMsg::RunTest { line, no_debug } => {
+                self.proj.context_menu = None;
+                self.run_test_at(line, no_debug)
+            }
+            DebugMsg::RunMain { line, no_debug } => {
+                self.proj.context_menu = None;
+                self.run_main_at(line, no_debug)
+            }
             DebugMsg::ShowTab(tab) => self.show_run_tab(tab),
             DebugMsg::CloseTab(tab) => self.close_run_tab(tab),
             DebugMsg::Again => self.on_debug_again(),

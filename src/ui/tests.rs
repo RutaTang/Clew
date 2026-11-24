@@ -5312,6 +5312,64 @@ fn the_code_menu_shows_the_breakpoints_key() {
     assert!(key.x > row.x + row.width, "after its words");
 }
 
+/// A Lean file's code menu, and its `main`'s ▶ menu, offer no breakpoint:
+/// Lean runs no debugger. Its ▶ runs the program, and only runs it.
+#[test]
+fn a_lean_files_menus_offer_no_breakpoint() {
+    let mut app = reader_app();
+    app.proj.panes[0].as_mut().unwrap().lang_key = Some("lean");
+    let menu = |gutter| crate::ContextMenu {
+        pane: 0,
+        line: 1,
+        col: 1,
+        x: 20.0,
+        y: 20.0,
+        insight: None,
+        served: true,
+        by_pointer: true,
+        line_top: None,
+        test: None,
+        gutter,
+    };
+    app.proj.context_menu = Some(menu(None));
+    let mut sim = sim_of(&app);
+    assert!(shows(&mut sim, "Toggle Bookmark"));
+    assert!(!shows(&mut sim, "Toggle Breakpoint"));
+    assert!(!shows(&mut sim, "Conditional Breakpoint…"));
+    drop(sim);
+    app.proj.context_menu = Some(menu(Some(crate::GutterRun {
+        main: Some("Main.lean".into()),
+        debug: false,
+    })));
+    let mut sim = sim_of(&app);
+    assert!(shows(&mut sim, "Run Main.lean"));
+    assert!(!shows(&mut sim, "Debug Main.lean"));
+    assert!(!shows(&mut sim, "Add Breakpoint"));
+    drop(sim);
+    // Picked, the menu goes as the run starts.
+    let sent = click(sim_of(&app), "Run Main.lean");
+    for m in sent {
+        let _ = app.update(m);
+    }
+    assert!(app.proj.context_menu.is_none());
+    // F9 there says why nothing is set.
+    let abs = app.proj.panes[0]
+        .as_ref()
+        .unwrap()
+        .abs
+        .with_extension("lean");
+    let _ = app.update(Message::Debug(crate::DebugMsg::BreakpointToggle {
+        path: abs.clone(),
+        line: 2,
+    }));
+    assert!(!app.debug.breakpoints.contains_key(&abs));
+    assert!(
+        app.status.contains("Lean has no debugger"),
+        "{}",
+        app.status
+    );
+}
+
 /// L11: the walkthrough player's ‹ and › do nothing at the ends — at
 /// "1/1" both stayed lit — and its × puts the tour away.
 #[test]

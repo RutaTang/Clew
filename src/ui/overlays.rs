@@ -504,9 +504,20 @@ pub(crate) fn context_menu<'a>(app: &App, menu: &'a crate::ContextMenu) -> Eleme
             ),
         ],
     ];
+    // Lean runs no debugger: no breakpoint is offered in it.
+    let lean = app
+        .proj
+        .panes
+        .get(menu.pane)
+        .and_then(Option::as_ref)
+        .is_some_and(|v| v.lang_key == Some("lean"));
+    if lean {
+        groups.pop();
+    }
     // From a gutter ▶: what runs from the line, and its breakpoint.
     if menu.gutter.is_some() {
-        groups.drain(..groups.len() - 2);
+        let kept = if lean { 1 } else { 2 };
+        groups.drain(..groups.len() - kept);
     }
     // As designed, or as wide as its longest row (its keys too) in the
     // reader's language, so none wraps or is clipped. A row is its words,

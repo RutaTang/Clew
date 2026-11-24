@@ -1101,6 +1101,7 @@
  "Latest calls": "最近的调用",
  "Laying out the graph…": "正在布局图…",
  "Lean could not be started: {error}": "无法启动 Lean：{error}",
+ "Lean has no debugger, so a breakpoint here would stop nothing. To follow a proof, use Step Through Proof.": "Lean 没有调试器，在这里设断点不会让任何东西停下。要跟随证明，请使用“逐步查看证明”。",
  "Lean has no debugger. Use Run to run this file's main, or Step Through Proof to go through a proof one tactic at a time.": "Lean 没有调试器。可用“运行”运行这个文件的 main，或用“逐步查看证明”一次一条策略地查看证明。",
  "Lean is checking line {line} of {total} in this file. The goals at line {cursor} show once it gets there.": "Lean 正在检查此文件的第 {line} 行（共 {total} 行）。检查到第 {cursor} 行后，会在这里显示该行的目标。",
  "Lean is checking line {line} of {total} in this file…": "Lean 正在检查此文件的第 {line} 行（共 {total} 行）…",

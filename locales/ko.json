@@ -1101,6 +1101,7 @@
  "Latest calls": "최근 호출",
  "Laying out the graph…": "그래프를 배치하는 중…",
  "Lean could not be started: {error}": "Lean을 시작할 수 없습니다: {error}",
+ "Lean has no debugger, so a breakpoint here would stop nothing. To follow a proof, use Step Through Proof.": "Lean에는 디버거가 없어 여기에 중단점을 두어도 아무것도 멈추지 않습니다. 증명을 따라가려면 '증명 단계별 보기'를 사용하세요.",
  "Lean has no debugger. Use Run to run this file's main, or Step Through Proof to go through a proof one tactic at a time.": "Lean에는 디버거가 없습니다. ‘실행’으로 이 파일의 main을 실행하거나, ‘증명 단계별 보기’로 증명을 전술 하나씩 따라가세요.",
  "Lean is checking line {line} of {total} in this file. The goals at line {cursor} show once it gets there.": "Lean이 이 파일의 {total}줄 중 {line}번째 줄을 검사하는 중입니다. {cursor}번째 줄까지 검사하면 그 줄의 목표를 보여 줍니다.",
  "Lean is checking line {line} of {total} in this file…": "Lean이 이 파일의 {total}줄 중 {line}번째 줄을 검사하는 중…",

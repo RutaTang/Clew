@@ -408,7 +408,10 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
             Some((
                 crate::lsp::registry::default_for_language(k)
                     .filter(|_| at_work)
-                    .map(|server| server.name),
+                    .map(|server| server.name)
+                    // Named as its language ("lean"): said once, not
+                    // "Lean: lean ready".
+                    .filter(|name| !name.eq_ignore_ascii_case(lang)),
                 status,
             ))
         });

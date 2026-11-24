@@ -3269,6 +3269,81 @@ mod tests {
         client.shutdown().await;
     }
 
+    /// A Lake project against a real `lake serve` (the one `CLEW_TEST_LAKE`
+    /// names): a module importing another of the project's is checked —
+    /// Lake builds the import — with how far it has got said as it goes;
+    /// the expected type is given beside the goals in a tactic proof; and
+    /// "unsolved goals" spans the lines of the proof it is about.
+    #[tokio::test]
+    #[ignore = "needs Lean's lake (CLEW_TEST_LAKE=path/to/lake); run explicitly"]
+    async fn live_lake_project_against_lake_serve() {
+        let exe = std::path::PathBuf::from(
+            std::env::var("CLEW_TEST_LAKE").expect("CLEW_TEST_LAKE names the lake binary"),
+        );
+        let root = crate::testutil::TempDir::new("lake-serve");
+        let write = |rel: &str, text: &str| {
+            let path = root.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, text).unwrap();
+            path
+        };
+        write(
+            "lakefile.toml",
+            "name = \"demo\"\ndefaultTargets = [\"Demo\"]\n\n[[lean_lib]]\nname = \"Demo\"\n",
+        );
+        if let Ok(toolchain) = std::env::var("CLEW_TEST_LEAN_TOOLCHAIN") {
+            write("lean-toolchain", &format!("{toolchain}\n"));
+        }
+        write("Demo/Basic.lean", "def two : Nat := 2\n");
+        let src = "import Demo.Basic\n\ntheorem t : two = 2 := by\n  exact rfl\n\ntheorem bad (p q : Prop) (hp : p) : p ∧ q := by\n  constructor\n  exact hp\n";
+        let file = write("Demo/Use.lean", src);
+        let client = LspClient::start(&exe, &["serve".into()], &root, None)
+            .await
+            .unwrap();
+        client.did_open(&file, "lean4", 1, src);
+        // Checked to the end, the import built: what Lean said of it.
+        let mut seen_checking = false;
+        let mut diags = Vec::new();
+        for _ in 0..240 {
+            let snapshot = client.snapshot().unwrap();
+            seen_checking |= snapshot.checking(&file).is_some();
+            diags = snapshot.diagnostics(&file).to_vec();
+            if !diags.is_empty() && snapshot.checking(&file).is_none() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+        eprintln!("checking seen: {seen_checking}; diagnostics: {diags:#?}");
+        assert!(
+            !diags.iter().any(|d| d.message.contains("unknown")),
+            "the project's import resolved: {diags:#?}"
+        );
+        let unsolved = diags
+            .iter()
+            .find(|d| d.message.contains("unsolved goals"))
+            .expect("the bad proof's error");
+        assert!(
+            unsolved.end_line > unsolved.line,
+            "said on the proof's lines: {unsolved:?}"
+        );
+        // Before `exact`: the goal. On `rfl`, the proof done, and the type
+        // `rfl` is to have — as Lean's own view shows both.
+        let before = client.lean_goal(&file, 3, 2).await.unwrap();
+        eprintln!("before exact: {before:?}");
+        assert!(
+            matches!(&before, Some(LeanGoal::Tactic(goals, _)) if *goals == ["⊢ two = 2"]),
+            "{before:?}"
+        );
+        let on_rfl = client.lean_goal(&file, 3, 9).await.unwrap();
+        eprintln!("on rfl: {on_rfl:?}");
+        assert!(
+            matches!(&on_rfl, Some(LeanGoal::Tactic(_, Some(ty))) if ty == "⊢ two = 2"),
+            "{on_rfl:?}"
+        );
+        client.did_close(&file);
+        client.shutdown().await;
+    }
+
     /// The Lean goals against a real Lean server (`lean --server`, the one
     /// `CLEW_TEST_LEAN` names): a tactic proof's goal before its tactic, no
     /// goals once it is done, and outside any tactic block the type a term

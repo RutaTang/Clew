@@ -668,14 +668,14 @@ fn a_lean_main_has_a_play_mark_that_runs_it() {
         })
     );
     assert_eq!(menu.test, None);
-    // Run: through Lake — not found here, which it says.
-    let _ = app.update(Message::Hover(HoverMsg::ContextMenuClosed));
+    // Run: through Lake — not found here, which it says — the menu gone.
     let _no_lean = clew_core::testutil::EnvVars::new().set("ELAN_HOME", root.join("no-elan"));
     let _ = app.update(Message::Debug(DebugMsg::RunMain {
         line: 3,
         no_debug: true,
     }));
     assert!(app.status.contains("lake"), "{}", app.status);
+    assert!(app.proj.context_menu.is_none());
 }
 
 /// The gutter's ▶: on a Rust file's tests, its test module and its `main`,

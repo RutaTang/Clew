@@ -1101,6 +1101,7 @@
  "Latest calls": "最近の呼び出し",
  "Laying out the graph…": "グラフをレイアウト中…",
  "Lean could not be started: {error}": "Lean を起動できませんでした: {error}",
+ "Lean has no debugger, so a breakpoint here would stop nothing. To follow a proof, use Step Through Proof.": "Lean にはデバッガーがないため、ここにブレークポイントを置いても何も止まりません。証明をたどるには「証明をステップ実行」を使ってください。",
  "Lean has no debugger. Use Run to run this file's main, or Step Through Proof to go through a proof one tactic at a time.": "Lean にはデバッガーがありません。「実行」でこのファイルの main を実行するか、「証明をステップ実行」で証明を 1 タクティクずつたどってください。",
  "Lean is checking line {line} of {total} in this file. The goals at line {cursor} show once it gets there.": "Lean がこのファイルを検査しています（{total} 行中 {line} 行目）。{cursor} 行目まで進むと、そこのゴールを表示します。",
  "Lean is checking line {line} of {total} in this file…": "Lean がこのファイルを検査中（{total} 行中 {line} 行目）…",
