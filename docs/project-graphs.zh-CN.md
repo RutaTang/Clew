@@ -4,7 +4,7 @@
 
 工具条上的 **项目图** 打开 Clew 从项目文件里读出的各种图。它像读代码的人一样静态地读：运行时按数据注册的路由、只由 ORM 建出来的表，都看不到。什么都没找到的图不会列出；远程项目的图在它所在的主机上读取。
 
-- **SQL** —— 数据库结构（表、列、外键、视图），按顺序执行每个迁移后的结构（也包括 Rails 的迁移，down 迁移不计），每个视图和 `INSERT … SELECT` 追溯到它读取的表的数据血缘，以及引用每张表的代码。
+- **SQL** —— 以表格形式绘制的数据库结构：每张表一张卡片，列出各列的类型和标记（主键、标识列、唯一、可否为空 —— 图例说明含义），并从每个外键的列连线到它引用的列；视图和枚举也各有卡片。指向一张表会点亮它的连线，指向一列会显示它的类型、默认值、注释和引用；单击选中一张表，再次单击打开它。结构由按顺序重放的迁移得到（编号 `0002` 在 `00010` 之前，down 迁移不计），支持 PostgreSQL、MySQL、SQLite 和 SQL Server 的写法 —— 包括 `DO` 块、`ALTER COLUMN`、重命名和 `SET SCHEMA` —— 也可读取 Prisma schema、Django 模型、SQLAlchemy 模型或 Rails 的 `db/`；并列的多个迁移文件夹各自是一个数据库。此外：每个迁移后的结构，每个视图和 `INSERT … SELECT` 追溯到它读取的表的数据血缘，以及引用每张表的代码。
 - **路由** —— 每条路由对应的处理函数：Flask、FastAPI、Django、Express 及同类框架、NestJS、Next.js、Spring、ASP.NET、Laravel、Symfony、Rails，以及 Go 的 `net/http`、gin、echo 和 chi。
 - **框架** —— 依赖注入（Spring、.NET、Nest 和 Angular）、ORM 关系（JPA、Entity Framework、Eloquent、ActiveRecord、Django、SQLAlchemy、TypeORM）和 WordPress 钩子。
 - **Python** —— 类继承关系及每个类的方法解析顺序（MRO），pytest fixture 以及用到它们的地方，还有运行时才决定调用谁的地方（用算出来的名字调用 `getattr`、存放可调用对象的字典、由装饰器注册的函数）以及它们可能调用到的东西。

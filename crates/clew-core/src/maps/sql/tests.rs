@@ -964,3 +964,36 @@ fn a_prisma_schema_stands_for_its_migrations() {
         ["id Int [key] [not null]"]
     );
 }
+
+#[test]
+fn django_models_are_a_database_beside_the_projects_sql() {
+    let corpus = Corpus::of(&[
+        (
+            "shop/models.py",
+            "from django.db import models\n\nclass Order(models.Model):\n    total = models.IntegerField()\n\nclass Line(models.Model):\n    order = models.ForeignKey(Order, on_delete=models.CASCADE)\n",
+        ),
+        (
+            "search/sql/index.sql",
+            "CREATE TABLE terms (word text PRIMARY KEY);",
+        ),
+        (
+            "search/sql/extra.sql",
+            "CREATE TABLE hits (word text REFERENCES terms);",
+        ),
+    ]);
+    let built = maps(&corpus);
+    let titled = |t: &str| {
+        built
+            .iter()
+            .find(|m| m.title == t)
+            .unwrap_or_else(|| panic!("{t}"))
+    };
+    assert_eq!(
+        joins(titled("Database schema · shop/models.py")),
+        ["Line.order_id → Order.id"]
+    );
+    assert_eq!(
+        joins(titled("Database schema · search/sql")),
+        ["hits.word → terms.word"]
+    );
+}

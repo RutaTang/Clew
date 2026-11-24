@@ -28,11 +28,13 @@ use super::{Corpus, MapBuilder, Source};
 use crate::highlight::Lang;
 
 pub(crate) mod ddl;
+mod django;
 mod files;
 mod lex;
 mod prisma;
 mod rails;
 mod schema;
+mod sqlalchemy;
 #[cfg(test)]
 mod tests;
 
@@ -82,12 +84,82 @@ pub(crate) fn schemas(corpus: &Corpus) -> Vec<(files::Database, Schema)> {
             )),
         }
     }
+    // Django's models: the database they make (Django's migrations are
+    // Python, not SQL).
+    let models: Vec<&Source> = corpus
+        .files
+        .iter()
+        .filter(|s| django::is_models(s) && !crate::weakspots::is_test_path(&s.rel))
+        .collect();
+    if let Some(schema) = django::schema(&models) {
+        out.push((
+            files::Database {
+                root: match models.as_slice() {
+                    [one] => one.rel.clone(),
+                    _ => "Django models".to_string(),
+                },
+                changes: Vec::new(),
+            },
+            schema,
+        ));
+    }
+    // SQLAlchemy's models (Alembic's migrations are Python too).
+    let declared: Vec<&Source> = corpus
+        .files
+        .iter()
+        .filter(|s| sqlalchemy::is_models(s) && !crate::weakspots::is_test_path(&s.rel))
+        .collect();
+    if let Some(schema) = sqlalchemy::schema(&declared) {
+        out.push((
+            files::Database {
+                root: match declared.as_slice() {
+                    [one] => one.rel.clone(),
+                    _ => "SQLAlchemy models".to_string(),
+                },
+                changes: Vec::new(),
+            },
+            schema,
+        ));
+    }
     out.sort_by(|a, b| {
         (b.1.tables.len() + b.1.views.len())
             .cmp(&(a.1.tables.len() + a.1.views.len()))
             .then_with(|| files::natural(&a.0.root, &b.0.root))
     });
     out
+}
+
+/// What a database is called beside others: its folder of migrations, or
+/// the folder its files share (its file, when it has one).
+fn name_of(db: &files::Database) -> String {
+    if !db.root.is_empty() {
+        return db.root.clone();
+    }
+    let dirs: Vec<&str> = db
+        .changes
+        .iter()
+        .map(|c| c.rel.rsplit_once('/').map_or("", |(d, _)| d))
+        .collect();
+    match db.changes.as_slice() {
+        [one] => one.rel.clone(),
+        _ => {
+            let first = dirs.first().copied().unwrap_or("");
+            let mut common: Vec<&str> = first.split('/').collect();
+            for d in &dirs[1..] {
+                let parts: Vec<&str> = d.split('/').collect();
+                let same = common
+                    .iter()
+                    .zip(&parts)
+                    .take_while(|(a, b)| a == b)
+                    .count();
+                common.truncate(same);
+            }
+            match common.join("/") {
+                c if c.is_empty() => "SQL".to_string(),
+                c => c,
+            }
+        }
+    }
 }
 
 pub fn maps(corpus: &Corpus) -> Vec<ProjectMap> {
@@ -98,7 +170,7 @@ pub fn maps(corpus: &Corpus) -> Vec<ProjectMap> {
         .collect();
     // With several databases, each map says whose it is.
     let several = shown.len() > 1;
-    let whose = |db: &files::Database| several.then(|| db.root.clone());
+    let whose = |db: &files::Database| several.then(|| name_of(db));
     let mut out = Vec::new();
     for (db, schema) in &shown {
         out.extend(schema_map(schema, whose(db).as_deref()));
