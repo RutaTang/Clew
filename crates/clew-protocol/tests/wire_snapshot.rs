@@ -234,6 +234,7 @@ fn project_task_index(t: &ProjectTask) -> usize {
         ProjectTask::JsMain { .. } => 6,
         ProjectTask::PackageScript { .. } => 7,
         ProjectTask::Test { .. } => 8,
+        ProjectTask::Main { .. } => 9,
     }
 }
 
@@ -270,6 +271,9 @@ fn project_tasks() -> Vec<ProjectTask> {
         ProjectTask::Test {
             file: "cart/cart_test.go".into(),
             line: 9,
+        },
+        ProjectTask::Main {
+            file: "scripts/seed.exs".into(),
         },
     ]
 }

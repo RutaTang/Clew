@@ -4099,5 +4099,8 @@
  "{rel} has no tests to run": "{rel} 中没有可运行的测试",
  "No {manifest} was found above {name}, so its tests have no project to run in.": "在 {name} 之上没有找到 {manifest}，因此它的测试没有可运行的项目。",
  "This project's tests run by CTest from a CMake build: build it, then run the test again.": "这个项目的测试由 CTest 从 CMake 构建中运行：请先构建，然后重新运行测试。",
- "These tests run without the debugger: {status}": "这些测试在没有调试器的情况下运行：{status}"
+ "These tests run without the debugger: {status}": "这些测试在没有调试器的情况下运行：{status}",
+ "{rel} has no program to run": "{rel} 中没有可运行的程序",
+ "No {manifest} was found above {name}, so it has no build to run it.": "在 {name} 之上没有找到 {manifest}，因此没有可以运行它的构建。",
+ "This language's programs run without the debugger: {status}": "这种语言的程序在没有调试器的情况下运行：{status}"
 }

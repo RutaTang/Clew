@@ -761,6 +761,97 @@ pub fn test_command(
     }
 }
 
+/// The languages whose programs [`main_command`] runs: Kotlin's, Scala's
+/// and Elixir's, which no debugger of Clew's runs.
+pub fn handles_main(lang: &str) -> bool {
+    matches!(lang, "kotlin" | "scala" | "elixir")
+}
+
+/// The command that runs `file`, a program in `lang` under `root`, as its
+/// project runs one: a Kotlin script by `kotlinc -script`, a Kotlin
+/// program by its Gradle build's `run`; Scala by sbt's `run` in an sbt
+/// build, else by scala-cli (`scala`, since Scala 3.5); Elixir by `mix run`
+/// in a Mix project (a script by it, with the project loaded), else by
+/// `elixir`.
+pub fn main_command(
+    root: &Path,
+    file: &Path,
+    lang: &str,
+    search: &OsStr,
+) -> Result<JsCommand, String> {
+    let tool = |name: &str| {
+        crate::lsp::store::find_in_unresolved(search, name)
+            .ok_or_else(|| format!("{other} wasn't found here.", other = name))
+    };
+    let command = |program: PathBuf, args: Vec<String>, cwd: &Path| JsCommand {
+        program,
+        args,
+        cwd: cwd.to_path_buf(),
+        env: Vec::new(),
+    };
+    let name = file.to_string_lossy().into_owned();
+    match lang {
+        "kotlin" if name.ends_with(".kts") => {
+            let dir = file.parent().unwrap_or(root);
+            Ok(command(tool("kotlinc")?, vec!["-script".into(), name], dir))
+        }
+        "kotlin" => {
+            let dir = above(
+                root,
+                file,
+                &[
+                    "build.gradle.kts",
+                    "build.gradle",
+                    "settings.gradle.kts",
+                    "settings.gradle",
+                ],
+            )
+            .ok_or_else(|| no_program("build.gradle.kts", file))?;
+            let gradle = wrapper(root, &dir, "gradlew").map_or_else(|| tool("gradle"), Ok)?;
+            Ok(command(
+                gradle,
+                vec![
+                    "-p".into(),
+                    dir.to_string_lossy().into_owned(),
+                    "run".into(),
+                ],
+                &dir,
+            ))
+        }
+        "scala" => {
+            if let Some(dir) = above(root, file, &["build.sbt"]) {
+                return Ok(command(tool("sbt")?, vec!["run".into()], &dir));
+            }
+            let dir = file.parent().unwrap_or(root);
+            let cli = tool("scala-cli").or_else(|_| tool("scala"))?;
+            Ok(command(cli, vec!["run".into(), name], dir))
+        }
+        "elixir" => match above(root, file, &["mix.exs"]) {
+            Some(project) => {
+                let mut args = vec!["run".to_string()];
+                if name.ends_with(".exs") {
+                    args.push(rel_slash(&project, file));
+                }
+                Ok(command(tool("mix")?, args, &project))
+            }
+            None => {
+                let dir = file.parent().unwrap_or(root);
+                Ok(command(tool("elixir")?, vec![name], dir))
+            }
+        },
+        _ => Err(format!("{rel} has no program to run", rel = lang)),
+    }
+}
+
+/// "No `manifest` was found above `file`": the build that runs it.
+fn no_program(manifest: &str, file: &Path) -> String {
+    let name = file
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    format!("No {manifest} was found above {name}, so it has no build to run it.")
+}
+
 /// "No `manifest` was found above `file`": where its tests run from.
 fn no_manifest(manifest: &str, file: &Path) -> String {
     let name = file
@@ -1219,5 +1310,48 @@ mod tests {
         );
         let c = run("scala", &scalatest, 6);
         assert_eq!(c.args, ["testOnly acme.CartSpec -- -z \"adds\""]);
+
+        // Programs: Kotlin's by its Gradle build, a script by kotlinc;
+        // Scala's by sbt; Elixir's by mix in a Mix project, by elixir
+        // outside one.
+        for name in ["kotlinc", "gradle", "elixir"] {
+            let path = bin.join(name);
+            std::fs::write(&path, "#!/bin/sh\n").unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
+        let main = |lang: &str, file: &Path| main_command(&root, file, lang, search).unwrap();
+        let app = write(
+            "app/lib/src/main/kotlin/com/acme/Main.kt",
+            "fun main() {}\n",
+        );
+        let c = main("kotlin", &app);
+        assert_eq!(c.program, root.join("app/gradlew"));
+        assert_eq!(c.args.last().unwrap(), "run");
+        let script = write("tools/build.main.kts", "println(1)\n");
+        let c = main("kotlin", &script);
+        assert_eq!(
+            (c.program, c.args[0].as_str()),
+            (bin.join("kotlinc"), "-script")
+        );
+        let c = main("scala", &scala);
+        assert_eq!(
+            (c.program, c.args.clone()),
+            (bin.join("sbt"), vec!["run".to_string()])
+        );
+        let seed = write("ex/priv/seed.exs", "IO.puts(1)\n");
+        let c = main("elixir", &seed);
+        assert_eq!(
+            (c.args.clone(), c.cwd),
+            (
+                vec!["run".to_string(), "priv/seed.exs".into()],
+                root.join("ex")
+            )
+        );
+        let loose = write("loose/hello.exs", "IO.puts(1)\n");
+        assert_eq!(main("elixir", &loose).program, bin.join("elixir"));
     }
 }

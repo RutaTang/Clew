@@ -4099,5 +4099,8 @@
  "{rel} has no tests to run": "{rel} n’a aucun test à exécuter",
  "No {manifest} was found above {name}, so its tests have no project to run in.": "Aucun {manifest} n’a été trouvé au-dessus de {name} : ses tests n’ont pas de projet où s’exécuter.",
  "This project's tests run by CTest from a CMake build: build it, then run the test again.": "Les tests de ce projet s’exécutent avec CTest depuis une build CMake : compilez-le, puis relancez le test.",
- "These tests run without the debugger: {status}": "Ces tests s’exécutent sans le débogueur : {status}"
+ "These tests run without the debugger: {status}": "Ces tests s’exécutent sans le débogueur : {status}",
+ "{rel} has no program to run": "{rel} n’a aucun programme à exécuter",
+ "No {manifest} was found above {name}, so it has no build to run it.": "Aucun {manifest} n’a été trouvé au-dessus de {name} : aucune build ne peut l’exécuter.",
+ "This language's programs run without the debugger: {status}": "Les programmes de ce langage s’exécutent sans le débogueur : {status}"
 }

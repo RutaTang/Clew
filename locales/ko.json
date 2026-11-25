@@ -4099,5 +4099,8 @@
  "{rel} has no tests to run": "{rel}에는 실행할 테스트가 없습니다",
  "No {manifest} was found above {name}, so its tests have no project to run in.": "{name} 위에서 {manifest}을(를) 찾지 못해 테스트를 실행할 프로젝트가 없습니다.",
  "This project's tests run by CTest from a CMake build: build it, then run the test again.": "이 프로젝트의 테스트는 CMake 빌드에서 CTest로 실행됩니다. 빌드한 뒤 테스트를 다시 실행하세요.",
- "These tests run without the debugger: {status}": "이 테스트는 디버거 없이 실행됩니다: {status}"
+ "These tests run without the debugger: {status}": "이 테스트는 디버거 없이 실행됩니다: {status}",
+ "{rel} has no program to run": "{rel}에는 실행할 프로그램이 없습니다",
+ "No {manifest} was found above {name}, so it has no build to run it.": "{name} 위에서 {manifest}을(를) 찾지 못해 이를 실행할 빌드가 없습니다.",
+ "This language's programs run without the debugger: {status}": "이 언어의 프로그램은 디버거 없이 실행됩니다: {status}"
 }

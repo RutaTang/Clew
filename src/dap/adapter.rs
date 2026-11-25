@@ -117,6 +117,10 @@ impl Lang {
             Some(
                 "vue" | "svelte" | "astro" | "html" | "htm" | "css" | "scss" | "sass" | "less",
             ) => None,
+            // Kotlin, Scala and Elixir run by their project's build or
+            // runner (`ProjectTask::Main`), under no debugger of Clew's: an
+            // unknown extension read as a native binary sent them to lldb.
+            Some("kt" | "kts" | "scala" | "sc" | "sbt" | "mill" | "ex" | "exs") => None,
             None => Some(Lang::Native),
             _ => Some(Lang::Native),
         }

@@ -48,6 +48,7 @@ fn run_with(
         | ProjectTask::JsTest { file, .. }
         | ProjectTask::JsMain { file }
         | ProjectTask::Test { file, .. }
+        | ProjectTask::Main { file }
         | ProjectTask::PackageScript { dir: file, .. } => file,
     };
     // A package at the project's root names its folder as nothing; every
@@ -101,6 +102,14 @@ fn run_with(
                 .ok_or_else(|| format!("{rel} has no tests to run"))?;
             let command =
                 crate::langtests::test_command(&root, &file, lang, &source, test, search)?;
+            crate::jsrun::run(&command, said, cancel)
+        }
+        ProjectTask::Main { .. } => {
+            let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+            let lang = crate::highlight::detect(&file)
+                .filter(|l| crate::langtests::handles_main(l))
+                .ok_or_else(|| format!("{rel} has no program to run"))?;
+            let command = crate::langtests::main_command(&root, &file, lang, search)?;
             crate::jsrun::run(&command, said, cancel)
         }
         ProjectTask::PackageScript { script, .. } => {

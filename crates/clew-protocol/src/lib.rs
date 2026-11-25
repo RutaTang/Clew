@@ -166,7 +166,8 @@ pub use payload::*;
 ///
 /// v35: [`ProjectTask::Test`]: a test of Go, Java, Kotlin, Scala, C#, Dart,
 /// Ruby, Zig, Erlang, Elixir, Haskell, C or C++, run by its project's own
-/// test command.
+/// test command; [`ProjectTask::Main`]: a Kotlin, Scala or Elixir program,
+/// run by its project's build or the language's own runner.
 pub const PROTOCOL_VERSION: u32 = 35;
 
 /// A hash of this crate's source as a token stream — comments and whitespace
@@ -1614,6 +1615,10 @@ pub enum ProjectTask {
     /// or `flutter test`, RSpec or Minitest, `zig test`, rebar3, `mix
     /// test`, Cabal or Stack, CTest.
     Test { file: Rel, line: usize },
+    /// `file`, a Kotlin, Scala or Elixir program, run as its project runs
+    /// one: Gradle's `run` or `kotlinc -script`, sbt's `run` or scala-cli,
+    /// `mix run` or `elixir`.
+    Main { file: Rel },
 }
 
 /// What the user chose for one project's languages, in Settings, where clew

@@ -1017,6 +1017,16 @@ impl App {
     /// Begin a debug session from the project's `.clew/launch.json`. Spawns the
     /// adapter off-thread and streams its events back as `DapEvent` messages.
     pub(crate) fn start_debug(&mut self) -> Task<Message> {
+        // Kotlin, Scala and Elixir have no debugger of Clew's: Debug runs
+        // the program, and says so.
+        if let Some(plan) = self.lang_file_run() {
+            let task = self.start_session(true, Some(plan));
+            self.status = tr!(
+                "This language's programs run without the debugger: {status}",
+                status = self.status
+            );
+            return task;
+        }
         self.start_session(false, None)
     }
 
@@ -1024,10 +1034,35 @@ impl App {
     /// launch, the adapter told `noDebug`, no breakpoint set in it. Its
     /// output and its end show in the bottom panel as a debug run's do.
     pub(crate) fn start_run(&mut self) -> Task<Message> {
-        if let Some(plan) = self.js_file_run() {
+        if let Some(plan) = self.js_file_run().or_else(|| self.lang_file_run()) {
             return self.start_session(true, Some(plan));
         }
         self.start_session(true, None)
+    }
+
+    /// What Run runs for a Kotlin, Scala or Elixir file when nothing names
+    /// what to run (no launch file): the file as a program, as its project
+    /// runs one (`ProjectTask::Main`) — where the project is.
+    fn lang_file_run(&self) -> Option<crate::app::runplan::RunPlan> {
+        let root = &self.proj.project.as_ref()?.root;
+        if crate::app::tasks::launch_file_path(root).is_some() {
+            return None;
+        }
+        let viewer = self.active_viewer()?;
+        viewer
+            .lang_key
+            .filter(|l| clew_core::langtests::handles_main(l))?;
+        let rel = self.project_rel(&viewer.abs)?;
+        let name = viewer
+            .abs
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        Some(crate::app::runplan::RunPlan::Remote {
+            task: clew_protocol::ProjectTask::Main { file: rel },
+            name,
+            tests: None,
+        })
     }
 
     /// What Run runs for a JavaScript or TypeScript file of a project on
@@ -1085,11 +1120,8 @@ impl App {
                 || clew_core::langtests::handles(l)
         })?;
         let remote = self.connection.is_remote();
-        let found = clew_core::runnables::runnables_in(
-            lang,
-            &viewer.abs.to_string_lossy(),
-            &viewer.source,
-        );
+        let found =
+            clew_core::runnables::runnables_in(lang, &viewer.abs.to_string_lossy(), &viewer.source);
         let test = clew_core::runnables::runnable_at(&found, line)?;
         Some(match test.kind {
             RunnableKind::Main => return None,

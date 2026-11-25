@@ -26,6 +26,8 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("{pm} wasn't found here. Install Node.js, then run again."),
     tr_noop!("{rel} could not be read"),
     tr_noop!("{rel} has no tests to run"),
+    tr_noop!("{rel} has no program to run"),
+    tr_noop!("No {manifest} was found above {name}, so it has no build to run it."),
     tr_noop!("No {manifest} was found above {name}, so its tests have no project to run in."),
     tr_noop!(
         "This project's tests run by CTest from a CMake build: build it, then run the test again."
