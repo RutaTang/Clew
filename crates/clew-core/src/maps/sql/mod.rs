@@ -30,7 +30,10 @@ use crate::highlight::Lang;
 pub(crate) mod ddl;
 mod django;
 mod ecto;
+mod efcore;
 mod files;
+mod gorm;
+mod jpa;
 mod lex;
 mod prisma;
 mod rails;
@@ -41,6 +44,30 @@ mod tests;
 
 use ddl::{Action, Change, Kind, Op, QName};
 pub(crate) use rails::pluralize;
+
+/// `name` in snake case, as ORMs name tables and columns from classes and
+/// fields: `OrderItem` `order_item`, `UserID` `user_id`, `HTTPServer`
+/// `http_server`, `createdAt` `created_at`.
+pub(crate) fn snake_case(name: &str) -> String {
+    let chars: Vec<char> = name.chars().collect();
+    let mut out = String::new();
+    for (i, &c) in chars.iter().enumerate() {
+        if c.is_uppercase() {
+            let prev = i.checked_sub(1).map(|p| chars[p]);
+            let next = chars.get(i + 1);
+            let after_lower = prev.is_some_and(|p| p.is_lowercase() || p.is_ascii_digit());
+            let acronym_end =
+                prev.is_some_and(char::is_uppercase) && next.is_some_and(|n| n.is_lowercase());
+            if (after_lower || acronym_end) && !out.ends_with('_') {
+                out.push('_');
+            }
+            out.extend(c.to_lowercase());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
 use schema::{Changes, Schema, Table};
 
 /// Each database's schema, as its files leave it: the one with the most
@@ -135,6 +162,71 @@ pub(crate) fn schemas(corpus: &Corpus) -> Vec<(files::Database, Schema)> {
                 root: match ecto.as_slice() {
                     [one] => one.rel.clone(),
                     _ => "Ecto schemas".to_string(),
+                },
+                changes: Vec::new(),
+            },
+            schema,
+        ));
+    }
+    // JPA's entities, Java's and Kotlin's (Hibernate, Spring Data).
+    let entities: Vec<&Source> = corpus
+        .files
+        .iter()
+        .filter(|s| jpa::is_entity(s) && !crate::weakspots::is_test_path(&s.rel))
+        .collect();
+    if let Some(schema) = jpa::schema(&entities) {
+        out.push((
+            files::Database {
+                root: match entities.as_slice() {
+                    [one] => one.rel.clone(),
+                    _ => "JPA entities".to_string(),
+                },
+                changes: Vec::new(),
+            },
+            schema,
+        ));
+    }
+    // Entity Framework Core's model: its contexts' sets, their entity
+    // classes read from the project's C#.
+    let contexts: Vec<&Source> = corpus
+        .files
+        .iter()
+        .filter(|s| efcore::is_context(s) && !crate::weakspots::is_test_path(&s.rel))
+        .collect();
+    if !contexts.is_empty() {
+        let csharp: Vec<&Source> = corpus
+            .files
+            .iter()
+            .filter(|s| {
+                s.lang == Some(crate::highlight::Lang::CSharp)
+                    && !crate::weakspots::is_test_path(&s.rel)
+            })
+            .collect();
+        if let Some(schema) = efcore::schema(&contexts, &csharp) {
+            out.push((
+                files::Database {
+                    root: match contexts.as_slice() {
+                        [one] => one.rel.clone(),
+                        _ => "Entity Framework model".to_string(),
+                    },
+                    changes: Vec::new(),
+                },
+                schema,
+            ));
+        }
+    }
+    // GORM's models.
+    let gorm: Vec<&Source> = corpus
+        .files
+        .iter()
+        .filter(|s| gorm::is_models(s) && !crate::weakspots::is_test_path(&s.rel))
+        .collect();
+    if let Some(schema) = gorm::schema(&gorm) {
+        out.push((
+            files::Database {
+                root: match gorm.as_slice() {
+                    [one] => one.rel.clone(),
+                    _ => "GORM models".to_string(),
                 },
                 changes: Vec::new(),
             },

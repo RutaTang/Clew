@@ -82,6 +82,7 @@ pub fn maps(corpus: &Corpus) -> Vec<ProjectMap> {
             Some(Lang::Go) => go(&mut routes, source),
             Some(Lang::Kotlin) => kotlin(&mut routes, source),
             Some(Lang::Elixir) if source.rel.ends_with("router.ex") => phoenix(&mut routes, source),
+            None if super::is_play_routes(&source.rel) => play(&mut routes, source),
             _ => {}
         }
     }
@@ -1934,6 +1935,71 @@ fn rails(routes: &mut Routes, source: &Source) {
     }
 }
 
+/// Play's routes file (`conf/routes`, or a sub-router's `conf/api.routes`):
+/// each `GET /items/:id controllers.Items.show(id: Long)` line a route to
+/// its controller's action; a sub-router's routes under the path that
+/// includes it (`-> /api api.Routes`).
+fn play(routes: &mut Routes, source: &Source) {
+    // The path another routes file includes this one at.
+    let stem = source.name().strip_suffix(".routes").map(|s| s.to_string());
+    let prefix = stem
+        .as_deref()
+        .and_then(|stem| {
+            routes
+                .corpus
+                .files
+                .iter()
+                .filter(|s| super::is_play_routes(&s.rel))
+                .find_map(|s| {
+                    s.text.lines().find_map(|l| {
+                        let words: Vec<&str> = l.split_whitespace().collect();
+                        match words.as_slice() {
+                            ["->", path, router, ..]
+                                if router.trim_end_matches(".Routes") == stem =>
+                            {
+                                Some(path.to_string())
+                            }
+                            _ => None,
+                        }
+                    })
+                })
+        })
+        .unwrap_or_default();
+    for (n, raw) in source.text.lines().enumerate() {
+        let words: Vec<&str> = raw.split_whitespace().collect();
+        let [method, path, action @ ..] = words.as_slice() else {
+            continue;
+        };
+        let method = method.to_ascii_uppercase();
+        if !matches!(
+            method.as_str(),
+            "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD" | "OPTIONS" | "*"
+        ) || action.is_empty()
+        {
+            continue;
+        }
+        // `controllers.Items.show(id: Long)`: the class, and the action.
+        let call = action.join(" ");
+        let call = call.split('(').next().unwrap_or(&call).trim();
+        let mut parts = call.rsplit('.');
+        let name = parts.next().unwrap_or(call).to_string();
+        let class = parts.next().map(str::to_string);
+        let method = if method == "*" {
+            "ANY"
+        } else {
+            method.as_str()
+        };
+        routes.add(
+            "Play",
+            method,
+            &join(&prefix, path),
+            &source.rel,
+            n + 1,
+            Handler::Named { name, class },
+        );
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn rails_route(
     routes: &mut Routes,
@@ -2561,6 +2627,36 @@ mod tests {
     /// Kotlin's Spring controllers and Ktor routing; a Phoenix router's
     /// verbs, resources (less `only:`'s), LiveViews and scopes — each
     /// action found in its controller's module.
+    /// Play's routes file: each line a route to its controller's action,
+    /// a sub-router's under the path that includes it.
+    #[test]
+    fn play_routes() {
+        let files: &[(&str, &str)] = &[
+            (
+                "conf/routes",
+                "# Routes\nGET     /                     controllers.HomeController.index()\nPOST    /items/:id            controllers.ItemController.update(id: Long)\n->      /api                  api.Routes\n",
+            ),
+            (
+                "conf/api.routes",
+                "GET /status controllers.api.Status.check\n",
+            ),
+            (
+                "app/controllers/ItemController.scala",
+                "package controllers\n\nclass ItemController {\n  def update(id: Long) = Action { Ok }\n}\n",
+            ),
+        ];
+        let labels = route_labels(files);
+        for route in ["GET /", "POST /items/:id", "GET /api/status"] {
+            assert!(labels.iter().any(|l| l == route), "{route} in {labels:?}");
+        }
+        let got = routes_of(files);
+        assert!(
+            got.iter()
+                .any(|(r, h, _)| r == "POST /items/:id" && h.ends_with("update")),
+            "{got:?}"
+        );
+    }
+
     #[test]
     fn kotlin_and_phoenix_routes() {
         let got = routes_of(&[

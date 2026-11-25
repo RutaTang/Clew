@@ -250,6 +250,16 @@ fn wanted_without_language(rel: &str) -> bool {
         || name == "go.mod"
         || name.ends_with(".lean")
         || name.ends_with(".prisma")
+        || is_play_routes(rel)
+}
+
+/// Whether `rel` is a Play application's routes file: `conf/routes`, or a
+/// sub-router's `conf/api.routes`.
+pub(crate) fn is_play_routes(rel: &str) -> bool {
+    let rel = rel.replace('\\', "/");
+    let name = rel.rsplit('/').next().unwrap_or(&rel);
+    let in_conf = rel == format!("conf/{name}") || rel.ends_with(&format!("/conf/{name}"));
+    in_conf && (name == "routes" || name.ends_with(".routes"))
 }
 
 /// Every map of `files` (under `root`), none empty.
