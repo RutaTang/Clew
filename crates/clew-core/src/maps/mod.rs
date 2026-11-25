@@ -482,6 +482,54 @@ pub fn ident(s: &str) -> &str {
 mod tests {
     use super::*;
 
+    /// Every map of a real project (`CLEW_TEST_PROJECT=path`) as Clew builds
+    /// it, printed for a reader to check against the project: each map's
+    /// nodes with their places and its arrows, and how long each took.
+    #[test]
+    #[ignore = "reads a project (CLEW_TEST_PROJECT=path); run explicitly"]
+    fn live_a_projects_maps() {
+        let root = std::path::PathBuf::from(
+            std::env::var("CLEW_TEST_PROJECT").expect("CLEW_TEST_PROJECT names a folder"),
+        );
+        let only = std::env::var("CLEW_TEST_MAP").unwrap_or_default();
+        let scanned = crate::fs_scan::scan(root);
+        let started = std::time::Instant::now();
+        let corpus = Corpus::read(&scanned.files);
+        println!(
+            "read {} files in {:?}",
+            scanned.files.len(),
+            started.elapsed()
+        );
+        let started = std::time::Instant::now();
+        let built = build_from(&corpus);
+        println!("built {} maps in {:?}", built.len(), started.elapsed());
+        for m in &built {
+            assert!(m.is_well_formed(), "{}", m.id);
+            println!(
+                "== {} ({}): {} nodes, {} arrows",
+                m.title,
+                m.id,
+                m.nodes.len(),
+                m.edges.len()
+            );
+            if !only.is_empty() && !m.id.starts_with(&only) {
+                continue;
+            }
+            for n in m.nodes.iter().take(80) {
+                println!("  [{}] {} ({}:{})", n.kind, n.label, n.file, n.line);
+                for line in n.detail.lines().take(4) {
+                    println!("      · {line}");
+                }
+            }
+            for e in m.edges.iter().take(120) {
+                println!(
+                    "  {} -> {} : {}",
+                    m.nodes[e.from].label, m.nodes[e.to].label, e.label
+                );
+            }
+        }
+    }
+
     #[test]
     fn a_map_holds_each_node_and_edge_once() {
         let mut map = MapBuilder::new("t", "Test", "how to read it");
