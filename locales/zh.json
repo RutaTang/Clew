@@ -3003,6 +3003,7 @@
  "not valid JSON: {e}": "不是有效的 JSON：{e}",
  "notation": "记号",
  "notes": "笔记",
+ "code outside any function": "函数之外的代码",
  "notes in the file": "文件中的注释",
  "nothing answered at that address": "该地址没有响应",
  "nothing to connect to": "没有可连接的目标",

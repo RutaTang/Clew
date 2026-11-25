@@ -4804,11 +4804,22 @@ fn the_weak_spots_page_lists_each_spot_with_why() {
             score: 3,
             reasons: vec![Reason::Marked(1)],
         },
+        Spot {
+            rel: "src/Post.vue".into(),
+            name: String::new(),
+            line: 1,
+            end_line: 1,
+            score: 4,
+            reasons: vec![
+                Reason::Risky(Risk::RawHtml, 1),
+                Reason::Risky(Risk::Unchecked, 1),
+            ],
+        },
     ]));
     let mut sim = sim_of(&app);
     for words in [
         "Weak Spots",
-        "2 spots in 12 files checked",
+        "3 spots in 12 files checked",
         "load",
         "src/load.rs:4",
         "87 lines",
@@ -4817,6 +4828,10 @@ fn the_weak_spots_page_lists_each_spot_with_why() {
         "changed in 24 commits",
         "notes in the file",
         "1 TODO or FIXME",
+        // The rest of a file that is more than notes is its code.
+        "code outside any function",
+        "writes raw HTML once",
+        "1 check turned off",
     ] {
         assert!(shows(&mut sim, words), "{words} is not shown");
     }

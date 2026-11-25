@@ -3003,6 +3003,7 @@
  "not valid JSON: {e}": "JSON invalide : {e}",
  "notation": "notation",
  "notes": "notes",
+ "code outside any function": "code hors de toute fonction",
  "notes in the file": "notes du fichier",
  "nothing answered at that address": "rien n’a répondu à cette adresse",
  "nothing to connect to": "rien à quoi se connecter",

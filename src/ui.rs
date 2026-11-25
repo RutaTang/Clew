@@ -50,7 +50,7 @@ pub(crate) use press::{Press, button};
 mod proof;
 mod weakspots;
 pub(crate) use fakerun::*;
-pub(crate) use weakspots::reason_words;
+pub(crate) use weakspots::{only_notes, reason_words, spot_name};
 mod slide;
 mod tutorial;
 pub(crate) use tutorial::*;

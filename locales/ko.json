@@ -3003,6 +3003,7 @@
  "not valid JSON: {e}": "올바른 JSON이 아님: {e}",
  "notation": "표기법",
  "notes": "메모",
+ "code outside any function": "함수 밖의 코드",
  "notes in the file": "파일의 메모",
  "nothing answered at that address": "해당 주소에서 응답이 없습니다",
  "nothing to connect to": "연결할 대상 없음",

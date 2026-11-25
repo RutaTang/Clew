@@ -259,6 +259,7 @@ pub fn is_test_path(rel: &str) -> bool {
                 | "benches"
                 | "e2e"
                 | "cypress"
+                | "playwright"
         )
     }) || name.starts_with("test_")
         || name.contains("_test.")

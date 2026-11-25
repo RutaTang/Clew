@@ -308,7 +308,7 @@ impl App {
                 let place = format!("{}:{}", spot.rel, spot.line);
                 let reasons: Vec<String> =
                     spot.reasons.iter().map(crate::ui::reason_words).collect();
-                self.proj.ask_input = if spot.name.is_empty() {
+                self.proj.ask_input = if spot.name.is_empty() && crate::ui::only_notes(&spot) {
                     tr!(
                         "Review the notes left in {place} ({reasons}). What do they say is wrong, and does the code bear it out?",
                         place = place,
@@ -317,7 +317,7 @@ impl App {
                 } else {
                     tr!(
                         "Review {name} at {place} ({reasons}). Is it risky, what could go wrong, and how could it be made safer or simpler?",
-                        name = spot.name,
+                        name = crate::ui::spot_name(&spot),
                         place = place,
                         reasons = reasons.join(", ")
                     )

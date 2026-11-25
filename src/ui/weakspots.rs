@@ -60,6 +60,26 @@ pub(crate) fn reason_words(reason: &Reason) -> String {
     }
 }
 
+/// What a spot is called: its function's name; for the rest of a file,
+/// its notes when they are all it has, else the code outside any function
+/// (a template's raw HTML, a file-wide `@ts-nocheck`, a loose `sorry`).
+pub(crate) fn spot_name(spot: &clew_core::weakspots::Spot) -> String {
+    if !spot.name.is_empty() {
+        return spot.name.clone();
+    }
+    match only_notes(spot) {
+        true => tr!("notes in the file").to_string(),
+        false => tr!("code outside any function").to_string(),
+    }
+}
+
+/// Whether all a file's spot says is that notes were left in it.
+pub(crate) fn only_notes(spot: &clew_core::weakspots::Spot) -> bool {
+    spot.reasons
+        .iter()
+        .all(|r| matches!(r, Reason::Marked(_) | Reason::Churn(_)))
+}
+
 /// The page: what it is, then each spot, highest first.
 pub(crate) fn weak_home(app: &App) -> Element<'_, Message> {
     let weak = &app.proj.weak;
@@ -121,11 +141,7 @@ pub(crate) fn weak_home(app: &App) -> Element<'_, Message> {
     }
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
     for (i, spot) in spots.iter().enumerate() {
-        let name = if spot.name.is_empty() {
-            tr!("notes in the file").to_string()
-        } else {
-            spot.name.clone()
-        };
+        let name = spot_name(spot);
         let place = format!("{}:{}", spot.rel, spot.line);
         let chips = Row::with_children(spot.reasons.iter().map(|r| {
             container(

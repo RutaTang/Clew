@@ -3003,6 +3003,7 @@
  "not valid JSON: {e}": "有効な JSON ではありません: {e}",
  "notation": "記法",
  "notes": "メモ",
+ "code outside any function": "関数の外のコード",
  "notes in the file": "ファイル内のメモ",
  "nothing answered at that address": "そのアドレスから応答がありません",
  "nothing to connect to": "接続先がありません",
