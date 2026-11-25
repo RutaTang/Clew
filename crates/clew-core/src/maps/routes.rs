@@ -80,6 +80,8 @@ pub fn maps(corpus: &Corpus) -> Vec<ProjectMap> {
                 rails(&mut routes, source)
             }
             Some(Lang::Go) => go(&mut routes, source),
+            Some(Lang::Kotlin) => kotlin(&mut routes, source),
+            Some(Lang::Elixir) if source.rel.ends_with("router.ex") => phoenix(&mut routes, source),
             _ => {}
         }
     }
@@ -1118,6 +1120,276 @@ fn annotations<'t>(declaration: Node<'t>) -> Vec<Node<'t>> {
         }
     }
     out
+}
+
+/// The first quoted string of `text` (`"…"`), as written.
+fn first_quoted(text: &str) -> Option<String> {
+    let start = text.find('"')? + 1;
+    let len = text[start..].find('"')?;
+    Some(text[start..start + len].to_string())
+}
+
+fn indent_of(line: &str) -> usize {
+    line.len() - line.trim_start().len()
+}
+
+/// Kotlin's routes: a Spring controller's mappings, as Java's are
+/// (`@GetMapping("/{id}") fun show(…)` under a class's `@RequestMapping`),
+/// and Ktor's routing (`route("/api") { get("/users") { … } }`).
+fn kotlin(routes: &mut Routes, source: &Source) {
+    let src = source.text.as_str();
+    let lines: Vec<&str> = src.lines().collect();
+    if src.contains("Mapping") {
+        // The class each `@RequestMapping` prefix is on, by indent.
+        let mut class_prefix: Vec<(usize, String, String)> = Vec::new();
+        let mut pending: Vec<(String, Option<String>)> = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let t = line.trim();
+            let depth = indent_of(line);
+            if let Some(rest) = t.strip_prefix('@') {
+                let name: String = rest.chars().take_while(|c| c.is_alphanumeric()).collect();
+                if name.ends_with("Mapping") {
+                    pending.push((name, first_quoted(rest)));
+                }
+                continue;
+            }
+            let class = t
+                .split_whitespace()
+                .skip_while(|w| *w != "class")
+                .nth(1)
+                .map(|w| {
+                    w.chars()
+                        .take_while(|c| c.is_alphanumeric() || *c == '_')
+                        .collect::<String>()
+                });
+            if let Some(class) = class.filter(|c| !c.is_empty()) {
+                let prefix = pending
+                    .iter()
+                    .find(|(n, _)| n == "RequestMapping")
+                    .and_then(|(_, p)| p.clone())
+                    .unwrap_or_default();
+                class_prefix.retain(|(d, _, _)| *d < depth);
+                class_prefix.push((depth, class, prefix));
+                pending.clear();
+                continue;
+            }
+            let Some(fun) = t.split_once("fun ").map(|(_, r)| r) else {
+                if !t.is_empty() {
+                    pending.clear();
+                }
+                continue;
+            };
+            let name: String = fun
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            let Some((_, class, prefix)) = class_prefix.iter().rev().find(|(d, _, _)| *d < depth)
+            else {
+                pending.clear();
+                continue;
+            };
+            for (mapping, path) in pending.drain(..) {
+                let method = match mapping.as_str() {
+                    "GetMapping" => "GET",
+                    "PostMapping" => "POST",
+                    "PutMapping" => "PUT",
+                    "DeleteMapping" => "DELETE",
+                    "PatchMapping" => "PATCH",
+                    "RequestMapping" => "ANY",
+                    _ => continue,
+                };
+                routes.add(
+                    "Spring",
+                    method,
+                    &join(prefix, path.as_deref().unwrap_or("")),
+                    &source.rel,
+                    i + 1,
+                    Handler::At {
+                        rel: source.rel.clone(),
+                        line: i + 1,
+                        label: format!("{class}.{name}"),
+                    },
+                );
+            }
+        }
+    }
+    if src.contains("routing") {
+        // Each `route("/x") {` open around a line, by its indent.
+        let mut open: Vec<(usize, String)> = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let t = line.trim_start();
+            let depth = indent_of(line);
+            if t.is_empty() {
+                continue;
+            }
+            open.retain(|(d, _)| *d < depth);
+            let word: String = t.chars().take_while(|c| c.is_alphabetic()).collect();
+            let after = &t[word.len()..];
+            // Its block opens on its line (`get("/x") {`, or a one-line
+            // `post("/y") { }`).
+            let opens = after.contains('{');
+            if !(after.starts_with('(') || after.trim_start().starts_with('{')) {
+                continue;
+            }
+            let path = after
+                .strip_prefix('(')
+                .and_then(|a| a.split(')').next())
+                .and_then(first_quoted)
+                .unwrap_or_default();
+            let prefix = open.last().map(|(_, p)| p.clone()).unwrap_or_default();
+            match word.as_str() {
+                "route" if opens => open.push((depth, join(&prefix, &path))),
+                "get" | "post" | "put" | "delete" | "patch" | "head" | "options" if opens => {
+                    routes.add(
+                        "Ktor",
+                        &word.to_ascii_uppercase(),
+                        &join(&prefix, &path),
+                        &source.rel,
+                        i + 1,
+                        Handler::Inline,
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+/// A Phoenix router's routes: each verb's (`get "/users", UserController,
+/// :index`), a `resources`' seven (less what `only:` or `except:` leave
+/// out), a LiveView's (`live "/x", PageLive`) and a `forward`'s, under the
+/// `scope`s around it — their paths joined, their aliases naming the
+/// controller's module.
+fn phoenix(routes: &mut Routes, source: &Source) {
+    let src = source.text.as_str();
+    if !src.contains("Phoenix.Router") && !src.contains(":router") {
+        return;
+    }
+    // Each `scope … do` open around a line: its indent, path and alias.
+    let mut open: Vec<(usize, String, String)> = Vec::new();
+    for (i, line) in src.lines().enumerate() {
+        let t = line.trim_start();
+        let depth = indent_of(line);
+        if t.is_empty() || t.starts_with('#') {
+            continue;
+        }
+        open.retain(|(d, _, _)| *d < depth || (*d == depth && !t.starts_with("end")));
+        if t == "end" || t.starts_with("end ") {
+            open.retain(|(d, _, _)| *d < depth);
+            continue;
+        }
+        let (prefix, alias) = open
+            .last()
+            .map(|(_, p, a)| (p.clone(), a.clone()))
+            .unwrap_or_default();
+        let word: String = t
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        let args = t[word.len()..].trim_start();
+        // The quoted path, then the module, then the action.
+        let parts: Vec<&str> = args
+            .trim_end_matches(" do")
+            .split(',')
+            .map(str::trim)
+            .collect();
+        let path = parts
+            .first()
+            .and_then(|p| first_quoted(p))
+            .unwrap_or_default();
+        let module = parts.get(1).copied().unwrap_or("").trim();
+        let full = |m: &str| match alias.is_empty() {
+            true => m.to_string(),
+            false => format!("{alias}.{m}"),
+        };
+        let action = |k: usize| {
+            parts.get(k).and_then(|a| a.strip_prefix(':')).map(|a| {
+                a.chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect::<String>()
+            })
+        };
+        let named = |name: String, m: &str| Handler::Named {
+            name,
+            class: Some(full(m)),
+        };
+        match word.as_str() {
+            "scope" => {
+                let scope_alias = match module.is_empty() || module.contains(':') {
+                    true => alias.clone(),
+                    false => full(module),
+                };
+                open.push((depth, join(&prefix, &path), scope_alias));
+            }
+            "get" | "post" | "put" | "patch" | "delete" | "options" | "head" => {
+                let Some(action) = action(2) else {
+                    continue;
+                };
+                routes.add(
+                    "Phoenix",
+                    &word.to_ascii_uppercase(),
+                    &join(&prefix, &path),
+                    &source.rel,
+                    i + 1,
+                    named(action, module),
+                );
+            }
+            "live" => {
+                routes.add(
+                    "Phoenix",
+                    "PAGE",
+                    &join(&prefix, &path),
+                    &source.rel,
+                    i + 1,
+                    named("mount".into(), module),
+                );
+            }
+            "forward" => {
+                routes.add(
+                    "Phoenix",
+                    "ANY",
+                    &join(&prefix, &path),
+                    &source.rel,
+                    i + 1,
+                    Handler::Named {
+                        name: "call".into(),
+                        class: Some(full(module)),
+                    },
+                );
+            }
+            "resources" => {
+                let only = list_option(args, "only");
+                let except = list_option(args, "except");
+                let base = join(&prefix, &path);
+                for (action, method, sub) in [
+                    ("index", "GET", ""),
+                    ("new", "GET", "/new"),
+                    ("create", "POST", ""),
+                    ("show", "GET", "/:id"),
+                    ("edit", "GET", "/:id/edit"),
+                    ("update", "PATCH", "/:id"),
+                    ("update", "PUT", "/:id"),
+                    ("delete", "DELETE", "/:id"),
+                ] {
+                    let kept = only.as_ref().is_none_or(|o| o.iter().any(|a| a == action))
+                        && !except
+                            .as_ref()
+                            .is_some_and(|e| e.iter().any(|a| a == action));
+                    if kept {
+                        routes.add(
+                            "Phoenix",
+                            method,
+                            &format!("{base}{sub}"),
+                            &source.rel,
+                            i + 1,
+                            named(action.into(), module),
+                        );
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 fn java(routes: &mut Routes, source: &Source) {
@@ -2283,6 +2555,73 @@ mod tests {
             integration,
             ["ANY /feed.xml", "PAGE /*slug", "PAGE /404"],
             "{integration:?}"
+        );
+    }
+
+    /// Kotlin's Spring controllers and Ktor routing; a Phoenix router's
+    /// verbs, resources (less `only:`'s), LiveViews and scopes — each
+    /// action found in its controller's module.
+    #[test]
+    fn kotlin_and_phoenix_routes() {
+        let got = routes_of(&[
+            (
+                "src/main/kotlin/com/acme/UserController.kt",
+                "@RestController\n@RequestMapping(\"/api/users\")\nclass UserController(private val repo: Repo) {\n    @GetMapping\n    fun list(): List<User> = repo.all()\n\n    @GetMapping(\"/{id}\")\n    fun show(@PathVariable id: Long) = repo.find(id)\n\n    @PostMapping\n    fun create(@RequestBody u: User) = repo.save(u)\n}\n",
+            ),
+            (
+                "src/main/kotlin/com/acme/Routes.kt",
+                "fun Application.module() {\n    routing {\n        route(\"/v2\") {\n            get(\"/health\") {\n                call.respondText(\"ok\")\n            }\n        }\n        post(\"/login\") { }\n    }\n}\n",
+            ),
+        ]);
+        for (route, handler) in [
+            ("GET /api/users", "UserController.list"),
+            ("GET /api/users/{id}", "UserController.show"),
+            ("POST /api/users", "UserController.create"),
+        ] {
+            assert!(
+                got.iter().any(|(r, h, _)| r == route && h == handler),
+                "{route} → {handler} in {got:?}"
+            );
+        }
+        let ktor = route_labels(&[(
+            "src/main/kotlin/com/acme/Routes.kt",
+            "fun Application.module() {\n    routing {\n        route(\"/v2\") {\n            get(\"/health\") {\n                call.respondText(\"ok\")\n            }\n        }\n        post(\"/login\") { }\n    }\n}\n",
+        )]);
+        assert_eq!(ktor, ["GET /v2/health", "POST /login"], "{ktor:?}");
+
+        let router = "defmodule ShopWeb.Router do\n  use ShopWeb, :router\n\n  scope \"/\", ShopWeb do\n    pipe_through :browser\n\n    get \"/\", PageController, :home\n    live \"/cart\", CartLive, :index\n    resources \"/users\", UserController, only: [:index, :show]\n  end\n\n  scope \"/api\", ShopWeb.Api do\n    post \"/orders\", OrderController, :create\n  end\nend\n";
+        let got = routes_of(&[
+            ("lib/shop_web/router.ex", router),
+            (
+                "lib/shop_web/controllers/user_controller.ex",
+                "defmodule ShopWeb.UserController do\n  def index(conn, _), do: conn\n  def show(conn, _), do: conn\nend\n",
+            ),
+            (
+                "lib/shop_web/controllers/api/order_controller.ex",
+                "defmodule ShopWeb.Api.OrderController do\n  def create(conn, _), do: conn\nend\n",
+            ),
+        ]);
+        for (route, handler) in [
+            ("GET /", "ShopWeb.PageController.home"),
+            ("PAGE /cart", "ShopWeb.CartLive.mount"),
+            ("GET /users", "ShopWeb.UserController.index"),
+            ("GET /users/:id", "ShopWeb.UserController.show"),
+            ("POST /api/orders", "ShopWeb.Api.OrderController.create"),
+        ] {
+            assert!(
+                got.iter().any(|(r, h, _)| r == route && h == handler),
+                "{route} → {handler} in {got:?}"
+            );
+        }
+        assert!(
+            !got.iter().any(|(r, _, _)| r == "POST /users"),
+            "only: index and show: {got:?}"
+        );
+        // An action found is placed at its function.
+        assert!(
+            got.iter()
+                .any(|(r, _, at)| r == "GET /users/:id" && at.contains("user_controller.ex")),
+            "{got:?}"
         );
     }
 

@@ -155,7 +155,14 @@ fn risks(lang: Lang) -> &'static [(&'static str, Risk)] {
             (" as any", Risk::Unchecked),
             ("<any>", Risk::Unchecked),
         ],
-        Lang::Go => &[("panic(", Risk::Panic)],
+        Lang::Go => &[
+            ("panic(", Risk::Panic),
+            ("log.Fatal", Risk::Panic),
+            ("unsafe.Pointer", Risk::Unsafe),
+            ("exec.Command(\"sh\"", Risk::Shell),
+            ("exec.Command(\"bash\"", Risk::Shell),
+            ("//nolint", Risk::Unchecked),
+        ],
         Lang::C | Lang::Cpp => &[
             ("strcpy(", Risk::UnboundedCopy),
             ("strcat(", Risk::UnboundedCopy),
@@ -172,10 +179,105 @@ fn risks(lang: Lang) -> &'static [(&'static str, Risk)] {
         ],
         Lang::Ruby => &[
             ("eval(", Risk::Eval),
+            ("instance_eval", Risk::Eval),
+            ("class_eval", Risk::Eval),
             ("system(", Risk::Shell),
+            ("exec(", Risk::Shell),
+            ("%x(", Risk::Shell),
+            ("Open3.", Risk::Shell),
             ("Marshal.load", Risk::Deserialize),
+            ("YAML.load(", Risk::Deserialize),
+            ("rescue Exception", Risk::CatchAll),
+            ("html_safe", Risk::RawHtml),
+            ("raw(", Risk::RawHtml),
         ],
-        Lang::Java => &[("Runtime.getRuntime().exec(", Risk::Shell)],
+        Lang::Java => &[
+            ("Runtime.getRuntime().exec(", Risk::Shell),
+            ("new ProcessBuilder(", Risk::Shell),
+            ("new ObjectInputStream(", Risk::Deserialize),
+            ("catch (Throwable", Risk::CatchAll),
+            ("@SuppressWarnings(", Risk::Unchecked),
+        ],
+        // `!!` throws on a null; `TODO()` always throws.
+        Lang::Kotlin => &[
+            ("!!", Risk::Unwrap),
+            ("TODO(", Risk::Panic),
+            ("Runtime.getRuntime().exec(", Risk::Shell),
+            ("ProcessBuilder(", Risk::Shell),
+            ("ObjectInputStream(", Risk::Deserialize),
+            (": Throwable)", Risk::CatchAll),
+            ("@Suppress(", Risk::Unchecked),
+        ],
+        // `???` always throws; `.get` on an `Option` throws on `None`.
+        Lang::Scala => &[
+            ("???", Risk::Panic),
+            (".get)", Risk::Unwrap),
+            (".get.", Risk::Unwrap),
+            ("asInstanceOf[", Risk::Unchecked),
+            ("@unchecked", Risk::Unchecked),
+            ("sys.process", Risk::Shell),
+            ("Runtime.getRuntime().exec(", Risk::Shell),
+            ("ObjectInputStream(", Risk::Deserialize),
+            ("case _: Throwable", Risk::CatchAll),
+        ],
+        // `x!.y` (the null-forgiving operator) says "trust me".
+        Lang::CSharp => &[
+            ("Process.Start(", Risk::Shell),
+            ("unsafe ", Risk::Unsafe),
+            ("BinaryFormatter", Risk::Deserialize),
+            ("TypeNameHandling.All", Risk::Deserialize),
+            ("#pragma warning disable", Risk::Unchecked),
+            ("!.", Risk::Unwrap),
+            ("throw new NotImplementedException", Risk::Panic),
+            ("catch (Exception)", Risk::CatchAll),
+        ],
+        // `x!` (the null assertion) throws on a null.
+        Lang::Dart => &[
+            ("!.", Risk::Unwrap),
+            ("Process.run(", Risk::Shell),
+            ("Process.start(", Risk::Shell),
+            ("runInShell: true", Risk::Shell),
+            ("// ignore:", Risk::Unchecked),
+            ("throw UnimplementedError", Risk::Panic),
+            ("catch (_)", Risk::CatchAll),
+        ],
+        // Partial functions that crash, and the unsafe escape hatches.
+        Lang::Haskell => &[
+            ("fromJust", Risk::Unwrap),
+            ("unsafePerformIO", Risk::Unsafe),
+            ("unsafeCoerce", Risk::Unsafe),
+            ("undefined", Risk::Panic),
+            ("callCommand", Risk::Shell),
+            ("readCreateProcess", Risk::Shell),
+        ],
+        // `x.?` and `catch unreachable` crash where the value is not there.
+        Lang::Zig => &[
+            (".?", Risk::Unwrap),
+            ("catch unreachable", Risk::Panic),
+            ("@panic(", Risk::Panic),
+            ("@ptrCast(", Risk::Unsafe),
+            ("@ptrFromInt(", Risk::Unsafe),
+            ("@intToPtr(", Risk::Unsafe),
+            ("std.process.Child", Risk::Shell),
+        ],
+        // An atom made from data never leaves the atom table.
+        Lang::Erlang => &[
+            ("os:cmd(", Risk::Shell),
+            ("binary_to_term(", Risk::Deserialize),
+            ("list_to_atom(", Risk::Deserialize),
+            ("erlang:halt(", Risk::Panic),
+            ("_:_ ->", Risk::CatchAll),
+        ],
+        Lang::Elixir => &[
+            ("Code.eval_string(", Risk::Eval),
+            ("Code.eval_quoted(", Risk::Eval),
+            ("System.shell(", Risk::Shell),
+            (":os.cmd(", Risk::Shell),
+            (":erlang.binary_to_term(", Risk::Deserialize),
+            ("String.to_atom(", Risk::Deserialize),
+            ("raw(", Risk::RawHtml),
+            ("rescue _ ->", Risk::CatchAll),
+        ],
         _ => &[],
     }
 }
@@ -274,6 +376,10 @@ pub fn is_test_path(rel: &str) -> bool {
         || name.ends_with("_tests.rs")
         || name == "tests.rs"
         || name == "conftest.py"
+        // A .NET solution's test projects (`Shop.Tests/`), a Common Test
+        // suite.
+        || rel.split('/').any(|part| part.ends_with(".Tests") || part.ends_with(".UnitTests"))
+        || name.ends_with("_SUITE.erl")
 }
 
 /// The weak spots of one file: each function that asks for attention, and
@@ -1052,6 +1158,104 @@ fn a_test() {
         assert!(reasons(&spots, "myeval").is_empty(), "a name is no call");
     }
 
+    /// Each language's own risks, in its code — never in a string: a
+    /// Kotlin `!!`, Scala's `???`, C#'s `!.`, `Process.Start` and
+    /// `BinaryFormatter`, Dart's `!.`, Haskell's `fromJust` and
+    /// `unsafePerformIO`, Zig's `.?` and `catch unreachable`, Erlang's
+    /// `os:cmd` and `list_to_atom`, Elixir's `Code.eval_string` and
+    /// `String.to_atom`, Go's `unsafe.Pointer`, Java's
+    /// `ObjectInputStream`, Ruby's backtick-free shells.
+    #[test]
+    fn each_languages_own_risks() {
+        let cases: &[(&str, &str, &str, &str, &[Risk])] = &[
+            (
+                "kotlin",
+                "src/main/kotlin/Cart.kt",
+                "fun total(c: Cart?): Int {\n    val s = \"!!\"\n    TODO()\n    return c!!.sum\n}\n",
+                "total",
+                &[Risk::Unwrap, Risk::Panic],
+            ),
+            (
+                "scala",
+                "src/main/scala/Cart.scala",
+                "object Cart {\n  def total(c: Option[Int]): Int = {\n    val x = c.get\n    ???\n  }\n}\n",
+                "total",
+                &[Risk::Panic],
+            ),
+            (
+                "csharp",
+                "src/Cart.cs",
+                "class Cart {\n  void Run(string x) {\n    var p = Process.Start(x);\n    var n = p!.Id;\n    var f = new BinaryFormatter();\n  }\n}\n",
+                "Run",
+                &[Risk::Shell, Risk::Unwrap, Risk::Deserialize],
+            ),
+            (
+                "dart",
+                "lib/cart.dart",
+                "int total(Cart? c) {\n  Process.run('ls', []);\n  return c!.sum;\n}\n",
+                "total",
+                &[Risk::Shell, Risk::Unwrap],
+            ),
+            (
+                "haskell",
+                "src/Cart.hs",
+                "total :: Maybe Int -> Int\ntotal m = fromJust m + unsafePerformIO (pure 1)\n",
+                "total",
+                &[Risk::Unwrap, Risk::Unsafe],
+            ),
+            (
+                "zig",
+                "src/cart.zig",
+                "fn total(c: ?u32) u32 {\n    const x = parse() catch unreachable;\n    return c.? + x;\n}\n",
+                "total",
+                &[Risk::Panic, Risk::Unwrap],
+            ),
+            (
+                "erlang",
+                "src/cart.erl",
+                "-module(cart).\nrun(X) ->\n    os:cmd(X),\n    list_to_atom(X).\n",
+                "run",
+                &[Risk::Shell, Risk::Deserialize],
+            ),
+            (
+                "elixir",
+                "lib/cart.ex",
+                "defmodule Cart do\n  def run(x) do\n    Code.eval_string(x)\n    String.to_atom(x)\n  end\nend\n",
+                "run",
+                &[Risk::Eval, Risk::Deserialize],
+            ),
+            (
+                "go",
+                "cart/cart.go",
+                "package cart\n\nfunc Raw(p *int) {\n\t_ = unsafe.Pointer(p)\n}\n",
+                "Raw",
+                &[Risk::Unsafe],
+            ),
+            (
+                "java",
+                "src/main/java/Cart.java",
+                "class Cart {\n  Object load(InputStream in) throws Exception {\n    return new ObjectInputStream(in).readObject();\n  }\n}\n",
+                "load",
+                &[Risk::Deserialize],
+            ),
+        ];
+        for (lang, rel, src, name, risks) in cases {
+            let spots = scan_file(rel, src, lang);
+            let found = reasons(&spots, name);
+            for risk in *risks {
+                assert!(
+                    found
+                        .iter()
+                        .any(|r| matches!(r, Reason::Risky(k, _) if k == risk)),
+                    "{lang} {name}: {risk:?} in {found:?}"
+                );
+            }
+        }
+        // Kotlin's `!!` in a string is no `!!`.
+        let spots = scan_file("a.kt", "fun s() = \"wow!!\"\n", "kotlin");
+        assert!(reasons(&spots, "s").is_empty(), "{spots:?}");
+    }
+
     #[test]
     fn a_long_function_and_a_files_loose_notes() {
         let mut src = String::from("// FIXME: this module leaks\nfunction big() {\n");
@@ -1112,6 +1316,8 @@ fn a_test() {
             "src/Button.stories.tsx",
             "cypress/e2e/login.cy.ts",
             "src/__mocks__/api.ts",
+            "Shop.Tests/CartTests.cs",
+            "test/cart_SUITE.erl",
         ] {
             assert!(is_test_path(rel), "{rel}");
         }

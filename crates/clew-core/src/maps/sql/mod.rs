@@ -29,6 +29,7 @@ use crate::highlight::Lang;
 
 pub(crate) mod ddl;
 mod django;
+mod ecto;
 mod files;
 mod lex;
 mod prisma;
@@ -115,6 +116,25 @@ pub(crate) fn schemas(corpus: &Corpus) -> Vec<(files::Database, Schema)> {
                 root: match declared.as_slice() {
                     [one] => one.rel.clone(),
                     _ => "SQLAlchemy models".to_string(),
+                },
+                changes: Vec::new(),
+            },
+            schema,
+        ));
+    }
+    // Ecto's schemas: the tables their modules map (Ecto's migrations
+    // are Elixir, not SQL).
+    let ecto: Vec<&Source> = corpus
+        .files
+        .iter()
+        .filter(|s| ecto::is_schema(s) && !crate::weakspots::is_test_path(&s.rel))
+        .collect();
+    if let Some(schema) = ecto::schema(&ecto) {
+        out.push((
+            files::Database {
+                root: match ecto.as_slice() {
+                    [one] => one.rel.clone(),
+                    _ => "Ecto schemas".to_string(),
                 },
                 changes: Vec::new(),
             },
