@@ -22052,6 +22052,25 @@ fn stepping_back_and_forth_records_each_function_once_in_the_trail() {
         .filter_map(|v| v.label)
         .collect();
     assert_eq!(labels, ["tax", "total"], "the trail flooded");
+    // A file's top-level code, which the debugger names for no function
+    // (js-debug's `<anonymous>`, Python's `<module>`), is its file's.
+    let top = |name: &str, file: &str| crate::dap::StackFrame {
+        id: 1,
+        name: name.into(),
+        path: Some(root.join(file)),
+        line: 1,
+        column: 1,
+    };
+    let _ = app.on_dap_stop_inspected(vec![top("<anonymous>", "web/app.js")], Vec::new(), true);
+    let _ = app.on_dap_stop_inspected(vec![top("<module>", "main.py")], Vec::new(), true);
+    let labels: Vec<String> = app
+        .proj
+        .history
+        .flatten()
+        .into_iter()
+        .filter_map(|v| v.label)
+        .collect();
+    assert_eq!(labels, ["tax", "total", "app.js", "main.py"]);
 }
 
 /// A debug run's trace: each inspected stop is recorded with the reason the
@@ -44705,21 +44724,39 @@ fn a_pages_script_runs_in_its_page_served_for_the_run() {
         "the run over, the page is no longer served"
     );
     assert!(std::net::TcpStream::connect(&addr).is_err());
-    // Run opens it too, without the debugger.
+    // Run opens it too, without the debugger — and Stop, which ends the
+    // run with no Terminated from its adapter, stops its server.
     let _ = app.start_run();
     let session = app.debug.session.as_ref().unwrap();
     assert!(app.debug.no_debug);
+    let url = session.program.to_string_lossy().into_owned();
+    assert!(url.starts_with("http://127.0.0.1:"), "{url}");
+    let addr = url
+        .trim_start_matches("http://")
+        .split('/')
+        .next()
+        .unwrap()
+        .to_string();
+    assert!(std::net::TcpStream::connect(&addr).is_ok());
+    let _ = app.update(Message::Debug(DebugMsg::Stop));
+    assert!(app.debug.page_servers.is_empty());
     assert!(
-        session
-            .program
-            .to_string_lossy()
-            .starts_with("http://127.0.0.1:")
+        std::net::TcpStream::connect(&addr).is_err(),
+        "stopped with its run"
     );
-    // The page itself, read: the same.
+    // The page itself, read: the same — and it ran itself, not one picked
+    // for it, as the script's run says its page was.
+    assert_eq!(app.debug.ran_for.as_deref(), Some("app.js"));
     open_synchronously(&mut app, "index.html", None);
     let _ = app.start_debug();
     let session = app.debug.session.as_ref().unwrap();
     assert!(session.program.to_string_lossy().ends_with("/index.html"));
+    assert_eq!(app.debug.ran_for, None, "{}", app.status);
+    assert!(
+        !app.status.contains("does not run on its own"),
+        "{}",
+        app.status
+    );
     // A script no page loads is a program, Node's to run.
     open_synchronously(&mut app, "cli.js", None);
     let _ = app.start_debug();

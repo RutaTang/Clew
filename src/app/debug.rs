@@ -1566,8 +1566,10 @@ impl App {
         // `envFile`: given to lldb as it is to debugpy.
         let mut file_env: Vec<(String, String)> = Vec::new();
         let mut file_notes: Vec<String> = Vec::new();
-        // A page's own server, held by its run's tab while it runs.
+        // A page's own server, held by its run's tab while it runs, and
+        // the page (the run's program is its URL).
         let mut page_server: Option<clew_core::pageserver::PageServer> = None;
+        let mut page_run: Option<PathBuf> = None;
         let (program, args, cwd, lang) = if remote {
             (root.clone(), Vec::new(), root.clone(), None)
         } else if let Some(plan) = &plan {
@@ -1582,6 +1584,7 @@ impl App {
                     match Self::page_launch(&page, &served) {
                         Ok((cfg, server)) => {
                             page_server = Some(server);
+                            page_run = std::fs::canonicalize(&page).ok();
                             cfg
                         }
                         Err(e) => {
@@ -1774,9 +1777,11 @@ impl App {
                 .map(|n| n.to_string_lossy().into_owned()),
             // A test is what was asked for.
             Some(_) => None,
+            // The page read, run: itself, not one picked for it.
             None => self
                 .active_viewer()
                 .filter(|v| picked && v.abs != program)
+                .filter(|v| page_run.is_none() || std::fs::canonicalize(&v.abs).ok() != page_run)
                 .and_then(|v| v.abs.file_name())
                 .map(|n| n.to_string_lossy().into_owned()),
         };
@@ -2946,6 +2951,9 @@ impl App {
         // checks the live counter and kills what it spawned.
         self.bump_debug_run();
         self.forget_adapter_verdicts();
+        // A page served for the run is served no longer: no Terminated of
+        // its adapter's comes to say the run is over.
+        self.debug.page_servers.remove(&self.debug.tab);
         // The next adapter answers `initialize` for itself.
         self.debug.hover_safe = false;
         // Every session of the run is ended, not only the one on screen: a
@@ -3978,12 +3986,22 @@ impl App {
         if let (true, Some(fname), Some((path, line))) = (record, &fname, &target)
             && self.debug.trail_fns.insert((path.clone(), fname.clone()))
         {
+            // A file's own top-level code is named by the debugger for no
+            // function (js-debug's `<anonymous>`, Python's `<module>`): by
+            // its file, in the trail, as it reads.
+            let label = match fname.starts_with('<') && fname.ends_with('>') {
+                true => path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| fname.clone()),
+                false => fname.clone(),
+            };
             self.proj.history.push(
                 Loc {
                     path: path.clone(),
                     line: Some(*line),
                 },
-                Some(fname.clone()),
+                Some(label),
             );
             saved = self.save_history();
         }
