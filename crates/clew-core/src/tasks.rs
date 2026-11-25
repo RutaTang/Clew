@@ -99,6 +99,7 @@ fn run_with(
                 .ok_or_else(|| format!("{rel} has no tests to run"))?;
             let found = crate::runnables::runnables_in(lang, rel.as_str(), &source);
             let test = crate::runnables::runnable_at(&found, *line)
+                .filter(|r| r.kind != crate::runnables::RunnableKind::Main)
                 .ok_or_else(|| format!("{rel} has no tests to run"))?;
             let command =
                 crate::langtests::test_command(&root, &file, lang, &source, test, search)?;

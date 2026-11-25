@@ -87,6 +87,45 @@ fn shows_scope(name: &str, expensive: bool, variables_reference: i64) -> bool {
     variables_reference != 0 && (!expensive || matches!(name, "Module" | "Script"))
 }
 
+/// Whether the margin marks a program's start in `lang` beyond Rust's,
+/// Python's and Lean's ([`clew_core::langtests::main_line`]).
+fn marks_main(lang: &str) -> bool {
+    matches!(
+        lang,
+        "go" | "c"
+            | "cpp"
+            | "java"
+            | "kotlin"
+            | "scala"
+            | "csharp"
+            | "dart"
+            | "zig"
+            | "haskell"
+            | "erlang"
+            | "ruby"
+    )
+}
+
+/// Whether a variable of a stop's scope is shown: in lldb's Globals, not
+/// the C or C++ library's own — a name of the implementation's (`__x`,
+/// `_X`, as `std::__detail::__integer_to_chars_is_unsigned`), or one lldb
+/// cannot read (`<error: …>`), which say nothing of the program.
+fn shows_variable(scope: &str, var: &crate::dap::proto::Variable) -> bool {
+    if scope != "Globals" {
+        return true;
+    }
+    // lldb names a global `name @ file:line` where two share a name.
+    let name = var.name.split(" @ ").next().unwrap_or(&var.name);
+    let reserved = name.split("::").any(|part| {
+        let mut chars = part.chars();
+        chars.next() == Some('_')
+            && chars
+                .next()
+                .is_some_and(|c| c == '_' || c.is_ascii_uppercase())
+    });
+    !reserved && !var.value.starts_with("<error")
+}
+
 /// A `launch` body without the exception filters Clew asks for in it (see
 /// `clew_core::debugadapter::EXCEPTIONS`), and those filters.
 fn take_exceptions(mut launch: serde_json::Value) -> (serde_json::Value, Vec<String>) {
@@ -147,6 +186,24 @@ fn without_debugger(launch: &mut serde_json::Value) {
 /// here to type at, and the run's output was the debugger's first.
 fn is_debugger_chatter(category: &str, text: &str) -> bool {
     let text = text.trim();
+    // Each JVM's notice of the options it took from the environment
+    // (`Picked up JAVA_TOOL_OPTIONS: …`), as javac and the program start:
+    // the JVM's, not the program's words.
+    let jvm_notice = |l: &str| {
+        l.strip_prefix("Picked up ").is_some_and(|r| {
+            ["JAVA_TOOL_OPTIONS:", "_JAVA_OPTIONS:", "JDK_JAVA_OPTIONS:"]
+                .iter()
+                .any(|v| r.starts_with(v))
+        })
+    };
+    if !text.is_empty()
+        && text
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .all(|l| jvm_notice(l.trim_start()))
+    {
+        return true;
+    }
     match category {
         "console" => {
             text == "Type 'dlv help' for list of commands."
@@ -157,14 +214,34 @@ fn is_debugger_chatter(category: &str, text: &str) -> bool {
                 || text == "Connected to the VM Service."
                 || (text.starts_with("Exited") && text.ends_with('.') && text.len() < 24)
         }
+        // Dart's "DEBUGGER:" lines; lldb's complaints about a program's
+        // debug information (`error: app 0x6f0a: DW_TAG_member … extends
+        // beyond the bounds of …`, of GCC's DWARF), not the program's.
         "stderr" => {
             !text.is_empty()
-                && text
-                    .lines()
-                    .all(|l| l.trim_start().starts_with("DEBUGGER: "))
+                && text.lines().filter(|l| !l.trim().is_empty()).all(|l| {
+                    let l = l.trim_start();
+                    l.starts_with("DEBUGGER: ")
+                        || ((l.starts_with("error: ") || l.starts_with("warning: "))
+                            && l.contains(": DW_"))
+                })
         }
         _ => false,
     }
+}
+
+/// The exit code Delve says a Go program ended with ("Process 4211 has
+/// exited with status 0"), which it sends no `exited` event for.
+fn delve_exit(category: &str, text: &str) -> Option<i64> {
+    if category == "stderr" {
+        return None;
+    }
+    let rest = text.trim().strip_prefix("Process ")?;
+    let (pid, status) = rest.split_once(" has exited with status ")?;
+    if pid.is_empty() || !pid.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    status.parse().ok()
 }
 
 /// The program's own output of a run, as one text.
@@ -384,6 +461,75 @@ async fn build_with_cargo(
 /// the `said` it is given, and stops once the `cancel` it is given is set;
 /// it answers how the program ended, or what to tell the reader of why it
 /// did not run.
+/// Run `job` off the UI thread — a build before a run — each line it
+/// says sent to the run's output as it comes (as Cargo's words are), and
+/// stopped with the run: what it came to, and whether it said anything;
+/// `None` once the run was stopped.
+async fn build_with_words<T, F>(
+    output: &mut iced::futures::channel::mpsc::Sender<Message>,
+    stamp: &Stamp,
+    run: u64,
+    live: &std::sync::Arc<std::sync::atomic::AtomicU64>,
+    job: F,
+) -> Option<(Result<T, String>, bool)>
+where
+    T: Send + 'static,
+    F: FnOnce(&mut dyn FnMut(&str), &std::sync::atomic::AtomicBool) -> Result<T, String>
+        + Send
+        + 'static,
+{
+    use iced::futures::SinkExt;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let console = |text: String| {
+        Message::Debug(DebugMsg::DapEvent {
+            stamp: stamp.clone(),
+            run,
+            event: dap::DapEvent::Output(dap::proto::Output {
+                category: "console".into(),
+                text,
+            }),
+        })
+    };
+    let (lines_tx, mut lines) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let cancel = std::sync::Arc::new(AtomicBool::new(false));
+    let job = tokio::task::spawn_blocking({
+        let cancel = cancel.clone();
+        move || {
+            let mut said = |line: &str| {
+                let _ = lines_tx.send(line.to_string());
+            };
+            job(&mut said, &cancel)
+        }
+    });
+    tokio::pin!(job);
+    let (mut open, mut spoke) = (true, false);
+    let mut tick = tokio::time::interval(std::time::Duration::from_millis(150));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let done = loop {
+        tokio::select! {
+            line = lines.recv(), if open => match line {
+                Some(line) => {
+                    spoke = true;
+                    let _ = output.send(console(format!("{line}\n"))).await;
+                }
+                None => open = false,
+            },
+            done = &mut job => break done,
+            _ = tick.tick() => {
+                if live.load(Ordering::SeqCst) != run {
+                    cancel.store(true, Ordering::SeqCst);
+                    return None;
+                }
+            }
+        }
+    };
+    while let Ok(line) = lines.try_recv() {
+        spoke = true;
+        let _ = output.send(console(format!("{line}\n"))).await;
+    }
+    Some((done.unwrap_or_else(|e| Err(e.to_string())), spoke))
+}
+
 async fn run_plain<F>(
     output: &mut iced::futures::channel::mpsc::Sender<Message>,
     stamp: &Stamp,
@@ -1077,6 +1223,19 @@ impl App {
         if let Some(plan) = self.js_file_run().or_else(|| self.lang_file_run()) {
             return self.start_session(true, Some(plan));
         }
+        // A C or C++ program: built as Debug builds it, run with the
+        // debugger off.
+        if let Some(plan) = self.lang_debug_main().filter(|p| {
+            matches!(
+                p,
+                crate::app::runplan::RunPlan::LangDebugMain {
+                    lang: "c" | "cpp",
+                    ..
+                }
+            )
+        }) {
+            return self.start_session(true, Some(plan));
+        }
         self.start_session(true, None)
     }
 
@@ -1084,17 +1243,25 @@ impl App {
     /// on this computer that names nothing to run (no launch file): the
     /// program Run runs, under its language's debugger, where it can be.
     fn lang_debug_main(&self) -> Option<crate::app::runplan::RunPlan> {
-        if self.connection.is_remote() {
-            return None;
-        }
         let root = &self.proj.project.as_ref()?.root;
         if crate::app::tasks::launch_file_path(root).is_some() {
             return None;
         }
+        self.file_debug_main()
+    }
+
+    /// The active file's own program under its language's debugger,
+    /// whatever a launch file names: [`Self::lang_debug_main`]'s, and the
+    /// margin ▶'s on its `main`.
+    fn file_debug_main(&self) -> Option<crate::app::runplan::RunPlan> {
+        if self.connection.is_remote() {
+            return None;
+        }
+        let root = &self.proj.project.as_ref()?.root;
         let viewer = self.active_viewer()?;
         let lang = viewer
             .lang_key
-            .filter(|l| clew_core::langtests::handles_main(l))?;
+            .filter(|l| clew_core::langtests::debugs_main(l))?;
         let slug = clew_core::langtests::main_debugger(root, &viewer.abs, lang)?;
         Some(crate::app::runplan::RunPlan::LangDebugMain {
             file: viewer.abs.clone(),
@@ -1111,6 +1278,12 @@ impl App {
         if crate::app::tasks::launch_file_path(root).is_some() {
             return None;
         }
+        self.file_main_run()
+    }
+
+    /// The active file run as a program, as its project runs one, whatever
+    /// a launch file names: [`Self::lang_file_run`]'s, and the margin ▶'s.
+    fn file_main_run(&self) -> Option<crate::app::runplan::RunPlan> {
         let viewer = self.active_viewer()?;
         viewer
             .lang_key
@@ -1259,6 +1432,16 @@ impl App {
                 .abs
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned()),
+            // Another language's program, by its file: on this computer,
+            // or one a remote project's host runs (`ProjectTask::Main`).
+            lang if marks_main(lang)
+                && (!self.connection.is_remote() || clew_core::langtests::handles_main(lang)) =>
+            {
+                viewer
+                    .abs
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+            }
             _ => None,
         }
     }
@@ -1281,7 +1464,15 @@ impl App {
             .filter(|r| match r.kind {
                 RunnableKind::Test => !r.name.contains('['),
                 RunnableKind::Tests => !r.name.is_empty(),
-                RunnableKind::Main | RunnableKind::Doctest => true,
+                // Another language's program on a remote project runs on
+                // its host where Clew runs one there (`ProjectTask::Main`).
+                RunnableKind::Main => match v.lang_key {
+                    Some(lang) if marks_main(lang) && self.connection.is_remote() => {
+                        clew_core::langtests::handles_main(lang)
+                    }
+                    _ => true,
+                },
+                RunnableKind::Doctest => true,
             })
             .map(|r| r.line)
             .collect()
@@ -1322,6 +1513,13 @@ impl App {
                 }),
             );
         }
+        if let Some(lang) = self
+            .active_viewer()
+            .and_then(|v| v.lang_key)
+            .filter(|l| marks_main(l))
+        {
+            return self.run_file_program(lang, no_debug);
+        }
         let plan = self
             .active_viewer()
             .and_then(|v| crate::app::runplan::main_plan_at(v.lang_key?, &v.abs, &v.source, line));
@@ -1331,6 +1529,49 @@ impl App {
                 self.status = tr!("No program starts here.").into();
                 Task::none()
             }
+        }
+    }
+
+    /// Run (`no_debug`) or debug the program the active file starts (the
+    /// margin ▶ on its `main`), as Run and Debug run the file when nothing
+    /// names what to run — whatever a launch file names: C's and C++'s
+    /// built as Debug builds them; Kotlin's, Scala's, C#'s, Zig's as their
+    /// project runs one; Go's, Java's, Dart's, Haskell's, Erlang's and
+    /// Ruby's file under its language's debugger.
+    fn run_file_program(&mut self, lang: &str, no_debug: bool) -> Task<Message> {
+        use crate::app::runplan::RunPlan;
+        let debug = self.file_debug_main();
+        if matches!(lang, "c" | "cpp") {
+            return match debug {
+                Some(plan) => self.start_session(no_debug, Some(plan)),
+                // A make, Meson or Bazel project's: the program its launch
+                // file names.
+                None if no_debug => self.start_run(),
+                None => self.start_debug(),
+            };
+        }
+        let run = self.file_main_run();
+        match (no_debug, debug, run) {
+            (true, _, Some(plan)) | (false, Some(plan), _) => {
+                self.start_session(no_debug, Some(plan))
+            }
+            // Out of the debugger's reach (an sbt build that forks it, a
+            // remote project's): run, and said so.
+            (false, None, Some(plan)) => {
+                let task = self.start_session(true, Some(plan));
+                self.status = tr!(
+                    "This language's programs run without the debugger: {status}",
+                    status = self.status
+                );
+                task
+            }
+            _ => match self.active_viewer().map(|v| v.abs.clone()) {
+                Some(file) if !self.connection.is_remote() => {
+                    self.start_session(no_debug, Some(RunPlan::Script { file }))
+                }
+                _ if no_debug => self.start_run(),
+                _ => self.start_debug(),
+            },
         }
     }
 
@@ -2469,15 +2710,28 @@ impl App {
                         Some(crate::app::runplan::RunPlan::LangDebugMain {
                             file, lang, ..
                         }) => {
+                            // Built first where it must be (CMake, the
+                            // compiler, `dotnet build`), its words in the
+                            // run's output as it builds, as Cargo's are.
                             let (root, file, lang) = (root.clone(), file.clone(), *lang);
-                            let worked = tokio::task::spawn_blocking(move || {
-                                let search = clew_core::linerpc::search_path().unwrap_or_default();
-                                clew_core::langtests::debug_main(&root, &file, lang, &search)
-                            })
-                            .await
-                            .unwrap_or_else(|e| Err(e.to_string()));
+                            let worked = build_with_words(
+                                &mut output,
+                                &stamp,
+                                run,
+                                &live,
+                                move |said, cancel| {
+                                    let search =
+                                        clew_core::linerpc::search_path().unwrap_or_default();
+                                    clew_core::langtests::debug_main(
+                                        &root, &file, lang, &search, said, cancel,
+                                    )
+                                },
+                            )
+                            .await;
                             match worked {
-                                Ok(debug) => {
+                                // Stopped while it built: nothing more said.
+                                None => return,
+                                Some((Ok(debug), _)) => {
                                     let ran = (
                                         debug.program.clone(),
                                         debug.args.clone(),
@@ -2487,14 +2741,24 @@ impl App {
                                     test_setup = Some(debug);
                                     ran
                                 }
-                                Err(why) => {
-                                    let _ = output
-                                        .send(Message::Debug(DebugMsg::Failed {
+                                // A build that said something and failed:
+                                // its tab kept with its words, marked so.
+                                Some((Err(why), built)) => {
+                                    let error = crate::i18n::message(&why);
+                                    let failed = match built {
+                                        true => DebugMsg::BuildFailed {
                                             stamp: stamp.clone(),
                                             run,
-                                            error: crate::i18n::message(&why),
-                                        }))
-                                        .await;
+                                            error,
+                                            built: false,
+                                        },
+                                        false => DebugMsg::Failed {
+                                            stamp: stamp.clone(),
+                                            run,
+                                            error,
+                                        },
+                                    };
+                                    let _ = output.send(Message::Debug(failed)).await;
                                     return;
                                 }
                             }
@@ -3539,10 +3803,17 @@ impl App {
                         if !shows_scope(&sc.name, sc.expensive, sc.variables_reference) {
                             continue; // skip Registers etc. by default
                         }
-                        let vars = client
+                        let mut vars = client
                             .variables(sc.variables_reference)
                             .await
                             .unwrap_or_default();
+                        let all = vars.len();
+                        vars.retain(|v| shows_variable(&sc.name, v));
+                        // None of the program's (none at all, or only
+                        // the library's): no heading over nothing.
+                        if vars.is_empty() && (all > 0 || sc.name == "Globals") {
+                            continue;
+                        }
                         scopes.push(DebugScope {
                             name: sc.name,
                             vars,
@@ -3822,6 +4093,15 @@ impl App {
             dap::DapEvent::Output(o) if o.category == "telemetry" => Task::none(),
             dap::DapEvent::Output(o) if is_formatter_noise(&o.text) => Task::none(),
             dap::DapEvent::Output(o) if is_debugger_chatter(&o.category, &o.text) => Task::none(),
+            // Delve's word of the program's end, its only one: the run
+            // ends with that code, not "finished", the line not the
+            // program's.
+            dap::DapEvent::Output(o) if delve_exit(&o.category, &o.text).is_some() => {
+                if session.exit_code.is_none() {
+                    session.exit_code = delve_exit(&o.category, &o.text);
+                }
+                Task::none()
+            }
             dap::DapEvent::Output(o) => {
                 push_debug_output(session, o.category, o.text);
                 Task::none()
@@ -3866,6 +4146,9 @@ impl App {
                     (Some(lang), None) => {
                         clew_core::langtests::test_end(lang, &program_said(&session.output))
                     }
+                    // Said in words (Delve's "has exited with status 1"),
+                    // with no `exited` event to say the verdict.
+                    (Some(_), code) => code,
                     _ => None,
                 };
                 if ended.is_some() {
@@ -5346,6 +5629,33 @@ fn is_program_start_file(rel: &str) -> bool {
 #[cfg(test)]
 mod tests {
 
+    /// lldb's Globals without the C++ library's own: its reserved names,
+    /// and what lldb cannot read.
+    #[test]
+    fn the_libraries_own_globals_are_not_shown() {
+        let var = |name: &str, value: &str| crate::dap::proto::Variable {
+            name: name.into(),
+            value: value.into(),
+            type_name: None,
+            variables_reference: 0,
+        };
+        assert!(!shows_variable(
+            "Globals",
+            &var(
+                "std::__detail::__integer_to_chars_is_unsigned @ charconv.h:48",
+                "true"
+            )
+        ));
+        assert!(!shows_variable("Globals", &var("_IO_stdin_used", "1")));
+        assert!(!shows_variable(
+            "Globals",
+            &var("counter", "<error: empty>")
+        ));
+        assert!(shows_variable("Globals", &var("counter", "3")));
+        assert!(shows_variable("Globals", &var("app::_count", "3")));
+        assert!(shows_variable("Locals", &var("__x", "1")));
+    }
+
     /// A JavaScript module's and script's own scopes are shown though
     /// js-debug marks them expensive; Registers and Global are not.
     #[test]
@@ -5461,6 +5771,14 @@ mod tests {
         ));
         assert!(is_debugger_chatter("stderr", "DEBUGGER: Connected.\n"));
         assert!(is_debugger_chatter(
+            "stderr",
+            "error: greeter 0x00006f0a: DW_TAG_member '_M_local_buf' refers to type 0x000000000000a55c which extends beyond the bounds of 0x00006f01\n"
+        ));
+        assert!(!is_debugger_chatter(
+            "stderr",
+            "error: could not open input.txt\n"
+        ));
+        assert!(is_debugger_chatter(
             "console",
             "Connecting to VM Service at ws://127.0.0.1:36369/htrV0IaX9bU=/ws\n"
         ));
@@ -5469,6 +5787,27 @@ mod tests {
             "Connected to the VM Service.\n"
         ));
         assert!(is_debugger_chatter("console", "\nExited.\n"));
+        assert!(is_debugger_chatter(
+            "stderr",
+            "Picked up JAVA_TOOL_OPTIONS: -Dx=y\nPicked up _JAVA_OPTIONS: -Xmx1g\n"
+        ));
+        assert!(!is_debugger_chatter("stdout", "Picked up the parcel\n"));
+        assert_eq!(
+            delve_exit("console", "Process 18891 has exited with status 0\n"),
+            Some(0)
+        );
+        assert_eq!(
+            delve_exit("console", "Process 7 has exited with status 2"),
+            Some(2)
+        );
+        assert_eq!(
+            delve_exit("stderr", "Process 7 has exited with status 2"),
+            None
+        );
+        assert_eq!(
+            delve_exit("stdout", "Process list has exited with status ok"),
+            None
+        );
         assert!(is_debugger_chatter("console", "Exited (1).\n"));
         assert!(
             !is_debugger_chatter("stdout", "Exited.\n"),

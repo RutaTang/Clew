@@ -178,7 +178,12 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("cannot make {arg1}: {e}"),
     tr_noop!("cannot write {arg1}: {e}"),
     tr_noop!("no free port for the debugger: {e}"),
-    tr_noop!("dotnet could not build {arg1}:\n{arg2}"),
+    tr_noop!("dotnet could not build {project} (its output is above)."),
+    tr_noop!("CMake could not configure the build (its output is above)."),
+    tr_noop!("The build was stopped."),
+    tr_noop!("CMake could not build {target} (its output is above)."),
+    tr_noop!("{target} was built, but its program wasn't found in {folder}."),
+    tr_noop!("{file} did not compile (the compiler's output is above)."),
     tr_noop!(
         "{name} has no main function to run: run its tests with Run Test, or open the program's own file."
     ),

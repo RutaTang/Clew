@@ -4114,7 +4114,12 @@
  "This program was built without debug information, so breakpoints won't bind and variables can't be read. Build it for debugging (CMake: -DCMAKE_BUILD_TYPE=Debug; a compiler: -g), then debug it again.": "Ce programme a été compilé sans informations de débogage : les points d’arrêt ne se lieront pas et les variables ne pourront pas être lues. Compilez-le pour le débogage (CMake : -DCMAKE_BUILD_TYPE=Debug ; un compilateur : -g), puis déboguez-le à nouveau.",
  "The tests ended before their host waited for the debugger. See their output.": "Les tests se sont terminés avant que leur hôte n’attende le débogueur. Consultez leur sortie.",
  "no free port for the debugger: {e}": "aucun port libre pour le débogueur : {e}",
- "dotnet could not build {arg1}:\n{arg2}": "dotnet n’a pas pu compiler {arg1} :\n{arg2}",
+ "dotnet could not build {project} (its output is above).": "dotnet n’a pas pu compiler {project} (sa sortie est ci-dessus).",
  "{name} has no main function to run: run its tests with Run Test, or open the program's own file.": "{name} n’a pas de fonction main à exécuter : lancez ses tests avec Exécuter le test, ou ouvrez le fichier du programme lui-même.",
- "{name} is a library or a test project, so it has no program to run.": "{name} est une bibliothèque ou un projet de tests : il n’a aucun programme à exécuter."
+ "{name} is a library or a test project, so it has no program to run.": "{name} est une bibliothèque ou un projet de tests : il n’a aucun programme à exécuter.",
+ "CMake could not configure the build (its output is above).": "CMake n’a pas pu configurer la compilation (sa sortie est ci-dessus).",
+ "CMake could not build {target} (its output is above).": "CMake n’a pas pu compiler {target} (sa sortie est ci-dessus).",
+ "{target} was built, but its program wasn't found in {folder}.": "{target} a été compilé, mais son programme est introuvable dans {folder}.",
+ "{file} did not compile (the compiler's output is above).": "{file} n’a pas compilé (la sortie du compilateur est ci-dessus).",
+ "The build was stopped.": "La compilation a été arrêtée."
 }

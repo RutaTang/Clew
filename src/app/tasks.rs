@@ -1707,18 +1707,87 @@ pub(crate) fn function_body<'a>(
 
 /// A short, readable name for a debug stack frame — the last path segment, with
 /// a trailing mangling hash (`::h1a2b3…`) dropped. "main::factorial::hd89…" →
-/// "factorial".
+/// "factorial". A C++ frame is named by its signature, as lldb names it:
+/// its parameter list and qualifiers go, and its path is split only
+/// outside `<…>` and `(…)` — `greet(std::basic_string<char> const&)` is
+/// "greet", `ns::Box<std::string>::get() const` "get".
 pub fn short_frame_name(name: &str) -> String {
-    let parts: Vec<&str> = name.split("::").collect();
+    let name = without_parameters(name.trim());
+    let mut parts: Vec<&str> = Vec::new();
+    let (mut depth, mut start) = (0i32, 0);
+    let bytes = name.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'<' | b'(' | b'[' => depth += 1,
+            b'>' | b')' | b']' => depth -= 1,
+            b':' if depth == 0 && bytes.get(i + 1) == Some(&b':') => {
+                parts.push(&name[start..i]);
+                start = i + 2;
+                i += 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    parts.push(&name[start..]);
     let drop_hash = parts.last().is_some_and(|s| {
         s.len() > 3 && s.starts_with('h') && s[1..].chars().all(|c| c.is_ascii_hexdigit())
     });
-    let end = if drop_hash {
+    let end = if drop_hash && parts.len() > 1 {
         parts.len() - 1
     } else {
         parts.len()
     };
-    parts[..end].last().copied().unwrap_or(name).to_string()
+    let last = parts[..end].last().copied().unwrap_or(name);
+    // A template's arguments (`get_as<int>`), not an operator's `<`.
+    let last = match last.find('<') {
+        Some(at) if last.ends_with('>') && !last.starts_with("operator") && at > 0 => &last[..at],
+        _ => last,
+    };
+    last.to_string()
+}
+
+/// A C++ signature's name without its parameter list and the qualifiers
+/// after it (`const`, `&`, `noexcept`): what precedes the `(` the closing
+/// `)` matches. A name that does not end in a parameter list (Go's
+/// `main.(*Server).Handle`) is kept whole.
+fn without_parameters(name: &str) -> &str {
+    let mut end = name;
+    loop {
+        let trimmed = end.trim_end();
+        let shorter = ["const", "volatile", "noexcept", "&&", "&"]
+            .iter()
+            .find_map(|q| trimmed.strip_suffix(q));
+        match shorter {
+            Some(rest) => end = rest,
+            None => {
+                end = trimmed;
+                break;
+            }
+        }
+    }
+    if !end.ends_with(')') {
+        return name;
+    }
+    let mut depth = 0i32;
+    for (i, c) in end.char_indices().rev() {
+        match c {
+            ')' => depth += 1,
+            '(' => {
+                depth -= 1;
+                if depth == 0 {
+                    // `operator()(…)`: the call operator keeps its own `()`.
+                    return match end[..i].trim_end() {
+                        "" => name,
+                        head => head,
+                    };
+                }
+            }
+            _ => {}
+        }
+    }
+    name
 }
 
 /// Resolve a possibly-relative path from the launch config against the root.
@@ -4077,6 +4146,34 @@ pub(crate) fn read_text_file(path: &Path) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
+    /// A frame's short name: Rust's path without its hash, C++'s signature
+    /// without its parameters and qualifiers, its path split outside its
+    /// templates; Go's whole.
+    #[test]
+    fn a_frames_short_name_is_its_functions() {
+        use super::short_frame_name as short;
+        assert_eq!(short("main::factorial::hd89a1b2c3d4e5f60"), "factorial");
+        assert_eq!(
+            short(
+                "greet(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char>> const&)"
+            ),
+            "greet"
+        );
+        assert_eq!(short("shop::Cart<std::string>::total() const"), "total");
+        assert_eq!(short("(anonymous namespace)::helper(int)"), "helper");
+        assert_eq!(short("main"), "main");
+        assert_eq!(short("main.(*Server).Handle"), "main.(*Server).Handle");
+        assert_eq!(
+            short("core::ptr::drop_in_place<alloc::string::String>"),
+            "drop_in_place"
+        );
+        assert_eq!(
+            short("operator<<(std::ostream&, Point const&)"),
+            "operator<<"
+        );
+        assert_eq!(short("main::$_0::operator()() const"), "operator()");
+    }
+
     use super::*;
     use crate::app::tests::test_dir;
 

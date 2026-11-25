@@ -4114,7 +4114,12 @@
  "This program was built without debug information, so breakpoints won't bind and variables can't be read. Build it for debugging (CMake: -DCMAKE_BUILD_TYPE=Debug; a compiler: -g), then debug it again.": "이 프로그램은 디버그 정보 없이 빌드되어 중단점이 연결되지 않고 변수를 읽을 수 없습니다. 디버그용으로 빌드한 뒤(CMake: -DCMAKE_BUILD_TYPE=Debug, 컴파일러: -g) 다시 디버그하세요.",
  "The tests ended before their host waited for the debugger. See their output.": "테스트 호스트가 디버거를 기다리기 전에 테스트가 끝났습니다. 출력을 확인하세요.",
  "no free port for the debugger: {e}": "디버거에 사용할 빈 포트가 없음: {e}",
- "dotnet could not build {arg1}:\n{arg2}": "dotnet이 {arg1}을(를) 빌드하지 못했습니다:\n{arg2}",
+ "dotnet could not build {project} (its output is above).": "dotnet이 {project}을(를) 빌드하지 못했습니다(출력은 위에 있습니다).",
  "{name} has no main function to run: run its tests with Run Test, or open the program's own file.": "{name}에는 실행할 main 함수가 없습니다. 테스트 실행으로 테스트를 실행하거나 프로그램 자체의 파일을 여세요.",
- "{name} is a library or a test project, so it has no program to run.": "{name}은(는) 라이브러리 또는 테스트 프로젝트이므로 실행할 프로그램이 없습니다."
+ "{name} is a library or a test project, so it has no program to run.": "{name}은(는) 라이브러리 또는 테스트 프로젝트이므로 실행할 프로그램이 없습니다.",
+ "CMake could not configure the build (its output is above).": "CMake가 빌드를 구성하지 못했습니다(출력은 위에 있습니다).",
+ "CMake could not build {target} (its output is above).": "CMake가 {target}을(를) 빌드하지 못했습니다(출력은 위에 있습니다).",
+ "{target} was built, but its program wasn't found in {folder}.": "{target}이(가) 빌드되었지만 {folder}에서 프로그램을 찾을 수 없습니다.",
+ "{file} did not compile (the compiler's output is above).": "{file}을(를) 컴파일하지 못했습니다(컴파일러 출력은 위에 있습니다).",
+ "The build was stopped.": "빌드가 중지되었습니다."
 }

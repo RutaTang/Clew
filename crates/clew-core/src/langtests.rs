@@ -80,7 +80,196 @@ pub fn tests(lang: &str, rel: &str, source: &str) -> Vec<Runnable> {
             },
         );
     }
+    // A Dart test file's `main` is its tests' (`group`, `test` inside it):
+    // they are what its ▶s run.
+    let tests_main = lang == "dart" && !out.is_empty();
+    if let Some(line) = main_line(lang, &lines).filter(|_| !tests_main) {
+        out.push(Runnable {
+            kind: RunnableKind::Main,
+            name: "main".to_string(),
+            line,
+            // Its own line: elsewhere in it, the cursor is where it was —
+            // in the file's tests, for Run Test.
+            span: (line, line),
+            scopes: Vec::new(),
+        });
+    }
     out
+}
+
+/// The 1-based line of a C# file's first top-level statement: a program
+/// with no `Main`, its statements before any type or namespace.
+fn csharp_top_level(lines: &[&str]) -> Option<usize> {
+    let mut in_comment = false;
+    for (i, line) in lines.iter().enumerate() {
+        let t = line.trim();
+        if in_comment {
+            in_comment = !t.contains("*/");
+            continue;
+        }
+        if t.is_empty() || t.starts_with("//") || t.starts_with('#') {
+            continue;
+        }
+        if t.starts_with("/*") {
+            in_comment = !t.contains("*/");
+            continue;
+        }
+        if t.starts_with("using ") || t.starts_with("global using ") {
+            continue;
+        }
+        let first = t
+            .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .next()
+            .unwrap_or("");
+        let declares = t.starts_with('[')
+            || matches!(
+                first,
+                "namespace"
+                    | "class"
+                    | "record"
+                    | "struct"
+                    | "interface"
+                    | "enum"
+                    | "delegate"
+                    | "public"
+                    | "internal"
+                    | "private"
+                    | "protected"
+                    | "static"
+                    | "sealed"
+                    | "abstract"
+                    | "partial"
+                    | "file"
+                    | "readonly"
+                    | "unsafe"
+            );
+        return (!declares).then_some(i + 1);
+    }
+    None
+}
+
+/// The 1-based line a program of `lang` starts at in a file, as its
+/// language starts one: Go's `func main()` of `package main`, C's and
+/// C++'s `int main(`, Java's `static void main(` (or a compact source
+/// file's `void main()`), Kotlin's top-level `fun main(`, Scala's `def
+/// main(args` or `@main def`, C#'s `static … Main(`, Dart's top-level
+/// `main(`, Zig's `pub fn main(`, Haskell's `main` of its `Main` module,
+/// an Erlang module's exported `main/1` (an escript's, the entry Clew's
+/// Erlang debugger runs), and Ruby's `if __FILE__ == $0` block.
+pub fn main_line(lang: &str, lines: &[&str]) -> Option<usize> {
+    let code = |l: &&str| {
+        let t = l.trim_start();
+        !(t.starts_with("//") || t.starts_with('*') || t.starts_with("/*"))
+    };
+    let at = |pick: &dyn Fn(&str, &str) -> bool| {
+        lines
+            .iter()
+            .position(|l| code(l) && pick(l, l.trim()))
+            .map(|i| i + 1)
+    };
+    let top = |l: &str| !l.starts_with([' ', '\t']);
+    match lang {
+        "go" => lines
+            .iter()
+            .any(|l| l.trim() == "package main")
+            .then(|| at(&|l, _| l.starts_with("func main()")))
+            .flatten(),
+        "c" | "cpp" => at(&|l, t| {
+            top(l)
+                && [
+                    "int main(",
+                    "int main (",
+                    "int\tmain(",
+                    "auto main(",
+                    "void main(",
+                    "signed main(",
+                ]
+                .iter()
+                .any(|p| t.starts_with(p))
+        }),
+        "java" => {
+            at(&|l, t| t.contains("static void main(") || (top(l) && t.starts_with("void main(")))
+        }
+        // Top level, or an object's `@JvmStatic` one (on its line or the
+        // one above).
+        "kotlin" => {
+            let jvm_static = |i: usize| {
+                lines[..i]
+                    .iter()
+                    .rev()
+                    .find(|l| !l.trim().is_empty())
+                    .is_some_and(|l| l.trim() == "@JvmStatic")
+            };
+            lines
+                .iter()
+                .enumerate()
+                .position(|(i, l)| {
+                    let t = l.trim();
+                    let main = t.starts_with("fun main(") || t.starts_with("suspend fun main(");
+                    (main && (top(l) || jvm_static(i))) || t.starts_with("@JvmStatic fun main(")
+                })
+                .map(|i| i + 1)
+        }
+        // Scala 2's `object Main extends App` too.
+        "scala" => at(&|_, t| {
+            t.starts_with("def main(args")
+                || t.starts_with("@main def ")
+                || t.starts_with("@main\tdef ")
+                || (t.starts_with("object ")
+                    && (t.contains(" extends App ")
+                        || t.ends_with(" extends App")
+                        || t.contains(" extends App{")))
+        }),
+        // A `Main`, or a program's top-level statements (what `dotnet new
+        // console` writes): the first, before any declaration.
+        "csharp" => at(&|_, t| {
+            t.contains("static ")
+                && t.contains(" Main(")
+                && (t.contains(" void ") || t.contains(" int ") || t.contains(" Task"))
+        })
+        .or_else(|| csharp_top_level(lines)),
+        "dart" => at(&|l, t| {
+            top(l)
+                && [
+                    "void main(",
+                    "main(",
+                    "Future<void> main(",
+                    "Future main(",
+                    "int main(",
+                ]
+                .iter()
+                .any(|p| t.starts_with(p))
+        }),
+        "zig" => at(&|l, t| top(l) && t.starts_with("pub fn main(")),
+        "haskell" => {
+            let module = lines
+                .iter()
+                .find_map(|l| l.strip_prefix("module "))
+                .map(|m| m.split_whitespace().next().unwrap_or(""));
+            matches!(module, None | Some("Main"))
+                .then(|| {
+                    at(&|l, _| l.starts_with("main ::") || l.starts_with("main =") || l == "main")
+                })
+                .flatten()
+        }
+        "erlang" => {
+            let escript = lines.first().is_some_and(|l| l.starts_with("#!"));
+            let exported = lines.iter().any(|l| {
+                let t = l.trim_start();
+                t.starts_with("-export(") && t.replace(' ', "").contains("main/1")
+            });
+            (escript || exported)
+                .then(|| at(&|l, _| l.starts_with("main(")))
+                .flatten()
+        }
+        "ruby" => at(&|_, t| {
+            t.starts_with("if __FILE__ == $0")
+                || t.starts_with("if $0 == __FILE__")
+                || t.starts_with("if __FILE__ == $PROGRAM_NAME")
+                || t.starts_with("if $PROGRAM_NAME == __FILE__")
+        }),
+        _ => None,
+    }
 }
 
 fn indent(line: &str) -> usize {
@@ -980,6 +1169,16 @@ pub fn main_debugger(root: &Path, file: &Path, lang: &str) -> Option<&'static st
         "zig" => {
             (above(root, file, &["build.zig"]).is_none() && has_zig_main(file)).then_some("native")
         }
+        // A CMake target's source, or a file with a `main` built alone; a
+        // make, Meson or Bazel project's program is a launch file's to name.
+        "c" | "cpp" => {
+            let cmake = cmake_target(root, file).is_some();
+            (cmake
+                || (!other_c_build(root, file)
+                    && above(root, file, &["CMakeLists.txt"]).is_none()
+                    && has_c_main(file, lang)))
+            .then_some("native")
+        }
         _ => None,
     }
 }
@@ -996,7 +1195,20 @@ pub fn debug_main(
     file: &Path,
     lang: &str,
     search: &OsStr,
+    said: &mut dyn FnMut(&str),
+    cancel: &std::sync::atomic::AtomicBool,
 ) -> Result<DebugTest, String> {
+    if matches!(lang, "c" | "cpp") {
+        let (program, cwd) = build_c_program(root, file, lang, search, said, cancel)?;
+        return Ok(DebugTest {
+            adapter: "native",
+            program,
+            args: Vec::new(),
+            cwd,
+            launch: serde_json::Map::new(),
+            start: DebugStart::Program,
+        });
+    }
     let run = main_command(root, file, lang, search)?;
     let name = file.to_string_lossy().into_owned();
     let jvm = |program: PathBuf, args: Vec<String>, cwd: PathBuf| {
@@ -1066,22 +1278,18 @@ pub fn debug_main(
                 .env("DOTNET_CLI_TELEMETRY_OPTOUT", "1")
                 .env("DOTNET_NOLOGO", "1")
                 .current_dir(&dir);
-            let built = crate::lsp::store::run_bounded(build, std::time::Duration::from_secs(900))?;
-            let said = String::from_utf8_lossy(&built.stdout).into_owned();
-            if !built.status.success() {
-                let tail: Vec<&str> = said.lines().rev().take(30).collect();
-                let tail: Vec<&str> = tail.into_iter().rev().collect();
+            let (built, lines) = build_step(build, said, cancel)?;
+            if !built {
                 return Err(format!(
-                    "dotnet could not build {}:\n{}",
-                    project
+                    "dotnet could not build {project} (its output is above).",
+                    project = project
                         .file_name()
                         .map(|n| n.to_string_lossy())
                         .unwrap_or_default(),
-                    tail.join("\n")
                 ));
             }
-            let assembly = said
-                .lines()
+            let assembly = lines
+                .iter()
                 .filter_map(|l| l.split_once(" -> ").map(|(_, p)| p.trim()))
                 .find(|p| p.ends_with(".dll"))
                 .map(PathBuf::from)
@@ -1575,6 +1783,273 @@ pub fn test_end(lang: &str, said: &str) -> Option<i64> {
 /// and Elixir's, which no debugger of Clew's runs.
 pub fn handles_main(lang: &str) -> bool {
     matches!(lang, "kotlin" | "scala" | "elixir" | "csharp" | "zig")
+}
+
+/// The languages whose programs [`debug_main`] debugs with no launch file:
+/// [`handles_main`]'s, and C's and C++'s (built by their CMake build, or a
+/// file alone by the compiler, then run under lldb — or, for Run, with the
+/// debugger off).
+pub fn debugs_main(lang: &str) -> bool {
+    handles_main(lang) || matches!(lang, "c" | "cpp")
+}
+
+/// The CMake executable target `file` is a source of, by the
+/// `add_executable(name sources…)` calls of the project's CMakeLists:
+/// its name and the folder its CMakeLists is in.
+fn cmake_target(root: &Path, file: &Path) -> Option<(String, PathBuf)> {
+    let file_name = file.file_name()?.to_string_lossy().into_owned();
+    let mut dir = file.parent()?.to_path_buf();
+    loop {
+        let lists = dir.join("CMakeLists.txt");
+        if let Some(text) = crate::statefile::read_capped(&lists, 4 << 20) {
+            let mut rest = text.as_str();
+            while let Some(at) = rest.find("add_executable(") {
+                let after = &rest[at + "add_executable(".len()..];
+                let end = after.find(')').unwrap_or(after.len());
+                let words: Vec<&str> = after[..end]
+                    .split_whitespace()
+                    .filter(|w| !matches!(*w, "WIN32" | "MACOSX_BUNDLE" | "EXCLUDE_FROM_ALL"))
+                    .collect();
+                if let Some((name, sources)) = words.split_first() {
+                    let listed = sources.iter().any(|s| {
+                        let s = s.trim_matches('"');
+                        dir.join(s) == file || s.rsplit('/').next() == Some(file_name.as_str())
+                    });
+                    if listed {
+                        return Some((name.trim_matches('"').to_string(), dir));
+                    }
+                }
+                rest = &after[end..];
+            }
+        }
+        if dir == root || !dir.pop() || !dir.starts_with(root) {
+            return None;
+        }
+    }
+}
+
+/// Whether the folder `file` is in, or one above it, is built by a build
+/// of its own Clew does not read (make, Meson, Bazel): its program is the
+/// one a launch file names.
+fn other_c_build(root: &Path, file: &Path) -> bool {
+    above(
+        root,
+        file,
+        &[
+            "Makefile",
+            "makefile",
+            "GNUmakefile",
+            "meson.build",
+            "BUILD",
+            "BUILD.bazel",
+        ],
+    )
+    .is_some()
+}
+
+/// Whether a C or C++ file has a `main` ([`main_line`]'s: `int main(` at
+/// the top level, not a `domain(`).
+fn has_c_main(file: &Path, lang: &str) -> bool {
+    crate::statefile::read_capped(file, 4 << 20).is_some_and(|text| {
+        let lines: Vec<&str> = text.lines().collect();
+        main_line(lang, &lines).is_some()
+    })
+}
+
+/// A C or C++ program built for a session: by its CMake build's target, or
+/// the file alone by the compiler (`-g -O0`, into Clew's data directory) —
+/// the build's words to `said` as they come.
+fn build_c_program(
+    root: &Path,
+    file: &Path,
+    lang: &str,
+    search: &OsStr,
+    said: &mut dyn FnMut(&str),
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Result<(PathBuf, PathBuf), String> {
+    let tool = |name: &str| {
+        crate::lsp::store::find_in_unresolved(search, name)
+            .ok_or_else(|| format!("{other} wasn't found here.", other = name))
+    };
+    if let Some((target, _)) = cmake_target(root, file) {
+        let cmake = tool("cmake")?;
+        // The project's configured build; none yet, a Debug one configured
+        // in `build/`, as an editor's CMake support does.
+        let top = cmake_top(root, file).unwrap_or_else(|| root.to_path_buf());
+        let build = match cmake_build_dir(&top) {
+            Some(build) => build,
+            None => {
+                let build = top.join("build");
+                let mut cmd = crate::spawn::command(&cmake);
+                cmd.arg("-S")
+                    .arg(&top)
+                    .arg("-B")
+                    .arg(&build)
+                    .arg("-DCMAKE_BUILD_TYPE=Debug")
+                    .current_dir(&top);
+                if !build_step(cmd, said, cancel)?.0 {
+                    return Err("CMake could not configure the build (its output is above).".into());
+                }
+                build
+            }
+        };
+        let mut cmd = crate::spawn::command(&cmake);
+        cmd.arg("--build")
+            .arg(&build)
+            .arg("--target")
+            .arg(&target)
+            .current_dir(root);
+        if !build_step(cmd, said, cancel)?.0 {
+            return Err(format!(
+                "CMake could not build {target} (its output is above)."
+            ));
+        }
+        let program = find_program(&build, &target).ok_or_else(|| {
+            format!(
+                "{target} was built, but its program wasn't found in {folder}.",
+                folder = build.display()
+            )
+        })?;
+        let cwd = program.parent().unwrap_or(&build).to_path_buf();
+        return Ok((program, cwd));
+    }
+    let compilers: &[&str] = match lang {
+        "c" => &["cc", "gcc", "clang"],
+        _ => &["c++", "g++", "clang++"],
+    };
+    let compiler = compilers
+        .iter()
+        .find_map(|c| crate::lsp::store::find_in_unresolved(search, c))
+        .ok_or_else(|| format!("{other} wasn't found here.", other = compilers[0]))?;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    file.hash(&mut hasher);
+    let out = crate::lsp::store::data_root()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("debug-builds")
+        .join("c")
+        .join(format!("{:016x}", hasher.finish()));
+    std::fs::create_dir_all(&out).map_err(|e| format!("cannot make {}: {e}", out.display()))?;
+    let stem = file
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "program".into());
+    let program = out.join(if cfg!(windows) {
+        format!("{stem}.exe")
+    } else {
+        stem
+    });
+    let mut cmd = crate::spawn::command(&compiler);
+    cmd.args(["-g", "-O0"])
+        .arg(file)
+        .arg("-o")
+        .arg(&program)
+        .current_dir(file.parent().unwrap_or(root));
+    if !build_step(cmd, said, cancel)?.0 {
+        let name = file
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        return Err(format!(
+            "{file} did not compile (the compiler's output is above).",
+            file = name
+        ));
+    }
+    Ok((program, file.parent().unwrap_or(root).to_path_buf()))
+}
+
+/// One step of a build, run to its end, each line it writes handed to
+/// `said` as it comes: whether it succeeded, and its lines (what it names
+/// it built). Stopped, a step says so.
+fn build_step(
+    cmd: std::process::Command,
+    said: &mut dyn FnMut(&str),
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Result<(bool, Vec<String>), String> {
+    let name = cmd.get_program().to_string_lossy().into_owned();
+    let mut lines = Vec::new();
+    let end = crate::spawn::run_streaming(
+        cmd,
+        |line, _| {
+            said(line);
+            lines.push(line.to_string());
+        },
+        cancel,
+    )
+    .map_err(|e| format!("could not run {name}: {e}"))?;
+    match end {
+        crate::spawn::RunEnd::Exited(code) => Ok((code == 0, lines)),
+        crate::spawn::RunEnd::Stopped => Err("The build was stopped.".into()),
+    }
+}
+
+/// The top CMake project `file` is in: the highest folder, from the file
+/// up to the project's root, with a CMakeLists.
+fn cmake_top(root: &Path, file: &Path) -> Option<PathBuf> {
+    let mut top = None;
+    let mut dir = file.parent()?.to_path_buf();
+    while dir.starts_with(root) {
+        if dir.join("CMakeLists.txt").is_file() {
+            top = Some(dir.clone());
+        }
+        if dir == root || !dir.pop() {
+            break;
+        }
+    }
+    top
+}
+
+/// A configured CMake build (`CMakeCache.txt`) of the project at `top`:
+/// a `build…` or `cmake-build-…` folder, a Debug one first, or one of
+/// `out/build`'s (Visual Studio's).
+fn cmake_build_dir(top: &Path) -> Option<PathBuf> {
+    let mut found: Vec<PathBuf> = std::fs::read_dir(top)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    if let Ok(out) = std::fs::read_dir(top.join("out/build")) {
+        found.extend(out.flatten().map(|e| e.path()).filter(|p| p.is_dir()));
+    }
+    found.retain(|p| p.join("CMakeCache.txt").is_file());
+    found.sort_by_key(|p| {
+        let name = p
+            .file_name()
+            .map(|n| n.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+        (!name.contains("debug"), name)
+    });
+    found.into_iter().next()
+}
+
+/// The program a build made, by its target's name, in the build folder.
+fn find_program(build: &Path, name: &str) -> Option<PathBuf> {
+    let wanted = if cfg!(windows) {
+        format!("{name}.exe")
+    } else {
+        name.to_string()
+    };
+    let mut todo = vec![(build.to_path_buf(), 0)];
+    while let Some((dir, depth)) = todo.pop() {
+        for entry in std::fs::read_dir(&dir).ok()?.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                let skip = path
+                    .file_name()
+                    .is_some_and(|n| n == "CMakeFiles" || n.to_string_lossy().starts_with('.'));
+                if depth < 6 && !skip {
+                    todo.push((path, depth + 1));
+                }
+            } else if path
+                .file_name()
+                .is_some_and(|n| n.to_string_lossy() == wanted)
+            {
+                return Some(path);
+            }
+        }
+    }
+    None
 }
 
 /// The .NET project `file` is in, and whether it makes a program — not a
@@ -2249,6 +2724,177 @@ mod tests {
         assert_eq!(main("elixir", &loose).program, bin.join("elixir"));
     }
 
+    /// Each language's program start, marked on its own line, beside the
+    /// file's tests; none where a file only defines things.
+    #[test]
+    fn a_programs_start_is_marked_in_each_language() {
+        let main = |lang: &str, rel: &str, source: &str| {
+            tests(lang, rel, source)
+                .into_iter()
+                .find(|r| r.kind == RunnableKind::Main)
+                .map(|r| (r.line, r.span))
+        };
+        assert_eq!(
+            main("go", "main.go", "package main\n\nfunc main() {\n}\n"),
+            Some((3, (3, 3)))
+        );
+        assert_eq!(
+            main("go", "util.go", "package util\n\nfunc main() {\n}\n"),
+            None
+        );
+        assert_eq!(
+            main(
+                "c",
+                "hello.c",
+                "#include <stdio.h>\nint main(void) {\n  return 0;\n}\n"
+            ),
+            Some((2, (2, 2)))
+        );
+        assert_eq!(
+            main("cpp", "lib.cpp", "int add(int a) { return a; }\n"),
+            None
+        );
+        assert_eq!(
+            main(
+                "java",
+                "App.java",
+                "class App {\n    public static void main(String[] args) {\n    }\n}\n"
+            ),
+            Some((2, (2, 2)))
+        );
+        assert_eq!(
+            main("kotlin", "Main.kt", "package a\n\nfun main() {\n}\n"),
+            Some((3, (3, 3)))
+        );
+        assert_eq!(
+            main("kotlin", "Cart.kt", "class Cart {\n    fun main() {}\n}\n"),
+            None
+        );
+        assert_eq!(
+            main(
+                "scala",
+                "Hello.scala",
+                "@main def hello(): Unit =\n  println(1)\n"
+            ),
+            Some((1, (1, 1)))
+        );
+        assert_eq!(
+            main(
+                "csharp",
+                "Program.cs",
+                "class Program {\n    static async Task<int> Main(string[] args) {\n    }\n}\n"
+            ),
+            Some((2, (2, 2)))
+        );
+        assert_eq!(
+            main(
+                "dart",
+                "bin/app.dart",
+                "import 'x.dart';\n\nvoid main(List<String> args) {\n}\n"
+            ),
+            Some((3, (3, 3)))
+        );
+        assert_eq!(
+            main(
+                "zig",
+                "main.zig",
+                "const std = @import(\"std\");\npub fn main() !void {\n}\n"
+            ),
+            Some((2, (2, 2)))
+        );
+        assert_eq!(
+            main(
+                "haskell",
+                "app/Main.hs",
+                "module Main where\n\nmain :: IO ()\nmain = pure ()\n"
+            ),
+            Some((3, (3, 3)))
+        );
+        assert_eq!(
+            main(
+                "haskell",
+                "src/Lib.hs",
+                "module Lib where\n\nmain :: IO ()\nmain = pure ()\n"
+            ),
+            None
+        );
+        assert_eq!(
+            main(
+                "erlang",
+                "tool.erl",
+                "-module(tool).\n-export([main/1]).\n\nmain(Args) ->\n    ok.\n"
+            ),
+            Some((4, (4, 4)))
+        );
+        assert_eq!(
+            main(
+                "ruby",
+                "tool.rb",
+                "def run; end\n\nif __FILE__ == $0\n  run\nend\n"
+            ),
+            Some((3, (3, 3)))
+        );
+        // Scala 2's App object; a Kotlin object's `@JvmStatic` main; a C#
+        // program's top-level statements, not a file of types.
+        assert_eq!(
+            main(
+                "scala",
+                "Shop.scala",
+                "package shop\n\nobject Shop extends App {\n  println(1)\n}\n"
+            )
+            .map(|m| m.0),
+            Some(3)
+        );
+        assert_eq!(
+            main(
+                "kotlin",
+                "App.kt",
+                "object App {\n    @JvmStatic\n    fun main(args: Array<String>) {}\n}\n"
+            )
+            .map(|m| m.0),
+            Some(3)
+        );
+        assert_eq!(
+            main(
+                "csharp",
+                "Program.cs",
+                "// a tool\nusing System;\n\nConsole.WriteLine(\"hi\");\n"
+            )
+            .map(|m| m.0),
+            Some(4)
+        );
+        assert_eq!(
+            main(
+                "csharp",
+                "Cart.cs",
+                "using System;\n\nnamespace Shop;\n\npublic class Cart {}\n"
+            ),
+            None
+        );
+        assert_eq!(
+            main(
+                "csharp",
+                "Point.cs",
+                "[Serializable]\npublic record Point(int X);\n"
+            ),
+            None
+        );
+        // Beside a Zig file's tests, the cursor in them still runs them.
+        let both = tests(
+            "zig",
+            "main.zig",
+            "pub fn main() void {\n}\n\ntest \"adds\" {\n}\n",
+        );
+        assert_eq!(
+            crate::runnables::runnable_at(&both, 5).map(|r| r.kind),
+            Some(RunnableKind::Test)
+        );
+        assert_eq!(
+            crate::runnables::runnable_at(&both, 1).map(|r| r.kind),
+            Some(RunnableKind::Main)
+        );
+    }
+
     /// A debugged test's end, by its runner's last words.
     #[test]
     fn a_tests_end_is_read_off_its_runners_last_words() {
@@ -2588,7 +3234,8 @@ mod tests {
         let search = bin.as_os_str();
         let debug = |lang: &str, file: &Path| {
             assert!(main_debugger(&root, file, lang).is_some(), "{lang}");
-            debug_main(&root, file, lang, search).unwrap_or_else(|e| panic!("{lang}: {e}"))
+            debug_main(&root, file, lang, search, &mut |_| {}, &Default::default())
+                .unwrap_or_else(|e| panic!("{lang}: {e}"))
         };
         let command = |d: &DebugTest| -> Vec<String> {
             d.launch["command"]
@@ -2695,6 +3342,35 @@ mod tests {
             main_command(&root, &built, "zig", search).unwrap().args,
             ["build", "run"]
         );
+        // C and C++: a CMake target's source, a file alone with a main;
+        // a make project's is a launch file's to name.
+        write(
+            "cm/CMakeLists.txt",
+            "project(x CXX)\nadd_executable(greeter\n  src/main.cpp src/util.cpp)\n",
+        );
+        let main_cpp = write("cm/src/main.cpp", "int main() { return 0; }\n");
+        let util = write("cm/src/util.cpp", "int util() { return 1; }\n");
+        assert_eq!(
+            cmake_target(&root, &main_cpp).map(|t| t.0).as_deref(),
+            Some("greeter")
+        );
+        assert_eq!(
+            cmake_target(&root, &util).map(|t| t.0).as_deref(),
+            Some("greeter")
+        );
+        assert_eq!(main_debugger(&root, &util, "cpp"), Some("native"));
+        let alone = write(
+            "one/hello.c",
+            "#include <stdio.h>\nint main(void) { return 0; }\n",
+        );
+        assert_eq!(main_debugger(&root, &alone, "c"), Some("native"));
+        write("mk/Makefile", "all:\n");
+        let made = write("mk/app.c", "int main(void) { return 0; }\n");
+        assert_eq!(main_debugger(&root, &made, "c"), None);
+        let no_main = write("one/lib.c", "int add(int a, int b) { return a + b; }\n");
+        assert_eq!(main_debugger(&root, &no_main, "c"), None);
+        let domain = write("one/dom.c", "int domain(int x) {\n    return x;\n}\n");
+        assert_eq!(main_debugger(&root, &domain, "c"), None);
         let lone = write("lone/hi.exs", "IO.puts(1)\n");
         let d = debug("elixir", &lone);
         assert!(d.launch.get("projectDir").is_none());

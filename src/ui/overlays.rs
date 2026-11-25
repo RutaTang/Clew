@@ -129,11 +129,12 @@ pub(crate) fn gutter_words(app: &App, pane: usize, line: usize) -> Option<String
                     false => tr!("Run this example of {item}", item = r.name),
                 },
                 // Named without reading the package (this is drawn each
-                // frame): Rust's `main`, a Python block's file, a Lean
-                // file's — which runs, but has no debugger.
+                // frame): Rust's `main`; any other language's by its file
+                // (a Python block's, a Go `main`'s) — Lean's runs, but has
+                // no debugger.
                 RunnableKind::Main => {
                     let program = match v.lang_key {
-                        Some("python" | "lean") => v
+                        Some(lang) if lang != "rust" => v
                             .abs
                             .file_name()
                             .map(|n| n.to_string_lossy().into_owned())

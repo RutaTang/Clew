@@ -372,11 +372,13 @@ impl RunPlan {
                     .map_or_else(|| root.to_path_buf(), Path::to_path_buf),
                 Some(crate::dap::Lang::Python),
             ),
+            // A Python file, or the program another language's file starts
+            // (the margin ▶ on its `main`), run as Debug runs the file.
             RunPlan::Script { file } => (
                 file.clone(),
                 Vec::new(),
                 root.to_path_buf(),
-                Some(crate::dap::Lang::Python),
+                crate::dap::Lang::detect(None, file).or(Some(crate::dap::Lang::Python)),
             ),
             RunPlan::JsDebugTest {
                 program, args, cwd, ..
