@@ -49,8 +49,10 @@ fn run_with(
         | ProjectTask::JsMain { file }
         | ProjectTask::PackageScript { dir: file, .. } => file,
     };
-    // A package at the project's root names its folder as nothing.
-    let file = match rel.is_empty() {
+    // A package at the project's root names its folder as nothing; every
+    // other task names a file.
+    let root_package = rel.is_empty() && matches!(task, ProjectTask::PackageScript { .. });
+    let file = match root_package {
         true => std::fs::canonicalize(root).map_err(|e| e.to_string())?,
         false => crate::confine::confine(root, rel).map_err(|e| format!("{rel}: {e}"))?,
     };
