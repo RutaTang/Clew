@@ -1752,6 +1752,18 @@ fn analyze_impl(source: &str, lang_key: &str, scope_rust: bool) -> Option<Analys
     let (lang, source) = crate::highlight::read_as(lang_key, source)?;
     let source = &*source;
     let tree = crate::highlight::parse(source, lang)?;
+    // A page or a stylesheet is indexed for what it loads (`<script src>`,
+    // `@import`), not for its ids and rules: those are its outline, not
+    // symbols for the project's search.
+    if matches!(lang, Lang::Html | Lang::Css | Lang::Scss | Lang::Less) {
+        return Some(Analysis {
+            lang,
+            symbols: Vec::new(),
+            imports: crate::imports::imports_in(&tree, source, lang),
+            calls: Vec::new(),
+            owners: Default::default(),
+        });
+    }
     let symbols = located_in(&tree, source, lang);
     let mut imports = crate::imports::imports_in(&tree, source, lang);
     if scope_rust && lang == Lang::Rust {

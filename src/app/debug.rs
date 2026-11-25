@@ -674,6 +674,15 @@ impl App {
         if matches!(lang, dap::Lang::Native | dap::Lang::CSharp) {
             return None;
         }
+        // A web app's JSX component runs in the browser, not under Node:
+        // Debug suggests the launch file that opens it there.
+        let jsx = abs
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("tsx") || e.eq_ignore_ascii_case("jsx"));
+        let root = &self.proj.project.as_ref()?.root;
+        if jsx && crate::app::tasks::dev_server_url(root).is_some() {
+            return None;
+        }
         // A test file runs its tests (under pytest): Run on
         // tests/test_pricing.py ran main.py, and said the test "does not
         // run on its own".
@@ -1524,14 +1533,6 @@ impl App {
                     return Task::none();
                 }
             };
-            // A module is found by Python, not at a path.
-            if cfg.extras.module.is_none() && !cfg.program.exists() {
-                self.status = tr!(
-                    "Program not found at {path}. Build it first.",
-                    path = cfg.program.display()
-                );
-                return Task::none();
-            }
             // Pick the language (explicit type, else the program's extension).
             let Some(lang) = dap::Lang::detect(cfg.type_hint.as_deref(), &cfg.program) else {
                 self.status = tr!(
@@ -1540,7 +1541,16 @@ impl App {
                 );
                 return Task::none();
             };
-            if lang == dap::Lang::Python {
+            // A module is found by Python, not at a path, and a browser
+            // opens a URL.
+            if cfg.extras.module.is_none() && lang != dap::Lang::Browser && !cfg.program.exists() {
+                self.status = tr!(
+                    "Program not found at {path}. Build it first.",
+                    path = cfg.program.display()
+                );
+                return Task::none();
+            }
+            if matches!(lang, dap::Lang::Python | dap::Lang::Browser) {
                 from_file = Some(cfg.extras);
             } else if let Some(env) = cfg.extras.fields.get("env").and_then(|e| e.as_object()) {
                 file_env = env
@@ -1956,6 +1966,20 @@ impl App {
                             .await;
                         return;
                     };
+                    if lang == dap::Lang::Browser {
+                        let error = tr!(
+                            "A page is debugged in a browser on this computer: open the project from a folder here to debug it in one."
+                        )
+                        .to_string();
+                        let _ = output
+                            .send(Message::Debug(DebugMsg::Failed {
+                                stamp: stamp.clone(),
+                                run,
+                                error,
+                            }))
+                            .await;
+                        return;
+                    }
                     if lang == dap::Lang::Python {
                         from_file = Some(cfg.extras.clone());
                     }

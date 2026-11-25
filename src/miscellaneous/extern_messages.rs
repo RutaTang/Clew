@@ -10,12 +10,10 @@ use crate::tr_noop;
 
 /// Every such message, as its crate writes it.
 pub(crate) const MESSAGES: &[&str] = &[
-    tr_noop!(
-        "Node.js cannot run JSX by itself: add tsx to the project (npm install --save-dev tsx), then run again."
-    ),
+    tr_noop!("Node.js cannot run JSX by itself: add tsx to the project ({add}), then run again."),
     tr_noop!("The package has no script named {script}."),
     tr_noop!(
-        "{arg1} is not installed in this project: install its dependencies (npm install), then run again."
+        "{runner} is not installed in this project: install its dependencies ({install}), then run again."
     ),
     tr_noop!("{other} wasn't found here."),
     tr_noop!("{pm} wasn't found here. Install Node.js, then run again."),

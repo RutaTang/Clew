@@ -466,9 +466,8 @@ fn build_core_capped(
     // The noise directories stay out as well (`.clew/` is in the tree for its
     // config files, which are not source to index), by the filter the
     // server's snapshot applies too (`fs_scan::index_language`).
-    let indexable = files
-        .iter()
-        .filter_map(|f| clew_core::fs_scan::index_language(&f.rel, &f.abs).map(|lang| (f, lang)));
+    // Code first: pages and stylesheets take what room it leaves.
+    let indexable = clew_core::fs_scan::index_order(files);
     let mut taken = 0usize;
     for (file, lang) in indexable {
         if taken == cap {
@@ -1088,8 +1087,10 @@ fn not_a_test() {}
 
     /// A19: the cap counts only files the index extracts from — the filter
     /// the server's snapshot applies too (`fs_scan::index_language`). Data
-    /// files the editor merely colors (JSON, YAML, CSS) used to spend it, so
-    /// a tree full of fixtures indexed fewer sources locally than remotely.
+    /// files the editor merely colors (JSON, YAML) used to spend it, so a
+    /// tree full of fixtures indexed fewer sources locally than remotely.
+    /// Stylesheets, read for their imports, take what room the code leaves
+    /// (`fs_scan::index_order`).
     #[test]
     fn data_files_cost_no_index_budget() {
         let dir = clew_core::testutil::TempDir::new("index-data-files");
@@ -1116,13 +1117,14 @@ fn not_a_test() {}
             indexed_files,
             [&dir.join("src/a.rs"), &dir.join("src/b.rs")]
         );
-        assert_eq!(indexed.over_cap, 0, "a data file counted against the cap");
-        let counted: Vec<&str> = files
-            .iter()
-            .filter(|f| clew_core::fs_scan::index_language(&f.rel, &f.abs).is_some())
-            .map(|f| f.rel.as_str())
+        // The stylesheet, indexed for its imports, comes after the code:
+        // past the cap, it is the one left out.
+        assert_eq!(indexed.over_cap, 1, "the stylesheet, after the code");
+        let counted: Vec<&str> = clew_core::fs_scan::index_order(&files)
+            .into_iter()
+            .map(|(f, _)| f.rel.as_str())
             .collect();
-        assert_eq!(counted, ["src/a.rs", "src/b.rs"]);
+        assert_eq!(counted, ["src/a.rs", "src/b.rs", "fixtures/c.css"]);
     }
 
     /// I7: files under a noise directory (a vendored `node_modules`, build

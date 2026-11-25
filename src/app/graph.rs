@@ -48,11 +48,13 @@ fn graph_language_name(lang: &str) -> bool {
 }
 
 /// Whether a file is a node of the Import graph: [`graph_language`]'s, and
-/// Lean's, whose imports clew resolves but whose calls it does not read
-/// (`clew_core::projectcalls`) — in the call graph its every definition would
-/// be a node without an edge.
+/// Lean's, pages' and stylesheets', whose imports clew resolves but whose
+/// calls it does not read (`clew_core::projectcalls`) — in the call graph
+/// their every definition would be a node without an edge.
 pub(crate) fn import_graph_language(path: &std::path::Path) -> bool {
-    crate::highlight::detect(path).is_some_and(|lang| graph_language_name(lang) || lang == "lean")
+    crate::highlight::detect(path).is_some_and(|lang| {
+        graph_language_name(lang) || matches!(lang, "lean" | "html" | "css" | "scss" | "less")
+    })
 }
 
 /// The same stamp for `project_calls.rev`, written when a build FAILED: the
@@ -2887,5 +2889,17 @@ mod tests {
         }
         let lean = Path::new("/p/A.lean");
         assert!(import_graph_language(lean) && !graph_language(lean));
+        for page in [
+            "/p/index.html",
+            "/p/src/app.css",
+            "/p/src/_vars.scss",
+            "/p/a.less",
+        ] {
+            let page = Path::new(page);
+            assert!(
+                import_graph_language(page) && !graph_language(page),
+                "{page:?}"
+            );
+        }
     }
 }

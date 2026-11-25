@@ -343,7 +343,34 @@ pub fn resolve(
         "node" => {
             let node =
                 store::find_on_path_unresolved("node").ok_or("node not found — install Node.js")?;
-            Ok(node_with(node, program, args, cwd))
+            // A script is debugged under the runtime its project runs it
+            // with (Run's: `jsrun::main_command`).
+            let script = in_dir(cwd, program);
+            let is_script = matches!(
+                script.extension().and_then(|e| e.to_str()),
+                Some("js" | "mjs" | "cjs" | "jsx" | "ts" | "mts" | "cts" | "tsx")
+            );
+            match is_script.then(|| crate::jsrun::runtime_of(root, &script)) {
+                Some("deno") => {
+                    let deno = store::find_on_path_unresolved("deno")
+                        .ok_or("deno not found — install Deno")?;
+                    Ok(deno_with(node, &deno, program, args, cwd))
+                }
+                Some("bun") => {
+                    let mut resolution = node_with(node, program, args, cwd);
+                    if let Resolution::Ready(spec) = &mut resolution {
+                        spec.launch[NOTICE] = json!(BUN_NOTICE);
+                    }
+                    Ok(resolution)
+                }
+                _ => Ok(node_with(node, program, args, cwd)),
+            }
+        }
+        "browser" => {
+            // js-debug runs under Node and drives the browser itself.
+            let node =
+                store::find_on_path_unresolved("node").ok_or("node not found — install Node.js")?;
+            Ok(browser_with(node, program, cwd))
         }
         "ruby" => {
             // The Ruby whose Ruby LSP the user chose has its own `rdbg`, its
@@ -669,6 +696,10 @@ fn rust_sysroot(cwd: &Path) -> Option<PathBuf> {
 const DW_LANG_ZIG: u16 = 0x27;
 
 /// What a Zig program built by Zig's own code generator is told.
+/// Said when a Bun project's script is debugged: under Node, as js-debug
+/// speaks V8's inspector protocol and Bun's inspector speaks WebKit's.
+const BUN_NOTICE: &str = "This is a Bun project, and Bun's debugger speaks WebKit's inspector protocol, which Clew's JavaScript debugger does not: the file is debugged under Node.js, where Bun's own APIs (Bun.serve, Bun.file) are missing. Run runs it with Bun.";
+
 const ZIG_BACKEND_NOTICE: &str = "This program's debug information comes from Zig's built-in code generator (the default for Debug builds on x86-64), and lldb can't read variables from it. Breakpoints and stepping work, but no variables show. Build it with -fllvm (or .use_llvm = true in build.zig) to see them.";
 
 /// Whether the test file at `path` runs its own tests when run as a script
@@ -1426,6 +1457,50 @@ fn go_spec(
 /// TypeScript one with its types stripped, as Run runs it; any other (a
 /// test runner the project installed, `node_modules/.bin/vitest`) is run
 /// as it is, js-debug attaching to the Node processes it starts.
+/// A Deno project's script under vscode-js-debug: Deno runs it with its V8
+/// inspector waiting on a free local port (`--inspect-wait`), as Deno's
+/// own guide has VS Code do it, and js-debug attaches there.
+fn deno_with(node: PathBuf, deno: &Path, program: &str, args: &[String], cwd: &Path) -> Resolution {
+    let port = std::net::TcpListener::bind(("127.0.0.1", 0))
+        .and_then(|l| l.local_addr())
+        .map(|a| a.port())
+        .unwrap_or(9229);
+    let Resolution::Ready(mut spec) = node_with(node, program, args, cwd) else {
+        return Resolution::NeedsInstall(AdapterInstall::JsDebug);
+    };
+    spec.launch = json!({
+        "type": "pwa-node",
+        "request": "launch",
+        "program": program,
+        "args": args,
+        "cwd": cwd.to_string_lossy(),
+        "runtimeExecutable": deno.to_string_lossy(),
+        "runtimeArgs": ["run", format!("--inspect-wait=127.0.0.1:{port}"), "--allow-all"],
+        "attachSimplePort": port,
+        "console": "internalConsole",
+    });
+    Resolution::Ready(spec)
+}
+
+/// A page debugged in a browser under vscode-js-debug: `url` opened in
+/// Chrome (a launch file's `"type": "msedge"` opens Edge, and its own
+/// fields — `webRoot`, `runtimeExecutable`, `userDataDir`… — are its), the
+/// project's folder its web root, so the source maps the dev server sends
+/// lead breakpoints in its `.tsx` and `.vue` files to the code the page
+/// runs.
+fn browser_with(node: PathBuf, url: &str, cwd: &Path) -> Resolution {
+    let Resolution::Ready(mut spec) = node_with(node, url, &[], cwd) else {
+        return Resolution::NeedsInstall(AdapterInstall::JsDebug);
+    };
+    spec.launch = json!({
+        "type": "pwa-chrome",
+        "request": "launch",
+        "url": url,
+        "webRoot": cwd.to_string_lossy(),
+    });
+    Resolution::Ready(spec)
+}
+
 fn node_with(node: PathBuf, program: &str, args: &[String], cwd: &Path) -> Resolution {
     let Some(server) = js_debug_server() else {
         return Resolution::NeedsInstall(AdapterInstall::JsDebug);
@@ -2992,6 +3067,40 @@ mod tests {
             assert_eq!(runner.launch["runtimeArgs"], json!(args));
             assert_eq!(runner.launch["autoAttachChildProcesses"], true);
             assert_eq!(runner.launch.get("program"), None);
+            // A Deno project's script under Deno, its inspector waiting on
+            // the port js-debug attaches to.
+            let Resolution::Ready(deno) = deno_with(
+                PathBuf::from("node"),
+                Path::new("/opt/deno"),
+                "/p/main.ts",
+                &[],
+                Path::new("/p"),
+            ) else {
+                panic!("installed");
+            };
+            assert_eq!(deno.launch["runtimeExecutable"], "/opt/deno");
+            let port = deno.launch["attachSimplePort"].as_u64().unwrap();
+            assert_eq!(
+                deno.launch["runtimeArgs"],
+                json!([
+                    "run",
+                    format!("--inspect-wait=127.0.0.1:{port}"),
+                    "--allow-all"
+                ])
+            );
+            assert_eq!(deno.launch["program"], "/p/main.ts");
+            // A page in a browser: its URL, the project its web root.
+            let Resolution::Ready(page) = browser_with(
+                PathBuf::from("node"),
+                "http://localhost:5173",
+                Path::new("/p"),
+            ) else {
+                panic!("installed");
+            };
+            assert_eq!(page.launch["type"], "pwa-chrome");
+            assert_eq!(page.launch["url"], "http://localhost:5173");
+            assert_eq!(page.launch["webRoot"], "/p");
+            assert_eq!(Path::new(&page.args[0]), entry);
         });
         let go = go_spec(PathBuf::from("/bin/dlv"), "/p", &[], Path::new("/p"), None);
         assert_eq!(go.args, ["dap", "--listen", "127.0.0.1:0"]);

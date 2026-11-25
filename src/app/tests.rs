@@ -44608,6 +44608,100 @@ fn the_runs_input_line_sends_what_is_typed_to_the_program() {
     );
 }
 
+/// Debug on a web app's component, with no launch file, suggests one that
+/// opens the page in a browser at the dev server's address — not a Python
+/// script, and not lldb for a `.vue` file.
+#[test]
+fn a_web_apps_component_suggests_debugging_it_in_a_browser() {
+    use crate::app::tasks::launch_example;
+    let root = test_dir("launch-web-app");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+        root.join("package.json"),
+        r#"{"devDependencies": {"vite": "^6"}}"#,
+    )
+    .unwrap();
+    let example = launch_example(&root, Some("vue"));
+    assert!(
+        example.contains(r#""type": "chrome""#) && example.contains("http://localhost:5173"),
+        "{example}"
+    );
+    assert_eq!(
+        launch_example(&root, Some("typescript")),
+        r#"{"program": "index.js"}"#
+    );
+    assert_eq!(
+        crate::dap::Lang::detect(None, Path::new("/p/App.vue")),
+        None
+    );
+    assert_eq!(
+        crate::dap::Lang::detect(None, Path::new("/p/index.html")),
+        None
+    );
+    std::fs::write(
+        root.join("package.json"),
+        r#"{"dependencies": {"next": "15"}}"#,
+    )
+    .unwrap();
+    assert!(launch_example(&root, Some("tsx")).contains("localhost:3000"));
+}
+
+/// A browser's launch file, as VS Code's "Launch Chrome against
+/// localhost": no program but the page's URL, js-debug's own fields kept,
+/// Edge's type read as Edge's — and the adapter's body is the file's.
+#[test]
+fn a_browser_launch_file_debugs_its_page() {
+    use crate::app::tasks::{parse_launch_config, with_launch_file};
+    let root = test_dir("launch-browser");
+    let text = r#"{
+        "type": "msedge",
+        "request": "launch",
+        "url": "http://localhost:5173",
+        "webRoot": "${workspaceFolder}/web",
+        "userDataDir": false,
+        "console": "integratedTerminal"
+    }"#;
+    let cfg = parse_launch_config(&root, text, None, true).unwrap();
+    assert_eq!(cfg.program, Path::new("http://localhost:5173"));
+    assert_eq!(
+        crate::dap::Lang::detect(cfg.type_hint.as_deref(), &cfg.program),
+        Some(crate::dap::Lang::Browser)
+    );
+    let fields = &cfg.extras.fields;
+    assert_eq!(fields["type"], "pwa-msedge");
+    assert_eq!(fields["webRoot"], format!("{}/web", root.display()));
+    assert!(!fields.contains_key("console"));
+    // The adapter's body, made for Chrome, takes the file's browser.
+    let mut launch = serde_json::json!({
+        "type": "pwa-chrome", "request": "launch",
+        "url": "http://localhost:5173", "webRoot": root.to_string_lossy(),
+    });
+    with_launch_file(&mut launch, &cfg.extras);
+    assert_eq!(launch["type"], "pwa-msedge");
+    assert_eq!(launch["userDataDir"], false);
+    // A page's file in place of a URL.
+    let file = parse_launch_config(
+        &root,
+        r#"{"type": "chrome", "file": "index.html"}"#,
+        None,
+        true,
+    )
+    .unwrap();
+    assert_eq!(
+        file.extras.fields["file"],
+        root.join("index.html").to_string_lossy().as_ref()
+    );
+    let mut launch = serde_json::json!({"type": "pwa-chrome", "url": "index.html"});
+    with_launch_file(&mut launch, &file.extras);
+    assert_eq!(launch.get("url"), None, "a file, not a URL");
+    // Neither: said.
+    let Err(err) = parse_launch_config(&root, r#"{"type": "chrome"}"#, None, true) else {
+        panic!("a browser with nothing to open");
+    };
+    assert!(err.contains("url"), "{err}");
+}
+
 /// A Python launch file is read as VS Code's are: a `module` to run in
 /// place of a program (Python's, with no `type`), `${workspaceFolder}`,
 /// `${file}` and `${env:…}` in its strings, its `env` over its

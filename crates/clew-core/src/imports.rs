@@ -56,7 +56,7 @@ pub fn imports_of(source: &str, lang: &str) -> Vec<RawImport> {
     let source = &*source;
     // Fetch (or compile) the query first, so a language without an import
     // model is not parsed at all.
-    if import_query(lang).is_err() {
+    if !is_web_page_or_style(lang) && import_query(lang).is_err() {
         return Vec::new();
     }
     let Some(tree) = crate::highlight::parse(source, lang) else {
@@ -68,10 +68,15 @@ pub fn imports_of(source: &str, lang: &str) -> Vec<RawImport> {
 /// The imports of an already-parsed file (`tree` is `source` parsed with
 /// `lang`'s grammar), for callers that derive several facts from one parse.
 pub fn imports_in(tree: &Tree, source: &str, lang: Lang) -> Vec<RawImport> {
+    let root = tree.root_node();
+    match lang {
+        Lang::Html => return html_imports(root, source),
+        Lang::Css | Lang::Scss | Lang::Less => return style_imports(root, source),
+        _ => {}
+    }
     let Ok(query) = import_query(lang) else {
         return Vec::new();
     };
-    let root = tree.root_node();
     match lang {
         Lang::Rust => rust_imports(root, source, query),
         Lang::Python => python_imports(root, source, query),
@@ -2534,5 +2539,194 @@ mod metadata_tests {
         text.push_str(&"-- pad\n".repeat(MAX_METADATA_BYTES as usize / 7 + 16));
         std::fs::write(big.join("big.cabal"), &text).unwrap();
         assert!(read_cabal_source_dirs(&big.join("big.cabal")).is_empty());
+    }
+}
+
+/// Whether `lang` is a page's or a stylesheet's, whose imports are read off
+/// the tree without a query: HTML's scripts and stylesheets, CSS's, SCSS's
+/// and Less's `@import`s.
+fn is_web_page_or_style(lang: Lang) -> bool {
+    matches!(lang, Lang::Html | Lang::Css | Lang::Scss | Lang::Less)
+}
+
+/// What a page loads as code: a `<script src>`, and a `<link>` to a
+/// stylesheet or a preloaded module or style (`rel="stylesheet"`,
+/// `modulepreload`, `preload` as a script or style) — Vite's `index.html`
+/// and its `/src/main.ts`. Each URL as written; the resolver tells the
+/// project's files from the web's.
+fn html_imports(root: Node, source: &str) -> Vec<RawImport> {
+    let mut out = Vec::new();
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        let mut cursor = node.walk();
+        stack.extend(node.named_children(&mut cursor));
+        if !matches!(node.kind(), "start_tag" | "self_closing_tag") {
+            continue;
+        }
+        let mut cursor = node.walk();
+        let children: Vec<Node> = node.named_children(&mut cursor).collect();
+        let Some(tag) = children
+            .iter()
+            .find(|c| c.kind() == "tag_name")
+            .and_then(|t| source.get(t.byte_range()))
+        else {
+            continue;
+        };
+        let attr = |name: &str| -> Option<String> {
+            children
+                .iter()
+                .filter(|c| c.kind() == "attribute")
+                .find_map(|a| {
+                    let mut cursor = a.walk();
+                    let parts: Vec<Node> = a.named_children(&mut cursor).collect();
+                    let key = parts.first().and_then(|k| source.get(k.byte_range()))?;
+                    if !key.eq_ignore_ascii_case(name) {
+                        return None;
+                    }
+                    let value = parts.get(1)?;
+                    let value = match value.kind() {
+                        "quoted_attribute_value" => value.named_child(0)?,
+                        _ => *value,
+                    };
+                    source.get(value.byte_range()).map(|v| v.trim().to_string())
+                })
+        };
+        let url = match tag.to_ascii_lowercase().as_str() {
+            "script" => attr("src"),
+            "link" => {
+                let rel = attr("rel").unwrap_or_default().to_ascii_lowercase();
+                let kind = attr("as").unwrap_or_default().to_ascii_lowercase();
+                let loads = rel.split_whitespace().any(|r| {
+                    matches!(r, "stylesheet" | "modulepreload")
+                        || (r == "preload" && matches!(kind.as_str(), "script" | "style"))
+                });
+                loads.then(|| attr("href")).flatten()
+            }
+            _ => None,
+        };
+        if let Some(url) = url.filter(|u| !u.is_empty() && !u.starts_with("data:")) {
+            out.push(RawImport {
+                module: url,
+                line: node.start_position().row + 1,
+                is_mod_decl: false,
+            });
+        }
+    }
+    out.sort_by_key(|r| r.line);
+    out
+}
+
+/// A stylesheet's imports: CSS's `@import "x.css"` and `@import url(x.css)`,
+/// SCSS's `@use`, `@forward` and `@import "a", "b"`, Less's `@import
+/// (reference) "x"`. A `@use … with (…)`'s values are no imports: a `@use`
+/// or `@forward` names one, its first string.
+fn style_imports(root: Node, source: &str) -> Vec<RawImport> {
+    fn strings<'t>(node: Node<'t>, out: &mut Vec<Node<'t>>) {
+        match node.kind() {
+            "string_value" => out.push(node),
+            // `url(x.css)`: its argument, quoted or not.
+            "call_expression" => {
+                if let Some(arguments) = node
+                    .named_children(&mut node.walk())
+                    .find(|c| c.kind() == "arguments")
+                    && let Some(first) = arguments.named_child(0)
+                {
+                    out.push(first);
+                }
+            }
+            // A `@use`'s `with (…)` and Less's `(reference)`: no paths.
+            "parenthesized_value" => {}
+            _ => {
+                let mut cursor = node.walk();
+                for child in node.named_children(&mut cursor) {
+                    strings(child, out);
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        let kind = node.kind();
+        if !matches!(
+            kind,
+            "import_statement" | "use_statement" | "forward_statement"
+        ) {
+            let mut cursor = node.walk();
+            stack.extend(node.named_children(&mut cursor));
+            continue;
+        }
+        let mut found = Vec::new();
+        strings(node, &mut found);
+        if kind != "import_statement" {
+            found.truncate(1);
+        }
+        for s in found {
+            let text = source.get(s.byte_range()).unwrap_or("").trim();
+            let path = text.trim_matches(['"', '\'']).trim();
+            if !path.is_empty() {
+                out.push(RawImport {
+                    module: path.to_string(),
+                    line: s.start_position().row + 1,
+                    is_mod_decl: false,
+                });
+            }
+        }
+    }
+    out.sort_by_key(|r| r.line);
+    out
+}
+
+#[cfg(test)]
+mod web_tests {
+    use super::*;
+
+    fn modules(src: &str, lang: &str) -> Vec<(String, usize)> {
+        imports_of(src, lang)
+            .into_iter()
+            .map(|r| (r.module, r.line))
+            .collect()
+    }
+
+    fn m(s: &str, line: usize) -> (String, usize) {
+        (s.to_string(), line)
+    }
+
+    /// A stylesheet's `@import`, `@use` and `@forward`, a comment's
+    /// aside, a `@use`'s `with (…)` values and Less's options aside.
+    #[test]
+    fn stylesheet_imports() {
+        let css =
+            "@import url(\"a.css\") screen;\n@import 'b.css';\n/* @import 'c.css'; */\n.x {}\n";
+        assert_eq!(modules(css, "css"), [m("a.css", 1), m("b.css", 2)]);
+        let scss = "@use 'sass:math';\n@use \"theme\" as t with ($a: \"x\");\n@forward 'src/list';\n@import 'a', 'b';\n// @import 'z';\n";
+        assert_eq!(
+            modules(scss, "scss"),
+            [
+                m("sass:math", 1),
+                m("theme", 2),
+                m("src/list", 3),
+                m("a", 4),
+                m("b", 4)
+            ]
+        );
+        let less = "@import (reference) \"foo.less\";\n@import 'bar';\n";
+        assert_eq!(modules(less, "less"), [m("foo.less", 1), m("bar", 2)]);
+    }
+
+    /// What a page loads: its scripts and stylesheets, a preloaded module;
+    /// not its images, links or icons.
+    #[test]
+    fn a_pages_scripts_and_stylesheets() {
+        let html = "<!doctype html>\n<html><head>\n<link rel=\"stylesheet\" href=\"/style.css\">\n<link rel=\"icon\" href=\"/favicon.ico\">\n<link rel=\"modulepreload\" href=\"./vendor.js\">\n</head><body>\n<img src=\"logo.png\">\n<script type=\"module\" src=\"/src/main.ts\"></script>\n<script>inline()</script>\n<script src=\"https://cdn.example.com/x.js\"></script>\n</body></html>\n";
+        assert_eq!(
+            modules(html, "html"),
+            [
+                m("/style.css", 3),
+                m("./vendor.js", 5),
+                m("/src/main.ts", 8),
+                m("https://cdn.example.com/x.js", 10)
+            ]
+        );
     }
 }

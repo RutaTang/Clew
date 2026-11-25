@@ -123,7 +123,11 @@ pub(crate) fn build_project_symbols(
     files: &[FileEntry],
 ) -> Vec<clew_protocol::FileSymbols> {
     let mut snapshot = Vec::new();
-    for f in files.iter().filter(|f| indexable(f)).take(MAX_INDEX_FILES) {
+    // Code first: pages and stylesheets take what room it leaves.
+    for (f, _) in clew_core::fs_scan::index_order(files)
+        .into_iter()
+        .take(MAX_INDEX_FILES)
+    {
         let Some(entry) = file_symbols_for(root, &f.abs, &f.rel) else {
             continue;
         };

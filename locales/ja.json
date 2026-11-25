@@ -2807,9 +2807,9 @@
  "install Lean with elan": "elan で Lean",
  "install Node.js, which brings npm": "npm を含む Node.js をインストール",
  "install Deno": "Deno をインストール",
- "Node.js cannot run JSX by itself: add tsx to the project (npm install --save-dev tsx), then run again.": "Node.js だけでは JSX を実行できません。プロジェクトに tsx を追加して（npm install --save-dev tsx）、もう一度実行してください。",
+ "Node.js cannot run JSX by itself: add tsx to the project ({add}), then run again.": "Node.js だけでは JSX を実行できません。プロジェクトに tsx を追加して（{add}）、もう一度実行してください。",
  "The package has no script named {script}.": "このパッケージに {script} という名前のスクリプトはありません。",
- "{arg1} is not installed in this project: install its dependencies (npm install), then run again.": "このプロジェクトに {arg1} がインストールされていません。依存関係をインストールして（npm install）、もう一度実行してください。",
+ "{runner} is not installed in this project: install its dependencies ({install}), then run again.": "このプロジェクトに {runner} がインストールされていません。依存関係をインストールして（{install}）、もう一度実行してください。",
  "{other} wasn't found here.": "ここには {other} が見つかりません。",
  "{pm} wasn't found here. Install Node.js, then run again.": "ここには {pm} が見つかりません。Node.js をインストールして、もう一度実行してください。",
  "{rel} could not be read": "{rel} を読み込めませんでした",
@@ -4069,5 +4069,9 @@
  "NgRx signal store": "NgRx シグナルストア",
  "state: {names}": "状態: {names}",
  "getters: {names}": "ゲッター: {names}",
- "actions: {names}": "アクション: {names}"
+ "actions: {names}": "アクション: {names}",
+ "Browser (js-debug)": "ブラウザ（js-debug）",
+ "A browser's launch.json needs a \"url\" to open (or a page's \"file\")": "ブラウザ用の launch.json には開く \"url\"（またはページの \"file\"）が必要です",
+ "A page is debugged in a browser on this computer: open the project from a folder here to debug it in one.": "ページはこのコンピュータのブラウザでデバッグします。ブラウザでデバッグするには、このコンピュータ上のフォルダからプロジェクトを開いてください。",
+ "This is a Bun project, and Bun's debugger speaks WebKit's inspector protocol, which Clew's JavaScript debugger does not: the file is debugged under Node.js, where Bun's own APIs (Bun.serve, Bun.file) are missing. Run runs it with Bun.": "これは Bun のプロジェクトです。Bun のデバッガは WebKit のインスペクタプロトコルを使いますが、Clew の JavaScript デバッガはこれに対応していません。そのため、このファイルは Node.js でデバッグされ、Bun 独自の API（Bun.serve、Bun.file）は使えません。実行は Bun で行われます。"
 }

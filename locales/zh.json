@@ -2807,9 +2807,9 @@
  "install Lean with elan": "请用 elan 安装 Lean",
  "install Node.js, which brings npm": "请安装 Node.js（自带 npm）",
  "install Deno": "请安装 Deno",
- "Node.js cannot run JSX by itself: add tsx to the project (npm install --save-dev tsx), then run again.": "Node.js 本身无法运行 JSX：请将 tsx 添加到项目中（npm install --save-dev tsx），然后重新运行。",
+ "Node.js cannot run JSX by itself: add tsx to the project ({add}), then run again.": "Node.js 本身无法运行 JSX：请将 tsx 添加到项目中（{add}），然后重新运行。",
  "The package has no script named {script}.": "该包没有名为 {script} 的脚本。",
- "{arg1} is not installed in this project: install its dependencies (npm install), then run again.": "此项目中未安装 {arg1}：请先安装其依赖（npm install），然后重新运行。",
+ "{runner} is not installed in this project: install its dependencies ({install}), then run again.": "此项目中未安装 {runner}：请先安装其依赖（{install}），然后重新运行。",
  "{other} wasn't found here.": "在此处找不到 {other}。",
  "{pm} wasn't found here. Install Node.js, then run again.": "在此处找不到 {pm}。请安装 Node.js，然后重新运行。",
  "{rel} could not be read": "无法读取 {rel}",
@@ -4069,5 +4069,9 @@
  "NgRx signal store": "NgRx signal store",
  "state: {names}": "状态：{names}",
  "getters: {names}": "getter：{names}",
- "actions: {names}": "action：{names}"
+ "actions: {names}": "action：{names}",
+ "Browser (js-debug)": "浏览器（js-debug）",
+ "A browser's launch.json needs a \"url\" to open (or a page's \"file\")": "浏览器的 launch.json 需要一个要打开的 \"url\"（或页面的 \"file\"）",
+ "A page is debugged in a browser on this computer: open the project from a folder here to debug it in one.": "页面要在这台电脑上的浏览器里调试：请从这台电脑上的文件夹打开项目，才能在浏览器里调试它。",
+ "This is a Bun project, and Bun's debugger speaks WebKit's inspector protocol, which Clew's JavaScript debugger does not: the file is debugged under Node.js, where Bun's own APIs (Bun.serve, Bun.file) are missing. Run runs it with Bun.": "这是一个 Bun 项目，而 Bun 的调试器使用 WebKit 的检查器协议，Clew 的 JavaScript 调试器不支持它：因此这个文件在 Node.js 下调试，其中没有 Bun 自己的 API（Bun.serve、Bun.file）。运行时则用 Bun 运行。"
 }

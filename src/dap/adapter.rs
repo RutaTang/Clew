@@ -65,6 +65,9 @@ pub enum Lang {
     Java,
     /// Haskell via GHCi's debugger, through clew-server's own adapter.
     Haskell,
+    /// A page in Chrome or Edge via vscode-js-debug: a launch file's
+    /// `"type": "chrome"` (or `"msedge"`) and its `url`.
+    Browser,
 }
 
 impl Lang {
@@ -86,6 +89,9 @@ impl Lang {
                 "go" | "delve" | "dlv" => Some(Lang::Go),
                 "dart" | "flutter" => Some(Lang::Dart),
                 "node" | "js" | "ts" | "javascript" | "typescript" | "pwa-node" => Some(Lang::Node),
+                "chrome" | "pwa-chrome" | "msedge" | "edge" | "pwa-msedge" | "browser" => {
+                    Some(Lang::Browser)
+                }
                 _ => None,
             };
         }
@@ -106,6 +112,11 @@ impl Lang {
             Some("hs" | "lhs") => Some(Lang::Haskell),
             // A .NET assembly: what netcoredbg runs.
             Some("dll") => Some(Lang::CSharp),
+            // A page, a component or a stylesheet runs in a browser, from
+            // a launch file that names its URL: no program to start.
+            Some(
+                "vue" | "svelte" | "astro" | "html" | "htm" | "css" | "scss" | "sass" | "less",
+            ) => None,
             None => Some(Lang::Native),
             _ => Some(Lang::Native),
         }
@@ -124,6 +135,7 @@ impl Lang {
             Lang::Erlang => tr_noop!("Erlang (OTP interpreter)"),
             Lang::Java => "Java (JDWP)",
             Lang::Haskell => "Haskell (GHCi)",
+            Lang::Browser => tr_noop!("Browser (js-debug)"),
         }
     }
 
@@ -142,6 +154,7 @@ impl Lang {
             Lang::Erlang => "erlang",
             Lang::Java => "java",
             Lang::Haskell => "haskell",
+            Lang::Browser => "browser",
         }
     }
 }

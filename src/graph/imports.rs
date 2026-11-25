@@ -1065,8 +1065,101 @@ impl Resolver {
             "erlang" => self.resolve_erlang(raw, from),
             "haskell" => self.resolve_haskell(raw, from),
             "zig" => self.resolve_zig(raw, from),
+            "html" | "css" | "scss" | "less" => self.resolve_web(raw, from, lang),
             _ => Target::External(raw.module.clone()),
         }
+    }
+
+    // --- Pages and stylesheets ---
+
+    /// What a page or a stylesheet loads, as the browser, Vite and Sass
+    /// read it. A URL of the web (`https://`, `//cdn…`) is that host's, and
+    /// a Sass built-in (`sass:math`) is Sass's. `/src/main.ts` is from the
+    /// page's folder — Vite's root — or a folder above it in the project.
+    /// Anything else is beside the importer first (`@import "variables"`
+    /// is), with Sass's and Less's extensions, partials (`_variables.scss`)
+    /// and index files (`_index.scss`); then, unprefixed, an alias the
+    /// scripts' resolution knows (`@/styles/x`, a tsconfig path); a
+    /// package's path (`bootstrap/scss/bootstrap`, webpack's `~bootstrap`)
+    /// is that package's.
+    fn resolve_web(&self, raw: &RawImport, from: &Path, lang: &str) -> Target {
+        let spec = raw.module.split(['?', '#']).next().unwrap_or("").trim();
+        if spec.is_empty() {
+            return Target::Unresolved(raw.module.clone());
+        }
+        if let Some(rest) = ["https://", "http://", "//"]
+            .iter()
+            .find_map(|p| spec.strip_prefix(p))
+        {
+            return Target::External(rest.split('/').next().unwrap_or(rest).to_string());
+        }
+        if spec.contains(':') {
+            return Target::External(spec.to_string());
+        }
+        let dir = from.parent().unwrap_or(&self.root);
+        if let Some(rest) = spec.strip_prefix('/') {
+            let mut at = Some(dir);
+            while let Some(d) = at.filter(|d| d.starts_with(&self.root)) {
+                if let Some(found) = self.web_file(&normalize(&d.join(rest)), lang) {
+                    return Target::Internal(found);
+                }
+                at = d.parent();
+            }
+            return Target::Unresolved(spec.to_string());
+        }
+        if let Some(package) = spec.strip_prefix('~').filter(|p| !p.starts_with('/')) {
+            return Target::External(js_package(package));
+        }
+        if let Some(found) = self.web_file(&normalize(&dir.join(spec)), lang) {
+            return Target::Internal(found);
+        }
+        if spec.starts_with('.') {
+            return Target::Unresolved(spec.to_string());
+        }
+        if let Some(rest) = spec.strip_prefix("@/").or_else(|| spec.strip_prefix("~/"))
+            && let Some(found) = ["src", "app", ""]
+                .iter()
+                .find_map(|d| self.web_file(&normalize(&self.root.join(d).join(rest)), lang))
+        {
+            return Target::Internal(found);
+        }
+        match self.resolve_js(raw, from) {
+            Target::Internal(found) => Target::Internal(found),
+            _ => Target::External(js_package(spec)),
+        }
+    }
+
+    /// The file a page's or stylesheet's path names: as written, else with
+    /// the extensions, partials and index files its language reads.
+    fn web_file(&self, path: &Path, lang: &str) -> Option<PathBuf> {
+        if self.files.contains(path) {
+            return Some(path.to_path_buf());
+        }
+        let extensions: &[&str] = match lang {
+            "scss" => &["scss", "sass", "css"],
+            "less" => &["less", "css"],
+            "css" => &["css"],
+            _ => &[],
+        };
+        let name = path.file_name()?.to_str()?;
+        let parent = path.parent()?;
+        // `@use "x.scss"` of `_x.scss`.
+        if lang == "scss" {
+            let partial = parent.join(format!("_{name}"));
+            if self.files.contains(&partial) {
+                return Some(partial);
+            }
+        }
+        extensions.iter().find_map(|ext| {
+            [
+                parent.join(format!("{name}.{ext}")),
+                parent.join(format!("_{name}.{ext}")),
+                path.join(format!("_index.{ext}")),
+                path.join(format!("index.{ext}")),
+            ]
+            .into_iter()
+            .find(|candidate| self.files.contains(candidate))
+        })
     }
 
     // --- Java ---
@@ -8558,5 +8651,89 @@ mod resolution_tests {
         for file in [user, order, strings, program] {
             assert_eq!(g.imports(&at(file)), scratch.imports(&at(file)), "{file}");
         }
+    }
+}
+
+#[cfg(test)]
+mod web_resolution_tests {
+    use super::*;
+
+    /// A page's `/src/main.ts` from Vite's root, its stylesheet and a CDN
+    /// script; a stylesheet's partials, index files, aliases, packages and
+    /// Sass's built-ins.
+    #[test]
+    fn pages_and_stylesheets_resolve_as_browsers_and_sass_read_them() {
+        let root = PathBuf::from("/p");
+        let files: Vec<PathBuf> = [
+            "web/index.html",
+            "web/src/main.ts",
+            "web/style.css",
+            "web/src/styles/main.scss",
+            "web/src/styles/_variables.scss",
+            "web/src/styles/mixins/_index.scss",
+            "web/src/styles/theme.less",
+            "web/src/styles/base.less",
+            "src/styles/tokens.scss",
+        ]
+        .iter()
+        .map(|f| root.join(f))
+        .collect();
+        let r = Resolver::new(&root, &files);
+        let at = |from: &str, spec: &str, lang: &str| {
+            let raw = RawImport {
+                module: spec.to_string(),
+                line: 1,
+                is_mod_decl: false,
+            };
+            r.resolve(&raw, &root.join(from), lang)
+        };
+        let internal = |f: &str| Target::Internal(root.join(f));
+        let page = "web/index.html";
+        assert_eq!(
+            at(page, "/src/main.ts", "html"),
+            internal("web/src/main.ts")
+        );
+        assert_eq!(
+            at(page, "./style.css?v=2", "html"),
+            internal("web/style.css")
+        );
+        assert_eq!(
+            at(page, "https://cdn.example.com/x.js", "html"),
+            Target::External("cdn.example.com".into())
+        );
+        let scss = "web/src/styles/main.scss";
+        assert_eq!(
+            at(scss, "variables", "scss"),
+            internal("web/src/styles/_variables.scss")
+        );
+        assert_eq!(
+            at(scss, "./mixins", "scss"),
+            internal("web/src/styles/mixins/_index.scss")
+        );
+        assert_eq!(
+            at(scss, "@/styles/tokens", "scss"),
+            internal("src/styles/tokens.scss")
+        );
+        assert_eq!(
+            at(scss, "sass:math", "scss"),
+            Target::External("sass:math".into())
+        );
+        assert_eq!(
+            at(scss, "bootstrap/scss/bootstrap", "scss"),
+            Target::External("bootstrap".into())
+        );
+        assert_eq!(
+            at(scss, "~bootstrap/scss/x", "scss"),
+            Target::External("bootstrap".into())
+        );
+        let less = "web/src/styles/theme.less";
+        assert_eq!(
+            at(less, "base", "less"),
+            internal("web/src/styles/base.less")
+        );
+        assert_eq!(
+            at(less, "./missing", "less"),
+            Target::Unresolved("./missing".into())
+        );
     }
 }

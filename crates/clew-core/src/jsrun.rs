@@ -349,9 +349,10 @@ pub fn test_command(
     let installed = |bin: &str| -> Result<PathBuf, String> {
         local_bin(root, file, bin).ok_or_else(|| {
             format!(
-                "{} is not installed in this project: install its dependencies (npm install), \
+                "{runner} is not installed in this project: install its dependencies ({install}), \
                  then run again.",
-                runner.name()
+                runner = runner.name(),
+                install = install_command(root, &cwd),
             )
         })
     };
@@ -439,6 +440,19 @@ fn is_typescript(file: &Path) -> bool {
         .is_some_and(|e| matches!(e, "ts" | "mts" | "cts"))
 }
 
+/// The runtime `file`'s project runs it with, as [`main_command`] picks it:
+/// `"deno"` in a Deno project, `"bun"` in a Bun project, else `"node"`.
+pub fn runtime_of(root: &Path, file: &Path) -> &'static str {
+    let dirs = package_dirs(root, file);
+    if dirs.iter().any(|d| is_deno(d)) || (dirs.is_empty() && is_deno(root)) {
+        "deno"
+    } else if dirs.iter().any(|d| is_bun(d, manifest(d).as_ref())) || is_bun(root, None) {
+        "bun"
+    } else {
+        "node"
+    }
+}
+
 /// What runs `file` as a program: Deno, in a Deno project; Bun, in a Bun
 /// project (TypeScript and JSX alike); else Node — TypeScript with its
 /// types stripped (Node 22.6 and later), or by the project's own `tsx`,
@@ -458,15 +472,14 @@ pub fn main_command(root: &Path, file: &Path, search: &OsStr) -> Result<JsComman
         cwd: cwd.clone(),
         env: Vec::new(),
     };
-    let deno = dirs.iter().any(|d| is_deno(d)) || (dirs.is_empty() && is_deno(root));
-    if deno {
+    let runtime_name = runtime_of(root, file);
+    if runtime_name == "deno" {
         return Ok(command(
             runtime(search, "deno")?,
             vec!["run".into(), "--allow-all".into(), rel],
         ));
     }
-    let bun = dirs.iter().any(|d| is_bun(d, manifest(d).as_ref())) || is_bun(root, None);
-    if bun {
+    if runtime_name == "bun" {
         return Ok(command(runtime(search, "bun")?, vec!["run".into(), rel]));
     }
     let jsx = matches!(ext.as_str(), "jsx" | "tsx");
@@ -474,11 +487,10 @@ pub fn main_command(root: &Path, file: &Path, search: &OsStr) -> Result<JsComman
         return Ok(command(tsx, vec![rel]));
     }
     if jsx {
-        return Err(
-            "Node.js cannot run JSX by itself: add tsx to the project (npm install --save-dev \
-             tsx), then run again."
-                .to_string(),
-        );
+        return Err(format!(
+            "Node.js cannot run JSX by itself: add tsx to the project ({add}), then run again.",
+            add = add_dev_command(root, &cwd, "tsx"),
+        ));
     }
     let mut args = Vec::new();
     if is_typescript(file) {
@@ -486,6 +498,24 @@ pub fn main_command(root: &Path, file: &Path, search: &OsStr) -> Result<JsComman
     }
     args.push(rel);
     Ok(command(runtime(search, "node")?, args))
+}
+
+/// The command that installs the dependencies of the package at `dir`, with
+/// its project's package manager: `pnpm install`, `yarn install`…
+pub fn install_command(root: &Path, dir: &Path) -> String {
+    [package_manager(root, dir), "install"].join(" ")
+}
+
+/// The command that adds `package` to the development dependencies of the
+/// package at `dir`, as its package manager writes it.
+pub fn add_dev_command(root: &Path, dir: &Path, package: &str) -> String {
+    let words: [&str; 3] = match package_manager(root, dir) {
+        "pnpm" => ["pnpm", "add", "-D"],
+        "yarn" => ["yarn", "add", "-D"],
+        "bun" => ["bun", "add", "-d"],
+        pm => [pm, "install", "--save-dev"],
+    };
+    [&words[..], &[package]].concat().join(" ")
 }
 
 /// A package manager a project installs and runs its scripts with.
@@ -815,6 +845,21 @@ mod tests {
     /// A program runs by its project's runtime: Deno's, Bun's, or Node with
     /// TypeScript's types stripped, or the project's tsx (JSX needs it).
     #[cfg(unix)]
+    /// What is said to install is the project's package manager's command.
+    #[test]
+    fn install_advice_is_the_projects_package_managers() {
+        let root = crate::testutil::TempDir::new("jsrun-advice");
+        write(&root, "package.json", "{}");
+        assert_eq!(install_command(&root, &root), "npm install");
+        assert_eq!(
+            add_dev_command(&root, &root, "tsx"),
+            "npm install --save-dev tsx"
+        );
+        write(&root, "pnpm-lock.yaml", "");
+        assert_eq!(install_command(&root, &root), "pnpm install");
+        assert_eq!(add_dev_command(&root, &root, "tsx"), "pnpm add -D tsx");
+    }
+
     #[test]
     fn a_program_runs_by_its_projects_runtime() {
         let root = crate::testutil::TempDir::new("jsrun-main");
@@ -843,7 +888,9 @@ mod tests {
             (tsx.clone(), vec!["./src/App.jsx".to_string()])
         );
         std::fs::remove_file(&tsx).unwrap();
+        assert_eq!(runtime_of(&root, &ts), "node");
         write(&root, "bun.lock", "");
+        assert_eq!(runtime_of(&root, &ts), "bun");
         let cmd = main_command(&root, &ts, &search).unwrap();
         assert_eq!(
             (cmd.program, cmd.args),
@@ -853,6 +900,11 @@ mod tests {
             )
         );
         write(&root, "deno.json", "{}");
+        assert_eq!(
+            runtime_of(&root, &ts),
+            "deno",
+            "the debugger's choice is Run's"
+        );
         let cmd = main_command(&root, &ts, &search).unwrap();
         assert_eq!(cmd.args, ["run", "--allow-all", "./src/main.ts"]);
     }

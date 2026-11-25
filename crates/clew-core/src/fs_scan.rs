@@ -144,10 +144,26 @@ pub fn index_language(rel: &str, abs: &Path) -> Option<&'static str> {
         return None;
     }
     let lang = crate::highlight::detect(abs)?;
-    // A stylesheet's rules, a page's ids and a JSON file's keys are their
-    // file's outline, not symbols to look for: such files would spend the
-    // index's cap.
-    crate::highlight::is_code(lang).then_some(lang)
+    // A JSON file's keys are its outline, not symbols to look for: such
+    // files would spend the index's cap. A page and a stylesheet are
+    // indexed for what they load — `index.html`'s `/src/main.ts`, a
+    // stylesheet's `@import`s — and with no symbols ([`crate::outline`]).
+    (crate::highlight::is_code(lang) || matches!(lang, "html" | "css" | "scss" | "less"))
+        .then_some(lang)
+}
+
+/// The files the indexers take ([`index_language`]), each with its
+/// language, in the order the file cap ([`MAX_INDEX_FILES`]) takes them:
+/// code first, then pages and stylesheets — indexed for what they load,
+/// they get what room the code leaves.
+pub fn index_order<'a>(
+    files: impl IntoIterator<Item = &'a FileEntry>,
+) -> Vec<(&'a FileEntry, &'static str)> {
+    let (code, pages): (Vec<_>, Vec<_>) = files
+        .into_iter()
+        .filter_map(|f| index_language(&f.rel, &f.abs).map(|lang| (f, lang)))
+        .partition(|(_, lang)| crate::highlight::is_code(lang));
+    code.into_iter().chain(pages).collect()
 }
 
 /// Whether `rel` sits under one of [`NOISE_DIRS`] at any depth: what the walk

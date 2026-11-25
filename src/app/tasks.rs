@@ -1809,6 +1809,17 @@ pub(crate) fn launch_example(root: &Path, lang: Option<&str>) -> String {
         .find(|(manifest, _)| root.join(manifest).is_file())
         .map(|(_, lang)| lang)
     });
+    // A web app's page, component or stylesheet is debugged in a browser,
+    // at the URL its dev server serves it on.
+    let front_end = matches!(
+        lang,
+        Some("vue" | "svelte" | "astro" | "html" | "css" | "scss" | "less" | "tsx")
+    );
+    if front_end && let Some(url) = dev_server_url(root) {
+        return format!(
+            r#"{{"type": "chrome", "url": "{url}", "webRoot": "${{workspaceFolder}}"}}"#
+        );
+    }
     let program = match lang {
         // The binary Cargo builds, by its own name: the folder's was a
         // guess, often wrong.
@@ -1825,6 +1836,36 @@ pub(crate) fn launch_example(root: &Path, lang: Option<&str>) -> String {
         _ => "main.py".into(),
     };
     format!(r#"{{"program": "{program}"}}"#)
+}
+
+/// The URL a web app's dev server serves it on by default, from what its
+/// `package.json` builds it with: Vite's and SvelteKit's 5173, Next.js's,
+/// Nuxt's, Remix's and Create React App's 3000, Astro's 4321, Angular's
+/// 4200. `None` for a project that is no web app.
+pub(crate) fn dev_server_url(root: &Path) -> Option<String> {
+    let text = clew_core::statefile::read_capped(&root.join("package.json"), 1024 * 1024)?;
+    let manifest: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let has = |name: &str| {
+        ["dependencies", "devDependencies"]
+            .iter()
+            .any(|k| manifest.get(k).and_then(|d| d.get(name)).is_some())
+    };
+    let port = [
+        ("next", 3000),
+        ("nuxt", 3000),
+        ("@remix-run/dev", 3000),
+        ("react-scripts", 3000),
+        ("astro", 4321),
+        ("@angular/core", 4200),
+        ("@sveltejs/kit", 5173),
+        ("vite", 5173),
+        ("parcel", 1234),
+        ("webpack-dev-server", 8080),
+    ]
+    .into_iter()
+    .find(|(name, _)| has(name))
+    .map(|(_, port)| port)?;
+    Some(format!("http://localhost:{port}"))
 }
 
 /// Read `.clew/launch.json`, resolving relative paths against the project root.
@@ -1867,6 +1908,10 @@ pub(crate) fn with_launch_file(launch: &mut serde_json::Value, extras: &LaunchEx
         body.remove("program");
         body.insert("module".into(), serde_json::json!(module));
     }
+    // A browser opening a page's file opens no URL.
+    if extras.fields.contains_key("file") && !extras.fields.contains_key("url") {
+        body.remove("url");
+    }
     for (key, value) in &extras.fields {
         match (key.as_str(), body.get_mut(key), value) {
             ("env", Some(serde_json::Value::Object(env)), serde_json::Value::Object(theirs)) => {
@@ -1897,6 +1942,34 @@ pub(crate) const PYTHON_LAUNCH_KEYS: &[&str] = &[
     "subProcess",
     "showReturnValue",
     "redirectOutput",
+];
+
+/// The fields of a browser launch file (`"type": "chrome"` or `"msedge"`)
+/// js-debug takes as they are written — VS Code's: the page to open, where
+/// its sources are, and the browser to open it in.
+pub(crate) const BROWSER_LAUNCH_KEYS: &[&str] = &[
+    "url",
+    "file",
+    "webRoot",
+    "runtimeExecutable",
+    "runtimeArgs",
+    "userDataDir",
+    "env",
+    "sourceMaps",
+    "pathMapping",
+    "sourceMapPathOverrides",
+    "resolveSourceMapLocations",
+    "outFiles",
+    "skipFiles",
+    "smartStep",
+    "port",
+    "timeout",
+    "urlFilter",
+    "disableNetworkCache",
+    "includeDefaultArgs",
+    "cleanUp",
+    "perScriptSourcemaps",
+    "vueComponentPaths",
 ];
 
 /// Most bytes of an `envFile` read.
@@ -2074,10 +2147,34 @@ pub(crate) fn parse_launch_config(
         .map(str::trim)
         .filter(|m| !m.is_empty())
         .map(str::to_string);
+    // A page debugged in a browser: Chrome's or Edge's, as js-debug
+    // names them.
+    let browser = v.get("type").and_then(|t| t.as_str()).and_then(|t| {
+        match t.to_ascii_lowercase().as_str() {
+            "chrome" | "pwa-chrome" => Some("pwa-chrome"),
+            "msedge" | "edge" | "pwa-msedge" => Some("pwa-msedge"),
+            _ => None,
+        }
+    });
     let program = match (v.get("program").and_then(|p| p.as_str()), &module) {
         (Some(program), _) => program.to_string(),
         // Named for the module it runs: its tab says so.
         (None, Some(module)) => module.clone(),
+        // A browser opens a URL (or a page's file).
+        (None, None) if browser.is_some() => {
+            match ["url", "file"]
+                .iter()
+                .find_map(|k| v.get(*k).and_then(|u| u.as_str()))
+            {
+                Some(url) => url.to_string(),
+                None => {
+                    return Err(tr!(
+                        "A browser's launch.json needs a \"url\" to open (or a page's \"file\")"
+                    )
+                    .into());
+                }
+            }
+        }
         (None, None) => {
             return Err(
                 tr!("launch.json needs a \"program\" field (or a \"module\" to run)").into(),
@@ -2106,9 +2203,23 @@ pub(crate) fn parse_launch_config(
         .or_else(|| module.as_ref().map(|_| "python".to_string()));
     let mut notes = Vec::new();
     let mut fields = serde_json::Map::new();
-    for key in PYTHON_LAUNCH_KEYS {
+    let keys = match browser {
+        Some(_) => BROWSER_LAUNCH_KEYS,
+        None => PYTHON_LAUNCH_KEYS,
+    };
+    for key in keys {
         if let Some(value) = v.get(*key) {
             fields.insert(key.to_string(), value.clone());
+        }
+    }
+    if let Some(kind) = browser {
+        fields.insert("type".into(), serde_json::json!(kind));
+        // A page's file, from the project's folder.
+        if let Some(file) = v.get("file").and_then(|f| f.as_str())
+            && v.get("url").is_none()
+        {
+            let file = resolve_rel(root, file);
+            fields.insert("file".into(), serde_json::json!(file.to_string_lossy()));
         }
     }
     // The environment: the `envFile`'s variables, under those `env` sets.
@@ -2153,6 +2264,8 @@ pub(crate) fn parse_launch_config(
     }
     let program = match &module {
         Some(_) if v.get("program").is_none() => cwd.join(&program),
+        // A URL is no path of the project's.
+        _ if browser.is_some() && v.get("program").is_none() => PathBuf::from(&program),
         _ => resolve_rel(root, &program),
     };
     Ok(LaunchConfig {

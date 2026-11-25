@@ -2807,9 +2807,9 @@
  "install Lean with elan": "elan으로 Lean 설치",
  "install Node.js, which brings npm": "npm이 포함된 Node.js 설치",
  "install Deno": "Deno 설치",
- "Node.js cannot run JSX by itself: add tsx to the project (npm install --save-dev tsx), then run again.": "Node.js만으로는 JSX를 실행할 수 없습니다. 프로젝트에 tsx를 추가한 뒤(npm install --save-dev tsx) 다시 실행하세요.",
+ "Node.js cannot run JSX by itself: add tsx to the project ({add}), then run again.": "Node.js만으로는 JSX를 실행할 수 없습니다. 프로젝트에 tsx를 추가한 뒤({add}) 다시 실행하세요.",
  "The package has no script named {script}.": "이 패키지에는 {script}(이)라는 스크립트가 없습니다.",
- "{arg1} is not installed in this project: install its dependencies (npm install), then run again.": "이 프로젝트에 {arg1}이(가) 설치되어 있지 않습니다. 의존성을 설치한 뒤(npm install) 다시 실행하세요.",
+ "{runner} is not installed in this project: install its dependencies ({install}), then run again.": "이 프로젝트에 {runner}이(가) 설치되어 있지 않습니다. 의존성을 설치한 뒤({install}) 다시 실행하세요.",
  "{other} wasn't found here.": "여기에서 {other}을(를) 찾을 수 없습니다.",
  "{pm} wasn't found here. Install Node.js, then run again.": "여기에서 {pm}을(를) 찾을 수 없습니다. Node.js를 설치한 뒤 다시 실행하세요.",
  "{rel} could not be read": "{rel}을(를) 읽을 수 없습니다",
@@ -4069,5 +4069,9 @@
  "NgRx signal store": "NgRx 시그널 스토어",
  "state: {names}": "상태: {names}",
  "getters: {names}": "게터: {names}",
- "actions: {names}": "액션: {names}"
+ "actions: {names}": "액션: {names}",
+ "Browser (js-debug)": "브라우저 (js-debug)",
+ "A browser's launch.json needs a \"url\" to open (or a page's \"file\")": "브라우저용 launch.json에는 열 \"url\"(또는 페이지의 \"file\")이 필요합니다",
+ "A page is debugged in a browser on this computer: open the project from a folder here to debug it in one.": "페이지는 이 컴퓨터의 브라우저에서 디버그합니다. 브라우저에서 디버그하려면 이 컴퓨터의 폴더에서 프로젝트를 여세요.",
+ "This is a Bun project, and Bun's debugger speaks WebKit's inspector protocol, which Clew's JavaScript debugger does not: the file is debugged under Node.js, where Bun's own APIs (Bun.serve, Bun.file) are missing. Run runs it with Bun.": "이것은 Bun 프로젝트이고, Bun의 디버거는 WebKit 인스펙터 프로토콜을 쓰는데 Clew의 JavaScript 디버거는 이를 지원하지 않습니다. 그래서 이 파일은 Node.js에서 디버그되며, Bun 고유의 API(Bun.serve, Bun.file)는 없습니다. 실행은 Bun으로 합니다."
 }
