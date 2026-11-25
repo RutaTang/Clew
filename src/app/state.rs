@@ -2226,6 +2226,10 @@ pub type FileHistory = Result<Vec<crate::git::HistCommit>, String>;
 /// session.
 #[derive(Debug)]
 pub struct ProjectSession {
+    /// The scripts of the project's packages, read when the command bar
+    /// opens (`App::refresh_package_scripts`): each package's folder (the
+    /// root's empty), the package manager it uses, and its scripts' names.
+    pub package_scripts: Vec<(String, &'static str, Vec<String>)>,
     // -- The project and its index -----------------------------------------------
     /// The open project: its root, tree and file list (`None` while none is).
     pub project: Option<Project>,
@@ -2932,6 +2936,7 @@ impl Default for ProjectSession {
             project: None,
             derived_dir: Default::default(),
             project_languages: Default::default(),
+            package_scripts: Vec::new(),
             code_languages: Default::default(),
             setup_missing: Vec::new(),
             setup_look: 0,

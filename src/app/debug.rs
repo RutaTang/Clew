@@ -925,7 +925,48 @@ impl App {
     /// launch, the adapter told `noDebug`, no breakpoint set in it. Its
     /// output and its end show in the bottom panel as a debug run's do.
     pub(crate) fn start_run(&mut self) -> Task<Message> {
+        if let Some(plan) = self.js_file_run() {
+            return self.start_session(true, Some(plan));
+        }
         self.start_session(true, None)
+    }
+
+    /// What Run runs for a JavaScript or TypeScript file of a project on
+    /// this computer that names nothing to run (no `.clew/launch.json`): a
+    /// test file's tests, by the project's runner — Node ran one as a
+    /// script, where `describe` is no function — and any other file as a
+    /// program, by the project's runtime (`ProjectTask::JsMain`), with no
+    /// debugger to fetch first.
+    fn js_file_run(&self) -> Option<crate::app::runplan::RunPlan> {
+        use clew_core::runnables::{RunnableKind, runnables};
+        if self.connection.is_remote() {
+            return None;
+        }
+        let root = &self.proj.project.as_ref()?.root;
+        if root.join(".clew").join("launch.json").is_file() {
+            return None;
+        }
+        let viewer = self.active_viewer()?;
+        let lang = viewer
+            .lang_key
+            .filter(|l| matches!(*l, "javascript" | "typescript" | "tsx"))?;
+        let rel = self.project_rel(&viewer.abs)?;
+        let name = viewer
+            .abs
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let tests = runnables(lang, &viewer.source)
+            .iter()
+            .any(|r| r.kind == RunnableKind::Test);
+        Some(crate::app::runplan::RunPlan::Remote {
+            task: match tests {
+                true => clew_protocol::ProjectTask::JsTest { file: rel, line: 1 },
+                false => clew_protocol::ProjectTask::JsMain { file: rel },
+            },
+            name,
+            tests: tests.then_some(true),
+        })
     }
 
     /// What Run Test runs from 1-based `line` of pane `pane`'s file, when
@@ -1132,6 +1173,47 @@ impl App {
             let Some(rel) = self.project_rel(&viewer.abs.clone()) else {
                 return Task::none();
             };
+            // Debug Test, on this computer: the runner run under js-debug,
+            // asked for the test as Run Test asks — Node-run runners alike
+            // (Vitest, Jest, Mocha, Playwright, node:test); Bun's and Deno's
+            // inspectors are not js-debug's, so their tests run, said so.
+            let root = self.proj.project.as_ref().map(|p| p.root.clone());
+            let runner = root
+                .as_ref()
+                .and_then(|r| clew_core::jsrun::test_runner(r, &viewer.abs, &viewer.source));
+            let debuggable = !matches!(
+                runner,
+                None | Some(clew_core::jsrun::Runner::Bun | clew_core::jsrun::Runner::Deno)
+            );
+            if !no_debug
+                && !self.connection.is_remote()
+                && debuggable
+                && let Some(root) = root
+            {
+                let search = clew_core::linerpc::search_path().unwrap_or_default();
+                let (abs, source) = (viewer.abs.clone(), viewer.source.clone());
+                return match clew_core::jsrun::test_command(
+                    &root, &abs, lang, &source, line, &search,
+                ) {
+                    Ok((command, _)) => self.start_session(
+                        false,
+                        Some(crate::app::runplan::RunPlan::JsDebugTest {
+                            program: command.program,
+                            args: command.args,
+                            cwd: command.cwd,
+                            name,
+                            tested: match tests {
+                                Some(true) => crate::app::runplan::Tested::Group,
+                                _ => crate::app::runplan::Tested::One,
+                            },
+                        }),
+                    ),
+                    Err(why) => {
+                        self.status = crate::i18n::message(&why);
+                        Task::none()
+                    }
+                };
+            }
             let task = self.start_session(
                 true,
                 Some(crate::app::runplan::RunPlan::Remote {
@@ -2285,6 +2367,14 @@ impl App {
                     crate::app::tasks::with_launch_file(&mut launch, extras);
                 }
                 if !file_env.is_empty() {
+                    // lldb-dap takes a program's variables as `K=V` strings;
+                    // js-debug, delve, debugpy and the rest as an object —
+                    // the strings reached js-debug, which lost them.
+                    if !matches!(lang, Some(dap::Lang::Native))
+                        && let Some(body) = launch.as_object_mut()
+                    {
+                        body.entry("env").or_insert_with(|| serde_json::json!({}));
+                    }
                     clew_core::cargorun::with_cargo_env(&mut launch, &file_env);
                 }
                 if no_debug {
@@ -4258,6 +4348,23 @@ impl App {
                 self.run_main_at(line, no_debug)
             }
             DebugMsg::RunLake(task) => self.start_lake_task(task),
+            DebugMsg::RunScript { dir, script } => {
+                let pm = self
+                    .proj
+                    .package_scripts
+                    .iter()
+                    .find(|(d, _, _)| *d == dir)
+                    .map_or("npm", |(_, pm, _)| *pm);
+                let name = format!("{pm} run {script}");
+                self.start_session(
+                    true,
+                    Some(crate::app::runplan::RunPlan::Remote {
+                        task: clew_protocol::ProjectTask::PackageScript { dir, script },
+                        name,
+                        tests: None,
+                    }),
+                )
+            }
             DebugMsg::ShowTab(tab) => self.show_run_tab(tab),
             DebugMsg::CloseTab(tab) => self.close_run_tab(tab),
             DebugMsg::Again => self.on_debug_again(),

@@ -1421,9 +1421,47 @@ fn go_spec(
 /// on TCP — port 0, announced as `Debug server listening at <addr>`. It is
 /// provisioned under clew's data dir; until it is, this is a
 /// [`Resolution::NeedsInstall`].
+///
+/// A program that is a JavaScript or TypeScript file runs under Node — a
+/// TypeScript one with its types stripped, as Run runs it; any other (a
+/// test runner the project installed, `node_modules/.bin/vitest`) is run
+/// as it is, js-debug attaching to the Node processes it starts.
 fn node_with(node: PathBuf, program: &str, args: &[String], cwd: &Path) -> Resolution {
     let Some(server) = js_debug_server() else {
         return Resolution::NeedsInstall(AdapterInstall::JsDebug);
+    };
+    let ext = Path::new(program)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let launch = match ext.as_str() {
+        "js" | "mjs" | "cjs" | "jsx" => json!({
+            "type": "pwa-node",
+            "request": "launch",
+            "program": program,
+            "args": args,
+            "cwd": cwd.to_string_lossy(),
+            "console": "internalConsole",
+        }),
+        "ts" | "mts" | "cts" | "tsx" => json!({
+            "type": "pwa-node",
+            "request": "launch",
+            "program": program,
+            "args": args,
+            "runtimeArgs": ["--experimental-strip-types"],
+            "cwd": cwd.to_string_lossy(),
+            "console": "internalConsole",
+        }),
+        _ => json!({
+            "type": "pwa-node",
+            "request": "launch",
+            "runtimeExecutable": program,
+            "runtimeArgs": args,
+            "cwd": cwd.to_string_lossy(),
+            "console": "internalConsole",
+            "autoAttachChildProcesses": true,
+        }),
     };
     Resolution::Ready(AdapterSpec {
         command: node,
@@ -1432,14 +1470,7 @@ fn node_with(node: PathBuf, program: &str, args: &[String], cwd: &Path) -> Resol
             "0".into(),
             "127.0.0.1".into(),
         ],
-        launch: json!({
-            "type": "pwa-node",
-            "request": "launch",
-            "program": program,
-            "args": args,
-            "cwd": cwd.to_string_lossy(),
-            "console": "internalConsole",
-        }),
+        launch,
         transport: AdapterTransport::Tcp,
     })
 }
@@ -2932,6 +2963,35 @@ mod tests {
             assert_eq!(spec.transport, AdapterTransport::Tcp);
             assert_eq!(Path::new(&spec.args[0]), entry);
             assert_eq!(&spec.args[1..], ["0", "127.0.0.1"]);
+            assert_eq!(spec.launch["program"], "/p/app.js");
+            // TypeScript, with its types stripped, as Run runs it.
+            let Resolution::Ready(ts) =
+                node_with(PathBuf::from("node"), "/p/app.ts", &[], Path::new("/p"))
+            else {
+                panic!("installed");
+            };
+            assert_eq!(
+                ts.launch["runtimeArgs"],
+                json!(["--experimental-strip-types"])
+            );
+            // A test runner the project installed: run as it is, js-debug
+            // attaching to the Node it starts.
+            let args = vec!["run".to_string(), "./a.test.ts".to_string()];
+            let Resolution::Ready(runner) = node_with(
+                PathBuf::from("node"),
+                "/p/node_modules/.bin/vitest",
+                &args,
+                Path::new("/p"),
+            ) else {
+                panic!("installed");
+            };
+            assert_eq!(
+                runner.launch["runtimeExecutable"],
+                "/p/node_modules/.bin/vitest"
+            );
+            assert_eq!(runner.launch["runtimeArgs"], json!(args));
+            assert_eq!(runner.launch["autoAttachChildProcesses"], true);
+            assert_eq!(runner.launch.get("program"), None);
         });
         let go = go_spec(PathBuf::from("/bin/dlv"), "/p", &[], Path::new("/p"), None);
         assert_eq!(go.args, ["dap", "--listen", "127.0.0.1:0"]);

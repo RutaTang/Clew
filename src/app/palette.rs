@@ -610,8 +610,49 @@ impl App {
         operation::focus(ui::finder_input_id())
     }
 
+    /// The scripts of the project's packages, read again as the command
+    /// bar opens: each package.json the project's tree holds (a
+    /// monorepo's packages too, the root's first), its scripts in the
+    /// order written, and the package manager its lockfile names. A
+    /// project on this computer's; a remote project's are its host's.
+    pub(crate) fn refresh_package_scripts(&mut self) {
+        /// Most packages offered: a tree of more is a vendored one's.
+        const MAX_PACKAGES: usize = 24;
+        let scripts = match (&self.proj.project, self.connection.is_remote()) {
+            (Some(project), false) => {
+                let root = &project.root;
+                let mut dirs: Vec<(String, PathBuf)> = project
+                    .files
+                    .iter()
+                    .filter(|f| f.rel.rsplit('/').next() == Some("package.json"))
+                    .filter(|f| !f.rel.split('/').any(|c| c == "node_modules"))
+                    .filter_map(|f| {
+                        let dir = f.abs.parent()?.to_path_buf();
+                        let rel = f.rel.rsplit_once('/').map_or("", |(d, _)| d).to_string();
+                        Some((rel, dir))
+                    })
+                    .collect();
+                dirs.sort_by_key(|(rel, _)| (rel.matches('/').count(), rel.clone()));
+                dirs.truncate(MAX_PACKAGES);
+                dirs.into_iter()
+                    .filter_map(|(rel, dir)| {
+                        let names: Vec<String> = clew_core::jsrun::scripts(&dir)
+                            .into_iter()
+                            .map(|(name, _)| name)
+                            .collect();
+                        (!names.is_empty())
+                            .then(|| (rel, clew_core::jsrun::package_manager(root, &dir), names))
+                    })
+                    .collect()
+            }
+            _ => Vec::new(),
+        };
+        self.proj.package_scripts = scripts;
+    }
+
     /// Rebuild the command bar's suggestions; they are its results.
     pub(crate) fn refresh_suggestions(&mut self) {
+        self.refresh_package_scripts();
         self.palette = self.palette_commands();
         self.palette_home = self.suggestions();
         self.proj.finder.selected = 0;
@@ -1078,6 +1119,24 @@ impl App {
         }
 
         // At the caret: what the context menu and the reading keys do there.
+        // The project's package scripts, as they are typed: `npm run
+        // dev`, and a monorepo package's with its folder.
+        for (dir, pm, scripts) in &self.proj.package_scripts {
+            for script in scripts {
+                let title = match dir.is_empty() {
+                    true => format!("{pm} run {script}"),
+                    false => format!("{pm} run {script} ({dir})"),
+                };
+                add(
+                    title,
+                    None,
+                    send(Message::Debug(DebugMsg::RunScript {
+                        dir: dir.clone(),
+                        script: script.clone(),
+                    })),
+                );
+            }
+        }
         if project && self.caret().is_some() {
             for (kind, keys) in [
                 (GotoKind::Definition, "F12".to_string()),

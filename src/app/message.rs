@@ -1874,6 +1874,10 @@ pub enum DebugMsg {
     /// (`lake build`, `lake test`): the palette's Lean: Build Project and
     /// Lean: Run Project Tests.
     RunLake(crate::app::runplan::LakeTask),
+    /// Run the script `script` of the package in `dir` (the project's
+    /// root when empty) by its package manager: the palette's `npm run
+    /// dev` and the like.
+    RunScript { dir: String, script: String },
     /// The adapter is ready; carry its handle + the TCP address it announced
     /// (for child sessions).
     /// Every DAP-side message names the `run` it belongs to (`App::debug_run`):
@@ -3262,6 +3266,7 @@ impl DebugMsg {
             | DebugMsg::RunTest { .. }
             | DebugMsg::RunMain { .. }
             | DebugMsg::RunLake(..)
+            | DebugMsg::RunScript { .. }
             | DebugMsg::Control(..)
             | DebugMsg::Stop
             | DebugMsg::ShowTab(..)

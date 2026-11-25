@@ -960,4 +960,36 @@ mod live {
         let (end, _) = run(6);
         assert_ne!(end, crate::spawn::RunEnd::Exited(0));
     }
+
+    /// A real Node runs a TypeScript program with its types stripped, as
+    /// Run runs a file of a project with no launch file.
+    #[test]
+    #[ignore = "runs Node.js 22.6 or later (on the search path); run explicitly"]
+    fn live_node_runs_a_typescript_program() {
+        use std::sync::atomic::AtomicBool;
+        let root = crate::testutil::TempDir::new("jsrun-live-main");
+        std::fs::write(root.join("package.json"), "{}").unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/main.ts"),
+            "const total = (prices: number[]): number => prices.reduce((a, b) => a + b, 0)\nconsole.log(`total ${total([1, 2, 3])}`)\n",
+        )
+        .unwrap();
+        let mut out = String::new();
+        let end = crate::tasks::run(
+            &root,
+            &clew_protocol::ProjectTask::JsMain {
+                file: "src/main.ts".into(),
+            },
+            &Default::default(),
+            &mut |l, _| {
+                out.push_str(l);
+                out.push('\n');
+            },
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert_eq!(end, crate::spawn::RunEnd::Exited(0), "{out}");
+        assert!(out.contains("total 6"), "{out}");
+    }
 }

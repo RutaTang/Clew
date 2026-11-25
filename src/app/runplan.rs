@@ -81,6 +81,19 @@ pub enum RunPlan {
         lake: PathBuf,
         task: LakeTask,
     },
+    /// A JavaScript or TypeScript test, suite or test file debugged: its
+    /// project's runner (`node_modules/.bin/vitest`, Node with `--test`)
+    /// run under js-debug, asked for it as Run Test asks
+    /// (`clew_core::jsrun::test_command`).
+    JsDebugTest {
+        program: PathBuf,
+        args: Vec<String>,
+        cwd: PathBuf,
+        /// What the run is called: the test's title, its suite's, or its
+        /// file's name.
+        name: String,
+        tested: Tested,
+    },
     /// A Lean file's `main`, run by Lean in its Lake project (`lake env
     /// lean --run`): no debugger, its output and how it ended.
     Lean {
@@ -144,7 +157,9 @@ impl RunPlan {
                 TargetKind::Test(name) => tr!("{target} tests", target = name),
                 _ => target_name(target),
             },
-            RunPlan::Pytest { name, .. } | RunPlan::Django { name, .. } => name.clone(),
+            RunPlan::Pytest { name, .. }
+            | RunPlan::Django { name, .. }
+            | RunPlan::JsDebugTest { name, .. } => name.clone(),
             RunPlan::Doctest { item, file, .. } => {
                 tr!("Doctest of {item}", item = doctest_item(item, file))
             }
@@ -164,7 +179,9 @@ impl RunPlan {
             RunPlan::Cargo {
                 test: Some(test), ..
             } => Some(&test.name),
-            RunPlan::Pytest { name, .. } | RunPlan::Django { name, .. } => Some(name),
+            RunPlan::Pytest { name, .. }
+            | RunPlan::Django { name, .. }
+            | RunPlan::JsDebugTest { name, .. } => Some(name),
             RunPlan::Cargo { test: None, .. }
             | RunPlan::Script { .. }
             | RunPlan::Lean { .. }
@@ -222,6 +239,9 @@ impl RunPlan {
             } | RunPlan::Django {
                 tested: Tested::Group,
                 ..
+            } | RunPlan::JsDebugTest {
+                tested: Tested::Group,
+                ..
             } | RunPlan::Cargo {
                 test: Some(CargoTest {
                     runs: CargoTests::Under(_),
@@ -269,6 +289,7 @@ impl RunPlan {
             RunPlan::Pytest { .. }
             | RunPlan::Django { .. }
             | RunPlan::Script { .. }
+            | RunPlan::JsDebugTest { .. }
             | RunPlan::Lean { .. }
             | RunPlan::Lake { .. }
             | RunPlan::Remote { .. }
@@ -318,6 +339,14 @@ impl RunPlan {
                 root.to_path_buf(),
                 Some(crate::dap::Lang::Python),
             ),
+            RunPlan::JsDebugTest {
+                program, args, cwd, ..
+            } => (
+                program.clone(),
+                args.clone(),
+                cwd.clone(),
+                Some(crate::dap::Lang::Node),
+            ),
             RunPlan::Lean { file, project, .. } => {
                 (file.clone(), Vec::new(), project.clone(), None)
             }
@@ -352,6 +381,7 @@ impl RunPlan {
                 file.parent().map(Path::to_path_buf).unwrap_or_default()
             }
             RunPlan::Lake { project, .. } => project.clone(),
+            RunPlan::JsDebugTest { cwd, .. } => cwd.clone(),
             RunPlan::Remote { .. } => PathBuf::new(),
         };
         beside.join(self.label())

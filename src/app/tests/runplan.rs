@@ -1063,8 +1063,45 @@ fn run_test_runs_the_javascript_test_at_the_line() {
             tests: Some(true),
         })
     );
-    // Debug Test: run, and said to be without the debugger.
+    // Debug Test: the runner under js-debug — once the project has it.
     let _ = run(&mut app, 5, false);
+    assert_eq!(
+        app.status,
+        "Vitest is not installed in this project: install its dependencies (npm install), then run again."
+    );
+    write(&root, "node_modules/.bin/vitest", "#!/bin/sh\n");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = root.join("node_modules/.bin/vitest");
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let plan = run(&mut app, 5, false);
+    let Some(RunPlan::JsDebugTest {
+        program,
+        args,
+        name,
+        tested,
+        ..
+    }) = plan
+    else {
+        panic!("{plan:?}");
+    };
+    assert_eq!(program, root.join("node_modules/.bin/vitest"));
+    assert_eq!(
+        args,
+        ["run", "./test/cart.test.ts", "-t", "(^| )cart drops$"]
+    );
+    assert_eq!((name.as_str(), tested), ("drops", Tested::One));
+    assert!(!app.debug.no_debug);
+    // A runner js-debug does not drive (Bun's): run, said so.
+    write(
+        &root,
+        "test/bun.test.ts",
+        "import { test } from 'bun:test'\ntest('bun adds', () => {})\n",
+    );
+    open_synchronously(&mut app, "test/bun.test.ts", None);
+    let _ = run(&mut app, 2, false);
     assert!(app.debug.no_debug);
     assert!(
         app.status
@@ -1072,6 +1109,7 @@ fn run_test_runs_the_javascript_test_at_the_line() {
         "{}",
         app.status
     );
+    open_synchronously(&mut app, "test/cart.test.ts", None);
     // The gutter marks the suite and its tests; the code menu names what
     // runs at a line.
     let marks = app.run_marks(app.active_viewer().unwrap());
@@ -1091,5 +1129,99 @@ fn run_test_runs_the_javascript_test_at_the_line() {
     assert_eq!(
         app.status,
         "No test here. Put the cursor in a test function to run it."
+    );
+}
+
+/// A JavaScript project's own ways to run: its package scripts in the
+/// command bar, as they are typed (`pnpm run dev`, a monorepo package's
+/// with its folder), each run by the package manager its lockfile names;
+/// Run on a file with no launch file runs it as a program by its project's
+/// runtime, and a test file's tests by its runner.
+#[test]
+fn a_javascript_projects_scripts_and_files_run_as_the_project_runs_them() {
+    let mut app = scanned_app("runplan-js-scripts");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    write(
+        &root,
+        "package.json",
+        r#"{"scripts": {"dev": "vite", "build": "vite build"}}"#,
+    );
+    write(&root, "pnpm-lock.yaml", "lockfileVersion: 9\n");
+    write(
+        &root,
+        "packages/api/package.json",
+        r#"{"scripts": {"start": "node server.js"}}"#,
+    );
+    write(&root, "src/seed.ts", "console.log('seeded')\n");
+    write(
+        &root,
+        "src/seed.test.ts",
+        "import { test } from 'node:test'\ntest('seeds', () => {})\n",
+    );
+    scan_synchronously(&mut app, root.clone());
+    app.refresh_suggestions();
+    let titles: Vec<String> = app
+        .palette_commands()
+        .into_iter()
+        .map(|c| c.title)
+        .collect();
+    for want in [
+        "pnpm run dev",
+        "pnpm run build",
+        "pnpm run start (packages/api)",
+    ] {
+        assert!(titles.iter().any(|t| t == want), "{want} in {titles:?}");
+    }
+    let _ = app.update(Message::Debug(DebugMsg::RunScript {
+        dir: "packages/api".into(),
+        script: "start".into(),
+    }));
+    assert_eq!(
+        app.debug.plan,
+        Some(RunPlan::Remote {
+            task: clew_protocol::ProjectTask::PackageScript {
+                dir: "packages/api".into(),
+                script: "start".into(),
+            },
+            name: "pnpm run start".into(),
+            tests: None,
+        })
+    );
+    // Run on a program: its runtime runs it, no debugger fetched first.
+    open_synchronously(&mut app, "src/seed.ts", None);
+    let _ = app.update(Message::Debug(DebugMsg::Run));
+    assert_eq!(
+        app.debug.plan,
+        Some(RunPlan::Remote {
+            task: clew_protocol::ProjectTask::JsMain {
+                file: "src/seed.ts".into(),
+            },
+            name: "seed.ts".into(),
+            tests: None,
+        })
+    );
+    assert_eq!(app.status, "Running seed.ts…");
+    // Run on a test file: its tests.
+    open_synchronously(&mut app, "src/seed.test.ts", None);
+    let _ = app.update(Message::Debug(DebugMsg::Run));
+    assert_eq!(
+        app.debug.plan,
+        Some(RunPlan::Remote {
+            task: clew_protocol::ProjectTask::JsTest {
+                file: "src/seed.test.ts".into(),
+                line: 1,
+            },
+            name: "seed.test.ts".into(),
+            tests: Some(true),
+        })
+    );
+    // A launch file names what runs: Run reads it, as before.
+    write(&root, ".clew/launch.json", r#"{"program": "src/seed.ts"}"#);
+    open_synchronously(&mut app, "src/seed.ts", None);
+    let _ = app.update(Message::Debug(DebugMsg::Run));
+    assert!(
+        !matches!(app.debug.plan, Some(RunPlan::Remote { .. })),
+        "{:?}",
+        app.debug.plan
     );
 }
