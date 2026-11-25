@@ -4108,5 +4108,7 @@
  "These tests are in more than one program: debug them one at a time.": "이 테스트들은 여러 프로그램에 나뉘어 있습니다. 하나씩 디버그하세요.",
  "This build runs its tests where the debugger can't reach them, so they run without it.": "이 빌드는 디버거가 닿지 않는 곳에서 테스트를 실행하므로, 테스트는 디버거 없이 실행됩니다.",
  "The build ended before its JVM started under the debugger. See its output.": "디버거에서 JVM이 시작되기 전에 빌드가 끝났습니다. 출력을 확인하세요.",
- "cannot write {arg1}: {e}": "{arg1} 파일을 쓸 수 없음: {e}"
+ "cannot write {arg1}: {e}": "{arg1} 파일을 쓸 수 없음: {e}",
+ "Elixir (OTP interpreter)": "Elixir (OTP 인터프리터)",
+ "{expression} is not bound here": "{expression}은(는) 여기서 바인딩되어 있지 않습니다"
 }

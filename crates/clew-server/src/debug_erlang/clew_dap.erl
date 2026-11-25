@@ -20,7 +20,9 @@ start([PortAtom]) ->
 reader(Sock, Main) ->
     case gen_tcp:recv(Sock, 0) of
         {ok, Line} ->
-            case parse(binary_to_list(Line)) of
+            %% Its characters, not its bytes: a path or an expression in
+            %% UTF-8 is one.
+            case parse(unicode:characters_to_list(Line)) of
                 {ok, Term} -> Main ! {command, Term};
                 {error, Why} -> Main ! {bad_command, Why}
             end,
@@ -79,15 +81,25 @@ meta(Meta, {break_at, Mod, Line, _Cm}, S) ->
         %% An evaluation re-reports where the process is stopped: not news.
         {_, true} -> S;
         {Id, false} ->
-            %% Stopped by a pause: its breakpoints everywhere go again.
-            Paused = maps:get(paused, S),
-            [int:delete_break(M, L) || {M, L} <- maps:get(pausing, S)],
-            Reason = case Paused of true -> <<"pause">>; false -> <<"breakpoint">> end,
-            send(S, #{event => <<"stopped">>, thread => Id, module => Mod, line => Line, reason => Reason}),
             Threads = maps:get(threads, S),
             Thread = maps:get(Id, Threads),
-            S#{refs => #{}, threads => maps:put(Id, Thread#{line => Line}, Threads),
-               pausing => [], paused => false}
+            case maps:get(paused, S) =:= false andalso same_statement(Meta, Mod, Line, Thread) of
+                {true, Seen} ->
+                    %% Still the statement it was let go from: an Elixir
+                    %% macro's expansion (`assert`) is several expressions
+                    %% on one line, each reaching its breakpoint.
+                    int:meta(Meta, continue),
+                    S#{threads => maps:put(Id, Thread#{resumed => Seen}, Threads)};
+                false ->
+                    %% Stopped by a pause: its breakpoints everywhere go again.
+                    Paused = maps:get(paused, S),
+                    [int:delete_break(M, L) || {M, L} <- maps:get(pausing, S)],
+                    Reason = case Paused of true -> <<"pause">>; false -> <<"breakpoint">> end,
+                    send(S, #{event => <<"stopped">>, thread => Id, module => Mod, line => Line, reason => Reason}),
+                    Stopped = (maps:remove(resumed, Thread))#{line => Line, module => Mod},
+                    S#{refs => #{}, threads => maps:put(Id, Stopped, Threads),
+                       pausing => [], paused => false}
+            end
     end;
 meta(Meta, {eval_rsp, Value}, S) ->
     Waiting = maps:get(waiting, S),
@@ -105,9 +117,75 @@ meta(Meta, {exit_at, _Where, _Reason, _Cm}, S) ->
 meta(_Meta, _Event, S) ->
     S.
 
+%% Whether a process stopped at `Mod`'s `Line` is still in the statement it
+%% was continued from there: at the same depth, with only new bindings
+%% since. A loop's next pass binds anew, or is deeper.
+same_statement(Meta, Mod, Line, #{resumed := {Mod, Line, Depth, Before}}) ->
+    case {depth(Meta), bindings(Meta)} of
+        {Depth, Now} ->
+            case lists:all(fun(B) -> lists:member(B, Now) end, Before) of
+                true -> {true, {Mod, Line, Depth, Now}};
+                false -> false
+            end;
+        _ -> false
+    end;
+same_statement(_, _, _, _) ->
+    false.
+
+depth(Meta) ->
+    case call(fun() -> int:meta(Meta, backtrace, all) end) of
+        {ok, B} when is_list(B) -> length(B);
+        _ -> undefined
+    end.
+
+bindings(Meta) ->
+    case call(fun() -> int:meta(Meta, bindings, nostack) end) of
+        {ok, B} when is_list(B) -> B;
+        _ -> []
+    end.
+
 command({interpret, Mods}, S) ->
-    Results = [#{module => M, ok => interpreted(int:i(M))} || M <- Mods],
+    Results = [described(M, interpreted(int:i(M)), code:which(M)) || M <- Mods],
     send(S, #{answer => <<"interpret">>, modules => Results}),
+    S;
+%% Elixir files compiled here — ExUnit's test files, whose modules exist
+%% only in memory — and each of their modules interpreted from its code:
+%% `Code` is Elixir that compiles them, giving `{Module, Source, Binary}`
+%% of each.
+command({load_elixir, Seq, Code}, S) ->
+    Results =
+        try 'Elixir.Code':eval_string(unicode:characters_to_binary(Code)) of
+            {Loaded, _} ->
+                [begin
+                     Src = unicode:characters_to_list(Source),
+                     Beam = filename:rootname(Src) ++ ".beam",
+                     Ok = interpreted(int:ni({Mod, Src, Beam, Bin})),
+                     #{module => Mod, ok => Ok, source => Source, lines => line_range(Bin)}
+                 end || {Mod, Source, Bin} <- Loaded]
+        catch
+            Class:Reason:Stack ->
+                io:format(standard_error, "~ts~n", [error_text(elixir, Class, Reason, Stack)]),
+                []
+        end,
+    reply(S, Seq, Results),
+    S;
+%% The program as an expression — Erlang's (`eunit:test(...)`) or
+%% Elixir's (a script required, ExUnit's tests run) — run in a process of
+%% its own; its value is how it ended (`ok` or `error`, a count of
+%% failures).
+command({run_expr, Lang, Code}, S) ->
+    Main = self(),
+    spawn(fun() ->
+        {Status, Why} =
+            try evaluate(Lang, Code) of
+                Value -> {exit_code(Value), <<"normal">>}
+            catch
+                Class:Reason:Stack ->
+                    io:format(standard_error, "~ts~n", [error_text(Lang, Class, Reason, Stack)]),
+                    {1, fmt({Class, Reason})}
+            end,
+        Main ! {program_done, Status, Why}
+    end),
     S;
 command({break, Seq, Mod, Lines}, S) ->
     [int:delete_break(Mod, L) || {{M, L}, _} <- int:all_breaks(), M =:= Mod],
@@ -134,10 +212,20 @@ command({run, Mod, Fun, Args}, S) ->
     S;
 command({resume, Thread, How}, S) ->
     case thread(Thread, S) of
-        #{meta := Meta} -> int:meta(Meta, How);
-        _ -> ok
-    end,
-    S;
+        #{meta := Meta} = T ->
+            %% Continued from a stop: where from, to pass over the rest of
+            %% that statement (`same_statement`). A step stops at each part.
+            Resumed = case {How, T} of
+                {continue, #{module := Mod, line := Line}} ->
+                    #{resumed => {Mod, Line, depth(Meta), bindings(Meta)}};
+                _ -> #{}
+            end,
+            int:meta(Meta, How),
+            Threads = maps:get(threads, S),
+            S#{threads => maps:put(Thread, maps:merge(maps:remove(resumed, T), Resumed), Threads)};
+        _ ->
+            S
+    end;
 %% Pause: nothing stops a running interpreted process from outside, so it is
 %% stopped by a breakpoint on every line of the interpreted modules that has
 %% one, taken off again at the first stop.
@@ -225,6 +313,67 @@ source_lines(Mod) ->
 
 interpreted({module, _}) -> true;
 interpreted(_) -> false.
+
+%% A module as interpreted: whether it is, its source file, and the first
+%% and last lines of its code — a file may hold several of Elixir's.
+described(Mod, Ok, Beam) ->
+    Source = case int:file(Mod) of
+        File when is_list(File) -> unicode:characters_to_binary(File);
+        _ -> undefined
+    end,
+    #{module => Mod, ok => Ok, source => Source, lines => line_range(Beam)}.
+
+%% The lines a module's functions span, read off its debug information
+%% (Erlang's abstract code, or what Elixir's backend gives of it), from its
+%% `.beam` file or its code.
+line_range(Beam) when is_list(Beam); is_binary(Beam) ->
+    try beam_lib:chunks(Beam, [debug_info]) of
+        {ok, {Mod, [{debug_info, {debug_info_v1, Backend, Data}}]}} ->
+            case Backend:debug_info(erlang_v1, Mod, Data, []) of
+                {ok, Forms} ->
+                    Lines = lists:foldl(
+                        fun({function, _, _, _, _} = F, Acc) ->
+                                erl_parse:fold_anno(
+                                    fun(Anno, In) ->
+                                        case erl_anno:line(Anno) of
+                                            L when is_integer(L), L > 0 -> [L | In];
+                                            _ -> In
+                                        end
+                                    end, Acc, F);
+                           (_, Acc) -> Acc
+                        end, [], Forms),
+                    case Lines of
+                        [] -> undefined;
+                        _ -> [lists:min(Lines), lists:max(Lines)]
+                    end;
+                _ -> undefined
+            end;
+        _ -> undefined
+    catch
+        _:_ -> undefined
+    end;
+line_range(_) ->
+    undefined.
+
+evaluate(erlang, Code) ->
+    {ok, Tokens, _} = erl_scan:string(Code),
+    {ok, Exprs} = erl_parse:parse_exprs(Tokens),
+    {value, Value, _} = erl_eval:exprs(Exprs, []),
+    Value;
+evaluate(elixir, Code) ->
+    {Value, _} = 'Elixir.Code':eval_string(unicode:characters_to_binary(Code)),
+    Value.
+
+exit_code(ok) -> 0;
+exit_code(error) -> 1;
+exit_code({error, _}) -> 1;
+exit_code(N) when is_integer(N), N >= 0, N < 256 -> N;
+exit_code(_) -> 0.
+
+error_text(elixir, Class, Reason, Stack) ->
+    'Elixir.Exception':format(Class, Reason, Stack);
+error_text(_, Class, Reason, Stack) ->
+    io_lib:format("~p:~tp~n~tp", [Class, Reason, Stack]).
 
 thread(Id, S) -> maps:get(Id, maps:get(threads, S), undefined).
 

@@ -462,6 +462,31 @@ pub fn resolve(
                 server, args_out, program, args, cwd,
             )))
         }
+        // Elixir's programs and tests, under OTP's interpreter as Erlang's
+        // are: clew-server's adapter, its node started by Elixir (by Mix
+        // in a Mix project).
+        "elixir" => {
+            let elixir = store::find_on_path_unresolved("elixir")
+                .ok_or("elixir not found — install Elixir")?;
+            let erl = store::find_on_path_unresolved("erl")
+                .ok_or("erl not found — install Erlang/OTP, with its debugger application")?;
+            let erlc = store::find_on_path_unresolved("erlc")
+                .ok_or("erlc not found — install Erlang/OTP")?;
+            let server =
+                server.ok_or("clew's Erlang debug adapter (clew-server) is not available")?;
+            let args_out = vec![
+                "erlang-debug".to_string(),
+                "--erl".to_string(),
+                erl.to_string_lossy().into_owned(),
+                "--erlc".to_string(),
+                erlc.to_string_lossy().into_owned(),
+                "--elixir".to_string(),
+                elixir.to_string_lossy().into_owned(),
+            ];
+            Ok(Resolution::Ready(own_spec(
+                server, args_out, program, args, cwd,
+            )))
+        }
         "erlang" => {
             let erl = store::find_on_path_unresolved("erl")
                 .ok_or("erl not found — install Erlang/OTP, with its debugger application")?;

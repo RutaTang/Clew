@@ -52,13 +52,42 @@ const MAX_SOURCES: usize = 2000;
 /// Frame ids carry their thread: `thread * FRAMES + level`.
 const FRAMES: u64 = 100_000;
 
+/// How long Mix has to compile an Elixir project and start its node.
+const ELIXIR_CONNECT_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// How long Elixir's tests' files have to compile (their application
+/// started first).
+const LOAD_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// The Elixir that gives a Mix project's own modules (each app's, in an
+/// umbrella) to interpret: `{Module, Source, Binary}` of each.
+const PROJECT_MODULES: &str = r#"apps = if Mix.Project.umbrella?(), do: Map.keys(Mix.Project.apps_paths()), else: [Mix.Project.config()[:app]]
+Enum.flat_map(apps, fn app ->
+  Application.load(app)
+  case :application.get_key(app, :modules) do
+    {:ok, mods} ->
+      for mod <- mods, beam = :code.which(mod), is_list(beam),
+          source = mod.module_info(:compile)[:source], is_list(source),
+          do: {mod, List.to_string(source), File.read!(beam)}
+    _ -> []
+  end
+end)"#;
+
+static NEXT_BREAKPOINT: AtomicU64 = AtomicU64::new(1);
+
 /// Run the adapter on this process's stdin/stdout.
-pub async fn run(erl: PathBuf, erlc: PathBuf) -> Result<(), String> {
-    serve(erl, erlc, tokio::io::stdin(), tokio::io::stdout()).await
+pub async fn run(erl: PathBuf, erlc: PathBuf, elixir: Option<PathBuf>) -> Result<(), String> {
+    serve(erl, erlc, elixir, tokio::io::stdin(), tokio::io::stdout()).await
 }
 
 /// [`run`], over the given streams.
-pub async fn serve<I, O>(erl: PathBuf, erlc: PathBuf, input: I, output: O) -> Result<(), String>
+pub async fn serve<I, O>(
+    erl: PathBuf,
+    erlc: PathBuf,
+    elixir: Option<PathBuf>,
+    input: I,
+    output: O,
+) -> Result<(), String>
 where
     I: AsyncRead + Unpin + Send + 'static,
     O: AsyncWrite + Unpin + Send + 'static,
@@ -66,11 +95,14 @@ where
     let mut adapter = Adapter {
         erl,
         erlc,
+        elixir,
         out: Out::new(output),
         bridge: None,
         node: None,
         scratch: None,
         modules: HashMap::new(),
+        pending: HashMap::new(),
+        is_elixir: false,
         entry: None,
         refs: Arc::new(Mutex::new(Vec::new())),
         stepping: Arc::new(AtomicBool::new(false)),
@@ -102,24 +134,49 @@ struct Node {
     kill: Option<oneshot::Sender<()>>,
 }
 
-/// The program `configurationDone` starts: `Module:Function(Args)`.
-struct Entry {
-    module: String,
-    function: String,
-    /// `None` for an entry that takes no arguments.
-    args: Option<Vec<String>>,
+/// The program `configurationDone` starts.
+enum Entry {
+    /// `Module:Function(Args)`.
+    Call {
+        module: String,
+        function: String,
+        /// `None` for an entry that takes no arguments.
+        args: Option<Vec<String>>,
+    },
+    /// An expression in `lang` (`erlang` or `elixir`), its value how the
+    /// program ended: `eunit:test(…)`, a script required.
+    Expr { lang: &'static str, code: String },
+    /// Elixir's tests: `load` compiles their files and gives their modules
+    /// to interpret (their breakpoints are set then), `run` runs them.
+    ElixirTests { load: String, run: String },
+}
+
+/// A module of the program's, interpreted.
+#[derive(Debug, Clone)]
+struct Module {
+    source: PathBuf,
+    /// The first and last lines of its functions, where its debug
+    /// information says: which of a file's modules a line is in.
+    lines: Option<(u64, u64)>,
 }
 
 struct Adapter {
     erl: PathBuf,
     erlc: PathBuf,
+    /// Elixir's `elixir`, for its programs and tests.
+    elixir: Option<PathBuf>,
     out: Out,
     bridge: Option<Arc<Bridge>>,
     node: Option<Node>,
     /// Where the program's modules and the bridge were compiled to.
     scratch: Option<PathBuf>,
-    /// Each module compiled for the session, with its source file.
-    modules: HashMap<String, PathBuf>,
+    /// Each module interpreted for the session, by name.
+    modules: HashMap<String, Module>,
+    /// Breakpoints in files whose modules are not compiled yet (Elixir's
+    /// test files, compiled as the tests start), and their ids.
+    pending: HashMap<PathBuf, Vec<(u64, u64)>>,
+    /// The program is Elixir's: its variables are shown by its names.
+    is_elixir: bool,
     entry: Option<Entry>,
     /// The references handed out since a process last stopped.
     refs: Arc<Mutex<Vec<VarRef>>>,
@@ -181,6 +238,11 @@ impl Adapter {
             .filter(|p| !p.is_empty())
             .map(PathBuf::from)
             .ok_or("no program to run")?;
+        let elixir = args["language"] == "elixir"
+            || program.extension().is_some_and(|e| e == "ex" || e == "exs");
+        if elixir {
+            return self.launch_elixir(args, &program).await;
+        }
         if program.extension().is_none_or(|e| e != "erl") {
             return Err(format!(
                 "{} is not an Erlang source file (.erl)",
@@ -215,25 +277,51 @@ impl Adapter {
                     .collect()
             })
             .unwrap_or_default();
-        self.entry = Some(Entry {
-            module: module.clone(),
-            function,
-            args: takes_args.then_some(program_args),
+        // An expression to run in its place: a test's (`eunit:test(…)`).
+        self.entry = Some(match args["run"].as_str() {
+            Some(code) => Entry::Expr {
+                lang: "erlang",
+                code: code.to_string(),
+            },
+            None => Entry::Call {
+                module: module.clone(),
+                function,
+                args: takes_args.then_some(program_args),
+            },
         });
+        // The macros it is compiled with: `TEST`, for a test's (the
+        // `-ifdef(TEST)` tests rebar3's `eunit` compiles).
+        let defines: Vec<String> = args["defines"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
 
         let scratch = scratch_dir()?;
         self.scratch = Some(scratch.clone());
         let (sources, includes) = sources_of(&program, &cwd);
-        let compiled = self.compile(&sources, &includes, &scratch).await?;
+        let compiled = self
+            .compile(&sources, &includes, &scratch, &defines)
+            .await?;
         if !compiled.contains_key(&module) {
             return Err(format!("{module} did not compile. See the output"));
         }
-        self.modules = compiled;
-        let bridge_dir = scratch.join("bridge");
-        std::fs::create_dir_all(&bridge_dir).map_err(|e| e.to_string())?;
-        std::fs::write(bridge_dir.join("clew_dap.erl"), BRIDGE).map_err(|e| e.to_string())?;
-        self.compile(&[bridge_dir.join("clew_dap.erl")], &[], &bridge_dir)
-            .await?;
+        self.modules = compiled
+            .into_iter()
+            .map(|(name, source)| {
+                (
+                    name,
+                    Module {
+                        source,
+                        lines: None,
+                    },
+                )
+            })
+            .collect();
+        let bridge_dir = self.compile_bridge(&scratch).await?;
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -249,19 +337,173 @@ impl Adapter {
             .arg(&scratch)
             .arg("-pa")
             .arg(&bridge_dir);
-        for ebin in dependency_ebins(&cwd) {
+        for ebin in dependency_ebins(&cwd, defines.iter().any(|d| d == "TEST")) {
             command.arg("-pa").arg(ebin);
         }
         command
             .args(["-s", "clew_dap", "start", &port.to_string()])
-            .current_dir(&cwd)
+            .current_dir(&cwd);
+        let bridge = self
+            .start_node(command, &self.erl.clone(), listener, CONNECT_TIMEOUT)
+            .await?;
+        let mut modules: Vec<&String> = self.modules.keys().collect();
+        modules.sort();
+        let list = modules
+            .iter()
+            .map(|m| atom(m))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let interpreted = bridge
+            .ask_named("interpret", format!("{{interpret, [{list}]}}."))
+            .await?;
+        self.take_interpreted(&interpreted["modules"]).await;
+        self.bridge = Some(bridge);
+        Ok(())
+    }
+
+    /// Elixir's program or tests, under the same interpreter: a Mix
+    /// project's node started by Mix (`mix run --no-start`, which compiles
+    /// it first, in `mixEnv`), its own modules interpreted; a script alone
+    /// by `elixir`. `run` is the Elixir that runs the program, and `load`
+    /// what compiles the tests' files first.
+    async fn launch_elixir(&mut self, args: &Value, program: &Path) -> Result<(), String> {
+        let elixir = self
+            .elixir
+            .clone()
+            .ok_or("elixir wasn't found here.".to_string())?;
+        self.is_elixir = true;
+        let project = args["projectDir"].as_str().map(PathBuf::from);
+        let cwd = args["cwd"]
+            .as_str()
+            .map(PathBuf::from)
+            .or_else(|| project.clone())
+            .or_else(|| program.parent().map(Path::to_path_buf))
+            .unwrap_or_else(|| PathBuf::from("."));
+        let run = args["run"].as_str().map(str::to_string).unwrap_or_else(|| {
+            format!(
+                "Code.require_file({})\n0",
+                elixir_string(&program.to_string_lossy())
+            )
+        });
+        self.entry = Some(match args["load"].as_str() {
+            Some(load) => Entry::ElixirTests {
+                load: load.to_string(),
+                run,
+            },
+            None => Entry::Expr {
+                lang: "elixir",
+                code: run,
+            },
+        });
+        let scratch = scratch_dir()?;
+        self.scratch = Some(scratch.clone());
+        let bridge_dir = self.compile_bridge(&scratch).await?;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .map_err(|e| format!("cannot listen for the node: {e}"))?;
+        let port = listener
+            .local_addr()
+            .map_err(|e| format!("cannot listen for the node: {e}"))?
+            .port();
+        let start = format!(":clew_dap.start([:\"{port}\"])");
+        let mut command = clew_core::spawn::tokio_command(&elixir);
+        command.arg("-pa").arg(&bridge_dir);
+        match &project {
+            Some(project) => {
+                let env = args["mixEnv"].as_str().unwrap_or("dev");
+                command
+                    .args(["-S", "mix", "run", "--no-start", "--no-halt", "-e", &start])
+                    .env("MIX_ENV", env)
+                    .current_dir(project);
+            }
+            None => {
+                command.args(["--no-halt", "-e", &start]).current_dir(&cwd);
+            }
+        }
+        // Mix compiles the project first: as long as that takes.
+        let bridge = self
+            .start_node(command, &elixir, listener, ELIXIR_CONNECT_TIMEOUT)
+            .await?;
+        if project.is_some() {
+            let listed = bridge
+                .ask(|seq| format!("{{load_elixir, {seq}, {}}}.", string(PROJECT_MODULES)))
+                .await?;
+            self.take_interpreted(&listed["body"]).await;
+        }
+        self.bridge = Some(bridge);
+        Ok(())
+    }
+
+    /// The modules the bridge says it interpreted, each with its source
+    /// and lines; those it could not are said.
+    async fn take_interpreted(&mut self, listed: &Value) {
+        let mut failed = Vec::new();
+        for m in listed.as_array().into_iter().flatten() {
+            let Some(name) = m["module"].as_str() else {
+                continue;
+            };
+            if m["ok"] != true {
+                failed.push(display_module(name, self.is_elixir));
+                continue;
+            }
+            let lines = m["lines"]
+                .as_array()
+                .and_then(|l| Some((l.first()?.as_u64()?, l.get(1)?.as_u64()?)));
+            match (m["source"].as_str(), self.modules.get_mut(name)) {
+                (_, Some(known)) => known.lines = lines,
+                (Some(source), None) => {
+                    self.modules.insert(
+                        name.to_string(),
+                        Module {
+                            source: PathBuf::from(source),
+                            lines,
+                        },
+                    );
+                }
+                (None, None) => {}
+            }
+        }
+        if !failed.is_empty() {
+            failed.sort();
+            self.out
+                .output(
+                    "console",
+                    format!(
+                        "Not interpreted (no breakpoints there): {}\n",
+                        failed.join(", ")
+                    ),
+                )
+                .await;
+        }
+    }
+
+    /// Compile the bridge into `scratch`: the directory it is in.
+    async fn compile_bridge(&self, scratch: &Path) -> Result<PathBuf, String> {
+        let bridge_dir = scratch.join("bridge");
+        std::fs::create_dir_all(&bridge_dir).map_err(|e| e.to_string())?;
+        std::fs::write(bridge_dir.join("clew_dap.erl"), BRIDGE).map_err(|e| e.to_string())?;
+        self.compile(&[bridge_dir.join("clew_dap.erl")], &[], &bridge_dir, &[])
+            .await?;
+        Ok(bridge_dir)
+    }
+
+    /// Start the node `command` runs (`what` names it), its output the
+    /// program's, and wait up to `limit` for its bridge to connect.
+    async fn start_node(
+        &mut self,
+        mut command: tokio::process::Command,
+        what: &Path,
+        listener: tokio::net::TcpListener,
+        limit: Duration,
+    ) -> Result<Arc<Bridge>, String> {
+        command
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
         let mut child = command
             .spawn()
-            .map_err(|e| format!("cannot run {}: {e}", self.erl.display()))?;
+            .map_err(|e| format!("cannot run {}: {e}", what.display()))?;
         for (stream, category) in [
             (
                 child
@@ -302,53 +544,21 @@ impl Adapter {
             kill: Some(kill),
         });
         let stream = tokio::select! {
-            accepted = tokio::time::timeout(CONNECT_TIMEOUT, listener.accept()) => match accepted {
+            accepted = tokio::time::timeout(limit, listener.accept()) => match accepted {
                 Ok(Ok((stream, _))) => stream,
                 Ok(Err(e)) => return Err(format!("the node did not connect: {e}")),
-                Err(_) => return Err(format!("the node did not connect within {} s", CONNECT_TIMEOUT.as_secs())),
+                Err(_) => return Err(format!("the node did not connect within {} s", limit.as_secs())),
             },
             _ = exited.wait_for(Option::is_some) => {
                 return Err("the Erlang node exited before its debugger connected. See its output".into());
             }
         };
-        let bridge = Bridge::start(
+        Ok(Bridge::start(
             stream,
             self.out.clone(),
             self.refs.clone(),
             self.stepping.clone(),
-        );
-        let mut modules: Vec<&String> = self.modules.keys().collect();
-        modules.sort();
-        let list = modules
-            .iter()
-            .map(|m| atom(m))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let interpreted = bridge
-            .ask_named("interpret", format!("{{interpret, [{list}]}}."))
-            .await?;
-        let failed: Vec<String> = interpreted["modules"]
-            .as_array()
-            .map(|ms| {
-                ms.iter()
-                    .filter(|m| m["ok"] != true)
-                    .filter_map(|m| m["module"].as_str().map(str::to_string))
-                    .collect()
-            })
-            .unwrap_or_default();
-        if !failed.is_empty() {
-            self.out
-                .output(
-                    "console",
-                    format!(
-                        "Not interpreted (no breakpoints there): {}\n",
-                        failed.join(", ")
-                    ),
-                )
-                .await;
-        }
-        self.bridge = Some(bridge);
-        Ok(())
+        ))
     }
 
     /// `erlc +debug_info` the `sources` into `into`: the modules compiled,
@@ -358,12 +568,16 @@ impl Adapter {
         sources: &[PathBuf],
         includes: &[PathBuf],
         into: &Path,
+        defines: &[String],
     ) -> Result<HashMap<String, PathBuf>, String> {
         if sources.is_empty() {
             return Ok(HashMap::new());
         }
         let mut command = clew_core::spawn::tokio_command(&self.erlc);
         command.arg("+debug_info").arg("-o").arg(into);
+        for define in defines {
+            command.arg(format!("-D{define}"));
+        }
         for include in includes {
             command.arg("-I").arg(include);
         }
@@ -397,8 +611,11 @@ impl Adapter {
             .ok_or_else(|| "no program is running".to_string())
     }
 
-    /// Replace one file's breakpoints.
-    async fn set_breakpoints(&self, args: &Value) -> Result<Value, String> {
+    /// Replace one file's breakpoints: each on the module of the file's
+    /// whose lines hold it — an Elixir file may define several. A file
+    /// whose modules are not compiled yet, an Elixir test file, has them
+    /// set when it is, as its tests start.
+    async fn set_breakpoints(&mut self, args: &Value) -> Result<Value, String> {
         let path = PathBuf::from(
             args["source"]["path"]
                 .as_str()
@@ -408,61 +625,158 @@ impl Adapter {
             .as_array()
             .map(|bps| bps.iter().filter_map(|bp| bp["line"].as_u64()).collect())
             .unwrap_or_default();
-        let module = self
-            .modules
+        let ids: Vec<u64> = lines
             .iter()
-            .find(|(_, source)| same_file(source, &path))
-            .map(|(module, _)| module.clone());
-        let (Some(module), Ok(bridge)) = (module, self.bridge()) else {
-            let unverified: Vec<Value> = lines
+            .map(|_| NEXT_BREAKPOINT.fetch_add(1, Ordering::Relaxed))
+            .collect();
+        let of_file = self.modules_of(&path);
+        if of_file.is_empty() || self.bridge.is_none() {
+            let later = matches!(self.entry, Some(Entry::ElixirTests { .. }))
+                && path.extension().is_some_and(|e| e == "exs");
+            let message = match later {
+                true => "set when its tests are compiled",
+                false => "not one of the program's modules",
+            };
+            if later {
+                self.pending.insert(
+                    path,
+                    ids.iter().copied().zip(lines.iter().copied()).collect(),
+                );
+            }
+            let unverified: Vec<Value> = ids
                 .iter()
-                .map(|line| json!({ "verified": false, "line": line, "message": "not one of the program's modules" }))
+                .zip(&lines)
+                .map(|(id, line)| json!({ "id": id, "verified": false, "line": line, "message": message }))
                 .collect();
             return Ok(json!({ "breakpoints": unverified }));
-        };
-        let list = lines
-            .iter()
-            .map(u64::to_string)
-            .collect::<Vec<_>>()
-            .join(", ");
-        let set = bridge
-            .ask(|seq| format!("{{break, {seq}, {}, [{list}]}}.", atom(&module)))
-            .await?;
-        let answers: Vec<Value> = lines
-            .iter()
-            .enumerate()
-            .map(|(i, line)| {
-                let ok = set["body"][i]["ok"] == true;
-                json!({
-                    "verified": ok,
-                    "line": line,
-                    "message": if ok { Value::Null } else { json!("no executable code on this line") },
-                })
-            })
-            .collect();
+        }
+        let answers = self.place(&of_file, &ids, &lines).await?;
         Ok(json!({ "breakpoints": answers }))
     }
 
-    async fn start_program(&self) -> Result<Value, String> {
+    /// The modules interpreted from `path`, with their lines.
+    fn modules_of(&self, path: &Path) -> Vec<(String, Option<(u64, u64)>)> {
+        let mut of_file: Vec<(String, Option<(u64, u64)>)> = self
+            .modules
+            .iter()
+            .filter(|(_, m)| same_file(&m.source, path))
+            .map(|(name, m)| (name.clone(), m.lines))
+            .collect();
+        of_file.sort();
+        of_file
+    }
+
+    /// Set `lines` (their `ids`) in the modules of one file: each on the
+    /// module whose lines hold it, every module of the file's cleared of
+    /// the ones it had.
+    async fn place(
+        &self,
+        of_file: &[(String, Option<(u64, u64)>)],
+        ids: &[u64],
+        lines: &[u64],
+    ) -> Result<Vec<Value>, String> {
         let bridge = self.bridge()?;
-        let entry = self.entry.as_ref().ok_or("no program to run")?;
-        let args = match &entry.args {
-            Some(args) => format!(
-                "[{}]",
-                args.iter()
-                    .map(|a| string(a))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-            None => "none".into(),
-        };
-        bridge
-            .send(&format!(
-                "{{run, {}, {}, {args}}}.",
-                atom(&entry.module),
-                atom(&entry.function)
-            ))
-            .await?;
+        let mut by_module: std::collections::BTreeMap<&str, Vec<(usize, u64)>> = of_file
+            .iter()
+            .map(|(m, _)| (m.as_str(), Vec::new()))
+            .collect();
+        for (i, &line) in lines.iter().enumerate() {
+            if let Some(wanted) = by_module.get_mut(module_for_line(of_file, line)) {
+                wanted.push((i, line));
+            }
+        }
+        let mut ok = vec![false; lines.len()];
+        for (module, wanted) in &by_module {
+            let list = wanted
+                .iter()
+                .map(|(_, line)| line.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let set = bridge
+                .ask(|seq| format!("{{break, {seq}, {}, [{list}]}}.", atom(module)))
+                .await?;
+            for (k, (i, _)) in wanted.iter().enumerate() {
+                ok[*i] = set["body"][k]["ok"] == true;
+            }
+        }
+        Ok(lines
+            .iter()
+            .enumerate()
+            .map(|(i, line)| {
+                json!({
+                    "id": ids[i],
+                    "verified": ok[i],
+                    "line": line,
+                    "message": if ok[i] { Value::Null } else { json!("no executable code on this line") },
+                })
+            })
+            .collect())
+    }
+
+    async fn start_program(&mut self) -> Result<Value, String> {
+        let bridge = self.bridge()?;
+        match self.entry.as_ref().ok_or("no program to run")? {
+            Entry::Call {
+                module,
+                function,
+                args,
+            } => {
+                let args = match args {
+                    Some(args) => format!(
+                        "[{}]",
+                        args.iter()
+                            .map(|a| string(a))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                    None => "none".into(),
+                };
+                bridge
+                    .send(&format!(
+                        "{{run, {}, {}, {args}}}.",
+                        atom(module),
+                        atom(function)
+                    ))
+                    .await?;
+            }
+            Entry::Expr { lang, code } => {
+                bridge
+                    .send(&format!(
+                        "{{run_expr, {lang}, {}}}.",
+                        string(&expression(lang, code))
+                    ))
+                    .await?;
+            }
+            Entry::ElixirTests { load, run } => {
+                let (load, run) = (load.clone(), run.clone());
+                // The tests' files compiled, their modules interpreted, and
+                // the breakpoints waiting for them set: then they run.
+                let listed = bridge
+                    .ask_within(LOAD_TIMEOUT, |seq| {
+                        format!("{{load_elixir, {seq}, {}}}.", string(&load))
+                    })
+                    .await?;
+                self.take_interpreted(&listed["body"]).await;
+                for (path, wanted) in std::mem::take(&mut self.pending) {
+                    let of_file = self.modules_of(&path);
+                    if of_file.is_empty() {
+                        continue;
+                    }
+                    let (ids, lines): (Vec<u64>, Vec<u64>) = wanted.into_iter().unzip();
+                    for answer in self.place(&of_file, &ids, &lines).await? {
+                        self.out
+                            .event(
+                                "breakpoint",
+                                json!({ "reason": "changed", "breakpoint": answer }),
+                            )
+                            .await;
+                    }
+                }
+                bridge
+                    .send(&format!("{{run_expr, elixir, {}}}.", string(&run)))
+                    .await?;
+            }
+        }
         Ok(json!({}))
     }
 
@@ -515,13 +829,20 @@ impl Adapter {
                     .map(|f| {
                         let module = f["module"].as_str().unwrap_or("?");
                         let level = f["level"].as_u64().unwrap_or(0);
+                        let function = f["function"].as_str().unwrap_or("?");
+                        // As each language writes a call: `cart:add/2`,
+                        // `Cart.add/2`.
+                        let name = match module.strip_prefix("Elixir.") {
+                            Some(module) => format!("{module}.{function}/{}", f["arity"]),
+                            None => format!("{module}:{function}/{}", f["arity"]),
+                        };
                         let mut frame = json!({
                             "id": thread * FRAMES + level,
-                            "name": format!("{module}:{}/{}", f["function"].as_str().unwrap_or("?"), f["arity"]),
+                            "name": name,
                             "line": f["line"],
                             "column": 1,
                         });
-                        if let Some(source) = self.modules.get(module) {
+                        if let Some(source) = self.modules.get(module).map(|m| &m.source) {
                             frame["source"] = json!({
                                 "path": source.to_string_lossy(),
                                 "name": source.file_name().map(|n| n.to_string_lossy().into_owned()),
@@ -566,11 +887,20 @@ impl Adapter {
                     .await?
             }
         };
+        let mut listed: Vec<Value> = listed["body"].as_array().cloned().unwrap_or_default();
+        // Elixir's bindings by the names its code gives them: the
+        // interpreter has them as Erlang's (`_total@1`), each version of
+        // one rebound.
+        if matches!(var, VarRef::Bindings { .. }) {
+            listed = match self.is_elixir {
+                true => elixir_bindings(listed),
+                // Latest bound first, as the interpreter lists them: shown
+                // as bound.
+                false => listed.into_iter().rev().collect(),
+            };
+        }
         let mut refs = self.refs.lock().await;
-        let variables: Vec<Value> = listed["body"]
-            .as_array()
-            .map(|vs| vs.iter().map(|v| shown(v, &mut refs)).collect())
-            .unwrap_or_default();
+        let variables: Vec<Value> = listed.iter().map(|v| shown(v, &mut refs)).collect();
         Ok(json!({ "variables": variables }))
     }
 
@@ -582,6 +912,22 @@ impl Adapter {
         let (thread, level) =
             frame_of(args).map_err(|_| "evaluate in a stopped process's frame".to_string())?;
         let bridge = self.bridge()?;
+        // An Elixir variable, by its own name: the interpreter evaluates
+        // Erlang, and knows it by Erlang's (`_total@1`).
+        if self.is_elixir && is_identifier(&expression) {
+            let listed = bridge
+                .ask(|seq| format!("{{bindings, {seq}, {thread}, {level}}}."))
+                .await?;
+            let bound = elixir_bindings(listed["body"].as_array().cloned().unwrap_or_default())
+                .into_iter()
+                .find(|b| b["name"] == expression.as_str())
+                .ok_or_else(|| format!("{expression} is not bound here"))?;
+            let mut refs = self.refs.lock().await;
+            let shown = shown(&bound, &mut refs);
+            return Ok(
+                json!({ "result": shown["value"], "variablesReference": shown["variablesReference"] }),
+            );
+        }
         let value = bridge
             .ask(|seq| {
                 format!(
@@ -663,6 +1009,105 @@ fn string(text: &str) -> String {
     }
     quoted.push('"');
     quoted
+}
+
+/// `code` as the bridge evaluates it: Erlang's ends with a full stop.
+fn expression(lang: &str, code: &str) -> String {
+    let code = code.trim();
+    match lang == "erlang" && !code.ends_with('.') {
+        true => format!("{code}."),
+        false => code.to_string(),
+    }
+}
+
+/// `text` as an Elixir string: its quotes, backslashes and interpolation
+/// escaped.
+pub(crate) fn elixir_string(text: &str) -> String {
+    let mut quoted = String::from("\"");
+    for c in text.chars() {
+        match c {
+            '"' | '\\' | '#' => {
+                quoted.push('\\');
+                quoted.push(c);
+            }
+            '\n' => quoted.push_str("\\n"),
+            c => quoted.push(c),
+        }
+    }
+    quoted.push('"');
+    quoted
+}
+
+/// A module as its language writes it: Elixir's without `Elixir.`.
+fn display_module(name: &str, elixir: bool) -> String {
+    match elixir {
+        true => name.strip_prefix("Elixir.").unwrap_or(name).to_string(),
+        false => name.to_string(),
+    }
+}
+
+/// Which of a file's modules a line is in: the one whose lines hold it,
+/// the innermost where they nest; else the nearest.
+fn module_for_line(of_file: &[(String, Option<(u64, u64)>)], line: u64) -> &str {
+    let holding = of_file
+        .iter()
+        .filter_map(|(m, range)| {
+            let (first, last) = (*range)?;
+            (first <= line && line <= last).then_some((last - first, m))
+        })
+        .min();
+    if let Some((_, m)) = holding {
+        return m;
+    }
+    of_file
+        .iter()
+        .min_by_key(|(_, range)| match range {
+            Some((first, last)) => first.abs_diff(line).min(last.abs_diff(line)),
+            None => u64::MAX,
+        })
+        .map_or("", |(m, _)| m.as_str())
+}
+
+/// An Elixir variable's name and version, from the interpreter's
+/// (`_total@1`: `total`, 1); none for one the compiler made up.
+fn elixir_name(erlang: &str) -> Option<(String, u64)> {
+    let (name, version) = match erlang.rsplit_once('@') {
+        Some((name, version)) => (name, version.parse().ok()?),
+        None => (erlang, 0),
+    };
+    let name = name.strip_prefix('_').unwrap_or(name);
+    let own = name
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_lowercase() || c == '_')
+        && !name.starts_with('_');
+    own.then(|| (name.to_string(), version))
+}
+
+/// An Elixir frame's bindings by their own names: of a variable rebound,
+/// its latest; the compiler's own, left out.
+fn elixir_bindings(listed: Vec<Value>) -> Vec<Value> {
+    let mut latest: Vec<(String, u64, Value)> = Vec::new();
+    for mut binding in listed {
+        let Some((name, version)) = binding["name"].as_str().and_then(elixir_name) else {
+            continue;
+        };
+        binding["name"] = json!(name);
+        match latest.iter_mut().find(|(n, ..)| *n == name) {
+            Some(known) if known.1 <= version => *known = (name, version, binding),
+            Some(_) => {}
+            None => latest.push((name, version, binding)),
+        }
+    }
+    // The interpreter lists the latest bound first: shown as bound.
+    latest.into_iter().rev().map(|(.., b)| b).collect()
+}
+
+/// Whether `text` is a variable's name alone.
+fn is_identifier(text: &str) -> bool {
+    let mut chars = text.chars();
+    chars.next().is_some_and(|c| c.is_lowercase() || c == '_')
+        && chars.all(|c| c.is_alphanumeric() || c == '_')
 }
 
 /// Whether two paths name one file.
@@ -754,9 +1199,14 @@ fn sources_of(program: &Path, root: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
 /// The compiled dependencies the program runs with: rebar3's
 /// `_build/default/lib/*/ebin`, and `deps/*/ebin` and `ebin/` of older
 /// layouts.
-fn dependency_ebins(root: &Path) -> Vec<PathBuf> {
+fn dependency_ebins(root: &Path, test: bool) -> Vec<PathBuf> {
     let mut ebins = Vec::new();
-    for parent in [root.join("_build/default/lib"), root.join("deps")] {
+    // A test's are rebar3's test profile's, where it has built one.
+    let mut parents = vec![root.join("_build/default/lib"), root.join("deps")];
+    if test {
+        parents.insert(0, root.join("_build/test/lib"));
+    }
+    for parent in parents {
         if let Ok(entries) = std::fs::read_dir(parent) {
             let mut found: Vec<PathBuf> = entries
                 .flatten()
@@ -862,12 +1312,32 @@ impl Bridge {
         self.ask_named(&seq.to_string(), build(seq)).await
     }
 
+    /// [`Self::ask`], waiting up to `limit`.
+    async fn ask_within(
+        &self,
+        limit: Duration,
+        build: impl FnOnce(u64) -> String,
+    ) -> Result<Value, String> {
+        let seq = self.seq.fetch_add(1, Ordering::Relaxed) + 1;
+        self.ask_named_within(&seq.to_string(), build(seq), limit)
+            .await
+    }
+
     /// Send `line`, and wait for the answer named `key`.
     async fn ask_named(&self, key: &str, line: String) -> Result<Value, String> {
+        self.ask_named_within(key, line, ANSWER_TIMEOUT).await
+    }
+
+    async fn ask_named_within(
+        &self,
+        key: &str,
+        line: String,
+        limit: Duration,
+    ) -> Result<Value, String> {
         let (tx, rx) = oneshot::channel();
         self.pending.lock().await.insert(key.to_string(), tx);
         self.send(&line).await?;
-        match tokio::time::timeout(ANSWER_TIMEOUT, rx).await {
+        match tokio::time::timeout(limit, rx).await {
             Ok(Ok(answer)) => Ok(answer),
             Ok(Err(_)) => Err("the node is gone".into()),
             Err(_) => {
@@ -908,7 +1378,7 @@ mod tests {
             std::fs::set_permissions(tool, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
         let (mut client, input, output) = Client::pipes();
-        let running = tokio::spawn(serve(erl, erlc, input, output));
+        let running = tokio::spawn(serve(erl, erlc, None, input, output));
         client
             .request("initialize", json!({ "adapterID": "clew" }))
             .await;
@@ -932,6 +1402,46 @@ mod tests {
 
     /// Commands are Erlang terms: names quoted as atoms, text as strings on
     /// one line, whatever they hold; frames carry their process.
+    /// Elixir's variables by their own names, each at its latest; a line
+    /// in the module of a file's whose lines hold it, the innermost; Elixir
+    /// strings quoted, interpolation and all.
+    #[test]
+    fn elixir_is_read_as_it_is_written() {
+        assert_eq!(elixir_name("_total@1"), Some(("total".into(), 1)));
+        assert_eq!(elixir_name("total@2"), Some(("total".into(), 2)));
+        assert_eq!(elixir_name("__@1"), None, "the compiler's own");
+        let listed = vec![
+            json!({ "name": "_b@1", "value": "3" }),
+            json!({ "name": "_a@1", "value": "2" }),
+            json!({ "name": "_a@2", "value": "4" }),
+        ];
+        let shown: Vec<(String, String)> = elixir_bindings(listed)
+            .iter()
+            .map(|b| {
+                (
+                    b["name"].as_str().unwrap().to_string(),
+                    b["value"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            shown,
+            [("a".to_string(), "4".to_string()), ("b".into(), "3".into())]
+        );
+        let of_file = vec![
+            ("Elixir.Outer".to_string(), Some((2, 30))),
+            ("Elixir.Outer.Inner".to_string(), Some((10, 15))),
+            ("Elixir.Other".to_string(), Some((40, 50))),
+        ];
+        assert_eq!(module_for_line(&of_file, 12), "Elixir.Outer.Inner");
+        assert_eq!(module_for_line(&of_file, 5), "Elixir.Outer");
+        assert_eq!(module_for_line(&of_file, 38), "Elixir.Other", "the nearest");
+        assert_eq!(elixir_string("a\"b#{c}\\"), "\"a\\\"b\\#{c}\\\\\"");
+        assert!(is_identifier("total") && !is_identifier("cart.total"));
+        assert_eq!(expression("erlang", "eunit:test(m)"), "eunit:test(m).");
+        assert_eq!(expression("elixir", "ExUnit.run()"), "ExUnit.run()");
+    }
+
     #[test]
     fn commands_quote_what_they_carry() {
         assert_eq!(atom("shop"), "'shop'");
@@ -980,7 +1490,7 @@ mod tests {
         assert_eq!(names, ["src/a.erl", "src/b.erl", "apps/web/src/w.erl"]);
         assert!(includes.contains(&dir.join("include")));
         assert_eq!(
-            dependency_ebins(&dir),
+            dependency_ebins(&dir, false),
             [dir.join("_build/default/lib/cowboy/ebin")]
         );
         let (one, two) = (scratch_dir().unwrap(), scratch_dir().unwrap());
@@ -1005,7 +1515,7 @@ mod tests {
         .unwrap();
         let tool = |name| clew_core::lsp::store::find_on_path_unresolved(name).expect(name);
         let (mut client, input, output) = Client::pipes();
-        let running = tokio::spawn(serve(tool("erl"), tool("erlc"), input, output));
+        let running = tokio::spawn(serve(tool("erl"), tool("erlc"), None, input, output));
         client
             .request("initialize", json!({ "adapterID": "clew" }))
             .await;
@@ -1060,7 +1570,7 @@ mod tests {
         .unwrap();
         let tool = |name| clew_core::lsp::store::find_on_path_unresolved(name).expect(name);
         let (mut client, input, output) = Client::pipes();
-        let running = tokio::spawn(serve(tool("erl"), tool("erlc"), input, output));
+        let running = tokio::spawn(serve(tool("erl"), tool("erlc"), None, input, output));
         client
             .request("initialize", json!({ "adapterID": "clew" }))
             .await;

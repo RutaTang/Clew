@@ -4108,5 +4108,7 @@
  "These tests are in more than one program: debug them one at a time.": "Ces tests se trouvent dans plusieurs programmes : déboguez-les un par un.",
  "This build runs its tests where the debugger can't reach them, so they run without it.": "Cette build exécute ses tests hors de portée du débogueur : ils s’exécutent donc sans lui.",
  "The build ended before its JVM started under the debugger. See its output.": "La build s’est terminée avant que sa JVM ne démarre sous le débogueur. Consultez sa sortie.",
- "cannot write {arg1}: {e}": "impossible d’écrire {arg1} : {e}"
+ "cannot write {arg1}: {e}": "impossible d’écrire {arg1} : {e}",
+ "Elixir (OTP interpreter)": "Elixir (interpréteur OTP)",
+ "{expression} is not bound here": "{expression} n’est pas lié ici"
 }

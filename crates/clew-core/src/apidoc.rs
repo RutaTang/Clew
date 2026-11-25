@@ -304,6 +304,100 @@ pub fn module_doc(source: &str, lang_key: &str) -> String {
                 .trim()
                 .to_string()
         }
+        // Its `@moduledoc`: a heredoc (`"""`, `~S"""`), dedented, or one
+        // string; `@moduledoc false` hides the module, and says nothing.
+        "elixir" => elixir_moduledoc(&lines.collect::<Vec<_>>()),
+        // The `///` lines on its `library` directive: a Dart library's doc.
+        "dart" => {
+            let all: Vec<&str> = lines.collect();
+            let Some(library) = all.iter().position(|l| {
+                let t = l.trim_start();
+                t.starts_with("library;") || t.starts_with("library ")
+            }) else {
+                return String::new();
+            };
+            let mut doc: Vec<&str> = all[..library]
+                .iter()
+                .rev()
+                .map(|l| l.trim_start())
+                .filter(|l| !l.starts_with('@'))
+                .take_while(|l| l.starts_with("///"))
+                .map(|l| {
+                    let rest = &l[3..];
+                    rest.strip_prefix(' ').unwrap_or(rest)
+                })
+                .collect();
+            doc.reverse();
+            doc.join("\n").trim().to_string()
+        }
+        // A package's Javadoc: the `/** … */` on `package …;`
+        // (`package-info.java`'s).
+        "java" => {
+            let all: Vec<&str> = lines.collect();
+            let Some(package) = all
+                .iter()
+                .position(|l| l.trim_start().starts_with("package "))
+            else {
+                return String::new();
+            };
+            let before: Vec<&str> = all[..package]
+                .iter()
+                .rev()
+                .skip_while(|l| l.trim().is_empty() || l.trim_start().starts_with('@'))
+                .copied()
+                .collect();
+            match before.first().map(|l| l.trim_end()) {
+                Some(last) if last.ends_with("*/") => {
+                    let start = before.iter().position(|l| l.trim_start().starts_with("/*"));
+                    match start {
+                        Some(i) if before[i].trim_start().starts_with("/**") => {
+                            let mut block: Vec<&str> = before[..=i].to_vec();
+                            block.reverse();
+                            block_comment_text(&block)
+                        }
+                        _ => String::new(),
+                    }
+                }
+                _ => String::new(),
+            }
+        }
+        // Doxygen's file comment: the `/** … */` (or `/*! … */`) that says
+        // `@file` (`\file`), its tags taken off.
+        "c" | "cpp" => {
+            let all: Vec<&str> = lines.collect();
+            let mut i = 0;
+            while i < all.len() {
+                let t = all[i].trim_start();
+                if t.starts_with("/**") || t.starts_with("/*!") {
+                    let end = (i..all.len())
+                        .find(|&j| all[j].contains("*/"))
+                        .unwrap_or(all.len() - 1);
+                    let block = &all[i..=end];
+                    let says_file = block.iter().any(|l| {
+                        let l = l
+                            .trim_start()
+                            .trim_start_matches(['/', '*', '!'])
+                            .trim_start();
+                        l.starts_with("@file") || l.starts_with("\\file")
+                    });
+                    if says_file {
+                        return doxygen_file_doc(&block_comment_text(block));
+                    }
+                    i = end + 1;
+                    continue;
+                }
+                // Its comments come before its code.
+                if !t.is_empty()
+                    && !t.starts_with("//")
+                    && !t.starts_with("/*")
+                    && !t.starts_with('*')
+                {
+                    break;
+                }
+                i += 1;
+            }
+            String::new()
+        }
         // The Haddock (`-- |`) before `module … where`.
         "haskell" => {
             let all: Vec<&str> = lines.collect();
@@ -1675,9 +1769,140 @@ fn modifiers(decl: &str) -> impl Iterator<Item = &str> {
     decl.split('(').next().unwrap_or(decl).split_whitespace()
 }
 
+/// The text of a `/** … */` block's lines, its comment marks taken off.
+fn block_comment_text(block: &[&str]) -> String {
+    let text: Vec<&str> = block
+        .iter()
+        .map(|l| {
+            let t = l.trim();
+            let t = t
+                .strip_prefix("/**")
+                .or_else(|| t.strip_prefix("/*!"))
+                .unwrap_or(t);
+            let t = t.strip_suffix("*/").unwrap_or(t).trim_end();
+            let t = t.trim_start();
+            let t = t.strip_prefix('*').unwrap_or(t);
+            t.strip_prefix(' ').unwrap_or(t)
+        })
+        .collect();
+    text.join("\n").trim().to_string()
+}
+
+/// A Doxygen file comment as a doc: its `@file` line gone, `@brief`'s
+/// word dropped.
+fn doxygen_file_doc(text: &str) -> String {
+    let lines: Vec<String> = text
+        .lines()
+        .filter(|l| {
+            let t = l.trim_start();
+            !t.starts_with("@file") && !t.starts_with("\\file")
+        })
+        .map(|l| {
+            let t = l.trim_start();
+            match t
+                .strip_prefix("@brief")
+                .or_else(|| t.strip_prefix("\\brief"))
+            {
+                Some(rest) => rest.trim_start().to_string(),
+                None => l.to_string(),
+            }
+        })
+        .collect();
+    lines.join("\n").trim().to_string()
+}
+
+/// An Elixir module's `@moduledoc`, as written: a heredoc's lines, their
+/// indentation taken off, or a string's text; none when it says `false`.
+fn elixir_moduledoc(lines: &[&str]) -> String {
+    let Some(at) = lines
+        .iter()
+        .position(|l| l.trim_start().starts_with("@moduledoc"))
+    else {
+        return String::new();
+    };
+    let rest = lines[at].trim_start()["@moduledoc".len()..].trim();
+    let heredoc = rest
+        .trim_start_matches("~S")
+        .trim_start_matches("~s")
+        .starts_with("\"\"\"");
+    if heredoc {
+        let body: Vec<&str> = lines[at + 1..]
+            .iter()
+            .take_while(|l| l.trim() != "\"\"\"")
+            .copied()
+            .collect();
+        let indent = body
+            .iter()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| l.len() - l.trim_start().len())
+            .min()
+            .unwrap_or(0);
+        let text: Vec<&str> = body
+            .iter()
+            .map(|l| l.get(indent..).unwrap_or("").trim_end())
+            .collect();
+        return text.join("\n").trim().to_string();
+    }
+    match rest
+        .strip_prefix('"')
+        .and_then(|r| r.rfind('"').map(|end| &r[..end]))
+    {
+        Some(text) => text.replace("\\\"", "\"").trim().to_string(),
+        None => String::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A module's own doc in Elixir (`@moduledoc`), Dart (its `library`'s
+    /// `///`), Java (`package-info.java`'s Javadoc) and C and C++
+    /// (Doxygen's `@file` comment).
+    #[test]
+    fn module_docs_of_elixir_dart_java_and_c() {
+        let ex = "defmodule Shop.Cart do\n  @moduledoc \"\"\"\n  A cart.\n\n  Holds items.\n  \"\"\"\n  def add, do: 1\nend\n";
+        assert_eq!(module_doc(ex, "elixir"), "A cart.\n\nHolds items.");
+        assert_eq!(
+            module_doc(
+                "defmodule A do\n  @moduledoc \"One line.\"\nend\n",
+                "elixir"
+            ),
+            "One line."
+        );
+        assert_eq!(
+            module_doc("defmodule A do\n  @moduledoc false\nend\n", "elixir"),
+            ""
+        );
+        assert_eq!(
+            module_doc(
+                "/// A shop.\n///\n/// Carts and orders.\nlibrary;\n\nimport 'a.dart';\n",
+                "dart"
+            ),
+            "A shop.\n\nCarts and orders."
+        );
+        assert_eq!(module_doc("import 'a.dart';\n", "dart"), "");
+        assert_eq!(
+            module_doc(
+                "/**\n * The shop's carts.\n */\npackage com.acme.cart;\n",
+                "java"
+            ),
+            "The shop's carts."
+        );
+        assert_eq!(
+            module_doc("/* Licence. */\npackage com.acme;\n", "java"),
+            "",
+            "a licence is no doc"
+        );
+        assert_eq!(
+            module_doc(
+                "/**\n * @file cart.h\n * @brief A cart.\n *\n * Holds items.\n */\n#include <x>\n",
+                "cpp"
+            ),
+            "A cart.\n\nHolds items."
+        );
+        assert_eq!(module_doc("/** A function. */\nint f();\n", "c"), "");
+    }
 
     /// A module's own doc in Zig (`//!`), Erlang (EDoc above `-module`) and
     /// Haskell (Haddock above `module … where`).

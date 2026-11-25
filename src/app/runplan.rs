@@ -112,6 +112,17 @@ pub enum RunPlan {
         name: String,
         tested: Tested,
     },
+    /// A Kotlin, Scala or Elixir program debugged under its language's
+    /// debugger, run as Run runs it — a Gradle build's `run`, sbt's,
+    /// scala-cli's, `kotlinc`'s script, Mix's application or script — as
+    /// `clew_core::langtests::debug_main` works out when the session starts.
+    LangDebugMain {
+        /// The program's file and its language's key.
+        file: PathBuf,
+        lang: &'static str,
+        /// The debugger it runs under.
+        debugger: crate::dap::Lang,
+    },
     /// A Lean file's `main`, run by Lean in its Lake project (`lake env
     /// lean --run`): no debugger, its output and how it ended.
     Lean {
@@ -182,7 +193,9 @@ impl RunPlan {
             RunPlan::Doctest { item, file, .. } => {
                 tr!("Doctest of {item}", item = doctest_item(item, file))
             }
-            RunPlan::Script { file } | RunPlan::Lean { file, .. } => file
+            RunPlan::Script { file }
+            | RunPlan::Lean { file, .. }
+            | RunPlan::LangDebugMain { file, .. } => file
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default(),
@@ -204,6 +217,7 @@ impl RunPlan {
             | RunPlan::LangDebugTest { name, .. } => Some(name),
             RunPlan::Cargo { test: None, .. }
             | RunPlan::Script { .. }
+            | RunPlan::LangDebugMain { .. }
             | RunPlan::Lean { .. }
             | RunPlan::Lake { .. }
             | RunPlan::Remote { .. }
@@ -314,6 +328,7 @@ impl RunPlan {
             | RunPlan::Script { .. }
             | RunPlan::JsDebugTest { .. }
             | RunPlan::LangDebugTest { .. }
+            | RunPlan::LangDebugMain { .. }
             | RunPlan::Lean { .. }
             | RunPlan::Lake { .. }
             | RunPlan::Remote { .. }
@@ -372,7 +387,8 @@ impl RunPlan {
                 Some(crate::dap::Lang::Node),
             ),
             // Stand-ins: what runs is worked out as the session starts.
-            RunPlan::LangDebugTest { file, debugger, .. } => (
+            RunPlan::LangDebugTest { file, debugger, .. }
+            | RunPlan::LangDebugMain { file, debugger, .. } => (
                 file.clone(),
                 Vec::new(),
                 file.parent()
@@ -410,6 +426,7 @@ impl RunPlan {
             | RunPlan::Django { file, .. }
             | RunPlan::Script { file }
             | RunPlan::LangDebugTest { file, .. }
+            | RunPlan::LangDebugMain { file, .. }
             | RunPlan::Lean { file, .. } => {
                 file.parent().map(Path::to_path_buf).unwrap_or_default()
             }

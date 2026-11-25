@@ -824,6 +824,14 @@ pub fn test_debugger(root: &Path, file: &Path, lang: &str) -> Option<&'static st
         "zig" => Some("native"),
         "c" | "cpp" => ctest_dir(root).map(|_| "native"),
         "java" | "kotlin" | "scala" => jvm_debug_build(root, file).map(|_| "java"),
+        // EUnit's, not a Common Test suite's: CT runs its cases its own way.
+        "erlang" => {
+            let suite = file
+                .file_stem()
+                .is_some_and(|s| s.to_string_lossy().ends_with("_SUITE"));
+            (!suite).then_some("erlang")
+        }
+        "elixir" => above(root, file, &["mix.exs"]).map(|_| "elixir"),
         _ => None,
     }
 }
@@ -842,12 +850,7 @@ enum JvmBuild {
 /// with `fork := true` they run in one it starts without it.
 fn jvm_debug_build(root: &Path, file: &Path) -> Option<JvmBuild> {
     if let Some(dir) = above(root, file, &["build.sbt"]) {
-        let forks =
-            crate::statefile::read_capped(&dir.join("build.sbt"), 1 << 20).is_some_and(|text| {
-                text.lines()
-                    .any(|l| l.contains("fork") && l.contains(":= true"))
-            });
-        return (!forks).then_some(JvmBuild::Sbt);
+        return (!sbt_forks(&dir)).then_some(JvmBuild::Sbt);
     }
     if above(root, file, &["build.mill", "build.sc"]).is_some() {
         return None;
@@ -867,6 +870,149 @@ fn jvm_debug_build(root: &Path, file: &Path) -> Option<JvmBuild> {
         return Some(JvmBuild::Gradle);
     }
     above(root, file, &["pom.xml"]).map(|_| JvmBuild::Maven)
+}
+
+/// Whether the sbt build in `dir` forks its tests or programs (`fork :=
+/// true`): they run in a JVM it starts, where the agent on its own is not.
+fn sbt_forks(dir: &Path) -> bool {
+    crate::statefile::read_capped(&dir.join("build.sbt"), 1 << 20).is_some_and(|text| {
+        text.lines()
+            .any(|l| l.contains("fork") && l.contains(":= true"))
+    })
+}
+
+/// The debugger a program of `lang` in `file` is debugged under, run as
+/// Run runs it ([`main_command`]): Kotlin's and Scala's JVM — a Gradle
+/// build's `run`, a script's `kotlinc`, sbt's `run` in its own JVM,
+/// scala-cli's — and Elixir's under OTP's interpreter, in its Mix project
+/// or alone. None where it runs out of the debugger's reach (an sbt build
+/// that forks it) or has no build to run it.
+pub fn main_debugger(root: &Path, file: &Path, lang: &str) -> Option<&'static str> {
+    let name = file.to_string_lossy();
+    match lang {
+        "kotlin" if name.ends_with(".kts") => Some("java"),
+        "kotlin" => above(
+            root,
+            file,
+            &[
+                "build.gradle.kts",
+                "build.gradle",
+                "settings.gradle.kts",
+                "settings.gradle",
+            ],
+        )
+        .map(|_| "java"),
+        "scala" => match above(root, file, &["build.sbt"]) {
+            Some(dir) => (!sbt_forks(&dir)).then_some("java"),
+            None => Some("java"),
+        },
+        "elixir" => Some("elixir"),
+        _ => None,
+    }
+}
+
+/// How a program of `lang` in `file` is debugged: run as Run runs it
+/// ([`main_command`]), under its language's debugger — the JVM's agent on
+/// Gradle's `run` (Clew's init script), on `kotlinc`'s JVM (`JAVA_OPTS`),
+/// on sbt's own JVM (`-J`), on scala-cli's (`--java-opt`); Elixir's under
+/// OTP's interpreter, its Mix project's application started first (and
+/// kept running, for an application with a supervision tree, as `mix run
+/// --no-halt` keeps it), a script required.
+pub fn debug_main(
+    root: &Path,
+    file: &Path,
+    lang: &str,
+    search: &OsStr,
+) -> Result<DebugTest, String> {
+    let run = main_command(root, file, lang, search)?;
+    let name = file.to_string_lossy().into_owned();
+    let jvm = |program: PathBuf, args: Vec<String>, cwd: PathBuf| {
+        let mut command = vec![serde_json::Value::from(
+            program.to_string_lossy().into_owned(),
+        )];
+        command.extend(args.iter().cloned().map(serde_json::Value::from));
+        let mut launch = serde_json::Map::new();
+        launch.insert("command".into(), command.into());
+        DebugTest {
+            adapter: "java",
+            program,
+            args,
+            cwd,
+            launch,
+            start: DebugStart::Program,
+        }
+    };
+    match lang {
+        "kotlin" if name.ends_with(".kts") => {
+            // kotlinc runs the script in its own JVM, started with
+            // `JAVA_OPTS`.
+            let opts = match std::env::var("JAVA_OPTS") {
+                Ok(opts) if !opts.trim().is_empty() => format!("{opts} {JDWP_AGENT}"),
+                _ => JDWP_AGENT.to_string(),
+            };
+            let mut debug = jvm(run.program, run.args, run.cwd);
+            debug
+                .launch
+                .insert("env".into(), serde_json::json!({ "JAVA_OPTS": opts }));
+            Ok(debug)
+        }
+        "kotlin" => {
+            let mut args = run.args;
+            args.push("--init-script".into());
+            args.push(gradle_debug_script()?.to_string_lossy().into_owned());
+            Ok(jvm(run.program, args, run.cwd))
+        }
+        "scala" => {
+            let mut args = run.args;
+            let sbt = run
+                .program
+                .file_stem()
+                .is_some_and(|n| n.to_string_lossy() == "sbt");
+            match sbt {
+                true => args.insert(0, format!("-J{JDWP_AGENT}")),
+                false => args.extend(["--java-opt".to_string(), JDWP_AGENT.to_string()]),
+            }
+            Ok(jvm(run.program, args, run.cwd))
+        }
+        "elixir" => {
+            let project = above(root, file, &["mix.exs"]);
+            let path = elixir_string(&name);
+            let start = "Mix.Task.rerun(\"app.start\")\n";
+            let code = match (&project, name.ends_with(".exs")) {
+                (Some(_), true) => format!("{start}Code.require_file({path})\n0"),
+                (Some(dir), false) => {
+                    let serves = crate::statefile::read_capped(&dir.join("mix.exs"), 1 << 20)
+                        .is_some_and(|mix| mix.contains("mod:"));
+                    let held = if serves {
+                        "Process.sleep(:infinity)\n"
+                    } else {
+                        ""
+                    };
+                    format!("{start}{held}0")
+                }
+                (None, _) => format!("Code.require_file({path})\n0"),
+            };
+            let mut launch = serde_json::Map::new();
+            launch.insert("language".into(), "elixir".into());
+            if let Some(dir) = &project {
+                launch.insert(
+                    "projectDir".into(),
+                    dir.to_string_lossy().into_owned().into(),
+                );
+            }
+            launch.insert("mixEnv".into(), "dev".into());
+            launch.insert("run".into(), code.into());
+            Ok(DebugTest {
+                adapter: "elixir",
+                program: file.to_path_buf(),
+                args: Vec::new(),
+                cwd: run.cwd,
+                launch,
+                start: DebugStart::Program,
+            })
+        }
+        _ => Err(format!("{rel} has no program to run", rel = lang)),
+    }
 }
 
 /// How `runnable`, a test of `file`, is debugged: run as [`test_command`]
@@ -897,6 +1043,39 @@ pub fn debug_test(
     };
     match lang {
         "c" | "cpp" => return ctest_debug(root, file, lang, source, runnable, search),
+        "erlang" => {
+            // EUnit's own call for the test, its module or its generator,
+            // under the interpreter, the file compiled with `TEST` as
+            // rebar3's `eunit` compiles it.
+            let module = file
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let call = match (whole_file, runnable.name.ends_with("_test_")) {
+                // Code, not words: put together, not formatted.
+                (true, _) => ["eunit:test(", &erlang_atom(&module), ", [verbose])"].concat(),
+                (false, true) => format!(
+                    "eunit:test({{generator, {}, {}}}, [verbose])",
+                    erlang_atom(&module),
+                    erlang_atom(&runnable.name)
+                ),
+                (false, false) => format!(
+                    "eunit:test({{test, {}, {}}}, [verbose])",
+                    erlang_atom(&module),
+                    erlang_atom(&runnable.name)
+                ),
+            };
+            // In its rebar3 project, where its dependencies are built; rebar3
+            // itself is not needed.
+            let cwd = above(root, file, &["rebar.config"])
+                .unwrap_or_else(|| file.parent().unwrap_or(root).to_path_buf());
+            let mut debug = test("erlang", file.to_path_buf(), Vec::new(), cwd);
+            debug.launch.insert("run".into(), call.into());
+            debug
+                .launch
+                .insert("defines".into(), serde_json::json!(["TEST"]));
+            return Ok(debug);
+        }
         "zig" => {
             let zig = crate::debugadapter::zig_for(choices)?;
             let filter = (!whole_file).then_some(runnable.name.as_str());
@@ -948,6 +1127,46 @@ pub fn debug_test(
             };
             Ok(debug)
         }
+        "elixir" => {
+            // As `mix test file:line` runs it, in the test environment:
+            // the application started, ExUnit's helper required, the
+            // test file compiled (its modules interpreted, for its
+            // breakpoints), the test picked by its line.
+            let project = run.cwd.clone();
+            let rel = rel_slash(&project, file);
+            let load = format!(
+                "Mix.Task.rerun(\"app.start\")\n\
+                 ExUnit.start(autorun: false)\n\
+                 for path <- Mix.Project.config()[:test_paths] || [\"test\"],\n    \
+                 helper = Path.join(path, \"test_helper.exs\"),\n    \
+                 File.exists?(helper),\n    \
+                 do: Code.require_file(helper)\n\
+                 for file <- [{file}], {{mod, bin}} <- Code.compile_file(file), do: {{mod, file, bin}}",
+                file = elixir_string(&file.to_string_lossy())
+            );
+            let filter = match whole_file {
+                true => String::new(),
+                false => format!(
+                    "{{_, filters}} = ExUnit.Filters.parse_path({target})\n\
+                     opts = if Keyword.has_key?(filters, :include), do: filters, else: [exclude: [:test], include: filters]\n\
+                     if filters != [], do: ExUnit.configure(opts)\n",
+                    target = elixir_string(&format!("{rel}:{}", runnable.line))
+                ),
+            };
+            let run = format!(
+                "{filter}%{{failures: failures}} = ExUnit.run()\nif failures > 0, do: 1, else: 0"
+            );
+            let mut debug = test("elixir", file.to_path_buf(), Vec::new(), project.clone());
+            debug.launch.insert("language".into(), "elixir".into());
+            debug.launch.insert(
+                "projectDir".into(),
+                project.to_string_lossy().into_owned().into(),
+            );
+            debug.launch.insert("mixEnv".into(), "test".into());
+            debug.launch.insert("load".into(), load.into());
+            debug.launch.insert("run".into(), run.into());
+            Ok(debug)
+        }
         "java" | "kotlin" | "scala" => {
             let Some(build) = jvm_debug_build(root, file) else {
                 return Err("This build runs its tests where the debugger can't reach them, so they run without it.".to_string());
@@ -971,6 +1190,29 @@ pub fn debug_test(
         }
         _ => Err(format!("{rel} has no tests to run", rel = lang)),
     }
+}
+
+/// `name` as an Erlang atom, quoted.
+fn erlang_atom(name: &str) -> String {
+    format!("'{}'", name.replace('\\', "\\\\").replace('\'', "\\'"))
+}
+
+/// `text` as an Elixir string: its quotes, backslashes and interpolation
+/// escaped.
+fn elixir_string(text: &str) -> String {
+    let mut quoted = String::from("\"");
+    for c in text.chars() {
+        match c {
+            '"' | '\\' | '#' => {
+                quoted.push('\\');
+                quoted.push(c);
+            }
+            '\n' => quoted.push_str("\\n"),
+            c => quoted.push(c),
+        }
+    }
+    quoted.push('"');
+    quoted
 }
 
 /// Gradle's init script that starts each test JVM, and an application's
@@ -1788,7 +2030,18 @@ mod tests {
             path
         };
         let bin = root.join("bin");
-        for name in ["go", "dart", "flutter", "bundle", "mvn", "sbt", "gradle"] {
+        for name in [
+            "go",
+            "dart",
+            "flutter",
+            "bundle",
+            "mvn",
+            "sbt",
+            "gradle",
+            "mix",
+            "kotlinc",
+            "scala-cli",
+        ] {
             let path = write(&format!("bin/{name}"), "#!/bin/sh\n");
             #[cfg(unix)]
             {
@@ -1921,8 +2174,165 @@ mod tests {
         let forked = write("fk/src/test/scala/acme/CartSuite.scala", "");
         assert_eq!(test_debugger(&root, &forked, "scala"), None);
 
-        for lang in ["csharp", "erlang", "elixir", "haskell"] {
+        for lang in ["csharp", "haskell"] {
             assert_eq!(test_debugger(&root, &go, lang), None, "{lang}");
         }
+
+        // EUnit's under OTP's interpreter, compiled with TEST, by EUnit's
+        // own call; a Common Test suite's, without.
+        write("erl/rebar.config", "");
+        let erl = write(
+            "erl/test/cart_tests.erl",
+            "-module(cart_tests).\nadd_test() ->\n    ok.\nadds_test_() ->\n    [].\n",
+        );
+        assert_eq!(test_debugger(&root, &erl, "erlang"), Some("erlang"));
+        let d = debug("erlang", &erl, 2);
+        assert_eq!((d.adapter, &d.cwd), ("erlang", &root.join("erl")));
+        assert_eq!(
+            d.launch["run"],
+            "eunit:test({test, 'cart_tests', 'add_test'}, [verbose])"
+        );
+        assert_eq!(d.launch["defines"], serde_json::json!(["TEST"]));
+        let d = debug("erlang", &erl, 4);
+        assert_eq!(
+            d.launch["run"],
+            "eunit:test({generator, 'cart_tests', 'adds_test_'}, [verbose])"
+        );
+        let suite = write("erl/test/cart_SUITE.erl", "-module(cart_SUITE).\n");
+        assert_eq!(test_debugger(&root, &suite, "erlang"), None);
+
+        // ExUnit's as `mix test file:line` runs them, in the test
+        // environment: the test file compiled first, for its breakpoints.
+        write("ex/mix.exs", "");
+        let ex = write(
+            "ex/test/cart_test.exs",
+            "defmodule CartTest do\n  test \"adds\" do\n  end\nend\n",
+        );
+        assert_eq!(test_debugger(&root, &ex, "elixir"), Some("elixir"));
+        let d = debug("elixir", &ex, 2);
+        assert_eq!(d.adapter, "elixir");
+        assert_eq!(d.launch["mixEnv"], "test");
+        assert_eq!(
+            d.launch["projectDir"],
+            root.join("ex").to_string_lossy().as_ref()
+        );
+        let load = d.launch["load"].as_str().unwrap();
+        assert!(load.contains("Code.compile_file(file)"), "{load}");
+        assert!(load.contains(&ex.to_string_lossy().into_owned()), "{load}");
+        let run = d.launch["run"].as_str().unwrap();
+        assert!(
+            run.contains("ExUnit.Filters.parse_path(\"test/cart_test.exs:2\")"),
+            "{run}"
+        );
+        assert!(run.ends_with("if failures > 0, do: 1, else: 0"), "{run}");
+    }
+
+    /// Each program debugged runs as Run runs it, under its language's
+    /// debugger: Gradle's `run` with Clew's init script, a Kotlin script's
+    /// kotlinc with the agent in `JAVA_OPTS`, sbt with the agent on its JVM,
+    /// scala-cli with it as a Java option, an Elixir script or application
+    /// in its Mix project; none for an sbt build that forks its run.
+    #[test]
+    fn each_debugged_program_runs_under_its_languages_debugger() {
+        let _data = crate::testutil::DataDir::new("langtests-main-data");
+        let tmp = crate::testutil::TempDir::new("langtests-main");
+        let root = tmp.path().to_path_buf();
+        let write = |rel: &str, text: &str| {
+            let path = root.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, text).unwrap();
+            path
+        };
+        let bin = root.join("bin");
+        for name in ["gradle", "kotlinc", "sbt", "scala-cli", "mix", "elixir"] {
+            let path = write(&format!("bin/{name}"), "#!/bin/sh\n");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
+        let search = bin.as_os_str();
+        let debug = |lang: &str, file: &Path| {
+            assert!(main_debugger(&root, file, lang).is_some(), "{lang}");
+            debug_main(&root, file, lang, search).unwrap_or_else(|e| panic!("{lang}: {e}"))
+        };
+        let command = |d: &DebugTest| -> Vec<String> {
+            d.launch["command"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|w| w.as_str().unwrap().to_string())
+                .collect()
+        };
+
+        write("gr/build.gradle.kts", "");
+        let kt = write("gr/src/main/kotlin/acme/Main.kt", "fun main() {}\n");
+        let d = debug("kotlin", &kt);
+        assert_eq!(d.adapter, "java");
+        let words = command(&d);
+        assert_eq!(words[0], bin.join("gradle").to_string_lossy());
+        assert!(words.contains(&"run".to_string()) && words.contains(&"--init-script".to_string()));
+
+        let kts = write("scripts/hello.main.kts", "println(1)\n");
+        let d = debug("kotlin", &kts);
+        assert_eq!(
+            command(&d)[1..],
+            ["-script".to_string(), kts.to_string_lossy().into_owned()]
+        );
+        assert!(
+            d.launch["env"]["JAVA_OPTS"]
+                .as_str()
+                .unwrap()
+                .ends_with(JDWP_AGENT)
+        );
+
+        write("sb/build.sbt", "");
+        let sc = write("sb/src/main/scala/Main.scala", "object Main\n");
+        assert_eq!(
+            command(&debug("scala", &sc))[1..],
+            [format!("-J{JDWP_AGENT}"), "run".into()]
+        );
+        let alone = write("cli/hello.scala", "@main def hi() = ()\n");
+        let words = command(&debug("scala", &alone));
+        assert_eq!(
+            words[words.len() - 2..],
+            ["--java-opt".to_string(), JDWP_AGENT.into()]
+        );
+        write("fk/build.sbt", "run / fork := true\n");
+        let forked = write("fk/src/main/scala/Main.scala", "object Main\n");
+        assert_eq!(main_debugger(&root, &forked, "scala"), None);
+
+        write(
+            "ex/mix.exs",
+            "def application, do: [mod: {Cart.Application, []}]\n",
+        );
+        let script = write("ex/scripts/seed.exs", "IO.puts(1)\n");
+        let d = debug("elixir", &script);
+        assert_eq!(
+            (d.adapter, &d.launch["mixEnv"]),
+            ("elixir", &serde_json::json!("dev"))
+        );
+        let run = d.launch["run"].as_str().unwrap();
+        assert!(run.starts_with("Mix.Task.rerun(\"app.start\")"), "{run}");
+        assert!(run.contains("Code.require_file("), "{run}");
+        let app = write("ex/lib/cart.ex", "defmodule Cart do\nend\n");
+        let run = debug("elixir", &app).launch["run"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            run.contains("Process.sleep(:infinity)"),
+            "an application runs on: {run}"
+        );
+        let lone = write("lone/hi.exs", "IO.puts(1)\n");
+        let d = debug("elixir", &lone);
+        assert!(d.launch.get("projectDir").is_none());
+        assert!(
+            d.launch["run"]
+                .as_str()
+                .unwrap()
+                .starts_with("Code.require_file(")
+        );
     }
 }

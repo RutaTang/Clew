@@ -61,6 +61,9 @@ pub enum Lang {
     Php,
     /// Erlang via OTP's interpreter, through clew-server's own adapter.
     Erlang,
+    /// Elixir via OTP's interpreter, through the same adapter: its node
+    /// started by Elixir (by Mix, in a Mix project).
+    Elixir,
     /// Java via JDWP, through clew-server's own adapter.
     Java,
     /// Haskell via GHCi's debugger, through clew-server's own adapter.
@@ -83,6 +86,7 @@ impl Lang {
                 "coreclr" | "netcoredbg" | "csharp" | "cs" | "dotnet" => Some(Lang::CSharp),
                 "php" | "xdebug" => Some(Lang::Php),
                 "erlang" | "erl" => Some(Lang::Erlang),
+                "elixir" | "mix_task" => Some(Lang::Elixir),
                 "java" | "jdwp" => Some(Lang::Java),
                 "haskell" | "ghc" | "ghci" | "hs" => Some(Lang::Haskell),
                 "python" | "debugpy" => Some(Lang::Python),
@@ -108,6 +112,7 @@ impl Lang {
             Some("rb") => Some(Lang::Ruby),
             Some("php") => Some(Lang::Php),
             Some("erl") => Some(Lang::Erlang),
+            Some("ex" | "exs") => Some(Lang::Elixir),
             Some("java") => Some(Lang::Java),
             Some("hs" | "lhs") => Some(Lang::Haskell),
             // A .NET assembly: what netcoredbg runs.
@@ -117,10 +122,11 @@ impl Lang {
             Some(
                 "vue" | "svelte" | "astro" | "html" | "htm" | "css" | "scss" | "sass" | "less",
             ) => None,
-            // Kotlin, Scala and Elixir run by their project's build or
-            // runner (`ProjectTask::Main`), under no debugger of Clew's: an
-            // unknown extension read as a native binary sent them to lldb.
-            Some("kt" | "kts" | "scala" | "sc" | "sbt" | "mill" | "ex" | "exs") => None,
+            // Kotlin and Scala run by their project's build or runner
+            // (`ProjectTask::Main`), their JVM debugged through it: no
+            // program a launch file can start on its own. An unknown
+            // extension read as a native binary sent them to lldb.
+            Some("kt" | "kts" | "scala" | "sc" | "sbt" | "mill") => None,
             None => Some(Lang::Native),
             _ => Some(Lang::Native),
         }
@@ -137,6 +143,7 @@ impl Lang {
             Lang::CSharp => "C# (netcoredbg)",
             Lang::Php => "PHP (Xdebug)",
             Lang::Erlang => tr_noop!("Erlang (OTP interpreter)"),
+            Lang::Elixir => tr_noop!("Elixir (OTP interpreter)"),
             Lang::Java => "Java (JDWP)",
             Lang::Haskell => "Haskell (GHCi)",
             Lang::Browser => tr_noop!("Browser (js-debug)"),
@@ -156,6 +163,7 @@ impl Lang {
             Lang::CSharp => "csharp",
             Lang::Php => "php",
             Lang::Erlang => "erlang",
+            Lang::Elixir => "elixir",
             Lang::Java => "java",
             Lang::Haskell => "haskell",
             Lang::Browser => "browser",

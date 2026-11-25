@@ -288,6 +288,11 @@ pub struct DebugState {
     /// The tabs whose program was built, and whose test was then not found
     /// in it: said "not run" — "build failed" said of a build that worked.
     pub not_run: std::collections::HashSet<u64>,
+    /// What the adapter said of a breakpoint (`breakpoint` events) before
+    /// its answer gave the handle it is known by — sent while it was being
+    /// configured (Clew's Erlang adapter, setting an Elixir test file's as
+    /// it compiles): applied when the answer comes, not dropped.
+    pub early_bp_changes: HashMap<i64, (bool, Option<usize>, Option<String>)>,
 }
 
 /// A tab of the bottom panel: a run of the program (Run or Debug), or one

@@ -1043,7 +1043,7 @@ impl Adapter {
         // through Gradle, Maven or sbt: run, its output the session's, and
         // the JVM it starts attached to.
         if let Some(command) = args["command"].as_array() {
-            return self.launch_build(command, &cwd).await;
+            return self.launch_build(command, &args["env"], &cwd).await;
         }
         let mut classpath: Vec<PathBuf> = args["classPaths"]
             .as_array()
@@ -1139,15 +1139,28 @@ impl Adapter {
     /// its output is the session's, as it goes, and the first JVM that says
     /// where its agent listens is the one debugged. The session ends with
     /// the build, as its run would.
-    async fn launch_build(&mut self, command: &[Value], cwd: &Path) -> Result<(), String> {
+    async fn launch_build(
+        &mut self,
+        command: &[Value],
+        env: &Value,
+        cwd: &Path,
+    ) -> Result<(), String> {
         let words: Vec<String> = command
             .iter()
             .filter_map(|w| w.as_str().map(str::to_string))
             .collect();
         let (program, rest) = words.split_first().ok_or("the build to run is empty")?;
         self.roots = source_roots(cwd);
+        // Its variables: `JAVA_OPTS` for a JVM a script starts (kotlinc's).
+        let vars: Vec<(String, String)> = env
+            .as_object()
+            .into_iter()
+            .flatten()
+            .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
+            .collect();
         let mut child = clew_core::spawn::tokio_command(Path::new(program))
             .args(rest)
+            .envs(vars)
             .current_dir(cwd)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
@@ -2905,7 +2918,12 @@ fn source_roots(root: &Path) -> Vec<PathBuf> {
         ".",
     ]
     .iter()
-    .map(|r| root.join(r))
+    // The folder itself as it is: `root/.` made `root/./hello.kts` of a
+    // frame's file, which is not the path the editor has open.
+    .map(|r| match *r {
+        "." => root.to_path_buf(),
+        r => root.join(r),
+    })
     .filter(|r| r.is_dir())
     .collect()
 }

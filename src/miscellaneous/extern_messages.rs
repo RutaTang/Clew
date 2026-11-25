@@ -176,6 +176,7 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("cannot make the staged command executable: {e}"),
     tr_noop!("cannot make {arg1}: {e}"),
     tr_noop!("cannot write {arg1}: {e}"),
+    tr_noop!("{expression} is not bound here"),
     tr_noop!("cannot open {rel}: {e}"),
     tr_noop!("cannot reach Node's inspector: {e}"),
     tr_noop!("cannot reach the JVM's agent: {e}"),

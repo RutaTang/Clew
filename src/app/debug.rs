@@ -1047,8 +1047,13 @@ impl App {
     /// Begin a debug session from the project's `.clew/launch.json`. Spawns the
     /// adapter off-thread and streams its events back as `DapEvent` messages.
     pub(crate) fn start_debug(&mut self) -> Task<Message> {
-        // Kotlin, Scala and Elixir have no debugger of Clew's: Debug runs
-        // the program, and says so.
+        // A Kotlin, Scala or Elixir program, under its language's debugger,
+        // run as Run runs it.
+        if let Some(plan) = self.lang_debug_main() {
+            return self.start_session(false, Some(plan));
+        }
+        // One out of the debugger's reach (an sbt build that forks it, a
+        // remote project's): Debug runs it, and says so.
         if let Some(plan) = self.lang_file_run() {
             let task = self.start_session(true, Some(plan));
             self.status = tr!(
@@ -1068,6 +1073,29 @@ impl App {
             return self.start_session(true, Some(plan));
         }
         self.start_session(true, None)
+    }
+
+    /// What Debug debugs for a Kotlin, Scala or Elixir file of a project
+    /// on this computer that names nothing to run (no launch file): the
+    /// program Run runs, under its language's debugger, where it can be.
+    fn lang_debug_main(&self) -> Option<crate::app::runplan::RunPlan> {
+        if self.connection.is_remote() {
+            return None;
+        }
+        let root = &self.proj.project.as_ref()?.root;
+        if crate::app::tasks::launch_file_path(root).is_some() {
+            return None;
+        }
+        let viewer = self.active_viewer()?;
+        let lang = viewer
+            .lang_key
+            .filter(|l| clew_core::langtests::handles_main(l))?;
+        let slug = clew_core::langtests::main_debugger(root, &viewer.abs, lang)?;
+        Some(crate::app::runplan::RunPlan::LangDebugMain {
+            file: viewer.abs.clone(),
+            lang,
+            debugger: dap::Lang::detect(Some(slug), Path::new(""))?,
+        })
     }
 
     /// What Run runs for a Kotlin, Scala or Elixir file when nothing names
@@ -1876,6 +1904,9 @@ impl App {
         self.debug.no_debug = no_debug;
         self.debug.plan = plan.clone();
         self.debug.trail_fns.clear();
+        // An adapter's handles are its session's own: the last one's
+        // early word about its handle 2 is not this one's.
+        self.debug.early_bp_changes.clear();
         // A new run: its trace starts empty — and what was said of the last
         // one's tour (its narration failed) is of a run no longer the one
         // traced.
@@ -2430,6 +2461,39 @@ impl App {
                     // CTest's tests or build a Zig test).
                     let mut test_setup: Option<clew_core::langtests::DebugTest> = None;
                     let (program, args, cwd, cargo_env) = match &plan {
+                        Some(crate::app::runplan::RunPlan::LangDebugMain {
+                            file, lang, ..
+                        }) => {
+                            let (root, file, lang) = (root.clone(), file.clone(), *lang);
+                            let worked = tokio::task::spawn_blocking(move || {
+                                let search = clew_core::linerpc::search_path().unwrap_or_default();
+                                clew_core::langtests::debug_main(&root, &file, lang, &search)
+                            })
+                            .await
+                            .unwrap_or_else(|e| Err(e.to_string()));
+                            match worked {
+                                Ok(debug) => {
+                                    let ran = (
+                                        debug.program.clone(),
+                                        debug.args.clone(),
+                                        debug.cwd.clone(),
+                                        None,
+                                    );
+                                    test_setup = Some(debug);
+                                    ran
+                                }
+                                Err(why) => {
+                                    let _ = output
+                                        .send(Message::Debug(DebugMsg::Failed {
+                                            stamp: stamp.clone(),
+                                            run,
+                                            error: crate::i18n::message(&why),
+                                        }))
+                                        .await;
+                                    return;
+                                }
+                            }
+                        }
                         Some(crate::app::runplan::RunPlan::LangDebugTest {
                             file,
                             lang,
@@ -4495,6 +4559,14 @@ impl App {
                 entry.verified = Some(bp.verified);
                 entry.bound_line = bp.relocated_to();
                 entry.adapter_id = bp.id;
+                // The adapter revised it before this answer was in.
+                if let Some((verified, line, _)) =
+                    bp.id.and_then(|id| self.debug.early_bp_changes.remove(&id))
+                {
+                    entry.verified = Some(verified);
+                    entry.bound_line = line.filter(|l| verified && *l != bp.requested_line);
+                    continue;
+                }
                 if !bp.verified {
                     refused += 1;
                 } else if let Some(to) = bp.relocated_to() {
@@ -4565,6 +4637,10 @@ impl App {
                 return Task::none();
             }
         }
+        // Its answer not in yet: kept for it.
+        self.debug
+            .early_bp_changes
+            .insert(id, (verified, line, message));
         Task::none()
     }
 

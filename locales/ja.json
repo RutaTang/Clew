@@ -4108,5 +4108,7 @@
  "These tests are in more than one program: debug them one at a time.": "これらのテストは複数のプログラムに分かれています。1 つずつデバッグしてください。",
  "This build runs its tests where the debugger can't reach them, so they run without it.": "このビルドはデバッガーの届かないところでテストを実行するため、テストはデバッガーなしで実行されます。",
  "The build ended before its JVM started under the debugger. See its output.": "デバッガーの下で JVM が起動する前にビルドが終了しました。出力を確認してください。",
- "cannot write {arg1}: {e}": "{arg1} を書き込めません: {e}"
+ "cannot write {arg1}: {e}": "{arg1} を書き込めません: {e}",
+ "Elixir (OTP interpreter)": "Elixir（OTP インタープリター）",
+ "{expression} is not bound here": "{expression} はここでは束縛されていません"
 }

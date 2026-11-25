@@ -4108,5 +4108,7 @@
  "These tests are in more than one program: debug them one at a time.": "这些测试分布在多个程序中：请逐个调试。",
  "This build runs its tests where the debugger can't reach them, so they run without it.": "此构建在调试器无法触及的地方运行测试，因此测试会在没有调试器的情况下运行。",
  "The build ended before its JVM started under the debugger. See its output.": "构建在其 JVM 于调试器下启动之前就结束了，请查看其输出。",
- "cannot write {arg1}: {e}": "无法写入 {arg1}：{e}"
+ "cannot write {arg1}: {e}": "无法写入 {arg1}：{e}",
+ "Elixir (OTP interpreter)": "Elixir（OTP 解释器）",
+ "{expression} is not bound here": "{expression} 在此处未绑定"
 }

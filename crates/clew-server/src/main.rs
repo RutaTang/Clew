@@ -125,19 +125,31 @@ fn main() {
         std::process::exit(code);
     }
     if args.first().map(String::as_str) == Some("erlang-debug") {
-        let (erl, erlc) = match args.get(1..) {
+        // Elixir's programs and tests, given `--elixir`: run by Elixir,
+        // debugged by the same interpreter.
+        let (erl, erlc, elixir) = match args.get(1..) {
             Some([a, erl, b, erlc]) if a == "--erl" && b == "--erlc" => (
                 std::path::PathBuf::from(erl),
                 std::path::PathBuf::from(erlc),
+                None,
             ),
+            Some([a, erl, b, erlc, c, elixir])
+                if a == "--erl" && b == "--erlc" && c == "--elixir" =>
+            {
+                (
+                    std::path::PathBuf::from(erl),
+                    std::path::PathBuf::from(erlc),
+                    Some(std::path::PathBuf::from(elixir)),
+                )
+            }
             _ => {
                 eprintln!(
-                    "[clew-server] usage: clew-server erlang-debug --erl <erl> --erlc <erlc>"
+                    "[clew-server] usage: clew-server erlang-debug --erl <erl> --erlc <erlc> [--elixir <elixir>]"
                 );
                 std::process::exit(2);
             }
         };
-        let code = match runtime.block_on(clew_server::erlangdebug::run(erl, erlc)) {
+        let code = match runtime.block_on(clew_server::erlangdebug::run(erl, erlc, elixir)) {
             Ok(()) => 0,
             Err(e) => {
                 eprintln!("[clew-server] erlang-debug: {e}");
