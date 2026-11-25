@@ -1302,7 +1302,7 @@
  "No release notes.": "릴리스 노트가 없습니다.",
  "No route to host (os error {arg1})": "호스트로 가는 경로가 없음 (시스템 오류 {arg1})",
  "No server is running for this file.": "이 파일에 실행 중인 서버가 없습니다.",
- "No servers downloaded yet. They are shared by all projects.": "아직 다운로드한 서버가 없습니다. 서버는 모든 프로젝트에서 함께 사용합니다.",
+ "No servers downloaded yet.": "아직 다운로드한 서버가 없습니다.",
  "No sessions match “{query}”.": "“{query}”에 해당하는 대화가 없습니다.",
  "No sessions yet. A session is saved once Clew has answered in it.": "아직 대화가 없습니다. Clew가 답변하면 대화가 저장됩니다.",
  "No shortcut matches “{filter}”": "“{filter}”에 해당하는 단축키가 없습니다",

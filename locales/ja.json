@@ -1302,7 +1302,7 @@
  "No release notes.": "リリースノートはありません。",
  "No route to host (os error {arg1})": "ホストへの経路がありません（システムエラー {arg1}）",
  "No server is running for this file.": "このファイルに対応するサーバーは起動していません。",
- "No servers downloaded yet. They are shared by all projects.": "ダウンロード済みのサーバーはまだありません。サーバーはすべてのプロジェクトで共有されます。",
+ "No servers downloaded yet.": "まだサーバーをダウンロードしていません。",
  "No sessions match “{query}”.": "「{query}」に一致する会話はありません。",
  "No sessions yet. A session is saved once Clew has answered in it.": "会話はまだありません。Clew が回答すると、その会話が保存されます。",
  "No shortcut matches “{filter}”": "「{filter}」に一致するショートカットはありません",

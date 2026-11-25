@@ -1302,7 +1302,7 @@
  "No release notes.": "没有发行说明。",
  "No route to host (os error {arg1})": "没有到主机的路由（系统错误 {arg1}）",
  "No server is running for this file.": "此文件没有正在运行的服务器。",
- "No servers downloaded yet. They are shared by all projects.": "还没有下载任何服务器。服务器由所有项目共用。",
+ "No servers downloaded yet.": "尚未下载任何服务器。",
  "No sessions match “{query}”.": "没有与“{query}”匹配的会话。",
  "No sessions yet. A session is saved once Clew has answered in it.": "还没有会话。Clew 回答之后，会话就会保存下来。",
  "No shortcut matches “{filter}”": "没有与“{filter}”匹配的快捷键",

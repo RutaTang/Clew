@@ -25,8 +25,11 @@ const LAYER_GAP: f32 = 52.0;
 const WRAP_GAP: f32 = 18.0;
 const PAD: f32 = 14.0;
 const RADIUS: f32 = 8.0;
-/// The coloured strip down a card's left edge.
-const STRIP_W: f32 = 4.0;
+/// Room the card's words keep from its left edge beyond [`PAD`] (none: its
+/// family's colour is its head's, not a strip's).
+const STRIP_W: f32 = 0.0;
+/// How far down a card its head — name, what it is, its size — reaches.
+const HEAD_H: f32 = PAD + 18.0 + 2.0 + 15.0 + 7.0;
 const TITLE: f32 = 14.0;
 const LINE: f32 = 12.0;
 const SMALL: f32 = 11.0;
@@ -37,16 +40,110 @@ const CHIP_ROWS: usize = 2;
 /// Above the row of what is around the code: its label.
 const FOOT_LABEL_H: f32 = 26.0;
 
-/// The colour of a family of kinds.
-fn tier_color(tier: Option<Tier>) -> Color {
-    match tier {
-        Some(Tier::Entry) => theme::accent(),
-        Some(Tier::Interface) => theme::info(),
-        Some(Tier::Logic) => theme::success(),
-        Some(Tier::Data) => theme::warning(),
-        Some(Tier::Support) | None => theme::fg_muted(),
-        Some(Tier::Around) => theme::dim(),
+/// The colour of a kind of part: one of the theme's own — its accent, or
+/// one of the colours its code is written in, tuned to sit together on its
+/// background — so each kind reads apart from the others in any theme, a
+/// light one too, and a project's UI, pages, styles and hooks are not one
+/// blue. What helps (utilities, config) is neutral; what is around the
+/// code, dim.
+pub(crate) fn kind_color(kind: Option<Kind>) -> Color {
+    kind_color_in(kind, theme::tokens(), theme::active())
+}
+
+/// The kinds coloured apart, in the order they choose — the commonest
+/// first: each its own colour of the theme's, first the one it is usually
+/// drawn in (the apps the accent, libraries an escape's, the UI a
+/// function's...), else the next of the theme's colours no kind before it
+/// took — a theme that writes two kinds of code alike gave two kinds one
+/// colour.
+const COLOURED: [&[Kind]; 8] = [
+    &[
+        Kind::App,
+        Kind::WebApp,
+        Kind::MobileApp,
+        Kind::DesktopApp,
+        Kind::Cli,
+        Kind::Server,
+    ],
+    &[Kind::Core, Kind::Library, Kind::Macros],
+    &[Kind::Ui],
+    &[Kind::Pages],
+    &[Kind::Api, Kind::Services],
+    &[Kind::Data, Kind::Models, Kind::Types],
+    &[Kind::Styles, Kind::Assets],
+    &[Kind::Hooks, Kind::State],
+];
+
+/// [`kind_color`] in the theme of syntax colours `t` and palette `p`.
+fn kind_color_in(kind: Option<Kind>, t: &theme::TokenColors, p: &theme::Palette) -> Color {
+    let Some(kind) = kind else {
+        return p.fg_muted;
+    };
+    if kind.is_around() {
+        return p.dim;
     }
+    let Some(slot) = COLOURED.iter().position(|kinds| kinds.contains(&kind)) else {
+        // What helps (utilities, config): neutral.
+        return p.fg_muted;
+    };
+    let ink = |c: u32| Color::from_rgb8((c >> 16) as u8, (c >> 8) as u8, c as u8);
+    // In the order of [`COLOURED`]: the commonest kinds choose first.
+    let usual = [
+        p.accent,
+        ink(t.escape),
+        ink(t.function),
+        ink(t.keyword),
+        ink(t.type_),
+        ink(t.number),
+        ink(t.string),
+        ink(t.property),
+    ];
+    // The theme's other colours, then those the later kinds usually take:
+    // a kind that lends one is not left to want it.
+    let mut spare: Vec<Color> = [
+        Some(t.parameter),
+        Some(t.operator),
+        t.definition,
+        t.module,
+        t.attribute,
+        t.macro_,
+    ]
+    .into_iter()
+    .flatten()
+    .map(ink)
+    .collect();
+    spare.extend([p.info, p.success, p.warning, p.danger]);
+    // A grey (a theme's parameters, its plain text) is no kind's colour:
+    // it is what the helpers are drawn in.
+    let grey = |c: &Color| c.r.max(c.g).max(c.b) - c.r.min(c.g).min(c.b) < 0.12;
+    let mut taken: Vec<Color> = Vec::new();
+    let mut mine = p.fg_muted;
+    for (k, own) in usual.iter().enumerate().take(slot + 1) {
+        let free = |c: &Color| !taken.contains(c) && !grey(c);
+        let colour = if free(own) {
+            *own
+        } else if let Some(c) = spare
+            .iter()
+            .chain(&usual[k + 1..])
+            .copied()
+            .find(|c| free(c))
+        {
+            c
+        } else {
+            // A palette of fewer colours than kinds: the accent turned
+            // round the colour wheel — as bright, as strong — to a hue no
+            // kind has.
+            (1..12)
+                .map(|step| hue_turned(p.accent, step as f32 * 30.0))
+                .find(|c| free(c))
+                .unwrap_or(p.accent)
+        };
+        taken.push(colour);
+        if k == slot {
+            mine = colour;
+        }
+    }
+    mine
 }
 
 /// `n` files, as the interface says it.
@@ -340,7 +437,7 @@ pub(crate) fn place(arch: &Architecture, width: f32) -> Placed {
         })
         .collect();
     let height_of = |card: &Card| -> f32 {
-        let mut h = PAD + 18.0 + 2.0 + 15.0;
+        let mut h = HEAD_H;
         if !card.about.is_empty() {
             h += 8.0 + card.about.len() as f32 * 16.0;
         }
@@ -353,7 +450,8 @@ pub(crate) fn place(arch: &Architecture, width: f32) -> Placed {
             h += 10.0 + last;
         }
         if card.built_on.is_some() {
-            h += 8.0 + 14.0;
+            // Room for its hairline, and the line under it.
+            h += 14.0 + 14.0;
         }
         h + PAD
     };
@@ -443,7 +541,7 @@ fn chip_rect(card: &Card, chip: Rectangle) -> Rectangle {
 }
 
 fn chips_top(card: &Card) -> f32 {
-    let mut y = card.rect.y + PAD + 18.0 + 2.0 + 15.0;
+    let mut y = card.rect.y + HEAD_H;
     if !card.about.is_empty() {
         y += 8.0 + card.about.len() as f32 * 16.0;
     }
@@ -652,82 +750,89 @@ fn draw_foot(frame: &mut Frame, y: f32, width: f32) {
 /// A row's top, its bottom, and where its cards are across it.
 type RowSpan = (f32, f32, Vec<(f32, f32)>);
 
-/// Each link, from its user to what it uses: down from the user's foot to
-/// the used one's head; up, from the foot row; across, within a row. Each
-/// card's ends spread along its edge, in the order of the cards at their
-/// other ends, so no two meet at one point.
+/// `a` mixed toward `b` by `t`, opaque: lines that run together over one
+/// another stay one line, not a darker one.
+fn mix(a: Color, b: Color, t: f32) -> Color {
+    Color {
+        r: a.r + (b.r - a.r) * t,
+        g: a.g + (b.g - a.g) * t,
+        b: a.b + (b.b - a.b) * t,
+        a: 1.0,
+    }
+}
+
+/// `c` turned `degrees` round the colour wheel, as light and as strong.
+fn hue_turned(c: Color, degrees: f32) -> Color {
+    let (max, min) = (c.r.max(c.g).max(c.b), c.r.min(c.g).min(c.b));
+    let l = (max + min) / 2.0;
+    let d = max - min;
+    if d < 1e-4 {
+        return c;
+    }
+    let sat = if l > 0.5 {
+        d / (2.0 - max - min)
+    } else {
+        d / (max + min)
+    };
+    let hue = if max == c.r {
+        ((c.g - c.b) / d).rem_euclid(6.0)
+    } else if max == c.g {
+        (c.b - c.r) / d + 2.0
+    } else {
+        (c.r - c.g) / d + 4.0
+    } * 60.0;
+    let h = (hue + degrees).rem_euclid(360.0) / 60.0;
+    let chroma = (1.0 - (2.0 * l - 1.0).abs()) * sat;
+    let x = chroma * (1.0 - (h.rem_euclid(2.0) - 1.0).abs());
+    let (r, g, b) = match h as u32 {
+        0 => (chroma, x, 0.0),
+        1 => (x, chroma, 0.0),
+        2 => (0.0, chroma, x),
+        3 => (0.0, x, chroma),
+        4 => (x, 0.0, chroma),
+        _ => (chroma, 0.0, x),
+    };
+    let m = l - chroma / 2.0;
+    Color::from_rgb(r + m, g + m, b + m)
+}
+
+/// `points`, a path of straight runs across and down, its corners rounded.
+fn rounded(points: &[Point], radius: f32) -> Shape {
+    Shape::new(|p| {
+        let Some(first) = points.first() else {
+            return;
+        };
+        p.move_to(*first);
+        for w in points.windows(3) {
+            let (a, c, b) = (w[0], w[1], w[2]);
+            let (d1, d2) = (c.distance(a), c.distance(b));
+            if d1 < 0.5 || d2 < 0.5 {
+                p.line_to(c);
+                continue;
+            }
+            let r = radius.min(d1 / 2.0).min(d2 / 2.0);
+            let before = Point::new(c.x + (a.x - c.x) / d1 * r, c.y + (a.y - c.y) / d1 * r);
+            let after = Point::new(c.x + (b.x - c.x) / d2 * r, c.y + (b.y - c.y) / d2 * r);
+            p.line_to(before);
+            p.quadratic_curve_to(c, after);
+        }
+        if let Some(last) = points.last() {
+            p.line_to(*last);
+        }
+    })
+}
+
+/// Each link, from its user to what it uses, as an architecture diagram
+/// draws it: down out of the user's foot — one trunk for all it uses —
+/// along a lane of its own in the gap under its row, and down into the
+/// head of what it uses, each user at a place of its own along that head.
+/// A link past a row goes down between that row's cards, not behind them;
+/// one from the foot row goes up the same way; one within a row, through
+/// the gap under it. Lines are opaque, so those that share a trunk stay
+/// one line.
 fn draw_links(frame: &mut Frame, arch: &Architecture, placed: &Placed, lit: Option<usize>) {
-    #[derive(Clone, Copy, PartialEq)]
-    enum Side {
-        Top,
-        Bottom,
-        Left,
-        Right,
-    }
     let cards = &placed.cards;
-    let sides = |from: usize, to: usize| -> (Side, Side) {
-        let (a, b) = (&cards[from], &cards[to]);
-        if a.row < b.row {
-            (Side::Bottom, Side::Top)
-        } else if a.row > b.row {
-            (Side::Top, Side::Bottom)
-        } else if a.rect.x < b.rect.x {
-            (Side::Right, Side::Left)
-        } else {
-            (Side::Left, Side::Right)
-        }
-    };
-    // The ends on each side of each card, ordered by where the other end is.
-    let mut ends: HashMap<(usize, u8), Vec<(f32, usize)>> = HashMap::new();
-    let key = |s: Side| s as u8;
-    for (n, l) in arch.links.iter().enumerate() {
-        let (sa, sb) = sides(l.from, l.to);
-        let (a, b) = (&cards[l.from], &cards[l.to]);
-        ends.entry((l.from, key(sa)))
-            .or_default()
-            .push((b.rect.center_x() + b.rect.center_y() * 0.001, n));
-        ends.entry((l.to, key(sb)))
-            .or_default()
-            .push((a.rect.center_x() + a.rect.center_y() * 0.001, n));
-    }
-    for list in ends.values_mut() {
-        list.sort_by(|x, y| x.0.total_cmp(&y.0));
-    }
-    let point = |card: usize, side: Side, link: usize| -> Point {
-        let r = cards[card].rect;
-        let list = &ends[&(card, key(side))];
-        let k = list.iter().position(|(_, n)| *n == link).unwrap_or(0);
-        let share = (k as f32 + 1.0) / (list.len() as f32 + 1.0);
-        match side {
-            Side::Top | Side::Bottom => {
-                // Along the middle of the edge, clear of the corners.
-                let span = (r.width * 0.6).min(40.0 * list.len() as f32);
-                let x = r.center_x() - span / 2.0 + span * share;
-                Point::new(
-                    x,
-                    if side == Side::Top {
-                        r.y
-                    } else {
-                        r.y + r.height
-                    },
-                )
-            }
-            Side::Left | Side::Right => {
-                let span = r.height * 0.5;
-                let y = r.center_y() - span / 2.0 + span * share;
-                Point::new(
-                    if side == Side::Left {
-                        r.x
-                    } else {
-                        r.x + r.width
-                    },
-                    y,
-                )
-            }
-        }
-    };
-    // Each row's top and bottom and where its cards are: a link past a row
-    // goes through it between its cards, not behind them.
+    // Each row's top and bottom and where its cards are.
     let mut rows: std::collections::BTreeMap<usize, RowSpan> = std::collections::BTreeMap::new();
     for card in cards {
         let r = card.rect;
@@ -741,8 +846,100 @@ fn draw_links(frame: &mut Frame, arch: &Architecture, placed: &Placed, lit: Opti
     for row in rows.values_mut() {
         row.2.sort_by(|a, b| a.0.total_cmp(&b.0));
     }
-    let mut through: HashMap<(usize, usize), usize> = HashMap::new();
-    let mut gap_x = |row: usize, ideal: f32| -> f32 {
+    let last_row = rows.keys().copied().max().unwrap_or(0);
+    // The gap under row `g`: from its bottom to the next row's top (less
+    // the foot's label, over the foot row).
+    let gap = |g: usize| -> (f32, f32) {
+        let top = rows.get(&g).map_or(0.0, |r| r.1);
+        let mut bottom = rows.get(&(g + 1)).map_or(top + LAYER_GAP, |r| r.0);
+        if g + 1 == last_row
+            && let Some(foot) = placed.foot
+        {
+            bottom = bottom.min(foot + 2.0);
+        }
+        (top, bottom)
+    };
+    // How each link runs: down (or up), and through which gaps.
+    struct Route {
+        down: bool,
+        gaps: Vec<usize>,
+        between: Vec<usize>,
+    }
+    let route = |from: usize, to: usize| -> Route {
+        let (ra, rb) = (cards[from].row, cards[to].row);
+        if ra < rb {
+            Route {
+                down: true,
+                gaps: (ra..rb).collect(),
+                between: (ra + 1..rb).collect(),
+            }
+        } else if ra > rb {
+            Route {
+                down: false,
+                gaps: (rb..ra).rev().collect(),
+                between: (rb + 1..ra).rev().collect(),
+            }
+        } else {
+            // Within a row: out of the foot, along the gap under it, and
+            // up into the other's foot.
+            Route {
+                down: true,
+                gaps: vec![ra],
+                between: Vec::new(),
+            }
+        }
+    };
+    // A lane for each user in each gap it runs along, in the order of the
+    // users across the page: none runs along another's.
+    let mut lane_users: HashMap<usize, Vec<(f32, usize)>> = HashMap::new();
+    for l in &arch.links {
+        for g in route(l.from, l.to).gaps {
+            let users = lane_users.entry(g).or_default();
+            if !users.iter().any(|(_, u)| *u == l.from) {
+                users.push((cards[l.from].rect.center_x(), l.from));
+            }
+        }
+    }
+    for users in lane_users.values_mut() {
+        users.sort_by(|a, b| a.0.total_cmp(&b.0));
+    }
+    let lane = |g: usize, user: usize| -> f32 {
+        let (top, bottom) = gap(g);
+        let users = &lane_users[&g];
+        let k = users.iter().position(|(_, u)| *u == user).unwrap_or(0);
+        let (top, bottom) = (top + 10.0, bottom - 14.0);
+        if bottom <= top {
+            return (top + bottom) / 2.0;
+        }
+        top + (bottom - top) * (k as f32 + 0.5) / users.len() as f32
+    };
+    // Where each link comes into what it uses: its users along its head
+    // (or foot), in their order across the page.
+    let mut ends: HashMap<(usize, bool), Vec<(f32, usize)>> = HashMap::new();
+    for (n, l) in arch.links.iter().enumerate() {
+        let into_top = cards[l.from].row < cards[l.to].row;
+        ends.entry((l.to, into_top))
+            .or_default()
+            .push((cards[l.from].rect.center_x(), n));
+    }
+    for list in ends.values_mut() {
+        list.sort_by(|x, y| x.0.total_cmp(&y.0));
+    }
+    let end_at = |n: usize| -> Point {
+        let l = &arch.links[n];
+        let into_top = cards[l.from].row < cards[l.to].row;
+        let r = cards[l.to].rect;
+        let list = &ends[&(l.to, into_top)];
+        let k = list.iter().position(|(_, m)| *m == n).unwrap_or(0);
+        let span = (r.width * 0.5).min(36.0 * list.len() as f32);
+        let x = r.center_x() - span / 2.0 + span * (k as f32 + 0.5) / list.len() as f32;
+        Point::new(x, if into_top { r.y } else { r.y + r.height })
+    };
+    // Where a link goes down a row it passes: the gap between its cards
+    // nearest where it is headed, clear of them — each user down a gap at
+    // a place of its own, beside the others.
+    let mut down_gap: HashMap<(usize, i32), Vec<usize>> = HashMap::new();
+    let mut corridor = |row: usize, ideal: f32, user: usize| -> f32 {
         let Some((_, _, spans)) = rows.get(&row) else {
             return ideal;
         };
@@ -757,26 +954,29 @@ fn draw_links(frame: &mut Frame, arch: &Architecture, placed: &Placed, lit: Opti
         if placed.width - 2.0 - at >= 8.0 {
             gaps.push((at, placed.width - 2.0));
         }
-        let Some((k, &(lo, hi))) = gaps.iter().enumerate().min_by(|(_, a), (_, b)| {
+        let Some(&(lo, hi)) = gaps.iter().min_by(|a, b| {
             let off = |g: &(f32, f32)| (g.0 - ideal).max(ideal - g.1).max(0.0);
             off(a).total_cmp(&off(b))
         }) else {
             return ideal;
         };
-        // Lines through one gap side by side, not one over another.
-        let n = through.entry((row, k)).or_default();
-        let spread = match *n {
+        let users = down_gap.entry((row, lo as i32)).or_default();
+        if !users.contains(&user) {
+            users.push(user);
+        }
+        let k = users.iter().position(|u| *u == user).unwrap_or(0);
+        let spread = match k {
             0 => 0.0,
-            n if n % 2 == 1 => 4.0 * n.div_ceil(2) as f32,
-            n => -4.0 * (n / 2) as f32,
+            k if k % 2 == 1 => 8.0 * k.div_ceil(2) as f32,
+            k => -8.0 * (k / 2) as f32,
         };
-        *n += 1;
-        let (lo, hi) = (lo + 5.0, hi - 5.0);
+        let (lo, hi) = (lo + 14.0, hi - 14.0);
         if lo >= hi {
             return (lo + hi) / 2.0;
         }
         (ideal.clamp(lo, hi) + spread).clamp(lo, hi)
     };
+    let background = theme::bg();
     // The faint first, the lit over them.
     let mut order: Vec<usize> = (0..arch.links.len()).collect();
     order.sort_by_key(|&n| {
@@ -785,100 +985,79 @@ fn draw_links(frame: &mut Frame, arch: &Architecture, placed: &Placed, lit: Opti
     });
     for n in order {
         let l = &arch.links[n];
-        let (sa, sb) = sides(l.from, l.to);
-        let (start, end) = (point(l.from, sa, n), point(l.to, sb, n));
+        let r = route(l.from, l.to);
+        let source = cards[l.from].rect;
+        let start = Point::new(
+            source.center_x(),
+            if r.down {
+                source.y + source.height
+            } else {
+                source.y
+            },
+        );
+        let end = end_at(n);
         let is_lit = lit.is_some_and(|c| l.from == c || l.to == c);
         let around = arch.components[l.from].kind.is_some_and(Kind::is_around);
+        let width = (1.2 + ((l.imports as f32) + 1.0).log2() * 0.16).min(2.2)
+            + if is_lit { 0.5 } else { 0.0 };
         let color = if is_lit {
             theme::accent()
         } else if lit.is_some() {
-            theme::with_alpha(theme::fg_muted(), 0.12)
+            mix(background, theme::fg_muted(), 0.12)
         } else if around {
-            theme::with_alpha(theme::fg_muted(), 0.22)
+            mix(background, theme::fg_muted(), 0.22)
         } else {
-            theme::with_alpha(theme::fg_muted(), 0.4)
+            mix(background, theme::fg_muted(), 0.36)
         };
-        let width = (1.0 + (l.imports as f32 + 1.0).log2() * 0.45).min(3.2)
-            * if is_lit { 1.2 } else { 1.0 };
-        let bend = |s: Side, p: Point, d: f32| match s {
-            Side::Bottom => Point::new(p.x, p.y + d),
-            Side::Top => Point::new(p.x, p.y - d),
-            Side::Right => Point::new(p.x + d, p.y),
-            Side::Left => Point::new(p.x - d, p.y),
-        };
-        let reach =
-            (((end.y - start.y).abs() + (end.x - start.x).abs() * 0.25) * 0.45).clamp(18.0, 120.0);
-        // Stop short of the card, where the head is.
-        let head = 7.0 + width;
+        // The runs: out of the user, along its lane, down each row it
+        // passes in its corridor, along the last lane, into what it uses.
+        let head = 6.0 + width;
+        let dir = if r.down { 1.0 } else { -1.0 };
         let tip = end;
-        let base = bend(sb, end, head);
-        // Through the rows between, in their gaps.
-        let (ra, rb) = (cards[l.from].row, cards[l.to].row);
-        let mut waypoints: Vec<(Point, Point)> = Vec::new();
-        if matches!(sa, Side::Top | Side::Bottom) && ra.abs_diff(rb) > 1 {
-            let between: Vec<usize> = if ra < rb {
-                (ra + 1..rb).collect()
-            } else {
-                (rb + 1..ra).rev().collect()
-            };
-            for row in between {
-                let Some(&(top, bottom, _)) = rows.get(&row) else {
-                    continue;
-                };
-                let mid = (top + bottom) / 2.0;
-                let t = ((mid - start.y) / (base.y - start.y)).clamp(0.0, 1.0);
-                let x = gap_x(row, start.x + (base.x - start.x) * t);
-                let (enter, leave) = if ra < rb {
-                    (Point::new(x, top - 8.0), Point::new(x, bottom + 8.0))
-                } else {
-                    (Point::new(x, bottom + 8.0), Point::new(x, top - 8.0))
-                };
-                waypoints.push((enter, leave));
-            }
+        let base = Point::new(end.x, end.y - dir * head);
+        let same_row = cards[l.from].row == cards[l.to].row;
+        let mut points = vec![start];
+        let mut x = start.x;
+        let mut gaps = r.gaps.iter().copied();
+        let first = gaps.next().unwrap_or(cards[l.from].row);
+        let mut y = lane(first, l.from);
+        points.push(Point::new(x, y));
+        for (k, &row) in r.between.iter().enumerate() {
+            // Toward where it is headed, by how far down it has come.
+            let t = (k as f32 + 1.0) / (r.between.len() as f32 + 1.0);
+            let ideal = start.x + (end.x - start.x) * t;
+            x = corridor(row, ideal, l.from);
+            points.push(Point::new(x, y));
+            let next = gaps.next().unwrap_or(first);
+            y = lane(next, l.from);
+            points.push(Point::new(x, y));
         }
-        let path = Shape::new(|p| {
-            p.move_to(start);
-            if waypoints.is_empty() {
-                let (c1, c2) = (bend(sa, start, reach), bend(sb, base, reach));
-                p.bezier_curve_to(c1, c2, base);
-                return;
-            }
-            // Down (or up) to each row's gap, straight through it, and on.
-            let dir = if ra < rb { 1.0 } else { -1.0 };
-            let mut from = start;
-            for (enter, leave) in &waypoints {
-                let d = ((enter.y - from.y).abs() * 0.5).max(10.0);
-                p.bezier_curve_to(
-                    Point::new(from.x, from.y + dir * d),
-                    Point::new(enter.x, enter.y - dir * d),
-                    *enter,
-                );
-                p.line_to(*leave);
-                from = *leave;
-            }
-            let d = ((base.y - from.y).abs() * 0.5).max(10.0);
-            p.bezier_curve_to(
-                Point::new(from.x, from.y + dir * d),
-                Point::new(base.x, base.y - dir * d),
-                base,
-            );
-        });
+        points.push(Point::new(end.x, y));
+        // Within a row, it comes up into the other's foot.
+        let (tip, base) = if same_row {
+            let up = Point::new(end.x, cards[l.to].rect.y + cards[l.to].rect.height);
+            (up, Point::new(up.x, up.y + head))
+        } else {
+            (tip, base)
+        };
+        points.push(base);
+        points.dedup_by(|a, b| a.distance(*b) < 0.5);
         let mut pen = Stroke::default()
             .with_width(width)
             .with_color(color)
             .with_line_cap(LineCap::Round);
         if l.imports == 0 || around {
             pen.line_dash = LineDash {
-                segments: &[5.0, 4.0],
+                segments: &[4.0, 4.0],
                 offset: 0,
             };
         }
-        frame.stroke(&path, pen);
-        // The head: a filled triangle into the used card's edge.
+        frame.stroke(&rounded(&points, 9.0), pen);
+        // The head: a filled triangle into what is used.
         let (dx, dy) = (tip.x - base.x, tip.y - base.y);
         let len = (dx * dx + dy * dy).sqrt().max(0.001);
         let (ux, uy) = (dx / len, dy / len);
-        let half = 3.5 + width * 0.6;
+        let half = 3.2 + width * 0.5;
         let arrow = Shape::new(|p| {
             p.move_to(tip);
             p.line_to(Point::new(base.x - uy * half, base.y + ux * half));
@@ -901,34 +1080,43 @@ fn draw_card(
     let a = |col: Color| theme::with_alpha(col, col.a * fade);
     let r = card.rect;
     let tier = c.kind.map(Kind::tier);
-    let tint = tier_color(tier);
+    let tint = kind_color(c.kind);
     let around = tier == Some(Tier::Around);
     let body = Shape::rounded_rectangle(r.position(), r.size(), RADIUS.into());
     frame.fill(&body, a(theme::bg_panel()));
-    frame.fill(
-        &body,
-        a(theme::with_alpha(tint, if around { 0.03 } else { 0.06 })),
-    );
-    // The strip down its left edge, in its family's colour.
-    let strip = Shape::new(|p| {
-        let (x, y, h) = (r.x, r.y, r.height);
-        let rr = RADIUS;
-        p.move_to(Point::new(x + STRIP_W, y));
-        p.line_to(Point::new(x + rr, y));
-        p.arc_to(Point::new(x, y), Point::new(x, y + rr), rr);
-        p.line_to(Point::new(x, y + h - rr));
-        p.arc_to(Point::new(x, y + h), Point::new(x + rr, y + h), rr);
-        p.line_to(Point::new(x + STRIP_W, y + h));
+    // Its head in its family's colour: what kind of part it is, at a
+    // glance, across the diagram.
+    let head_h = HEAD_H.min(r.height);
+    let head = Shape::new(|p| {
+        let (x, y, w, h, rr) = (r.x, r.y, r.width, head_h, RADIUS);
+        p.move_to(Point::new(x, y + h));
+        p.line_to(Point::new(x, y + rr));
+        p.arc_to(Point::new(x, y), Point::new(x + rr, y), rr);
+        p.line_to(Point::new(x + w - rr, y));
+        p.arc_to(Point::new(x + w, y), Point::new(x + w, y + rr), rr);
+        p.line_to(Point::new(x + w, y + h));
         p.close();
     });
     frame.fill(
-        &strip,
-        a(theme::with_alpha(tint, if around { 0.5 } else { 0.9 })),
+        &head,
+        a(theme::with_alpha(tint, if around { 0.06 } else { 0.13 })),
+    );
+    let under_head = Shape::line(
+        Point::new(r.x + 1.0, r.y + head_h),
+        Point::new(r.x + r.width - 1.0, r.y + head_h),
+    );
+    frame.stroke(
+        &under_head,
+        Stroke::default()
+            .with_width(1.0)
+            .with_color(a(theme::with_alpha(tint, if around { 0.12 } else { 0.22 }))),
     );
     let (border, width) = if lit {
         (theme::accent(), 1.6)
-    } else {
+    } else if around {
         (theme::border(), 1.0)
+    } else {
+        (mix(theme::border(), tint, 0.38), 1.0)
     };
     let mut pen = Stroke::default().with_width(width).with_color(a(border));
     if around && !lit {
@@ -957,7 +1145,8 @@ fn draw_card(
             9.0.into(),
         );
         frame.fill(&pill, a(theme::with_alpha(tint, 0.16)));
-        let ink = if tier == Some(Tier::Support) || tier.is_none() || around {
+        let neutral = matches!(c.kind, None | Some(Kind::Utilities | Kind::Config));
+        let ink = if neutral || around {
             theme::fg_muted()
         } else {
             tint
@@ -980,7 +1169,8 @@ fn draw_card(
         crate::fonts::UI,
         a(theme::dim()),
     );
-    y += 7.5;
+    // Under the head, what it is for.
+    y = r.y + HEAD_H;
     if !card.about.is_empty() {
         y += 8.0;
         for line in &card.about {
@@ -1020,6 +1210,17 @@ fn draw_card(
         );
     }
     if let Some(built_on) = &card.built_on {
+        // Its footer, set off by a hairline: what it is built on.
+        let rule_y = r.y + r.height - PAD - 14.0 - 7.0;
+        frame.stroke(
+            &Shape::line(
+                Point::new(r.x + PAD, rule_y),
+                Point::new(r.x + r.width - PAD, rule_y),
+            ),
+            Stroke::default()
+                .with_width(1.0)
+                .with_color(a(theme::hairline())),
+        );
         text(
             frame,
             built_on.clone(),
@@ -1218,4 +1419,61 @@ pub(crate) fn architecture_section(app: &App, width: f32) -> Option<Element<'_, 
         .spacing(4)
         .into(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// In every theme, the kinds a project is made of are told apart by
+    /// colour — each its own, from the theme's palette: an app, its pages,
+    /// its UI, its styles, its hooks, its API, its core and its data — a
+    /// theme that writes two kinds of code alike too.
+    /// Turned round the wheel, a colour keeps its lightness and strength.
+    #[test]
+    fn a_hue_turns_and_keeps_its_strength() {
+        let red = Color::from_rgb(0.8, 0.2, 0.2);
+        let turned = hue_turned(red, 120.0);
+        assert!(
+            (turned.g - 0.8).abs() < 1e-3 && (turned.r - 0.2).abs() < 1e-3,
+            "{turned:?}"
+        );
+        assert_eq!(
+            hue_turned(Color::from_rgb(0.5, 0.5, 0.5), 90.0),
+            Color::from_rgb(0.5, 0.5, 0.5)
+        );
+    }
+
+    #[test]
+    fn each_kind_has_a_colour_of_its_own_in_every_theme() {
+        let kinds = [
+            Kind::WebApp,
+            Kind::Pages,
+            Kind::Ui,
+            Kind::Styles,
+            Kind::Hooks,
+            Kind::Api,
+            Kind::Core,
+            Kind::Data,
+        ];
+        for def in theme::THEMES {
+            let p = &def.palette;
+            let colors: Vec<Color> = kinds
+                .iter()
+                .map(|k| kind_color_in(Some(*k), &def.tokens, p))
+                .collect();
+            let mut unique: Vec<Color> = Vec::new();
+            for c in &colors {
+                if !unique.contains(c) {
+                    unique.push(*c);
+                }
+            }
+            assert_eq!(unique.len(), kinds.len(), "{}: {colors:?}", def.id);
+            // None of them a grey, the colour helpers are drawn in.
+            for c in &colors {
+                let chroma = c.r.max(c.g).max(c.b) - c.r.min(c.g).min(c.b);
+                assert!(chroma >= 0.12 || *c == p.accent, "{}: {c:?}", def.id);
+            }
+        }
+    }
 }

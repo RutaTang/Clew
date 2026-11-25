@@ -1302,7 +1302,7 @@
  "No release notes.": "Aucune note de version.",
  "No route to host (os error {arg1})": "Aucune route vers l’hôte (erreur système {arg1})",
  "No server is running for this file.": "Aucun serveur n’est lancé pour ce fichier.",
- "No servers downloaded yet. They are shared by all projects.": "Aucun serveur téléchargé pour l’instant. Ils sont partagés par tous les projets.",
+ "No servers downloaded yet.": "Aucun serveur téléchargé pour l’instant.",
  "No sessions match “{query}”.": "Aucune conversation ne correspond à « {query} ».",
  "No sessions yet. A session is saved once Clew has answered in it.": "Aucune conversation pour l’instant. Une conversation est enregistrée dès que Clew y a répondu.",
  "No shortcut matches “{filter}”": "Aucun raccourci ne correspond à « {filter} »",
