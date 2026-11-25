@@ -1454,7 +1454,7 @@ impl Adapter {
                 .unwrap_or(0);
             let mut frame = json!({
                 "id": id,
-                "name": format!("{}.{method}", class.rsplit('.').next().unwrap_or(&class)),
+                "name": format!("{}.{}", readable(&class), decode_operators(&method)),
                 "line": line,
                 "column": 1,
             });
@@ -1465,6 +1465,15 @@ impl Adapter {
                 });
             } else {
                 frame["presentationHint"] = json!("subtle");
+            }
+            // Code with no line of its own (Scala's static forwarder to an
+            // object's `main`): the compiler's, not the reader's — no place
+            // in the file to show (it read `Main.scala:0`).
+            if line == 0
+                && let Some(frame) = frame.as_object_mut()
+            {
+                frame.remove("source");
+                frame.insert("presentationHint".into(), json!("subtle"));
             }
             shown.push(frame);
         }
@@ -1816,9 +1825,132 @@ async fn element_of(vm: &Jdwp, value: JValue, index: usize) -> Result<JValue, St
         .ok_or_else(|| "no such element".to_string())
 }
 
-/// A value as shown: a primitive as Java writes it, a string quoted, an
-/// object by its class.
+/// A value as shown: a primitive as Java writes it, a string quoted, a
+/// boxed number by its value, a Scala `List` or `Option` by what it holds
+/// (`List(2, 3)`, `Some(4)`: read off its fields, nothing called), any
+/// other object by its class — with its `size`, where it keeps one.
 async fn display(vm: &Jdwp, value: JValue) -> String {
+    if matches!(value.tag, b'L') && value.bits != 0 {
+        let class = vm.object_class(value.bits).await.unwrap_or(0);
+        let name = class_name(&vm.signature(class).await.unwrap_or_default());
+        match name.as_str() {
+            "scala.collection.immutable.Nil$" => return "List()".into(),
+            "scala.None$" => return "None".into(),
+            "scala.collection.immutable.$colon$colon" => {
+                let mut items = Vec::new();
+                let mut cell = value.bits;
+                while items.len() < LIST_SHOWN {
+                    let (Some(head), Some(next)) = (
+                        own_field(vm, cell, "head").await,
+                        own_field(vm, cell, "next").await,
+                    ) else {
+                        break;
+                    };
+                    items.push(display_one(vm, head).await);
+                    let next_class = vm.object_class(next.bits).await.unwrap_or(0);
+                    let next_name = class_name(&vm.signature(next_class).await.unwrap_or_default());
+                    if next.bits == 0 || next_name != "scala.collection.immutable.$colon$colon" {
+                        return format!("List({})", items.join(", "));
+                    }
+                    cell = next.bits;
+                }
+                return format!("List({}, …)", items.join(", "));
+            }
+            "scala.Some" => {
+                if let Some(inner) = own_field(vm, value.bits, "value").await {
+                    return format!("Some({})", display_one(vm, inner).await);
+                }
+            }
+            // Java's and Kotlin's lists by what they hold, as `toString`
+            // writes them: `ArrayList`'s first `size` of its array,
+            // `Arrays.asList`'s (Kotlin's `listOf`) array, `List.of`'s.
+            "java.util.ArrayList" => {
+                if let (Some(data), Some(size)) = (
+                    own_field(vm, value.bits, "elementData").await,
+                    own_field(vm, value.bits, "size").await,
+                ) {
+                    let size = (size.bits as u32 as i32).max(0) as usize;
+                    return array_text(vm, data, Some(size)).await;
+                }
+            }
+            "java.util.Arrays$ArrayList" => {
+                if let Some(data) = own_field(vm, value.bits, "a").await {
+                    return array_text(vm, data, None).await;
+                }
+            }
+            "java.util.ImmutableCollections$ListN" => {
+                if let Some(data) = own_field(vm, value.bits, "elements").await {
+                    return array_text(vm, data, None).await;
+                }
+            }
+            "java.util.Collections$SingletonList" => {
+                if let Some(only) = own_field(vm, value.bits, "element").await {
+                    return format!("[{}]", display_one(vm, only).await);
+                }
+            }
+            "java.util.Collections$EmptyList" | "kotlin.collections.EmptyList" => {
+                return "[]".into();
+            }
+            _ => {}
+        }
+    }
+    // A short array with what it holds: `int[3] [3, 4, 5]`.
+    if value.tag == b'[' && value.bits != 0 {
+        let shown = display_one(vm, value).await;
+        let length = vm.array_length(value.bits).await.unwrap_or(0);
+        if length <= LIST_SHOWN {
+            return format!("{shown} {}", array_text(vm, value, None).await);
+        }
+        return shown;
+    }
+    display_one(vm, value).await
+}
+
+/// An array's elements (its first `size`, a list's), as `toString` writes
+/// a list: `[3, 4, 5]`, cut after [`LIST_SHOWN`].
+async fn array_text(vm: &Jdwp, array: JValue, size: Option<usize>) -> String {
+    if array.bits == 0 {
+        return "[]".into();
+    }
+    let length = vm.array_length(array.bits).await.unwrap_or(0);
+    let length = size.map_or(length, |s| s.min(length));
+    let shown = length.min(LIST_SHOWN);
+    let values = vm
+        .array_values(array.bits, 0, shown)
+        .await
+        .unwrap_or_default();
+    let mut items = Vec::with_capacity(values.len());
+    for v in values {
+        items.push(display_one(vm, v).await);
+    }
+    match length > shown {
+        true => format!("[{}, …]", items.join(", ")),
+        false => format!("[{}]", items.join(", ")),
+    }
+}
+
+/// The most of a Scala `List` shown.
+const LIST_SHOWN: usize = 20;
+
+/// The value of an object's own field, by its name.
+async fn own_field(vm: &Jdwp, object: u64, name: &str) -> Option<JValue> {
+    let class = vm.object_class(object).await.ok()?;
+    let field = vm
+        .fields(class)
+        .await
+        .ok()?
+        .into_iter()
+        .find(|f| f.1 == name && f.3 & 0x0008 == 0)?;
+    vm.object_values(object, &[field.0])
+        .await
+        .ok()?
+        .into_iter()
+        .next()
+}
+
+/// [`display`] without looking inside a collection: what a list's
+/// elements are shown as.
+async fn display_one(vm: &Jdwp, value: JValue) -> String {
     match value.tag {
         b'Z' => (value.bits != 0).to_string(),
         b'B' => (value.bits as u8 as i8).to_string(),
@@ -1847,13 +1979,103 @@ async fn display(vm: &Jdwp, value: JValue) -> String {
             let class = vm.object_class(value.bits).await.unwrap_or(0);
             let signature = vm.signature(class).await.unwrap_or_default();
             let name = class_name(&signature);
-            format!(
-                "{}@{:x}",
-                name.rsplit('.').next().unwrap_or(&name),
-                value.bits
-            )
+            // A boxed number (a Kotlin `List<Int>`'s, a Scala `List[Int]`'s)
+            // by its value.
+            if BOXES.contains(&name.as_str())
+                && let Some(inner) = own_field(vm, value.bits, "value").await
+            {
+                return Box::pin(display_one(vm, inner)).await;
+            }
+            let size = match own_field(vm, value.bits, "size").await {
+                Some(size) if size.tag == b'I' => format!(" size={}", size.bits as u32 as i32),
+                _ => String::new(),
+            };
+            format!("{}@{:x}{size}", readable(&name), value.bits)
         }
     }
+}
+
+/// The boxes of Java's primitives.
+const BOXES: [&str; 8] = [
+    "java.lang.Integer",
+    "java.lang.Long",
+    "java.lang.Short",
+    "java.lang.Byte",
+    "java.lang.Double",
+    "java.lang.Float",
+    "java.lang.Boolean",
+    "java.lang.Character",
+];
+
+/// A class's name as its source writes it: its simple name, Scala's
+/// encoded operators read back (`$colon$colon` as `::`) and an object's
+/// class (`Cart$`) as the object.
+fn readable(class: &str) -> String {
+    // A lambda's hidden class (`shop.CartSuite$$Lambda/0x7fa2…`): the
+    // class it was written in.
+    if let Some(at) = class.find("$$Lambda") {
+        return format!("{} (lambda)", readable(&class[..at]));
+    }
+    // Any other hidden class (`LambdaForm$MH/0x7fda…`): by its class, not
+    // its address.
+    let class = match class.rsplit_once('.') {
+        Some((head, last)) if last.starts_with("0x") => head,
+        _ => class,
+    };
+    let simple = class.rsplit('.').next().unwrap_or(class);
+    let decoded = decode_operators(simple);
+    match decoded.strip_suffix('$') {
+        Some(object) if !object.is_empty() => object.to_string(),
+        _ => decoded,
+    }
+}
+
+/// Scala's encoded operator characters read back: `$colon` as `:`,
+/// `$plus` as `+`, … (what `scala.reflect.NameTransformer` writes).
+fn decode_operators(name: &str) -> String {
+    const OPS: [(&str, &str); 18] = [
+        ("$colon", ":"),
+        ("$plus", "+"),
+        ("$minus", "-"),
+        ("$times", "*"),
+        ("$div", "/"),
+        ("$eq", "="),
+        ("$less", "<"),
+        ("$greater", ">"),
+        ("$bang", "!"),
+        ("$amp", "&"),
+        ("$bar", "|"),
+        ("$up", "^"),
+        ("$percent", "%"),
+        ("$tilde", "~"),
+        ("$qmark", "?"),
+        ("$hash", "#"),
+        ("$at", "@"),
+        ("$bslash", "\\"),
+    ];
+    if !name.contains('$') {
+        return name.to_string();
+    }
+    let mut out = String::new();
+    let mut rest = name;
+    'outer: while !rest.is_empty() {
+        if rest.starts_with('$') {
+            for (code, op) in OPS {
+                // Whole codes only: `$up` is not `$update`'s start.
+                if let Some(after) = rest.strip_prefix(code)
+                    && !after.starts_with(|c: char| c.is_ascii_lowercase())
+                {
+                    out.push_str(op);
+                    rest = after;
+                    continue 'outer;
+                }
+            }
+        }
+        let c = rest.chars().next().unwrap_or_default();
+        out.push(c);
+        rest = &rest[c.len_utf8()..];
+    }
+    out
 }
 
 /// A floating value as Java writes one: `3.0`, `NaN`, `Infinity`.
@@ -2973,6 +3195,7 @@ async fn watch_lines(
 ) {
     let mut lines = BufReader::new(stream);
     let mut line = String::new();
+    let mut echoing_set = SbtSetEcho::default();
     loop {
         line.clear();
         match lines.read_line(&mut line).await {
@@ -2990,14 +3213,57 @@ async fn watch_lines(
         if is_jvm_options_notice(&line) {
             continue;
         }
+        // sbt's answer to the `set`s Clew gave it (the forked JVM, the
+        // agent on it): words of Clew's doing, not the build's.
+        if echoing_set.take_line(&line) {
+            continue;
+        }
         out.output(category, line.clone()).await;
+    }
+}
+
+/// sbt's lines answering a `set ThisBuild / … ` Clew gave it: from its
+/// `Defining ThisBuild / …` to the project it sets again.
+#[derive(Default)]
+struct SbtSetEcho {
+    within: bool,
+}
+
+impl SbtSetEcho {
+    /// Whether `line` is one of them.
+    fn take_line(&mut self, line: &str) -> bool {
+        let text = line.trim_end();
+        let said = text.strip_prefix("[info] ").unwrap_or(text).trim_start();
+        if said.starts_with("Defining ThisBuild / ") {
+            self.within = true;
+            return true;
+        }
+        if !self.within {
+            return false;
+        }
+        let echo = said.starts_with("The new value will be used by")
+            || said.starts_with("Run `last` for details.")
+            || said.starts_with("Reapplying settings...")
+            || said.starts_with("set current project to ");
+        if said.starts_with("set current project to ") {
+            self.within = false;
+        }
+        if !echo {
+            self.within = false;
+        }
+        echo
     }
 }
 
 /// The JVM's notice of the options it took from the environment
 /// (`Picked up JAVA_TOOL_OPTIONS: …`, `_JAVA_OPTIONS`, `JDK_JAVA_OPTIONS`).
 fn is_jvm_options_notice(line: &str) -> bool {
+    // sbt relays a forked JVM's words under its own label (`[error] `).
     let line = line.trim_start();
+    let line = ["[error] ", "[warn] ", "[info] "]
+        .iter()
+        .find_map(|label| line.strip_prefix(label))
+        .unwrap_or(line);
     ["JAVA_TOOL_OPTIONS:", "_JAVA_OPTIONS:", "JDK_JAVA_OPTIONS:"]
         .iter()
         .any(|v| {
@@ -3078,6 +3344,38 @@ mod tests {
         assert_eq!(class_name("Ldemo/Main$Cart;"), "demo.Main$Cart");
         assert_eq!(type_name("[I"), "int[]");
         assert_eq!(type_name("Ljava/lang/String;"), "String");
+        assert_eq!(readable("scala.collection.immutable.$colon$colon"), "::");
+        assert_eq!(readable("shop.Cart$"), "Cart");
+        assert_eq!(readable("demo.Main$Cart"), "Main$Cart");
+        assert_eq!(
+            readable("shop.CartSuite$$Lambda.0x00007fa2000c8a10"),
+            "CartSuite (lambda)"
+        );
+        assert_eq!(
+            readable("java.lang.invoke.LambdaForm$MH.0x00007fdaa80c4800"),
+            "LambdaForm$MH"
+        );
+        let mut echo = SbtSetEcho::default();
+        let said = [
+            "[info] welcome to sbt 1.10.7 (Ubuntu Java 21)",
+            "[info] Defining ThisBuild / Test / fork",
+            "[info] The new value will be used by Test / fork, Test / runner and 3 others.",
+            "[info] \tRun `last` for details.",
+            "[info] Reapplying settings...",
+            "[info] set current project to sbtp (in build file:/p/)",
+            "shop.CartSuite:",
+        ];
+        let kept: Vec<&str> = said.into_iter().filter(|l| !echo.take_line(l)).collect();
+        assert_eq!(
+            kept,
+            [
+                "[info] welcome to sbt 1.10.7 (Ubuntu Java 21)",
+                "shop.CartSuite:"
+            ]
+        );
+        assert_eq!(decode_operators("$plus$colon"), "+:");
+        assert_eq!(decode_operators("$anonfun$total$1"), "$anonfun$total$1");
+        assert_eq!(decode_operators("$update"), "$update");
         assert_eq!(line_at(&[(0, 10), (4, 11), (9, 12)], 6), Some(11));
         assert_eq!(line_at(&[(3, 10)], 1), None);
         assert_eq!(package_of("import java.util.List;\nclass A {}"), None);
@@ -3110,6 +3408,9 @@ mod tests {
             "Picked up JAVA_TOOL_OPTIONS: -Dx=y\n"
         ));
         assert!(is_jvm_options_notice("Picked up _JAVA_OPTIONS: -Xmx1g"));
+        assert!(is_jvm_options_notice(
+            "[error] Picked up _JAVA_OPTIONS: -Xmx1g"
+        ));
         assert!(!is_jvm_options_notice("CartTest > adds() PASSED"));
         assert_eq!(
             source_root(Path::new("/p/src/demo/shop/Main.java"), Some("demo.shop")),
@@ -3506,7 +3807,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("{name} in {fields}"))
         };
         assert_eq!(field("owner")["value"], "\"ann\"");
-        assert_eq!(field("items")["value"], "int[2]");
+        assert_eq!(field("items")["value"], "int[2] [2, 3]", "a short array, with what it holds");
         let items = client
             .request(
                 "variables",
@@ -3564,7 +3865,7 @@ mod tests {
             .await;
         assert_eq!(hovered["result"], "\"ann\"");
         for (expression, context, why) in [
-            ("cart.owner.length()", "hover", "not called for a hover"),
+            ("cart.owner.length()", "hover", "hovering does not run methods"),
             ("cart.items[0] / 0", "repl", "ArithmeticException"),
             ("cart.missing", "repl", "no field missing"),
             ("nothing(1)", "repl", "no method nothing"),

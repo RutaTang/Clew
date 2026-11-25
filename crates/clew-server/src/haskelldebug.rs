@@ -229,7 +229,7 @@ impl Adapter {
         let mut command = clew_core::spawn::tokio_command(program_name);
         command
             .args(ghci_args)
-            .arg("-ignore-dot-ghci")
+            .arg(ignore_dot_ghci(program_name))
             .current_dir(&cwd)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
@@ -263,13 +263,16 @@ impl Adapter {
             stdin,
             stdout: BufReader::new(stdout),
         };
-        // Our own prompt, and stops on uncaught exceptions.
+        // Our own prompt, and stops on uncaught exceptions; no colours
+        // (cabal's GHCi has them), and no warning of modules its package
+        // does not list: the source folders put before it are what let
+        // breakpoints bind in the library's code.
         ghci.write(&format!(
-            ":set prompt \"{}\\n\"\n:set prompt-cont \"\"\n:set -fbreak-on-error\n",
+            ":set prompt \"{}\\n\"\n:set prompt-cont \"\"\n:set -fbreak-on-error\n:set -fdiagnostics-color=never -Wno-missing-home-modules\n",
             PROMPT.trim_end()
         ))
         .await?;
-        for _ in 0..3 {
+        for _ in 0..4 {
             ghci.reply(LOAD_TIMEOUT).await?;
         }
         let dirs = source_dirs(&cwd);
@@ -634,7 +637,7 @@ impl Ghci {
                 }
                 if said.ends_with(PROMPT.as_bytes()) {
                     said.truncate(said.len() - PROMPT.len());
-                    return Ok(String::from_utf8_lossy(&said).into_owned());
+                    return Ok(without_colours(&String::from_utf8_lossy(&said)));
                 }
             }
         };
@@ -900,9 +903,65 @@ fn source_dirs(root: &Path) -> Vec<PathBuf> {
     dirs
 }
 
+/// GHCi's words without a terminal's colours: under `cabal repl` it
+/// colours its history and its messages (`\x1b[1mspec\x1b[0m`), and the
+/// stack read them as part of each frame's name.
+fn without_colours(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' && chars.peek() == Some(&'[') {
+            chars.next();
+            // Parameters, then the command's letter.
+            for c in chars.by_ref() {
+                if c.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+            continue;
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// GHCi's `-ignore-dot-ghci`, as the program GHCi is started through
+/// takes it: cabal's `repl` and stack's `ghci` pass GHCi's own flags on
+/// (`--repl-options`, `--ghci-options`), and refused the flag itself
+/// ("unrecognized 'repl' option").
+fn ignore_dot_ghci(program: &str) -> &'static str {
+    let name = Path::new(program)
+        .file_stem()
+        .map(|n| n.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    match name.as_str() {
+        "cabal" => "--repl-options=-ignore-dot-ghci",
+        "stack" => "--ghci-options=-ignore-dot-ghci",
+        _ => "-ignore-dot-ghci",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// GHCi's flag through cabal and stack, which pass it on.
+    #[test]
+    fn ghcis_flag_goes_through_cabal_and_stack() {
+        assert_eq!(
+            ignore_dot_ghci("/usr/bin/cabal"),
+            "--repl-options=-ignore-dot-ghci"
+        );
+        assert_eq!(ignore_dot_ghci("stack"), "--ghci-options=-ignore-dot-ghci");
+        assert_eq!(
+            ignore_dot_ghci("/opt/ghc/bin/ghci-9.4.7"),
+            "-ignore-dot-ghci"
+        );
+        assert_eq!(
+            without_colours("\x1b[1mspec:total\x1b[0m (test/CartSpec.hs:9:19-27)"),
+            "spec:total (test/CartSpec.hs:9:19-27)"
+        );
+    }
 
     /// A program's exit, read off the `ExitCode` exception GHCi names.
     #[test]

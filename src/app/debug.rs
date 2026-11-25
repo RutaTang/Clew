@@ -196,11 +196,20 @@ fn is_debugger_chatter(category: &str, text: &str) -> bool {
                 .any(|v| r.starts_with(v))
         })
     };
+    // sbt relays a forked JVM's words under its own label (`[error] `).
+    let unlabelled = |l: &str| {
+        let l = l.trim_start();
+        ["[error] ", "[warn] ", "[info] "]
+            .iter()
+            .find_map(|label| l.strip_prefix(label))
+            .unwrap_or(l)
+            .to_string()
+    };
     if !text.is_empty()
         && text
             .lines()
             .filter(|l| !l.trim().is_empty())
-            .all(|l| jvm_notice(l.trim_start()))
+            .all(|l| jvm_notice(&unlabelled(l)))
     {
         return true;
     }

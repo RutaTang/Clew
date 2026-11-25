@@ -731,11 +731,17 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
         let shown = super::steady::elide_start(&loc, ts::CAPTION, crate::fonts::UI, stack_room);
         let name = super::steady::cut(&f.name, stack_room, ts::SMALL, crate::fonts::UI);
         let cut = shown != loc || name != f.name;
+        // A frame with no source of the program's (the JDK's, libc's, a
+        // runtime's) dimmed: the reader's own frames stand out among them.
+        let name_color = match f.path {
+            Some(_) => theme::accent(),
+            None => theme::dim(),
+        };
         let mut b = button(
             column![
                 text(name)
                     .size(ts::SMALL)
-                    .color(theme::accent())
+                    .color(name_color)
                     .wrapping(Wrapping::None),
                 text(shown)
                     .size(ts::CAPTION)
@@ -797,14 +803,7 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
         };
         // In the code's font, so a program's columns line up, and wrapped:
         // a long line was cut at the column's edge.
-        out_rows.push(
-            text(txt.trim_end_matches('\n').to_string())
-                .size(ts::SMALL)
-                .font(crate::fonts::CODE)
-                .color(color)
-                .wrapping(Wrapping::WordOrGlyph)
-                .into(),
-        );
+        out_rows.push(output_text(txt.trim_end_matches('\n'), color));
     }
     // Ended without a word: said, where an empty pane read as Clew's
     // failure as much as the program's.
@@ -3589,6 +3588,33 @@ pub(crate) fn question_pieces(q: &str) -> Vec<(String, bool)> {
         // Odd pieces sat between a pair of backticks.
         .map(|(i, piece)| (piece.to_string(), i % 2 == 1))
         .collect()
+}
+
+/// A chunk of a run's output, in the code's font and wrapped: in its
+/// terminal colours where the program wrote them (sbt's, MUnit's, a test
+/// runner's `\x1b[31m…`), drawn as colours, not as escape codes.
+fn output_text<'a>(chunk: &str, color: iced::Color) -> Element<'a, Message> {
+    if !chunk.contains('\x1b') {
+        return text(chunk.to_string())
+            .size(ts::SMALL)
+            .font(crate::fonts::CODE)
+            .color(color)
+            .wrapping(Wrapping::WordOrGlyph)
+            .into();
+    }
+    let spans: Vec<iced::widget::text::Span<'a, Message>> = clew_core::notebook::ansi_spans(chunk)
+        .into_iter()
+        .map(|(run, ansi)| {
+            iced::widget::span(run)
+                .color(ansi.map_or(color, theme::ansi))
+                .font(crate::fonts::CODE)
+        })
+        .collect();
+    iced::widget::rich_text(spans)
+        .size(ts::SMALL)
+        .font(crate::fonts::CODE)
+        .wrapping(Wrapping::WordOrGlyph)
+        .into()
 }
 
 /// A question to try, as the reader reads it: names from the code set in

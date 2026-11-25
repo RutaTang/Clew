@@ -46,6 +46,7 @@ pub fn tests(lang: &str, rel: &str, source: &str) -> Vec<Runnable> {
             let mut found = junit_tests(lang, source, &lines);
             if lang == "scala" && found.is_empty() {
                 found = called_tests(&lines, &["test", "it", "property"], &["describe"]);
+                found = with_suite_classes(&lines, found);
             }
             found
         }
@@ -324,6 +325,32 @@ fn quoted(rest: &str) -> Option<String> {
 /// Tests that are calls naming them, as Dart's, RSpec's, ExUnit's, hspec's
 /// and ScalaTest's are: `test("adds") {`, `it "adds" do`, `test "adds" do`,
 /// each in the groups (`describe "Cart"`) around it.
+/// A Scala file's suites (MUnit's, ScalaTest's) as groups of their own:
+/// each class around its `test(…)` calls, run as a whole from its line.
+fn with_suite_classes(lines: &[&str], tests: Vec<Runnable>) -> Vec<Runnable> {
+    let mut classes: Vec<Runnable> = Vec::new();
+    for test in &tests {
+        let Some(at) = (0..test.line.saturating_sub(1)).rev().find(|&i| {
+            indent(lines[i]) < indent(lines[test.line - 1]) && class_name(lines[i]).is_some()
+        }) else {
+            continue;
+        };
+        if classes.iter().any(|c| c.line == at + 1) {
+            continue;
+        }
+        classes.push(Runnable {
+            kind: RunnableKind::Tests,
+            name: class_name(lines[at]).unwrap_or_default(),
+            line: at + 1,
+            span: (at + 1, span_from(lines, at) + 1),
+            scopes: Vec::new(),
+        });
+    }
+    let mut all: Vec<Runnable> = classes.into_iter().chain(tests).collect();
+    all.sort_by_key(|r| r.line);
+    all
+}
+
 fn called_tests(lines: &[&str], tests: &[&str], groups: &[&str]) -> Vec<Runnable> {
     let mut out = Vec::new();
     // The groups open around the line, by their indent.
@@ -731,22 +758,44 @@ pub fn test_command(
         }
         "java" | "kotlin" | "scala" => {
             let class = jvm_test_name(source, runnable);
+            // The file's own tests: its test classes, not the project's
+            // every one.
+            let classes: Vec<String> = match &class {
+                Some(_) => Vec::new(),
+                None => file_test_classes(lang, source),
+            };
             if let Some(dir) = above(root, file, &["build.sbt"]) {
-                // ScalaTest picks a test by its name's text (`-z`); MUnit
-                // and JUnit run their class's.
+                // ScalaTest picks a test by its name's text (`-z`), MUnit by
+                // its full name (`"acme.CartSuite.adds"`, spaces and all),
+                // JUnit's interface by its method (`--tests=`); a group,
+                // its class.
                 let scalatest = source.contains("org.scalatest");
+                let munit = source.contains("munit.");
+                let quoted = |text: &str| format!("\"{}\"", text.replace('"', "\\\""));
                 let filter = match (runnable.kind, &class) {
                     (RunnableKind::Test, Some((class, _))) if scalatest => {
-                        format!("testOnly {class} -- -z \"{}\"", runnable.name)
+                        format!("testOnly {class} -- -z {}", quoted(&runnable.name))
+                    }
+                    (RunnableKind::Test, Some((class, Some(name)))) if munit => {
+                        format!("testOnly {class} -- {}", quoted(&format!("{class}.{name}")))
+                    }
+                    (RunnableKind::Test, Some((class, Some(method))))
+                        if source.contains("org.junit") =>
+                    {
+                        format!("testOnly {class} -- --tests={method}")
                     }
                     (_, Some((class, _))) => format!("testOnly {class}"),
+                    (_, None) if !classes.is_empty() => format!("testOnly {}", classes.join(" ")),
                     (_, None) => "test".into(),
                 };
                 return Ok(command(tool("sbt")?, vec![filter], &dir));
             }
             if let Some(dir) = above(root, file, &["build.mill", "build.sc"]) {
                 let mut args = vec!["__.test.testOnly".to_string()];
-                args.extend(class.map(|(c, _)| c));
+                match class {
+                    Some((class, _)) => args.push(class),
+                    None => args.extend(classes),
+                }
                 return Ok(command(tool("mill")?, args, &dir));
             }
             if let Some(dir) = above(
@@ -775,6 +824,13 @@ pub fn test_command(
                         None => class,
                     });
                 }
+                for class in classes {
+                    args.extend(["--tests".into(), class]);
+                }
+                // Each test's outcome in the run (Gradle says only
+                // "BUILD SUCCESSFUL", or points to a report, of its own).
+                args.push("--init-script".into());
+                args.push(gradle_test_script()?.to_string_lossy().into_owned());
                 return Ok(command(gradle, args, &dir));
             }
             if let Some(dir) = above(root, file, &["pom.xml"]) {
@@ -790,6 +846,8 @@ pub fn test_command(
                         Some(method) => format!("-Dtest={class}#{method}"),
                         None => format!("-Dtest={class}"),
                     });
+                } else if !classes.is_empty() {
+                    args.push(format!("-Dtest={}", classes.join(",")));
                 }
                 return Ok(command(maven, args, &dir));
             }
@@ -798,6 +856,9 @@ pub fn test_command(
                 let dir = file.parent().unwrap_or(root);
                 let mut args = vec!["test".to_string(), dir.to_string_lossy().into_owned()];
                 if let Some((class, _)) = class {
+                    args.extend(["--test-only".into(), class]);
+                }
+                for class in classes {
                     args.extend(["--test-only".into(), class]);
                 }
                 return Ok(command(tool("scala-cli")?, args, dir));
@@ -1098,12 +1159,11 @@ enum JvmBuild {
 }
 
 /// The build that runs `file`'s tests where the JVM debugger reaches them,
-/// found as [`test_command`] finds it: Gradle's and Maven's (each test JVM
-/// started under the agent), and sbt's when it runs them in its own JVM —
-/// with `fork := true` they run in one it starts without it.
+/// found as [`test_command`] finds it: Gradle's, Maven's and sbt's, each
+/// test JVM started under the agent (sbt's forked for it).
 fn jvm_debug_build(root: &Path, file: &Path) -> Option<JvmBuild> {
-    if let Some(dir) = above(root, file, &["build.sbt"]) {
-        return (!sbt_forks(&dir)).then_some(JvmBuild::Sbt);
+    if above(root, file, &["build.sbt"]).is_some() {
+        return Some(JvmBuild::Sbt);
     }
     if above(root, file, &["build.mill", "build.sc"]).is_some() {
         return None;
@@ -1125,13 +1185,17 @@ fn jvm_debug_build(root: &Path, file: &Path) -> Option<JvmBuild> {
     above(root, file, &["pom.xml"]).map(|_| JvmBuild::Maven)
 }
 
-/// Whether the sbt build in `dir` forks its tests or programs (`fork :=
-/// true`): they run in a JVM it starts, where the agent on its own is not.
-fn sbt_forks(dir: &Path) -> bool {
-    crate::statefile::read_capped(&dir.join("build.sbt"), 1 << 20).is_some_and(|text| {
-        text.lines()
-            .any(|l| l.contains("fork") && l.contains(":= true"))
-    })
+/// sbt's commands that run `task`'s JVM (`Test`, `run`) forked, with the
+/// debugger's agent on it alone — every project's (`ThisBuild`): sbt's
+/// own JVM, and the one its launcher starts first to ask Java for its
+/// runtime, are not the program's (the debugger attached to that one, it
+/// ended, and the program's waited for a debugger that never came).
+fn sbt_forked_under(task: &str, agent: &str) -> [String; 2] {
+    // Commands to sbt, not words to the reader: built, not formatted.
+    [
+        ["set ThisBuild / ", task, " / fork := true"].concat(),
+        ["set ThisBuild / ", task, " / javaOptions += \"", agent, "\""].concat(),
+    ]
 }
 
 /// The debugger a program of `lang` in `file` is debugged under, run as
@@ -1155,10 +1219,7 @@ pub fn main_debugger(root: &Path, file: &Path, lang: &str) -> Option<&'static st
             ],
         )
         .map(|_| "java"),
-        "scala" => match above(root, file, &["build.sbt"]) {
-            Some(dir) => (!sbt_forks(&dir)).then_some("java"),
-            None => Some("java"),
-        },
+        "scala" => Some("java"),
         "elixir" => Some("elixir"),
         // A .NET program, built and run under netcoredbg; a Zig file on
         // its own, built for the session under lldb (a build.zig's
@@ -1258,7 +1319,11 @@ pub fn debug_main(
                 .file_stem()
                 .is_some_and(|n| n.to_string_lossy() == "sbt");
             match sbt {
-                true => args.insert(0, format!("-J{agent}")),
+                true => {
+                    for (i, set) in sbt_forked_under("run", &agent).into_iter().enumerate() {
+                        args.insert(i, set);
+                    }
+                }
                 false => args.extend(["--java-opt".to_string(), agent]),
             }
             let mut debug = jvm(run.program, args, run.cwd);
@@ -1573,12 +1638,14 @@ pub fn debug_test(
                     args.push(format!("-Dmaven.surefire.debug={agent}"));
                     agent_port = Some(port);
                 }
-                // sbt's own JVM, on a port of Clew's too: what the launcher
-                // prints is not counted on.
+                // sbt's tests in a JVM of their own, on a port of Clew's
+                // too: what sbt prints is not counted on.
                 JvmBuild::Sbt => {
                     let port = free_port()?;
                     let agent = JDWP_AGENT.replace("127.0.0.1:0", &format!("127.0.0.1:{port}"));
-                    args.insert(0, format!("-J{agent}"));
+                    for (i, set) in sbt_forked_under("Test", &agent).into_iter().enumerate() {
+                        args.insert(i, set);
+                    }
                     agent_port = Some(port);
                 }
             }
@@ -1628,22 +1695,37 @@ fn free_port() -> Result<u16, String> {
         .map_err(|e| format!("no free port for the debugger: {e}"))
 }
 
+/// Gradle's init script that has its test tasks say each test's outcome
+/// as it ends (`CartTest > adds() PASSED`), a failure's assertion and stack
+/// in full, and what a test prints — written once to Clew's data
+/// directory.
+fn gradle_test_script() -> Result<PathBuf, String> {
+    const SCRIPT: &str = "// Written by Clew to run tests: each test's outcome said as it ends.\ngradle.allprojects { project ->\n    project.tasks.withType(Test).configureEach { task ->\n        task.testLogging {\n            events 'passed', 'skipped', 'failed'\n            exceptionFormat 'full'\n            showStandardStreams true\n        }\n    }\n}\n";
+    write_gradle_script("clew-tests.gradle", SCRIPT)
+}
+
+/// A Gradle init script of Clew's, written to its data directory where it
+/// is not there already as it should be.
+fn write_gradle_script(name: &str, script: &str) -> Result<PathBuf, String> {
+    let dir = crate::lsp::store::data_root()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("debug-adapters")
+        .join("gradle");
+    let path = dir.join(name);
+    if std::fs::read_to_string(&path).ok().as_deref() != Some(script) {
+        std::fs::create_dir_all(&dir)
+            .and_then(|()| std::fs::write(&path, script))
+            .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    }
+    Ok(path)
+}
+
 /// Gradle's init script that starts each test JVM, and an application's
 /// `run`, under the debugging agent — one JVM at a time — written once to
 /// Clew's data directory.
 fn gradle_debug_script() -> Result<PathBuf, String> {
     const SCRIPT: &str = "// Written by Clew to debug a test or a program: its JVM starts under\n// the debugging agent, held until the debugger attaches.\ngradle.allprojects { project ->\n    project.tasks.withType(Test).configureEach { task ->\n        task.jvmArgs '-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=127.0.0.1:0'\n        task.maxParallelForks = 1\n    }\n    project.tasks.withType(JavaExec).configureEach { task ->\n        if (task.name == 'run') {\n            task.jvmArgs '-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=127.0.0.1:0'\n        }\n    }\n}\n";
-    let dir = crate::lsp::store::data_root()
-        .unwrap_or_else(std::env::temp_dir)
-        .join("debug-adapters")
-        .join("gradle");
-    let path = dir.join("clew-debug.gradle");
-    if std::fs::read_to_string(&path).ok().as_deref() != Some(SCRIPT) {
-        std::fs::create_dir_all(&dir)
-            .and_then(|()| std::fs::write(&path, SCRIPT))
-            .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
-    }
-    Ok(path)
+    write_gradle_script("clew-debug.gradle", SCRIPT)
 }
 
 /// A CTest test debugged: the program CTest runs for it and its arguments
@@ -2120,7 +2202,15 @@ pub fn main_command(
         }
         "scala" => {
             if let Some(dir) = above(root, file, &["build.sbt"]) {
-                return Ok(command(tool("sbt")?, vec!["run".into()], &dir));
+                // The file's own program (`runMain shop.Main`): `run` asks
+                // which, of a build with more than one, and has no one to
+                // answer.
+                let source = crate::statefile::read_capped(file, 4 << 20).unwrap_or_default();
+                let run = match scala_main_class(&source) {
+                    Some(class) => format!("runMain {class}"),
+                    None => "run".into(),
+                };
+                return Ok(command(tool("sbt")?, vec![run], &dir));
             }
             let dir = file.parent().unwrap_or(root);
             let cli = tool("scala-cli").or_else(|_| tool("scala"))?;
@@ -2293,7 +2383,13 @@ fn jvm_test_name(source: &str, runnable: &Runnable) -> Option<(String, Option<St
         {
             (runnable.name.clone(), None)
         }
-        _ => match runnable.scopes.first() {
+        // A JUnit test's scope is its class; a `describe`'s is no class,
+        // and the test's class is the one around it.
+        _ => match runnable.scopes.first().filter(|scope| {
+            lines
+                .iter()
+                .any(|l| class_name(l).as_deref() == Some(scope.as_str()))
+        }) {
             Some(class) if !is_class_line(&lines, runnable.line) => {
                 (class.clone(), Some(runnable.name.clone()))
             }
@@ -2308,6 +2404,57 @@ fn jvm_test_name(source: &str, runnable: &Runnable) -> Option<(String, Option<St
         _ => class,
     };
     Some((full, method))
+}
+
+/// The class a Scala file's program runs as, by its full name: the
+/// object with a `def main(args` or that `extends App`, or a `@main`
+/// method's own name (Scala 3 makes a class of it), in the file's package.
+fn scala_main_class(source: &str) -> Option<String> {
+    let lines: Vec<&str> = source.lines().collect();
+    let package: Vec<String> = lines
+        .iter()
+        .filter_map(|l| l.trim().strip_prefix("package "))
+        .map(|p| p.trim().trim_end_matches(':').trim().to_string())
+        .collect();
+    let at = main_line("scala", &lines)?;
+    let line = lines[at - 1].trim();
+    let name = if let Some(rest) = line
+        .strip_prefix("@main def ")
+        .or_else(|| line.strip_prefix("@main\tdef "))
+    {
+        rest.split(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .next()?
+            .to_string()
+    } else if line.starts_with("object ") {
+        class_name(line)?
+    } else {
+        // `def main(args…` in the object around it.
+        enclosing_class(&lines, at)?
+    };
+    let package = package.join(".");
+    Some(match package.is_empty() {
+        true => name,
+        false => format!("{package}.{name}"),
+    })
+}
+
+/// The test classes of a JVM file, by their full names: what running the
+/// file's tests runs.
+fn file_test_classes(lang: &str, source: &str) -> Vec<String> {
+    let mut classes: Vec<String> = Vec::new();
+    for runnable in tests(lang, "", source) {
+        if runnable.kind == RunnableKind::Main
+            || (runnable.kind == RunnableKind::Tests && runnable.name.is_empty())
+        {
+            continue;
+        }
+        if let Some((class, _)) = jvm_test_name(source, &runnable)
+            && !classes.contains(&class)
+        {
+            classes.push(class);
+        }
+    }
+    classes
 }
 
 /// Whether line `line1` declares a class or an object (a JUnit class's
@@ -2524,7 +2671,7 @@ mod tests {
             .iter()
             .map(|r| r.name.clone())
             .collect();
-        assert_eq!(got, ["", "adds"]);
+        assert_eq!(got, ["", "CartSuite", "adds"], "the suite, a group");
     }
 
     /// Each test runs as its project runs tests: Go's package by its
@@ -2607,7 +2754,9 @@ mod tests {
                 "cleanTest".into(),
                 "test".into(),
                 "--tests".into(),
-                "com.acme.CartTest.adds".into()
+                "com.acme.CartTest.adds".into(),
+                "--init-script".into(),
+                gradle_test_script().unwrap().to_string_lossy().into_owned()
             ]
         );
         write("mvn/pom.xml", "<project/>\n");
@@ -2672,7 +2821,15 @@ mod tests {
             "package acme\n\nclass CartSuite extends munit.FunSuite {\n  test(\"adds\") {\n  }\n}\n",
         );
         let c = run("scala", &scala, 4);
-        assert_eq!(c.args, ["testOnly acme.CartSuite"], "MUnit's: its class");
+        assert_eq!(
+            c.args,
+            ["testOnly acme.CartSuite -- \"acme.CartSuite.adds\""],
+            "MUnit's: by its full name"
+        );
+        let c = run("scala", &scala, 3);
+        assert_eq!(c.args, ["testOnly acme.CartSuite"], "the suite: its class");
+        let c = run("scala", &scala, 1);
+        assert_eq!(c.args, ["testOnly acme.CartSuite"], "the file: its suites");
         let scalatest = write(
             "sc/src/test/scala/acme/CartSpec.scala",
             "package acme\n\nimport org.scalatest.funsuite.AnyFunSuite\n\nclass CartSpec extends AnyFunSuite {\n  test(\"adds\") {\n  }\n}\n",
@@ -3057,10 +3214,12 @@ mod tests {
                 .contains(JDWP_AGENT)
         );
         assert_eq!(
-            d.args[d.args.len() - 4..],
+            d.args[d.args.len() - 6..],
             [
                 "--tests".to_string(),
                 "acme.CartTest.adds".into(),
+                "--init-script".into(),
+                gradle_test_script().unwrap().to_string_lossy().into_owned(),
                 "--init-script".into(),
                 script.to_string_lossy().into_owned()
             ]
@@ -3101,17 +3260,20 @@ mod tests {
         );
         let d = debug("scala", &scala, 4);
         let port = d.launch["port"].as_u64().unwrap();
+        let agent = JDWP_AGENT.replace("127.0.0.1:0", &format!("127.0.0.1:{port}"));
         assert_eq!(
-            d.args[0],
-            format!(
-                "-J{}",
-                JDWP_AGENT.replace("127.0.0.1:0", &format!("127.0.0.1:{port}"))
-            )
+            d.args[..2],
+            [
+                "set ThisBuild / Test / fork := true".to_string(),
+                format!("set ThisBuild / Test / javaOptions += \"{agent}\""),
+            ],
+            "the tests' JVM forked, the agent on it alone"
         );
-        // Forked, its tests run in a JVM the agent is not in.
+        assert!(d.args[2].starts_with("testOnly acme.CartSuite"));
+        // A build that forks already is debugged the same way.
         write("fk/build.sbt", "Test / fork := true\n");
         let forked = write("fk/src/test/scala/acme/CartSuite.scala", "");
-        assert_eq!(test_debugger(&root, &forked, "scala"), None);
+        assert_eq!(test_debugger(&root, &forked, "scala"), Some("java"));
 
         assert_eq!(test_debugger(&root, &go, "haskell"), None);
 
@@ -3274,7 +3436,26 @@ mod tests {
             JDWP_AGENT.replace("127.0.0.1:0", &format!("127.0.0.1:{port}"))
         };
         let d = debug("scala", &sc);
-        assert_eq!(command(&d)[1..], [format!("-J{}", agent(&d)), "run".into()]);
+        assert_eq!(
+            command(&d)[1..],
+            [
+                "set ThisBuild / run / fork := true".to_string(),
+                format!("set ThisBuild / run / javaOptions += \"{}\"", agent(&d)),
+                "run".into()
+            ]
+        );
+        assert_eq!(
+            scala_main_class("package shop\n\nobject Main:\n  def main(args: Array[String]): Unit =\n    println(1)\n").as_deref(),
+            Some("shop.Main")
+        );
+        assert_eq!(
+            scala_main_class("package a\npackage b\n\n@main def hello(): Unit = ()\n").as_deref(),
+            Some("a.b.hello")
+        );
+        assert_eq!(
+            scala_main_class("object Shop extends App {\n  println(1)\n}\n").as_deref(),
+            Some("Shop")
+        );
         let alone = write("cli/hello.scala", "@main def hi() = ()\n");
         let d = debug("scala", &alone);
         let words = command(&d);
@@ -3284,7 +3465,7 @@ mod tests {
         );
         write("fk/build.sbt", "run / fork := true\n");
         let forked = write("fk/src/main/scala/Main.scala", "object Main\n");
-        assert_eq!(main_debugger(&root, &forked, "scala"), None);
+        assert_eq!(main_debugger(&root, &forked, "scala"), Some("java"));
 
         write(
             "ex/mix.exs",
