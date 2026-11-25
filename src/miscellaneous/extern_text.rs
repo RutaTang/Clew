@@ -43,14 +43,13 @@ pub(crate) const VOICE_MODELS: &[&str] = &[
 /// what it is for.
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) const SPEECH_MODELS: &[&str] = &[
-    tr_noop!("Qwen3-TTS"),
-    tr_noop!(
-        "Natural-sounding speech that plays as it's generated, in English, Chinese, Japanese, Korean and six more languages."
-    ),
-    tr_noop!("Native to each language"),
     tr_noop!("Supertonic 3"),
     tr_noop!(
-        "A smaller download for 31 languages, including English, French, Korean, Japanese, Dutch and Arabic, but not Chinese. If Qwen3-TTS is also downloaded, it reads the languages they share."
+        "A small download for 31 languages, including English, French, Korean, Japanese, Dutch and Arabic. Chinese is read by Kokoro Chinese."
+    ),
+    tr_noop!("Kokoro Chinese"),
+    tr_noop!(
+        "Natural Chinese speech, with the English words in it read as English, in ten voices. Its first words play within a second or two."
     ),
     // The wake phrase's model (`wake::MODEL`).
     tr_noop!("Keyword Spotter"),

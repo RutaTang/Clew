@@ -7,16 +7,15 @@
 //! Two families; a language is read by the first of them here that speaks
 //! it ([`for_language_among`]):
 //!
-//! - **Qwen3-TTS** (Qwen, Apache-2.0), the 0.6B model with voices of its
-//!   own: speech as a person says it — English, Chinese, Japanese, Korean,
-//!   German, French, Spanish, Portuguese, Italian and Russian — streamed,
-//!   heard while the rest of the sentence is still being made. As Quick
-//!   Inference publishes it in ONNX, its weights quantized.
-//! - **Supertonic 3** (Supertone, OpenRAIL-M), a smaller download for the
+//! - **Supertonic 3** (Supertone, OpenRAIL-M), a small download for the
 //!   thirty-one languages it speaks — English, Korean and Japanese among
 //!   them, and Dutch, Polish, Turkish, Arabic, Hindi and more — read from
-//!   their characters; as sherpa-onnx packs it, int8. Where Qwen3-TTS is
-//!   here too, the languages both speak are Qwen3-TTS's.
+//!   their characters; as sherpa-onnx packs it, int8.
+//! - **Kokoro Chinese** (hexgrad's Kokoro v1.1-zh, Apache-2.0), Chinese as
+//!   it is spoken, the English words in it read as English, in voices of
+//!   its own; a clause at a time, the first heard while the rest is still
+//!   being made. As sherpa-onnx packs it, its full-precision weights: the
+//!   int8 ones are three times slower on a CPU.
 
 use std::fs;
 use std::io;
@@ -56,7 +55,7 @@ pub struct VoiceModel {
     pub id: &'static str,
     /// What the settings call it.
     pub name: &'static str,
-    /// How `clew-speak` loads it: `qwen3` or `supertonic`.
+    /// How `clew-speak` loads it: `supertonic` or `kokoro`.
     pub family: &'static str,
     /// The Hugging Face repository it is fetched from, and the revision.
     pub repo: &'static str,
@@ -130,118 +129,25 @@ const SUPERTONIC_VOICES: &[Voice] = &[
     Voice { name: "M5", id: 9 },
 ];
 
-/// Qwen3-TTS's voices: the first, a voice of each language's own — Ryan's
-/// for English and the European languages, Vivian's for Chinese, Ono
-/// Anna's for Japanese, Sohee's for Korean — then each by name, in every
-/// language (`clew-speak`'s `qwen3` numbers them so).
-const QWEN3_VOICES: &[Voice] = &[
-    Voice {
-        name: "Native to each language",
-        id: 0,
-    },
-    Voice {
-        name: "Ryan",
-        id: 1,
-    },
-    Voice {
-        name: "Aiden",
-        id: 2,
-    },
-    Voice {
-        name: "Vivian",
-        id: 3,
-    },
-    Voice {
-        name: "Serena",
-        id: 4,
-    },
-    Voice {
-        name: "Uncle Fu",
-        id: 5,
-    },
-    Voice {
-        name: "Ono Anna",
-        id: 6,
-    },
-    Voice {
-        name: "Sohee",
-        id: 7,
-    },
+/// Kokoro Chinese's voices: of its hundred, five women's and five men's
+/// that a speech recogniser took down word for word reading a passage of
+/// Chinese, at the briskest — the most natural — pace of those. Numbered
+/// as the model numbers its speakers: `zf_021` is number 14, `zm_012` 62.
+const KOKORO_ZH_VOICES: &[Voice] = &[
+    Voice { name: "F1", id: 14 },
+    Voice { name: "F2", id: 3 },
+    Voice { name: "F3", id: 19 },
+    Voice { name: "F4", id: 44 },
+    Voice { name: "F5", id: 36 },
+    Voice { name: "M1", id: 62 },
+    Voice { name: "M2", id: 60 },
+    Voice { name: "M3", id: 58 },
+    Voice { name: "M4", id: 59 },
+    Voice { name: "M5", id: 81 },
 ];
 
 /// Every voice model Clew offers.
 pub const VOICE_MODELS: &[VoiceModel] = &[
-    VoiceModel {
-        id: "qwen3-tts",
-        name: "Qwen3-TTS",
-        family: "qwen3",
-        repo: "danyalmalik/Qwen3-TTS-12Hz-0.6B-CustomVoice-ONNX-WebGPU",
-        revision: "ccdd14012062ee383dda616d7799cc955924af8a",
-        files: &[
-            VoiceFile {
-                path: "LICENSE",
-                bytes: 11357,
-                sha256: "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
-                from: None,
-            },
-            VoiceFile {
-                path: "talker/model.onnx",
-                bytes: 276512,
-                sha256: "2edc5aed01da638848a17123ee0673782d6d5a406339969e4198e555a2ab8ff3",
-                from: None,
-            },
-            VoiceFile {
-                path: "talker/model.onnx.data",
-                bytes: 301203456,
-                sha256: "026537338baf696232457b7e624a9c8794f16caa358a5a8cc88d92f61a091e3c",
-                from: None,
-            },
-            VoiceFile {
-                path: "code_predictor/model.onnx",
-                bytes: 56354,
-                sha256: "6ac4c6c4cc831ff024015537d1ae16c0d3e72b17e4ef512c4c5924a26a7b7a4c",
-                from: None,
-            },
-            VoiceFile {
-                path: "code_predictor/model.onnx.data",
-                bytes: 157483008,
-                sha256: "35284527836a5c52836f58d4fe0e140eb3a9a442cbeed44cd8d494c5eb056bf8",
-                from: None,
-            },
-            VoiceFile {
-                path: "text_embed_q4.onnx",
-                bytes: 97239399,
-                sha256: "6a0d7fa5c29e1a60ccce507a92827ddb432ddf49dfea8c166a886c5c7d138df9",
-                from: None,
-            },
-            VoiceFile {
-                path: "codec_embed_q4.onnx",
-                bytes: 21627240,
-                sha256: "e5f424a00c8c565f1d660f6dffd69ff3be9bceeacdd55b5c0eb936bd72958cd5",
-                from: None,
-            },
-            VoiceFile {
-                path: "tokenizer.json",
-                bytes: 11423986,
-                sha256: "09267689b8362020b9763b65dd5be7e086b31e28d72e02837a9e781de9a91bc7",
-                from: None,
-            },
-            VoiceFile {
-                path: "tok_decoder_q4c8.onnx",
-                bytes: 129800340,
-                sha256: "a285e311d00e248ac3f2d1dfd80d6e181218e37e852545bce162624e1fd9214d",
-                from: Some(Source {
-                    repo: "danyalmalik/Qwen3-TTS-Tokenizer-12Hz-ONNX-WebGPU",
-                    revision: "b2aa169358f3ba36110a9c9ce7d5a75209e39b7f",
-                }),
-            },
-        ],
-        languages: &["en", "zh", "ja", "ko", "de", "fr", "es", "pt", "it", "ru"],
-        voices: QWEN3_VOICES,
-        default_voice: 0,
-        about: "Natural-sounding speech that plays as it's generated, in English, Chinese, Japanese, Korean and six more languages.",
-        license: "Apache-2.0",
-    },
     VoiceModel {
         id: "supertonic-3",
         name: "Supertonic 3",
@@ -305,8 +211,106 @@ pub const VOICE_MODELS: &[VoiceModel] = &[
         ],
         voices: SUPERTONIC_VOICES,
         default_voice: 0,
-        about: "A smaller download for 31 languages, including English, French, Korean, Japanese, Dutch and Arabic, but not Chinese. If Qwen3-TTS is also downloaded, it reads the languages they share.",
+        about: "A small download for 31 languages, including English, French, Korean, Japanese, Dutch and Arabic. Chinese is read by Kokoro Chinese.",
         license: "OpenRAIL-M",
+    },
+    VoiceModel {
+        id: "kokoro-v1.1-zh",
+        name: "Kokoro Chinese",
+        family: "kokoro",
+        repo: "csukuangfj/kokoro-multi-lang-v1_1",
+        revision: "423bfb9ccd6a66115a76602a9630ffea265ae176",
+        files: &[
+            VoiceFile {
+                path: "LICENSE",
+                bytes: 11358,
+                sha256: "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+                from: None,
+            },
+            VoiceFile {
+                path: "model.onnx",
+                bytes: 325561476,
+                sha256: "99db0bc8fd0c5033d249fe922db16768b71b4a6b26cfd93d206fbf66c76efb5f",
+                from: None,
+            },
+            VoiceFile {
+                path: "voices.bin",
+                bytes: 53790720,
+                sha256: "e64a5a581d8c2a350d848f51c3121657cd83aa07ed6109172177345874a7244c",
+                from: None,
+            },
+            VoiceFile {
+                path: "tokens.txt",
+                bytes: 1111,
+                sha256: "931ab2df2400cd65d580a22402024c2347ced8ae9ea300e545144b1aacc48e14",
+                from: None,
+            },
+            VoiceFile {
+                path: "lexicon-zh.txt",
+                bytes: 2120131,
+                sha256: "fea060803db3e59193987f1a3436f56917bda09f3b3595b6588e46ae60cebf93",
+                from: None,
+            },
+            VoiceFile {
+                path: "lexicon-us-en.txt",
+                bytes: 5956885,
+                sha256: "7daaab53a181be9885b853a8582bf1838186317e5dadacbcef9c426d6fa0da14",
+                from: None,
+            },
+            VoiceFile {
+                path: "date-zh.fst",
+                bytes: 59154,
+                sha256: "eb8aa079ae3cb81d8f4404992f39d61a0cb990947512b5b8d1e54d1f6980e718",
+                from: None,
+            },
+            VoiceFile {
+                path: "number-zh.fst",
+                bytes: 64482,
+                sha256: "743f402181fcfebf76cc2f0546b71fa26476e626fbe4e460fb7b4c3a7a8bd5bd",
+                from: None,
+            },
+            VoiceFile {
+                path: "phone-zh.fst",
+                bytes: 88630,
+                sha256: "1ac2b6fa56b1442320c4de7db08353bab8963a2b57f365eebcdd3a2d3562f8d7",
+                from: None,
+            },
+            VoiceFile {
+                path: "dict/jieba.dict.utf8",
+                bytes: 5071204,
+                sha256: "3043b77068e09c9904f27cad82f12b6ebe9dbdb5aeff3b25e45ab7f9c1122b55",
+                from: None,
+            },
+            VoiceFile {
+                path: "dict/hmm_model.utf8",
+                bytes: 519739,
+                sha256: "f17790586ac86dd048c8adffed052c4bd2b28ed0682972c1275e59040c0589a7",
+                from: None,
+            },
+            VoiceFile {
+                path: "dict/user.dict.utf8",
+                bytes: 829194,
+                sha256: "5faabcd0c52adf512de77fd7eee3d556da8c98b50f493b47c66a981b3a24959c",
+                from: None,
+            },
+            VoiceFile {
+                path: "dict/idf.utf8",
+                bytes: 5998717,
+                sha256: "dbd1e03d72b2263cc8d84a4304ed77677eed9e7deaf43a1a5133bbba9733b535",
+                from: None,
+            },
+            VoiceFile {
+                path: "dict/stop_words.utf8",
+                bytes: 8974,
+                sha256: "b788b8a939d2e2fe079abd579ea98f12f9fb84370bfd0dddd81bb9381f7ab42c",
+                from: None,
+            },
+        ],
+        languages: &["zh"],
+        voices: KOKORO_ZH_VOICES,
+        default_voice: 14,
+        about: "Natural Chinese speech, with the English words in it read as English, in ten voices. Its first words play within a second or two.",
+        license: "Apache-2.0",
     },
 ];
 
@@ -321,9 +325,8 @@ pub fn for_language(lang: &str) -> Option<&'static VoiceModel> {
     VOICE_MODELS.iter().find(|m| m.speaks(lang))
 }
 
-/// The model that reads `lang` of those `here` says can be used: the best
-/// of them that speaks it — Qwen3-TTS before Supertonic 3, which speaks
-/// most of its languages too.
+/// The model that reads `lang` of those `here` says can be used: the
+/// first of them that speaks it.
 pub fn for_language_among(
     lang: &str,
     here: impl Fn(&VoiceModel) -> bool,
@@ -388,7 +391,12 @@ pub fn remove(store: &Store, model: &VoiceModel) -> io::Result<()> {
 /// are removed. Only these — a folder of `speech/` this build has never
 /// heard of may be a newer Clew's, sharing the data folder (side by side,
 /// or after a downgrade), and is left as it is.
-const RETIRED: &[&str] = &["kokoro-zh"];
+const RETIRED: &[&str] = &[
+    "kokoro-zh",
+    // Speech as a person says it, but a minute in the making on a laptop's
+    // CPU: Chinese is Kokoro Chinese's now, the rest Supertonic 3's.
+    "qwen3-tts",
+];
 
 /// Remove what a voice Clew no longer offers left in `store` — a folder of
 /// its `speech/` named among the retired voices (`RETIRED`) — and say how
@@ -448,48 +456,57 @@ mod tests {
         }
     }
 
-    /// A language is read by the best voice that speaks it: Clew's own five
-    /// by the one that streams; English, Korean and Japanese by Supertonic
-    /// too, when it is the one here — as before Qwen3-TTS came; the rest by
-    /// Supertonic alone.
+    /// A language is read by the voice that speaks it: Chinese, Chinese
+    /// written in either script too, by Kokoro Chinese; the rest by
+    /// Supertonic 3 — so a reader with Supertonic alone hears all but
+    /// Chinese, and one with Kokoro Chinese alone, Chinese alone.
     #[test]
-    fn a_language_is_read_by_the_best_voice_here() {
-        let qwen = find("qwen3-tts").unwrap();
-        let supertonic = find("supertonic-3").unwrap();
+    fn a_language_is_read_by_the_voice_that_speaks_it() {
+        for lang in ["zh", "zh-TW", "zh_CN"] {
+            assert_eq!(
+                for_language(lang).map(|m| m.id),
+                Some("kokoro-v1.1-zh"),
+                "{lang}"
+            );
+        }
         for lang in [
-            "en", "zh", "ja", "ko", "fr-CA", "zh-TW", "de", "es", "pt", "it", "ru",
+            "en", "en-GB", "ja", "ko", "fr-CA", "de", "es", "pt", "it", "ru", "nl", "tr",
         ] {
             assert_eq!(
                 for_language(lang).map(|m| m.id),
-                Some("qwen3-tts"),
+                Some("supertonic-3"),
                 "{lang}"
             );
             assert_eq!(
                 for_language_among(lang, |_| true).map(|m| m.id),
-                Some("qwen3-tts"),
-                "{lang}"
-            );
-        }
-        // Only Supertonic here: it reads what it speaks; Chinese, nothing.
-        let only_supertonic = |m: &VoiceModel| m.id == "supertonic-3";
-        for lang in ["en", "en-GB", "ko", "ja", "fr", "de", "ru", "nl", "tr"] {
-            assert_eq!(
-                for_language_among(lang, only_supertonic).map(|m| m.id),
                 Some("supertonic-3"),
                 "{lang}"
             );
         }
+        let only_supertonic = |m: &VoiceModel| m.id == "supertonic-3";
         assert_eq!(for_language_among("zh", only_supertonic), None);
+        let only_kokoro = |m: &VoiceModel| m.id == "kokoro-v1.1-zh";
+        assert_eq!(
+            for_language_among("zh", only_kokoro).map(|m| m.id),
+            Some("kokoro-v1.1-zh")
+        );
+        assert_eq!(for_language_among("en", only_kokoro), None);
         assert_eq!(for_language_among("en", |_| false), None);
-        // The rest are Supertonic's alone.
-        assert_eq!(for_language("nl").map(|m| m.id), Some("supertonic-3"));
-        assert_eq!(for_language("tr").map(|m| m.id), Some("supertonic-3"));
         assert_eq!(for_language("xx"), None);
-        // Every language Qwen3-TTS speaks but Chinese, Supertonic speaks too:
-        // a reader with Supertonic alone hears all but Chinese.
-        for lang in qwen.languages.iter().filter(|l| **l != "zh") {
-            assert!(supertonic.speaks(lang), "{lang}");
-        }
+    }
+
+    /// Kokoro Chinese's voices are the model's own speakers — of its 103,
+    /// numbered from 0, the Chinese ones from 3 — five women's, then five
+    /// men's, each once.
+    #[test]
+    fn kokoro_voices_are_its_chinese_speakers() {
+        let ids: Vec<i32> = KOKORO_ZH_VOICES.iter().map(|v| v.id).collect();
+        assert!(ids[..5].iter().all(|id| (3..58).contains(id)), "{ids:?}");
+        assert!(ids[5..].iter().all(|id| (58..103).contains(id)), "{ids:?}");
+        let mut unique = ids.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), ids.len());
     }
 
     /// A voice Clew no longer offers is removed, files and all; the ones
@@ -508,14 +525,21 @@ mod tests {
         fs::create_dir_all(speech.join("kokoro-zh").join("dict")).unwrap();
         fs::write(speech.join("kokoro-zh").join("voices.bin"), b"x").unwrap();
         fs::write(speech.join("notes.txt"), b"x").unwrap();
+        fs::create_dir_all(speech.join("qwen3-tts").join("talker")).unwrap();
+        fs::write(
+            speech.join("qwen3-tts").join("talker").join("model.onnx"),
+            b"x",
+        )
+        .unwrap();
         fs::create_dir_all(speech.join("qwen4-tts")).unwrap();
         fs::write(speech.join("qwen4-tts").join("model.onnx"), b"x").unwrap();
-        assert_eq!(remove_retired(&store), 1);
+        assert_eq!(remove_retired(&store), 2);
         assert!(
             speech.join("qwen4-tts").join("model.onnx").is_file(),
             "a newer Clew's voice is left"
         );
         assert!(!speech.join("kokoro-zh").exists());
+        assert!(!speech.join("qwen3-tts").exists());
         assert!(speech.join(VOICE_MODELS[0].id).is_dir());
         assert!(speech.join(VOICE_MODELS[1].id).is_dir());
         assert!(speech.join("notes.txt").is_file());

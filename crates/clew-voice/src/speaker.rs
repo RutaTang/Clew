@@ -611,7 +611,7 @@ mod tests {
     }
 
     /// A real `clew-speak` and a real model, when the test is pointed at
-    /// them — Qwen3-TTS, or the voice `CLEW_SPEAK_VOICE` names: what it
+    /// them — Supertonic 3, or the voice `CLEW_SPEAK_VOICE` names: what it
     /// says is as long as speech of it is. Not pointed at them, it says so
     /// and passes.
     #[test]

@@ -13,21 +13,17 @@
 //! writes answers to stdout, one JSON object per line:
 //!
 //! ```text
-//! clew-speak supertonic <model dir>     (or: qwen3 <model dir>)
+//! clew-speak supertonic <model dir>     (or: kokoro <model dir>)
 //! → {"ready":{"rate":44100,"voices":10}}
 //! ← {"say":{"id":1,"text":"Hello.","lang":"en","voice":0,"speed":1.0}}
-//! → {"audio":{"id":1,"pcm":"<base64: 16-bit little-endian samples>"}}
-//! ```
-//!
-//! A voice that streams ([`qwen3`]) answers a sentence in parts, as they
-//! are made, each `"more":true` — then the last, `"more"` left out (its
-//! `pcm` may be empty):
-//!
-//! ```text
-//! → {"audio":{"id":1,"pcm":"…","more":true}}
-//! → {"audio":{"id":1,"pcm":"…","more":true}}
+//! → {"audio":{"id":1,"pcm":"<base64: 16-bit little-endian samples>","more":true}}
 //! → {"audio":{"id":1,"pcm":""}}
 //! ```
+//!
+//! A sentence is answered in parts, as the model makes them — a clause of
+//! Chinese at a time, so its first words play while the rest is still
+//! being made — each `"more":true`, then the last with `"more"` left out
+//! (its `pcm` may be empty).
 //!
 //! It also makes embeddings (`clew-speak embed <model dir>`, [`embed`]),
 //! hears when a speaker has finished (`clew-speak turn <model file>`,
@@ -39,21 +35,20 @@
 //! when stdin closes.
 //!
 //! What is no longer wanted — the reader stopped it — is said
-//! `{"cancel":{"id":1}}`: a voice that streams stops making that sentence
-//! at its next part (answered `failed`), and one not yet begun is passed
-//! over. The next sentence waits for none of it.
+//! `{"cancel":{"id":1}}`: the sentence being made stops at its next part
+//! (answered `failed`), and one not yet begun is passed over. The next
+//! sentence waits for none of it.
 
 mod embed;
-mod graph;
 mod listen;
 mod mel;
-mod qwen3;
 mod runtime;
-mod stretch;
 mod turn;
 
+use std::cell::{Cell, RefCell};
 use std::io::{BufRead, Write};
 use std::path::Path;
+use std::rc::Rc;
 
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
@@ -61,27 +56,21 @@ use serde::{Deserialize, Serialize};
 /// A model family, and the files of its folder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Family {
-    /// Supertonic: characters in, any of its languages; a sentence made
-    /// whole.
+    /// Supertonic: characters in, any of its languages.
     Supertonic,
-    /// Qwen3-TTS: speech as a person says it, streamed ([`qwen3`]).
-    Qwen3,
+    /// Kokoro v1.1-zh: Chinese, the English words in it too, read through
+    /// its lexicons; a clause at a time.
+    Kokoro,
 }
 
 impl Family {
     fn parse(name: &str) -> Option<Family> {
         match name {
             "supertonic" => Some(Family::Supertonic),
-            "qwen3" => Some(Family::Qwen3),
+            "kokoro" => Some(Family::Kokoro),
             _ => None,
         }
     }
-}
-
-/// A model loaded.
-enum Voice {
-    Sherpa(sherpa_onnx::OfflineTts),
-    Qwen3(Box<qwen3::Qwen3>),
 }
 
 /// One request: say `text`.
@@ -215,27 +204,21 @@ fn main() {
         std::process::exit(turn::run(Path::new(&file)));
     }
     let (Some(family), Some(dir)) = (first.as_deref().and_then(Family::parse), args.next()) else {
-        eprintln!("usage: clew-speak supertonic|qwen3 <model dir>");
+        eprintln!("usage: clew-speak supertonic|kokoro <model dir>");
         std::process::exit(2);
     };
-    let stdout = std::io::stdout();
-    let mut out = stdout.lock();
-    let loaded = match family {
-        Family::Qwen3 => qwen3::Qwen3::load(Path::new(&dir)).map(|q| Voice::Qwen3(Box::new(q))),
-        Family::Supertonic => load(family, Path::new(&dir)).map(Voice::Sherpa),
-    };
-    let mut voice = match loaded {
-        Ok(voice) => voice,
+    let tts = match load(family, Path::new(&dir)) {
+        Ok(tts) => tts,
         Err(e) => {
-            let _ = send(&mut out, &Answer::Error(e));
+            let _ = send(&Answer::Error(e));
             std::process::exit(1);
         }
     };
-    let (rate, voices) = match &voice {
-        Voice::Sherpa(tts) => (tts.sample_rate(), tts.num_speakers().max(1)),
-        Voice::Qwen3(_) => (qwen3::RATE, qwen3::VOICES),
+    let ready = Answer::Ready {
+        rate: tts.sample_rate(),
+        voices: tts.num_speakers().max(1),
     };
-    if send(&mut out, &Answer::Ready { rate, voices }).is_err() {
+    if send(&ready).is_err() {
         return;
     }
     let (sender, lines) = std::sync::mpsc::channel();
@@ -247,8 +230,12 @@ fn main() {
             }
         }
     });
-    let mut inbox = Inbox::new(lines);
-    while let Some(line) = inbox.next() {
+    // Shared with the parts' callback, which hears a cancel between them.
+    let inbox = Rc::new(RefCell::new(Inbox::new(lines)));
+    loop {
+        let Some(line) = inbox.borrow_mut().next() else {
+            break;
+        };
         if line.trim().is_empty() {
             continue;
         }
@@ -256,82 +243,76 @@ fn main() {
             Ok(Request::Say(say)) => say,
             // For a sentence already made, or not yet begun.
             Ok(Request::Cancel { id }) => {
-                inbox.cancelled.insert(id);
+                inbox.borrow_mut().cancelled.insert(id);
                 continue;
             }
             Err(e) => {
-                if send(&mut out, &Answer::Error(format!("not a request: {e}"))).is_err() {
+                if send(&Answer::Error(format!("not a request: {e}"))).is_err() {
                     break;
                 }
                 continue;
             }
         };
         let id = say.id;
-        if inbox.take_cancelled(id) {
+        if inbox.borrow_mut().take_cancelled(id) {
             let answer = Answer::Failed {
                 id,
                 error: "cancelled".into(),
             };
-            if send(&mut out, &answer).is_err() {
+            if send(&answer).is_err() {
                 break;
             }
             continue;
         }
-        let answer = match &mut voice {
-            Voice::Sherpa(tts) => match speak(tts, family, &say) {
-                Ok(samples) => Answer::Audio {
+        // Each part as it is made; a reader gone ends it all.
+        let gone = Rc::new(Cell::new(false));
+        let part = {
+            let (inbox, gone) = (Rc::clone(&inbox), Rc::clone(&gone));
+            move |samples: &[f32]| {
+                if inbox.borrow_mut().cancelled(id) {
+                    return false;
+                }
+                let part = Answer::Audio {
                     id,
-                    pcm: pcm16(&samples),
-                    more: false,
-                },
-                Err(error) => Answer::Failed { id, error },
-            },
-            Voice::Qwen3(qwen3) => {
-                // Each part as it is made; a reader gone ends it.
-                let mut gone = false;
-                let said = qwen3.say(
-                    &say.text,
-                    say.lang.as_deref().unwrap_or(""),
-                    say.voice,
-                    say.speed,
-                    &mut |samples| {
-                        if inbox.cancelled(id) {
-                            return Err("cancelled".to_string());
-                        }
-                        let part = Answer::Audio {
-                            id,
-                            pcm: pcm16(samples),
-                            more: true,
-                        };
-                        send(&mut out, &part).map_err(|e| {
-                            gone = true;
-                            e.to_string()
-                        })
-                    },
-                );
-                if gone {
-                    break;
-                }
-                inbox.cancelled.remove(&id);
-                match said {
-                    Ok(()) => Answer::Audio {
-                        id,
-                        pcm: String::new(),
-                        more: false,
-                    },
-                    Err(error) => Answer::Failed { id, error },
-                }
+                    pcm: pcm16(samples),
+                    more: true,
+                };
+                let sent = send(&part).is_ok();
+                gone.set(!sent);
+                sent
             }
         };
-        if send(&mut out, &answer).is_err() {
+        let said = speak(&tts, family, &say, part);
+        if gone.get() {
+            break;
+        }
+        let cancelled = inbox.borrow_mut().cancelled.remove(&id);
+        let answer = match said {
+            _ if cancelled => Answer::Failed {
+                id,
+                error: "cancelled".into(),
+            },
+            Ok(rest) => Answer::Audio {
+                id,
+                pcm: if rest.is_empty() {
+                    String::new()
+                } else {
+                    pcm16(&rest)
+                },
+                more: false,
+            },
+            Err(error) => Answer::Failed { id, error },
+        };
+        if send(&answer).is_err() {
             break;
         }
     }
 }
 
-/// Write one answer as a line, flushed: the reader waits for it.
-fn send(out: &mut impl Write, answer: &Answer) -> std::io::Result<()> {
+/// Write one answer to stdout as a line, flushed: the reader waits for it.
+fn send(answer: &Answer) -> std::io::Result<()> {
     let line = serde_json::to_string(answer).map_err(std::io::Error::other)?;
+    let mut out = std::io::stdout().lock();
     writeln!(out, "{line}")?;
     out.flush()
 }
@@ -339,6 +320,8 @@ fn send(out: &mut impl Write, answer: &Answer) -> std::io::Result<()> {
 /// The model in `dir`, by the files its family's folder holds.
 fn load(family: Family, dir: &Path) -> Result<sherpa_onnx::OfflineTts, String> {
     use sherpa_onnx::*;
+    // Whole, as Kokoro's lists are named from inside it.
+    let dir = &std::path::absolute(dir).map_err(|e| format!("no model folder: {e}"))?;
     let file = |name: &str| -> Result<String, String> {
         let path = dir.join(name);
         if path.is_file() {
@@ -360,8 +343,37 @@ fn load(family: Family, dir: &Path) -> Result<sherpa_onnx::OfflineTts, String> {
                 voice_style: Some(file("voice.bin")?),
             };
         }
-        Family::Qwen3 => return Err("not a sherpa-onnx model".into()),
+        Family::Kokoro => {
+            // Its lexicons and rules are lists, split at commas: named from
+            // the model's folder, so a comma in the path to it splits none.
+            std::env::set_current_dir(dir)
+                .map_err(|e| format!("the model's folder cannot be read: {e}"))?;
+            let here =
+                |name: &str| -> Result<String, String> { file(name).map(|_| name.to_string()) };
+            if !dir.join("dict").is_dir() {
+                return Err("the model has no dict".into());
+            }
+            config.model.kokoro = OfflineTtsKokoroModelConfig {
+                model: Some(file("model.onnx")?),
+                voices: Some(file("voices.bin")?),
+                tokens: Some(file("tokens.txt")?),
+                lexicon: Some([here("lexicon-us-en.txt")?, here("lexicon-zh.txt")?].join(",")),
+                dict_dir: Some("dict".into()),
+                ..Default::default()
+            };
+            config.rule_fsts = Some(
+                [
+                    here("date-zh.fst")?,
+                    here("number-zh.fst")?,
+                    here("phone-zh.fst")?,
+                ]
+                .join(","),
+            );
+        }
     }
+    // A sentence at a time — for Chinese, a clause — each given as it is
+    // made ([`speak`]).
+    config.max_num_sentences = 1;
     // Half the cores, at least one: the editor goes on drawing meanwhile.
     config.model.num_threads =
         std::thread::available_parallelism().map_or(2, |n| (n.get() / 2).max(1)) as i32;
@@ -398,14 +410,33 @@ fn generation(family: Family, say: &Say, speakers: i32) -> sherpa_onnx::Generati
     config
 }
 
-/// `say`'s text as samples, at the model's rate.
-fn speak(tts: &sherpa_onnx::OfflineTts, family: Family, say: &Say) -> Result<Vec<f32>, String> {
+/// `say`'s text spoken, at the model's rate: each part — a sentence of
+/// it, a clause of Chinese — given to `part` as it is made, which answers
+/// whether more is wanted; then whatever of it was not given that way.
+fn speak(
+    tts: &sherpa_onnx::OfflineTts,
+    family: Family,
+    say: &Say,
+    mut part: impl FnMut(&[f32]) -> bool + 'static,
+) -> Result<Vec<f32>, String> {
     let config = generation(family, say, tts.num_speakers());
-    let Some(audio) = tts.generate_with_config(&say.text, &config, None::<fn(&[f32], f32) -> bool>)
-    else {
+    let given = Rc::new(Cell::new(0));
+    let counted = Rc::clone(&given);
+    let callback = move |samples: &[f32], _progress: f32| {
+        let more = part(samples);
+        if more {
+            counted.set(counted.get() + samples.len());
+        }
+        more
+    };
+    let Some(audio) = tts.generate_with_config(&say.text, &config, Some(callback)) else {
         return Err("no audio could be made from the text".into());
     };
-    Ok(audio.samples().to_vec())
+    Ok(audio
+        .samples()
+        .get(given.get()..)
+        .unwrap_or_default()
+        .to_vec())
 }
 
 /// Samples in [-1, 1] as 16-bit little-endian PCM, in base64.
@@ -525,8 +556,8 @@ mod tests {
     #[test]
     fn families_are_named() {
         assert_eq!(Family::parse("supertonic"), Some(Family::Supertonic));
-        assert_eq!(Family::parse("qwen3"), Some(Family::Qwen3));
-        assert_eq!(Family::parse("kokoro"), None);
+        assert_eq!(Family::parse("kokoro"), Some(Family::Kokoro));
+        assert_eq!(Family::parse("qwen3"), None, "retired");
         assert_eq!(Family::parse("piper"), None);
     }
 }

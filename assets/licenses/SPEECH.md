@@ -58,22 +58,15 @@ No voice ships with Clew. Each is downloaded only when the user asks for it,
 in Settings → Voice, from Hugging Face, at a revision Clew pins and checks
 file by file:
 
-- **Qwen3-TTS** 0.6B CustomVoice and the decoder of its speech tokenizer, by
-  the Qwen team, Alibaba Cloud
-  (<https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice>,
-  <https://huggingface.co/Qwen/Qwen3-TTS-Tokenizer-12Hz>), under the Apache
-  License 2.0 — as converted to ONNX, its weights quantized, by Quick
-  Inference
-  (<https://huggingface.co/danyalmalik/Qwen3-TTS-12Hz-0.6B-CustomVoice-ONNX-WebGPU>,
-  <https://huggingface.co/danyalmalik/Qwen3-TTS-Tokenizer-12Hz-ONNX-WebGPU>),
-  under the Apache License 2.0 too. As `clew-speak` loads it, it changes one
-  thing in memory: the talker's attention is given its queries and keys
-  already normalised, by operators the CPU runs, instead of normalising them
-  itself — the same arithmetic. The files are not changed.
 - **Supertonic 3**, by Supertone Inc. (<https://huggingface.co/Supertone/supertonic-3>),
   under the BigScience OpenRAIL-M license, whose use restrictions apply to
   anyone who uses it (<https://huggingface.co/Supertone/supertonic-3/blob/main/LICENSE>),
   from the sherpa-onnx project's copy.
+- **Kokoro v1.1-zh**, by hexgrad (<https://huggingface.co/hexgrad/Kokoro-82M-v1.1-zh>),
+  under the Apache License 2.0, as the sherpa-onnx project packs it
+  (<https://huggingface.co/csukuangfj/kokoro-multi-lang-v1_1>) with its
+  pronunciation lexicons and the dictionary cppjieba splits Chinese words
+  with.
 
 ## MIT License
 

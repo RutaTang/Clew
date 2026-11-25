@@ -783,20 +783,26 @@ impl Speech {
 }
 
 /// What Settings' Try says with `model`: a sentence in the interface's
-/// language when the model speaks it, else in English — which every voice
-/// Clew offers speaks.
+/// language when the model speaks it, else in English when it speaks that,
+/// else in the language it does speak — Kokoro Chinese's, Chinese.
 fn sample(model: &VoiceModel) -> Sentence {
+    const SAMPLE: &str = "This is how Clew sounds when it reads an answer aloud.";
     let ui = crate::i18n::current().code();
     if model.speaks(ui) {
-        Sentence {
+        return Sentence {
             text: tr!("This is how Clew sounds when it reads an answer aloud.").to_string(),
             lang: clew_voice::say::known_language(ui).unwrap_or("en"),
-        }
-    } else {
-        Sentence {
-            text: "This is how Clew sounds when it reads an answer aloud.".into(),
-            lang: "en",
-        }
+        };
+    }
+    let lang = match model.languages {
+        langs if langs.contains(&"en") => "en",
+        [first, ..] => first,
+        [] => "en",
+    };
+    let text = crate::i18n::Lang::parse(lang).map_or(SAMPLE, |l| crate::i18n::lookup_in(l, SAMPLE));
+    Sentence {
+        text: text.to_string(),
+        lang,
     }
 }
 
@@ -1118,7 +1124,7 @@ impl App {
     /// A question was asked (`spoken`, or typed) whose answer will be read
     /// aloud: its voice starts loading now, while the model thinks — loaded
     /// on the answer's first sentence, it held that sentence for the
-    /// seconds a voice takes to load (nine, measured, for Qwen3-TTS).
+    /// seconds a voice takes to load.
     pub(crate) fn warm_voice_for_question(&self, spoken: bool) {
         if !self.voice.prefs.read_aloud.reads(spoken) {
             return;
@@ -1406,9 +1412,8 @@ impl App {
             .then(|| self.proj.ask_turns.last().map(|t| t.stream))
             .flatten();
         while let Some(sentence) = self.voice.speech.queue.pop_front() {
-            // The best voice here that speaks the sentence's language: Qwen3-TTS,
-            // or Supertonic where it is the one here — a reader who heard
-            // answers in English with Supertonic hears them still.
+            // The voice here that speaks the sentence's language: Kokoro
+            // Chinese for Chinese, Supertonic 3 for the rest.
             let model = match only {
                 Some(model) => here(model).then_some(model),
                 None => speech::for_language_among(sentence.lang, here),

@@ -1611,7 +1611,7 @@ fn the_ask_card_says_what_keeps_answers_from_being_heard() {
     let _ = std::fs::remove_dir_all(&dir);
     let store = clew_voice::models::Store::new(dir);
     app.voice.store = Some(store.clone());
-    let qwen = speech::find("qwen3-tts").unwrap();
+    let kokoro = speech::find("kokoro-v1.1-zh").unwrap();
     // Said of the last answer.
     app.proj.ask_turns.push(crate::app::model::AskTurn {
         stream: 1,
@@ -1619,21 +1619,23 @@ fn the_ask_card_says_what_keeps_answers_from_being_heard() {
         spoken: true,
         ..Default::default()
     });
-    let missing = |lang| Blocked::Missing {
-        model: "qwen3-tts",
+    let missing = |model, lang| Blocked::Missing {
+        model,
         lang,
         stream: 1,
     };
-    // No voice here: no answer is heard.
-    app.voice.speech.blocked = Some(missing("en"));
-    let needed = "To hear answers read aloud, download Qwen3-TTS";
+    // No voice here: no answer — this one, in Chinese — is heard.
+    app.voice.speech.blocked = Some(missing("kokoro-v1.1-zh", "zh"));
+    let needed = "To hear answers read aloud, download Kokoro Chinese";
     assert!(shows(&mut sim_of(&app), needed));
-    let download = format!("Download ({} MB)", qwen.size_mb());
+    let download = format!("Download ({} MB)", kokoro.size_mb());
     let sent = click(sim_of(&app), &download);
     assert!(
         matches!(
             sent.as_slice(),
-            [Message::Voice(crate::VoiceMsg::DownloadSpeech("qwen3-tts"))]
+            [Message::Voice(crate::VoiceMsg::DownloadSpeech(
+                "kokoro-v1.1-zh"
+            ))]
         ),
         "{sent:?}"
     );
@@ -1644,8 +1646,8 @@ fn the_ask_card_says_what_keeps_answers_from_being_heard() {
             matches!(
                 m,
                 Message::Voice(crate::VoiceMsg::DismissBlocked(Blocked::Missing {
-                    model: "qwen3-tts",
-                    lang: "en",
+                    model: "kokoro-v1.1-zh",
+                    lang: "zh",
                     stream: 1
                 }))
             )
@@ -1654,11 +1656,13 @@ fn the_ask_card_says_what_keeps_answers_from_being_heard() {
     assert!(!sent.is_empty(), "its ✕ puts it away");
     // Downloading: that it is, how far it has come, and Cancel, where
     // Download was — not still to download it.
-    let _ = app.update(Message::Voice(crate::VoiceMsg::DownloadSpeech("qwen3-tts")));
+    let _ = app.update(Message::Voice(crate::VoiceMsg::DownloadSpeech(
+        "kokoro-v1.1-zh",
+    )));
     assert!(shows(&mut sim_of(&app), "0%"));
     assert!(shows(
         &mut sim_of(&app),
-        &format!("Downloading Qwen3-TTS ({} MB)…", qwen.size_mb())
+        &format!("Downloading Kokoro Chinese ({} MB)…", kokoro.size_mb())
     ));
     assert!(!shows(&mut sim_of(&app), needed));
     assert!(!shows(&mut sim_of(&app), &download));
@@ -1667,41 +1671,41 @@ fn the_ask_card_says_what_keeps_answers_from_being_heard() {
         matches!(
             sent.as_slice(),
             [Message::Voice(crate::VoiceMsg::CancelSpeechDownload(
-                "qwen3-tts"
+                "kokoro-v1.1-zh"
             ))]
         ),
         "{sent:?}"
     );
     let _ = app.update(Message::Voice(crate::VoiceMsg::CancelSpeechDownload(
-        "qwen3-tts",
+        "kokoro-v1.1-zh",
     )));
     // Its download failed: why, under it.
     app.voice
         .speech
         .download_errors
-        .insert("qwen3-tts", "the connection was reset".into());
+        .insert("kokoro-v1.1-zh", "the connection was reset".into());
     assert!(shows(&mut sim_of(&app), "the connection was reset"));
-    // Supertonic here: a Chinese answer — this one — needs Qwen3-TTS; an
-    // English one is read, and nothing is said.
+    // Supertonic here: a Chinese answer — this one — needs Kokoro
+    // Chinese; an English one is read, and nothing is said.
     let supertonic = speech::find("supertonic-3").unwrap();
     for file in supertonic.files {
         let path = speech::path(&store, supertonic, file);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, b"x").unwrap();
     }
-    app.voice.speech.blocked = Some(missing("zh"));
+    app.voice.speech.blocked = Some(missing("kokoro-v1.1-zh", "zh"));
     assert!(shows(
         &mut sim_of(&app),
-        "Qwen3-TTS is needed to read this answer aloud"
+        "Kokoro Chinese is needed to read this answer aloud"
     ));
     // Supertonic reading the answer's English sentences: still said.
     app.voice.speech.speak_for_test(Box::new(Playing), 0.5);
     assert!(app.voice.speech.is_speaking());
     assert!(shows(
         &mut sim_of(&app),
-        "Qwen3-TTS is needed to read this answer aloud"
+        "Kokoro Chinese is needed to read this answer aloud"
     ));
-    app.voice.speech.blocked = Some(missing("en"));
+    app.voice.speech.blocked = Some(missing("supertonic-3", "en"));
     assert!(!shows(&mut sim_of(&app), "is needed to read"));
     // The voice failing: why, in its own words, and Settings.
     app.voice.speech.blocked = Some(Blocked::Failed {
