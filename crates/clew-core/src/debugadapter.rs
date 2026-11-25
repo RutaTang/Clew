@@ -128,6 +128,11 @@ pub enum AdapterInstall {
     /// `# /// script`) into the environment `uv` keeps for it
     /// (`uv sync --script`): what `uv run` would run it in.
     ScriptEnv { uv: PathBuf, script: PathBuf },
+    /// Install a JavaScript project's own dependencies with its package
+    /// manager (`pm install` in `dir`): its test runner, `tsx` and what its
+    /// programs import are among them. The project's own install scripts
+    /// run with it, as they do when it is installed by hand.
+    JsDependencies { pm: PathBuf, dir: PathBuf },
 }
 
 /// What installs a package into a Python environment.
@@ -149,6 +154,7 @@ impl AdapterInstall {
             AdapterInstall::Pytest { .. } => "pytest",
             AdapterInstall::JsDebug => "vscode-js-debug",
             AdapterInstall::ScriptEnv { .. } => "uv",
+            AdapterInstall::JsDependencies { .. } => "dependencies",
         }
     }
 
@@ -157,8 +163,8 @@ impl AdapterInstall {
             AdapterInstall::Debugpy => DEBUGPY_VERSION,
             AdapterInstall::Pytest { .. } => PYTEST_VERSION,
             AdapterInstall::JsDebug => JS_DEBUG_VERSION,
-            // Whatever the script asks for.
-            AdapterInstall::ScriptEnv { .. } => "",
+            // Whatever the script (or the project) asks for.
+            AdapterInstall::ScriptEnv { .. } | AdapterInstall::JsDependencies { .. } => "",
         }
     }
 
@@ -166,6 +172,12 @@ impl AdapterInstall {
     /// the consent prompt and the status line then say.
     pub fn is_script_packages(&self) -> bool {
         matches!(self, AdapterInstall::ScriptEnv { .. })
+    }
+
+    /// Whether this installs a project's own dependencies: what the consent
+    /// prompt and the status line then say.
+    pub fn is_dependencies(&self) -> bool {
+        matches!(self, AdapterInstall::JsDependencies { .. })
     }
 
     /// Whether this installs what runs tests rather than a debugger: what
@@ -200,6 +212,9 @@ impl AdapterInstall {
             AdapterInstall::ScriptEnv { uv, script } => {
                 format!("{} sync --script {}", uv.display(), script.display())
             }
+            AdapterInstall::JsDependencies { pm, dir } => {
+                format!("cd {} && {} install", dir.display(), pm.display())
+            }
         }
     }
 
@@ -220,6 +235,7 @@ impl AdapterInstall {
             AdapterInstall::Pytest { python, via } => install_pytest(python, via, cancel),
             AdapterInstall::JsDebug => install_js_debug(cancel).map(|_| ()),
             AdapterInstall::ScriptEnv { uv, script } => install_script_env(uv, script, cancel),
+            AdapterInstall::JsDependencies { pm, dir } => install_js_dependencies(pm, dir, cancel),
         }
     }
 }
@@ -1663,6 +1679,43 @@ fn pytest_command(python: &Path, via: &PyInstaller) -> Command {
     cmd
 }
 
+/// `pm install` in `dir`, with the tools' `PATH` (the Node a package
+/// manager runs on): a project's dependencies, as its package manager
+/// installs them.
+fn install_js_dependencies(pm: &Path, dir: &Path, cancel: &AtomicBool) -> Result<(), String> {
+    let mut cmd = crate::spawn::command(pm);
+    cmd.arg("install").current_dir(dir);
+    if let Some(path) = crate::linerpc::spawn_path() {
+        cmd.env("PATH", path);
+    }
+    let out = store::run_bounded_cancellable(cmd, PIP_TIMEOUT, cancel)?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let said = String::from_utf8_lossy(&out.stderr);
+    let last = said
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("it ended with an error");
+    let name = pm.file_stem().map_or_else(
+        || pm.display().to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    );
+    Err(format!("{name} install failed: {last}"))
+}
+
+/// The install of `file`'s project's dependencies, when they are not
+/// there ([`crate::jsrun::missing_dependencies`]) and its package manager
+/// is found.
+pub fn js_dependencies(root: &Path, file: &Path) -> Option<AdapterInstall> {
+    let dir = crate::jsrun::missing_dependencies(root, file)?;
+    let name = crate::jsrun::package_manager(root, &dir);
+    let pm = store::find_on_path_unresolved(name)?;
+    Some(AdapterInstall::JsDependencies { pm, dir })
+}
+
 fn install_pytest(python: &Path, via: &PyInstaller, cancel: &AtomicBool) -> Result<(), String> {
     let out = store::run_bounded_cancellable(pytest_command(python, via), PIP_TIMEOUT, cancel)?;
     if !out.status.success() {
@@ -3013,6 +3066,35 @@ mod tests {
         let err = probe_python_within(&python, Duration::from_secs(1)).unwrap_err();
         assert!(err.contains("did not finish"), "{err}");
         assert!(started.elapsed() < Duration::from_secs(10));
+    }
+
+    /// The project's dependencies installed for real, by Bun when it is
+    /// on this computer: `CLEW_LIVE_JS_INSTALL=1` (it reaches the npm
+    /// registry for one small package with no install scripts).
+    #[test]
+    #[ignore = "reaches the npm registry; CLEW_LIVE_JS_INSTALL=1"]
+    fn live_js_dependencies_install() {
+        if std::env::var_os("CLEW_LIVE_JS_INSTALL").is_none() {
+            return;
+        }
+        let dir = TempDir::new("live-js-deps");
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"name": "live", "dependencies": {"is-number": "7.0.0"}}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.join("bun.lock"), "").unwrap();
+        let file = dir.join("index.js");
+        std::fs::write(&file, "require('is-number')\n").unwrap();
+        let install = js_dependencies(&dir, &file).expect("bun is found, the dependencies are not");
+        let AdapterInstall::JsDependencies { pm, .. } = &install else {
+            panic!("{install:?}");
+        };
+        assert_eq!(pm.file_stem().unwrap(), "bun");
+        println!("{}", install.describe());
+        install.install().unwrap();
+        assert!(dir.join("node_modules/is-number/package.json").is_file());
+        assert_eq!(js_dependencies(&dir, &file), None, "installed now");
     }
 
     /// F3/F9/F10: js-debug is a consent request until installed (into a

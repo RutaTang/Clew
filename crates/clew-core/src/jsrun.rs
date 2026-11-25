@@ -500,6 +500,43 @@ pub fn main_command(root: &Path, file: &Path, search: &OsStr) -> Result<JsComman
     Ok(command(runtime(search, "node")?, args))
 }
 
+/// Where the dependencies of `file`'s package are to be installed, when
+/// they are not: its package declares some (`dependencies`,
+/// `devDependencies`) and no `node_modules` is beside it or above it in the
+/// project. A workspace's packages are installed from its root (the
+/// outermost package with `workspaces`, or a `pnpm-workspace.yaml`). `None`
+/// when they are there, when there are none, and for a Deno project, which
+/// fetches what it imports itself.
+pub fn missing_dependencies(root: &Path, file: &Path) -> Option<PathBuf> {
+    if runtime_of(root, file) == "deno" {
+        return None;
+    }
+    let dirs = package_dirs(root, file);
+    let nearest = dirs.first()?;
+    let declares = manifest(nearest).is_some_and(|m| {
+        ["dependencies", "devDependencies"].iter().any(|k| {
+            m.get(*k)
+                .and_then(Value::as_object)
+                .is_some_and(|deps| !deps.is_empty())
+        })
+    });
+    if !declares {
+        return None;
+    }
+    let mut at = Some(nearest.as_path());
+    while let Some(dir) = at.filter(|d| d.starts_with(root)) {
+        if dir.join("node_modules").is_dir() {
+            return None;
+        }
+        at = dir.parent();
+    }
+    let workspace = dirs.iter().rev().find(|d| {
+        d.join("pnpm-workspace.yaml").is_file()
+            || manifest(d).is_some_and(|m| m.get("workspaces").is_some())
+    });
+    Some(workspace.unwrap_or(nearest).clone())
+}
+
 /// The command that installs the dependencies of the package at `dir`, with
 /// its project's package manager: `pnpm install`, `yarn install`…
 pub fn install_command(root: &Path, dir: &Path) -> String {
@@ -845,6 +882,47 @@ mod tests {
     /// A program runs by its project's runtime: Deno's, Bun's, or Node with
     /// TypeScript's types stripped, or the project's tsx (JSX needs it).
     #[cfg(unix)]
+    /// A package's dependencies are missing when it declares some and no
+    /// `node_modules` is beside or above it; a workspace's are installed
+    /// from its root; a Deno project fetches its own.
+    #[test]
+    fn missing_dependencies_are_found_where_they_install() {
+        let root = crate::testutil::TempDir::new("jsrun-deps");
+        write(&root, "package.json", r#"{"workspaces": ["apps/*"]}"#);
+        write(
+            &root,
+            "apps/web/package.json",
+            r#"{"dependencies": {"react": "19"}}"#,
+        );
+        let file = write(&root, "apps/web/src/main.ts", "\n");
+        assert_eq!(missing_dependencies(&root, &file), Some(root.to_path_buf()));
+        write(&root, "node_modules/.modules.yaml", "");
+        assert_eq!(
+            missing_dependencies(&root, &file),
+            None,
+            "hoisted at the root"
+        );
+        let lone = crate::testutil::TempDir::new("jsrun-deps-lone");
+        write(&lone, "package.json", r#"{"name": "x"}"#);
+        let script = write(&lone, "index.js", "\n");
+        assert_eq!(missing_dependencies(&lone, &script), None, "declares none");
+        write(
+            &lone,
+            "package.json",
+            r#"{"devDependencies": {"vitest": "3"}}"#,
+        );
+        assert_eq!(
+            missing_dependencies(&lone, &script),
+            Some(lone.to_path_buf())
+        );
+        write(&lone, "deno.json", "{}");
+        assert_eq!(
+            missing_dependencies(&lone, &script),
+            None,
+            "Deno fetches its own"
+        );
+    }
+
     /// What is said to install is the project's package manager's command.
     #[test]
     fn install_advice_is_the_projects_package_managers() {

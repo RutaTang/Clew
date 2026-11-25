@@ -4073,5 +4073,11 @@
  "Browser (js-debug)": "ブラウザ（js-debug）",
  "A browser's launch.json needs a \"url\" to open (or a page's \"file\")": "ブラウザ用の launch.json には開く \"url\"（またはページの \"file\"）が必要です",
  "A page is debugged in a browser on this computer: open the project from a folder here to debug it in one.": "ページはこのコンピュータのブラウザでデバッグします。ブラウザでデバッグするには、このコンピュータ上のフォルダからプロジェクトを開いてください。",
- "This is a Bun project, and Bun's debugger speaks WebKit's inspector protocol, which Clew's JavaScript debugger does not: the file is debugged under Node.js, where Bun's own APIs (Bun.serve, Bun.file) are missing. Run runs it with Bun.": "これは Bun のプロジェクトです。Bun のデバッガは WebKit のインスペクタプロトコルを使いますが、Clew の JavaScript デバッガはこれに対応していません。そのため、このファイルは Node.js でデバッグされ、Bun 独自の API（Bun.serve、Bun.file）は使えません。実行は Bun で行われます。"
+ "This is a Bun project, and Bun's debugger speaks WebKit's inspector protocol, which Clew's JavaScript debugger does not: the file is debugged under Node.js, where Bun's own APIs (Bun.serve, Bun.file) are missing. Run runs it with Bun.": "これは Bun のプロジェクトです。Bun のデバッガは WebKit のインスペクタプロトコルを使いますが、Clew の JavaScript デバッガはこれに対応していません。そのため、このファイルは Node.js でデバッグされ、Bun 独自の API（Bun.serve、Bun.file）は使えません。実行は Bun で行われます。",
+ "Install this project's dependencies?": "このプロジェクトの依存関係をインストールしますか？",
+ "This will run, with the install scripts of the project and its packages:": "次を実行します（プロジェクトとそのパッケージのインストールスクリプトも実行されます）：",
+ "This needs the project's dependencies, which are not installed. Waiting for your approval.": "プロジェクトの依存関係が必要ですが、インストールされていません。承認を待っています。",
+ "Installing the project's dependencies…": "プロジェクトの依存関係をインストールしています…",
+ "The project's dependencies are installed": "プロジェクトの依存関係をインストールしました",
+ "Installing the project's dependencies failed: {error}": "プロジェクトの依存関係のインストールに失敗しました：{error}"
 }

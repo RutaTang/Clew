@@ -994,6 +994,91 @@ fn missing_rust_sources_are_added_on_request() {
     assert_eq!(app.proj.rust_src, RustSrc::Missing(None));
 }
 
+/// A JavaScript project whose dependencies are not installed: Run Test and
+/// Debug Test offer to install them with its package manager first, and
+/// the test runs once they are in.
+#[test]
+fn a_javascript_test_offers_the_projects_dependencies_first() {
+    // The offer names the package manager it runs: one must be found.
+    if clew_core::lsp::store::find_on_path_unresolved("npm").is_none() {
+        return;
+    }
+    let mut app = scanned_app("runplan-js-deps");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    write(
+        &root,
+        "package.json",
+        r#"{"devDependencies": {"vitest": "^3"}}"#,
+    );
+    write(
+        &root,
+        "test/cart.test.ts",
+        "import { describe, it } from 'vitest'\n\ndescribe('cart', () => {\n  it('adds', () => {})\n  it('drops', () => {})\n})\n",
+    );
+    open_synchronously(&mut app, "test/cart.test.ts", None);
+    // (Opening the file asked about TypeScript's server too.)
+    let offered = |app: &App| -> Option<std::path::PathBuf> {
+        app.proj
+            .pending_lsp_consent
+            .iter()
+            .find_map(|c| match &c.provision {
+                crate::LspProvision::DebugAdapter {
+                    install: crate::dap::AdapterInstall::JsDependencies { dir, .. },
+                    ..
+                } => Some(dir.clone()),
+                _ => None,
+            })
+    };
+    let installed = |app: &mut App| {
+        let stamp = app.stamp();
+        let _ = app.update(Message::Debug(DebugMsg::AdapterInstalled {
+            stamp,
+            install: crate::dap::AdapterInstall::JsDependencies {
+                pm: "npm".into(),
+                dir: root.clone(),
+            },
+            result: Ok(()),
+        }));
+    };
+    // Run Test: asked about, then run once installed.
+    let _ = app.update(Message::Debug(DebugMsg::RunTest {
+        line: Some(4),
+        no_debug: true,
+    }));
+    assert_eq!(offered(&app), Some(root.clone()), "{}", app.status);
+    assert!(app.status.contains("dependencies"), "{}", app.status);
+    assert!(app.debug.session.is_none(), "nothing ran yet");
+    app.proj.pending_lsp_consent.withdraw(|_| true);
+    write(&root, "node_modules/.package-lock.json", "{}");
+    installed(&mut app);
+    assert_eq!(app.status, "Running adds…");
+    let _ = app.stop_debug_session();
+    // Debug Test: the same, and the test is asked for again.
+    std::fs::remove_dir_all(root.join("node_modules")).unwrap();
+    let _ = app.update(Message::Debug(DebugMsg::RunTest {
+        line: Some(5),
+        no_debug: false,
+    }));
+    assert_eq!(offered(&app), Some(root.clone()));
+    assert_eq!(app.debug.retry_test, Some((5, false)));
+    app.proj.pending_lsp_consent.withdraw(|_| true);
+    write(&root, "node_modules/.bin/vitest", "#!/bin/sh\n");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = root.join("node_modules/.bin/vitest");
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    installed(&mut app);
+    assert_eq!(app.debug.retry_test, None);
+    assert!(
+        matches!(app.debug.plan, Some(RunPlan::JsDebugTest { .. })),
+        "{:?} {}",
+        app.debug.plan,
+        app.status
+    );
+}
+
 /// Run Test on a JavaScript or TypeScript test runs it by the project's own
 /// test runner where the project is: the test at the line by its title, its
 /// suite's tests from the suite's line, and the file's from anywhere else;
@@ -1008,6 +1093,8 @@ fn run_test_runs_the_javascript_test_at_the_line() {
         "package.json",
         r#"{"devDependencies": {"vitest": "^3"}}"#,
     );
+    // Installed, but for Vitest (see below).
+    write(&root, "node_modules/.package-lock.json", "{}");
     write(
         &root,
         "test/cart.test.ts",

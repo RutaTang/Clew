@@ -1201,6 +1201,12 @@ impl App {
             {
                 let search = clew_core::linerpc::search_path().unwrap_or_default();
                 let (abs, source) = (viewer.abs.clone(), viewer.source.clone());
+                // Its runner is among the project's dependencies: not
+                // installed, they are offered first.
+                if let Some(install) = clew_core::debugadapter::js_dependencies(&root, &abs) {
+                    self.debug.retry_test = Some((line, no_debug));
+                    return self.offer_adapter_install(install);
+                }
                 return match clew_core::jsrun::test_command(
                     &root, &abs, lang, &source, line, &search,
                 ) {
@@ -1393,6 +1399,21 @@ impl App {
         let Some(root) = self.proj.project.as_ref().map(|p| p.root.clone()) else {
             return Task::none();
         };
+        // A JavaScript program or test of a project on this computer whose
+        // dependencies are not installed: they are offered first, and the
+        // run starts once they are in (`on_debug_adapter_installed`).
+        if let Some(RunPlan::Remote { task, .. }) = &plan
+            && !self.connection.is_remote()
+            && let clew_protocol::ProjectTask::JsTest { file, .. }
+            | clew_protocol::ProjectTask::JsMain { file } = task
+            && let Some(install) =
+                clew_core::debugadapter::js_dependencies(&root, &root.join(file.as_str()))
+        {
+            self.debug.no_debug = no_debug;
+            self.debug.plan = plan.clone();
+            self.debug.retry_test = None;
+            return self.offer_adapter_install(install);
+        }
         // The panel hidden over a session still live: Run or Debug shows it
         // again, as its tooltip says — it started a second copy of the
         // program beside the one paused out of sight. Asked again, with the
@@ -2503,12 +2524,21 @@ impl App {
             return Task::none();
         }
         self.debug.session = None;
+        self.offer_adapter_install(install)
+    }
+
+    /// Ask the reader whether to install what a run needs (a debug adapter,
+    /// pytest, a script's or the project's packages): the run asked for is
+    /// started again once it is in.
+    pub(crate) fn offer_adapter_install(&mut self, install: dap::AdapterInstall) -> Task<Message> {
         if self.proj.project.is_none() {
             return Task::none();
         }
         // pytest is not a debugger: a test, run or debugged, needs it; nor
         // are a script's own packages.
-        self.status = if install.is_script_packages() {
+        self.status = if install.is_dependencies() {
+            tr!("This needs the project's dependencies, which are not installed. Waiting for your approval.").into()
+        } else if install.is_script_packages() {
             tr!("This script needs the packages it lists. Waiting for your approval.").into()
         } else if install.is_test_runner() {
             tr!(
@@ -2541,13 +2571,16 @@ impl App {
         install: dap::AdapterInstall,
         stamp: Stamp,
     ) -> Task<Message> {
-        self.status = match install.is_script_packages() {
-            true => tr!("Installing the packages the script lists…").into(),
-            false => tr!(
+        self.status = if install.is_dependencies() {
+            tr!("Installing the project's dependencies…").into()
+        } else if install.is_script_packages() {
+            tr!("Installing the packages the script lists…").into()
+        } else {
+            tr!(
                 "Installing {name} {version}…",
                 name = install.name(),
                 version = install.version()
-            ),
+            )
         };
         let installing = install.clone();
         // Raised when the project it was consented in is left (the session
@@ -2592,7 +2625,16 @@ impl App {
                 Task::none()
             }
             // pytest is no debug adapter: what failed is named as it is;
-            // a script's packages say so themselves.
+            // a script's packages and a project's dependencies say so
+            // themselves.
+            Err(e) if install.is_dependencies() => {
+                self.debug.retry_test = None;
+                self.status = tr!(
+                    "Installing the project's dependencies failed: {error}",
+                    error = e
+                );
+                Task::none()
+            }
             Err(e) if install.is_script_packages() => {
                 self.status = crate::i18n::message(&e);
                 Task::none()
@@ -2607,11 +2649,16 @@ impl App {
             }
             // The install is global and reported whatever the project; only
             // starting the session belongs to the project it was asked in.
-            Ok(()) if self.owns(&stamp) => {
-                self.start_session(self.debug.no_debug, self.debug.plan.clone())
-            }
+            Ok(()) if self.owns(&stamp) => match self.debug.retry_test.take() {
+                // Debug Test asked for before the dependencies were in.
+                Some((line, no_debug)) => self.run_test_at(Some(line), no_debug),
+                None => self.start_session(self.debug.no_debug, self.debug.plan.clone()),
+            },
             Ok(()) => {
-                self.status = if install.is_script_packages() {
+                self.debug.retry_test = None;
+                self.status = if install.is_dependencies() {
+                    tr!("The project's dependencies are installed").into()
+                } else if install.is_script_packages() {
                     tr!("The script's packages are installed").into()
                 } else if install.is_test_runner() {
                     tr!("pytest installed").into()

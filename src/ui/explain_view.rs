@@ -1013,6 +1013,12 @@ pub(crate) fn lsp_consent_modal(
             tr!("This will run:"),
             tr!("Install"),
         ),
+        // A JavaScript project's own dependencies, by its package manager.
+        LspProvision::DebugAdapter { install, .. } if install.is_dependencies() => (
+            tr!("Install this project's dependencies?"),
+            tr!("This will run, with the install scripts of the project and its packages:"),
+            tr!("Install"),
+        ),
         // pytest runs a project's tests: no debug adapter.
         LspProvision::DebugAdapter { install, .. } if install.is_test_runner() => (
             tr!("Install pytest to run tests?"),

@@ -4073,5 +4073,11 @@
  "Browser (js-debug)": "브라우저 (js-debug)",
  "A browser's launch.json needs a \"url\" to open (or a page's \"file\")": "브라우저용 launch.json에는 열 \"url\"(또는 페이지의 \"file\")이 필요합니다",
  "A page is debugged in a browser on this computer: open the project from a folder here to debug it in one.": "페이지는 이 컴퓨터의 브라우저에서 디버그합니다. 브라우저에서 디버그하려면 이 컴퓨터의 폴더에서 프로젝트를 여세요.",
- "This is a Bun project, and Bun's debugger speaks WebKit's inspector protocol, which Clew's JavaScript debugger does not: the file is debugged under Node.js, where Bun's own APIs (Bun.serve, Bun.file) are missing. Run runs it with Bun.": "이것은 Bun 프로젝트이고, Bun의 디버거는 WebKit 인스펙터 프로토콜을 쓰는데 Clew의 JavaScript 디버거는 이를 지원하지 않습니다. 그래서 이 파일은 Node.js에서 디버그되며, Bun 고유의 API(Bun.serve, Bun.file)는 없습니다. 실행은 Bun으로 합니다."
+ "This is a Bun project, and Bun's debugger speaks WebKit's inspector protocol, which Clew's JavaScript debugger does not: the file is debugged under Node.js, where Bun's own APIs (Bun.serve, Bun.file) are missing. Run runs it with Bun.": "이것은 Bun 프로젝트이고, Bun의 디버거는 WebKit 인스펙터 프로토콜을 쓰는데 Clew의 JavaScript 디버거는 이를 지원하지 않습니다. 그래서 이 파일은 Node.js에서 디버그되며, Bun 고유의 API(Bun.serve, Bun.file)는 없습니다. 실행은 Bun으로 합니다.",
+ "Install this project's dependencies?": "이 프로젝트의 의존성을 설치할까요?",
+ "This will run, with the install scripts of the project and its packages:": "다음을 실행합니다(프로젝트와 그 패키지의 설치 스크립트도 함께 실행됩니다):",
+ "This needs the project's dependencies, which are not installed. Waiting for your approval.": "프로젝트의 의존성이 필요한데 설치되어 있지 않습니다. 승인을 기다리는 중입니다.",
+ "Installing the project's dependencies…": "프로젝트의 의존성을 설치하는 중…",
+ "The project's dependencies are installed": "프로젝트의 의존성이 설치되었습니다",
+ "Installing the project's dependencies failed: {error}": "프로젝트 의존성 설치에 실패했습니다: {error}"
 }

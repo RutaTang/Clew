@@ -204,6 +204,10 @@ pub struct DebugState {
     /// what its end is said as ("Test adds passed"). `None` for a run of
     /// the launch file's program or a script as it is.
     pub plan: Option<crate::app::runplan::RunPlan>,
+    /// The test Run Test or Debug Test was asked for (its 1-based line, and
+    /// whether to run it without the debugger) while the project's
+    /// dependencies were being installed: asked for again once they are.
+    pub retry_test: Option<(usize, bool)>,
     /// The last run's stops, in order (see [`TraceStop`]): what the program
     /// actually did, kept after the session ends so a walkthrough can be
     /// made of it; cleared when the next run starts.

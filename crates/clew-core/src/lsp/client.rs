@@ -1396,11 +1396,15 @@ fn locale() -> Option<String> {
 /// English.
 /// The settings sent once the server is initialized, for one that reads
 /// them only as they are pushed: Python's (pylsp pulls nothing, and pyright,
-/// which pulls, takes the push as word to pull again). Other servers pull
-/// what they need when they need it.
+/// which pulls, takes the push as word to pull again), and the JSON
+/// server's schemas (`langenv::JSON_SCHEMAS`). Other servers pull what they
+/// need when they need it.
 fn pushed_settings(settings: Option<&Value>) -> Option<Value> {
     settings
-        .filter(|s| s.get("python").is_some() && s.get("pylsp").is_some())
+        .filter(|s| {
+            (s.get("python").is_some() && s.get("pylsp").is_some())
+                || s.get("json").and_then(|j| j.get("schemas")).is_some()
+        })
         .cloned()
 }
 
@@ -2574,10 +2578,33 @@ mod tests {
     /// Python's settings are pushed once the server is up (pylsp pulls
     /// none); another language's are left for the server to pull.
     #[test]
-    fn only_pythons_settings_are_pushed() {
+    fn only_pythons_and_json_schemas_settings_are_pushed() {
         let python = json!({ "python": { "pythonPath": "/p" }, "pylsp": {} });
         assert_eq!(pushed_settings(Some(&python)), Some(python.clone()));
         assert_eq!(pushed_settings(Some(&json!({ "rust-analyzer": {} }))), None);
+        // The JSON server reads its schemas only as they are pushed.
+        let json_server = crate::lsp::langenv::detect(
+            "json",
+            "vscode-json-language-server",
+            std::path::Path::new("/p"),
+        )
+        .unwrap();
+        assert_eq!(
+            pushed_settings(Some(&json_server)),
+            Some(json_server.clone())
+        );
+        let schemas = json_server["json"]["schemas"].as_array().unwrap();
+        let package = schemas
+            .iter()
+            .find(|s| s["fileMatch"][0] == "package.json")
+            .unwrap();
+        assert_eq!(package["url"], "https://json.schemastore.org/package.json");
+        assert!(schemas.iter().any(|s| {
+            s["fileMatch"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("tsconfig.*.json"))
+        }));
         assert_eq!(pushed_settings(Some(&json!({ "python": {} }))), None);
         assert_eq!(pushed_settings(None), None);
     }

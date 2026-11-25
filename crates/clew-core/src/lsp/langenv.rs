@@ -56,8 +56,69 @@ pub fn detect(language: &str, _server: &str, root: &Path) -> Option<Value> {
         "rust" => rust_projects(root),
         // Deno's server reads a project only where it is told to.
         "typescript" if _server == "deno" => Some(json!({ "enable": true, "lint": true })),
+        "json" if _server == "vscode-json-language-server" => Some(json_settings()),
         _ => None,
     }
+}
+
+/// The schemas a JavaScript project's configuration files are checked and
+/// completed against, by name — as VS Code associates them: `package.json`,
+/// `tsconfig.json`, ESLint's, Prettier's, Babel's… A file that names its own
+/// (`"$schema"`) is read by that one. The JSON server fetches each the first
+/// time a file of it is opened.
+pub const JSON_SCHEMAS: &[(&[&str], &str)] = &[
+    (
+        &["package.json"],
+        "https://json.schemastore.org/package.json",
+    ),
+    (
+        &["tsconfig.json", "tsconfig.*.json", "tsconfig-*.json"],
+        "https://json.schemastore.org/tsconfig.json",
+    ),
+    (
+        &["jsconfig.json", "jsconfig.*.json"],
+        "https://json.schemastore.org/jsconfig.json",
+    ),
+    (
+        &["deno.json", "deno.jsonc"],
+        "https://raw.githubusercontent.com/denoland/deno/main/cli/schemas/config-file.v1.json",
+    ),
+    (
+        &[".eslintrc", ".eslintrc.json"],
+        "https://json.schemastore.org/eslintrc.json",
+    ),
+    (
+        &[".prettierrc", ".prettierrc.json"],
+        "https://json.schemastore.org/prettierrc.json",
+    ),
+    (
+        &[".babelrc", ".babelrc.json", "babel.config.json"],
+        "https://json.schemastore.org/babelrc.json",
+    ),
+    (&[".swcrc"], "https://json.schemastore.org/swcrc.json"),
+    (
+        &[".stylelintrc", ".stylelintrc.json"],
+        "https://json.schemastore.org/stylelintrc.json",
+    ),
+    (&["turbo.json"], "https://turbo.build/schema.json"),
+    (&["vercel.json"], "https://openapi.vercel.sh/vercel.json"),
+    (&["lerna.json"], "https://json.schemastore.org/lerna.json"),
+];
+
+/// The JSON server's settings: [`JSON_SCHEMAS`], validation and formatting
+/// on. It reads them only as they are pushed (`client::pushed_settings`).
+fn json_settings() -> Value {
+    let schemas: Vec<Value> = JSON_SCHEMAS
+        .iter()
+        .map(|(names, url)| json!({ "fileMatch": names, "url": url }))
+        .collect();
+    json!({
+        "json": {
+            "schemas": schemas,
+            "validate": { "enable": true },
+            "format": { "enable": true },
+        }
+    })
 }
 
 /// How deep under the project [`cargo_projects`] looks for a workspace:
