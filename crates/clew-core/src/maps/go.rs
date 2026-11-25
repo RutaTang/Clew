@@ -281,6 +281,8 @@ fn goroutines(corpus: &Corpus) -> Option<ProjectMap> {
         "Goroutines and channels",
         "an arrow from a function to each goroutine it starts (go) and to each channel it sends on or closes, and from a channel to each function that receives from it",
     );
+    // The definitions are indexed for a project with Go in it only.
+    corpus.in_langs(&[Lang::Go]).next()?;
     let defs = corpus.defs();
     for source in corpus.in_langs(&[Lang::Go]) {
         let Some(tree) = source.tree() else {

@@ -310,6 +310,8 @@ fn dispatch(corpus: &Corpus) -> Option<ProjectMap> {
         "Dynamic dispatch",
         "where Python picks what to call at run time (getattr with a computed name, dict registries of callables, functions a decorator registers) and the functions they can reach",
     );
+    // The definitions are indexed for a project with Python in it only.
+    corpus.in_langs(&[Lang::Python]).next()?;
     let defs = corpus.defs();
     for source in corpus.in_langs(&[Lang::Python]) {
         let Some(tree) = source.tree() else {

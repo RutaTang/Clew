@@ -254,6 +254,9 @@ fn imported_file(corpus: &Corpus, rel: &str, name: &str) -> Option<String> {
 /// `Bun.serve({ routes: { "/users/:id": handler, "/api/posts": { GET, POST } } })`.
 pub(super) fn bun(routes: &mut Routes, source: &Source, root: Node<'_>) {
     let src = source.text.as_str();
+    if !src.contains("Bun.serve") {
+        return;
+    }
     for call in all_of(root, "call_expression") {
         let Some(function) = call.child_by_field_name("function") else {
             continue;
@@ -310,6 +313,9 @@ pub(super) fn bun(routes: &mut Routes, source: &Source, root: Node<'_>) {
 /// an array of them.
 pub(super) fn hapi(routes: &mut Routes, source: &Source, root: Node<'_>) {
     let src = source.text.as_str();
+    if !(src.contains("handler") && src.contains("method")) {
+        return;
+    }
     for object in all_of(root, "object") {
         let entries = pairs(object);
         let value = |name: &str| {
@@ -517,6 +523,15 @@ impl Routes<'_> {
 // -- client routes -----------------------------------------------------------------
 
 /// The client router a file's route objects are for, by what it imports.
+/// Whether a file may hold routes the per-file readers below find — read
+/// off its text, so the rest are not parsed for them.
+pub(super) fn may_route(src: &str) -> bool {
+    src.contains("Bun.serve")
+        || (src.contains("handler") && src.contains("method"))
+        || src.contains("createFileRoute")
+        || client_router(src).is_some()
+}
+
 fn client_router(src: &str) -> Option<&'static str> {
     let has = |m: &str| src.contains(&format!("'{m}'")) || src.contains(&format!("\"{m}\""));
     if has("vue-router") {

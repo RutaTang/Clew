@@ -1596,6 +1596,83 @@ fn strip_quotes(s: &str) -> &str {
     s
 }
 
+/// JSON with comments (`//`, `/* */`) and trailing commas → strict JSON, the
+/// dialect tsconfig files are written in. String contents are left alone.
+pub fn strip_jsonc(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    let mut last = 0; // start of the pending verbatim run
+    let mut in_string = false;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if in_string {
+            match b {
+                b'\\' => i += 1,
+                b'"' => in_string = false,
+                _ => {}
+            }
+            i += 1;
+            continue;
+        }
+        match b {
+            b'"' => {
+                in_string = true;
+                i += 1;
+            }
+            b'/' if bytes.get(i + 1) == Some(&b'/') => {
+                out.push_str(&text[last..i]);
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+                last = i;
+            }
+            b'/' if bytes.get(i + 1) == Some(&b'*') => {
+                out.push_str(&text[last..i]);
+                i += 2;
+                while i < bytes.len() && !(bytes[i] == b'*' && bytes.get(i + 1) == Some(&b'/')) {
+                    i += 1;
+                }
+                i = (i + 2).min(bytes.len());
+                last = i;
+            }
+            b',' => {
+                // A comma whose next significant character closes the
+                // container is a trailing comma: drop it.
+                let mut j = i + 1;
+                loop {
+                    while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                        j += 1;
+                    }
+                    if bytes.get(j) == Some(&b'/') && bytes.get(j + 1) == Some(&b'/') {
+                        while j < bytes.len() && bytes[j] != b'\n' {
+                            j += 1;
+                        }
+                    } else if bytes.get(j) == Some(&b'/') && bytes.get(j + 1) == Some(&b'*') {
+                        j += 2;
+                        while j < bytes.len()
+                            && !(bytes[j] == b'*' && bytes.get(j + 1) == Some(&b'/'))
+                        {
+                            j += 1;
+                        }
+                        j = (j + 2).min(bytes.len());
+                    } else {
+                        break;
+                    }
+                }
+                if matches!(bytes.get(j), Some(b'}' | b']')) {
+                    out.push_str(&text[last..i]);
+                    last = i + 1;
+                }
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    out.push_str(&text[last..]);
+    out
+}
+
 #[cfg(test)]
 mod extraction_tests {
     use super::*;

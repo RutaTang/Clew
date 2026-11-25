@@ -76,6 +76,8 @@ fn meta(corpus: &Corpus) -> Option<ProjectMap> {
         "Metaprogramming",
         "the methods a class has without a def, and where they come from (modules mixed in, concerns' included blocks and class_methods, define_method, attr_*, delegate, alias, class_eval), plus calls made by name (send) and the classes that answer any call (method_missing)",
     );
+    // The definitions are indexed for a project with Ruby in it only.
+    corpus.in_langs(&[Lang::Ruby]).next()?;
     let defs = corpus.defs();
     let sources: Vec<(&Source, tree_sitter::Tree)> = corpus
         .in_langs(&[Lang::Ruby])

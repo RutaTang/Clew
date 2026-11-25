@@ -28,6 +28,7 @@ pub(crate) fn reason_words(reason: &Reason) -> String {
             Risk::RawHtml => trn!("writes raw HTML once", "writes raw HTML {n} times", n),
             Risk::CatchAll => trn!("1 catch-all", "{n} catch-alls", n),
             Risk::Sorry => trn!("1 unfinished proof", "{n} unfinished proofs", n),
+            Risk::Unchecked => trn!("1 check turned off", "{n} checks turned off", n),
             Risk::NoPrimaryKey => tr!("no primary key").to_string(),
             Risk::UnindexedKey => trn!(
                 "1 foreign key no index leads with",

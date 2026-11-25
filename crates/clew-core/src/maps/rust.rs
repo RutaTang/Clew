@@ -177,7 +177,11 @@ fn traits(corpus: &Corpus) -> Option<ProjectMap> {
             }
         }
     }
-    // Where each type and trait is defined.
+    // Where each type and trait is defined — the definitions indexed only
+    // when there is one to place.
+    if map.is_empty() {
+        return None;
+    }
     let defs = corpus.defs();
     for at in 0.. {
         let Some(node) = map.get(at) else {

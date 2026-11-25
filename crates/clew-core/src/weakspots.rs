@@ -74,6 +74,9 @@ pub enum Risk {
     /// A proof left unfinished: Lean's `sorry` or `admit`. What it states
     /// is not proved, and everything proved from it rests on it.
     Sorry,
+    /// A check turned off where it would speak: TypeScript's `as any`,
+    /// `@ts-ignore` and `@ts-nocheck`, an `eslint-disable`.
+    Unchecked,
     /// A table with no primary key (see [`crate::maps::sql::Issue`]).
     NoPrimaryKey,
     /// A foreign key no index leads with.
@@ -92,7 +95,7 @@ impl Risk {
     /// How much one of it weighs.
     fn weight(self) -> u32 {
         match self {
-            Risk::Unwrap => 1,
+            Risk::Unwrap | Risk::Unchecked => 1,
             Risk::Panic | Risk::CatchAll => 2,
             Risk::Unsafe | Risk::RawHtml => 3,
             Risk::Eval | Risk::Shell | Risk::UnboundedCopy | Risk::Deserialize | Risk::Sorry => 4,
@@ -140,7 +143,17 @@ fn risks(lang: Lang) -> &'static [(&'static str, Risk)] {
             ("eval(", Risk::Eval),
             ("new Function(", Risk::Eval),
             (".innerHTML =", Risk::RawHtml),
+            (".innerHTML +=", Risk::RawHtml),
+            (".outerHTML =", Risk::RawHtml),
+            (".insertAdjacentHTML(", Risk::RawHtml),
+            ("document.write(", Risk::RawHtml),
             ("dangerouslySetInnerHTML", Risk::RawHtml),
+            // Node's `child_process` (counted where the file uses it).
+            ("exec(", Risk::Shell),
+            ("execSync(", Risk::Shell),
+            ("shell: true", Risk::Shell),
+            (" as any", Risk::Unchecked),
+            ("<any>", Risk::Unchecked),
         ],
         Lang::Go => &[("panic(", Risk::Panic)],
         Lang::C | Lang::Cpp => &[
@@ -235,12 +248,28 @@ pub fn is_test_path(rel: &str) -> bool {
     rel.split('/').any(|part| {
         matches!(
             part,
-            "tests" | "test" | "__tests__" | "spec" | "testdata" | "fixtures" | "benches"
+            "tests"
+                | "test"
+                | "__tests__"
+                | "__mocks__"
+                | "__fixtures__"
+                | "spec"
+                | "testdata"
+                | "fixtures"
+                | "benches"
+                | "e2e"
+                | "cypress"
         )
     }) || name.starts_with("test_")
         || name.contains("_test.")
         || name.contains(".test.")
         || name.contains(".spec.")
+        // A JavaScript project's stories and end-to-end tests: fixtures
+        // and drivers, not the app.
+        || name.contains(".stories.")
+        || name.contains(".story.")
+        || name.contains(".cy.")
+        || name.contains(".e2e.")
         || name.ends_with("_tests.rs")
         || name == "tests.rs"
         || name == "conftest.py"
@@ -254,6 +283,7 @@ pub fn scan_file(rel: &str, source: &str, lang_key: &str) -> Vec<Spot> {
     if is_test_path(rel) {
         return Vec::new();
     }
+    let original = source;
     let Some((lang, source)) = highlight::read_as(lang_key, source) else {
         return Vec::new();
     };
@@ -303,24 +333,40 @@ pub fn scan_file(rel: &str, source: &str, lang_key: &str) -> Vec<Spot> {
             });
         }
     }
-    // Notes outside every function: the file's own.
+    // Notes, and checks turned off, outside every function: the file's
+    // own — and a component's template writing raw HTML.
+    let ecma = matches!(lang, Lang::JavaScript | Lang::TypeScript | Lang::Tsx);
     let mut loose = Vec::new();
+    let mut unchecked = 0;
     comments(tree.root_node(), &mut |node| {
         let at = node.start_byte();
         if covered.iter().any(|&(s, e)| s <= at && at < e) {
             return;
         }
-        let n = markers(&source[node.byte_range()]);
-        if n > 0 {
+        let text = &source[node.byte_range()];
+        let n = markers(text);
+        let off = if ecma { checks_off(text) } else { 0 };
+        if n + off > 0 {
             loose.push((node.start_position().row + 1, n));
+            unchecked += off;
         }
     });
-    if let Some(&(line, _)) = loose.first() {
+    let raw = template_raw_html(original, lang_key);
+    if !loose.is_empty() || raw > 0 {
+        let line = loose.first().map_or(1, |&(l, _)| l);
         let count: usize = loose.iter().map(|(_, n)| n).sum();
+        let mut risks = Vec::new();
+        if raw > 0 {
+            risks.push((Risk::RawHtml, raw));
+        }
+        if unchecked > 0 {
+            risks.push((Risk::Unchecked, unchecked));
+        }
         let (score, reasons) = judge(
             0,
             &Measured {
                 markers: count,
+                risks,
                 ..Measured::default()
             },
         );
@@ -574,7 +620,14 @@ fn measure(node: Node, source: &str, lang: Lang) -> Measured {
     blank(node, range.start, &mut code);
     let code = String::from_utf8_lossy(&code);
     let mut counts: Vec<(Risk, usize)> = Vec::new();
+    let ecma = matches!(lang, Lang::JavaScript | Lang::TypeScript | Lang::Tsx);
+    // `exec(` is a shell's only in a file that has Node's `child_process`
+    // (a `RegExp`'s `.exec(` is no call of it either way).
+    let shell_here = source.contains("child_process");
     for &(pattern, risk) in risks(lang) {
+        if ecma && risk == Risk::Shell && !shell_here {
+            continue;
+        }
         let n = occurrences(&code, pattern);
         if n == 0 {
             continue;
@@ -584,9 +637,43 @@ fn measure(node: Node, source: &str, lang: Lang) -> Measured {
             None => counts.push((risk, n)),
         }
     }
+    let mut unchecked = 0;
+    comments(node, &mut |c| {
+        m.markers += markers(&source[c.byte_range()]);
+        if ecma {
+            unchecked += checks_off(&source[c.byte_range()]);
+        }
+    });
+    if unchecked > 0 {
+        match counts.iter_mut().find(|(r, _)| *r == Risk::Unchecked) {
+            Some((_, c)) => *c += unchecked,
+            None => counts.push((Risk::Unchecked, unchecked)),
+        }
+    }
     m.risks = counts;
-    comments(node, &mut |c| m.markers += markers(&source[c.byte_range()]));
     m
+}
+
+/// How many checks a comment turns off: `@ts-ignore`, `@ts-nocheck`,
+/// `eslint-disable` (and its `-line`/`-next-line` forms). `@ts-expect-error`
+/// is not counted: it fails the build the day there is no error to expect.
+fn checks_off(comment: &str) -> usize {
+    ["@ts-ignore", "@ts-nocheck", "eslint-disable"]
+        .iter()
+        .map(|w| comment.matches(w).count())
+        .sum()
+}
+
+/// How many times a component's template writes raw HTML: Vue's `v-html`,
+/// Svelte's `{@html …}`, Astro's `set:html`.
+fn template_raw_html(source: &str, lang_key: &str) -> usize {
+    let directives: &[&str] = match lang_key {
+        "vue" => &["v-html="],
+        "svelte" => &["{@html "],
+        "astro" => &["set:html="],
+        _ => &[],
+    };
+    directives.iter().map(|d| source.matches(d).count()).sum()
 }
 
 /// Count `node`'s decisions and track the deepest nesting of its control
@@ -611,6 +698,9 @@ fn walk(node: Node, depth: usize, m: &mut Measured, source: &str) {
             m.branches += 1;
         }
         if is_catch(kind) && swallows(child) {
+            m.swallowed += 1;
+        }
+        if kind == "call_expression" && swallowing_catch(child, source) {
             m.swallowed += 1;
         }
         // A function inside is measured as its own, not as part of this
@@ -721,6 +811,44 @@ fn swallows(clause: Node) -> bool {
     let mut cursor = body.walk();
     body.named_children(&mut cursor)
         .all(|s| s.kind().contains("comment") || s.kind() == "pass_statement")
+}
+
+/// Whether a call is a promise's `.catch(…)` that drops what it caught:
+/// `.catch(() => {})`, `.catch(() => null)`, `.catch(noop)`.
+fn swallowing_catch(call: Node, source: &str) -> bool {
+    let is_catch = call
+        .child_by_field_name("function")
+        .filter(|f| f.kind() == "member_expression")
+        .and_then(|f| f.child_by_field_name("property"))
+        .and_then(|p| source.get(p.byte_range()))
+        == Some("catch");
+    if !is_catch {
+        return false;
+    }
+    let Some(handler) = call
+        .child_by_field_name("arguments")
+        .and_then(|a| a.named_child(0))
+    else {
+        return false;
+    };
+    match handler.kind() {
+        "identifier" => matches!(source.get(handler.byte_range()), Some("noop" | "_noop")),
+        "arrow_function" | "function_expression" | "function" => {
+            let Some(body) = handler.child_by_field_name("body") else {
+                return false;
+            };
+            match body.kind() {
+                "statement_block" => {
+                    let mut cursor = body.walk();
+                    body.named_children(&mut cursor)
+                        .all(|s| s.kind().contains("comment"))
+                }
+                "null" | "undefined" => true,
+                _ => false,
+            }
+        }
+        _ => false,
+    }
 }
 
 /// Call `each` on every comment node under `node`.
@@ -980,11 +1108,64 @@ fn a_test() {
             "web/app.test.ts",
             "web/__tests__/x.js",
             "src/app/tests.rs",
+            "src/Button.stories.tsx",
+            "cypress/e2e/login.cy.ts",
+            "src/__mocks__/api.ts",
         ] {
             assert!(is_test_path(rel), "{rel}");
         }
         for rel in ["src/testing_tools.rs", "src/attest.rs", "contest/main.go"] {
             assert!(!is_test_path(rel), "{rel}");
         }
+    }
+
+    /// A JavaScript or TypeScript function's risks: raw HTML written,
+    /// `child_process` run, a promise's error dropped, checks turned off —
+    /// in code only, and the shell's `exec` only where `child_process` is.
+    #[test]
+    fn javascript_raw_html_shell_dropped_errors_and_checks_off() {
+        let src = "import { exec } from 'node:child_process';\n\
+export function render(el, html) {\n\
+  el.innerHTML += html;\n\
+  el.insertAdjacentHTML('beforeend', html);\n\
+  exec(`rm -rf ${html}`);\n\
+  fetch('/x').catch(() => {});\n\
+  const data = JSON.parse(html) as any;\n\
+  // @ts-ignore\n\
+  data.nope();\n\
+  const s = 'el.innerHTML = x; exec(y)';\n\
+}\n\
+export function matches(re, s) {\n\
+  return re.exec(s);\n\
+}\n";
+        let spots = scan_file("src/render.ts", src, "typescript");
+        let got = reasons(&spots, "render");
+        for want in [
+            Reason::Risky(Risk::RawHtml, 2),
+            Reason::Risky(Risk::Shell, 1),
+            Reason::Risky(Risk::Unchecked, 2),
+            Reason::Swallowed(1),
+        ] {
+            assert!(got.contains(&want), "{want:?} in {got:?}");
+        }
+        assert!(reasons(&spots, "matches").is_empty(), "a RegExp's exec");
+        // Without `child_process`, `exec(` is someone's own function.
+        let plain = "export function run(q) {\n  return exec(q);\n}\n";
+        assert!(reasons(&scan_file("src/db.ts", plain, "typescript"), "run").is_empty());
+    }
+
+    /// A file-wide `@ts-nocheck` and a component template's raw HTML are
+    /// the file's own spot.
+    #[test]
+    fn a_files_checks_off_and_a_templates_raw_html() {
+        let ts = "// @ts-nocheck\n/* eslint-disable */\nexport const x = 1;\n";
+        let spots = scan_file("src/legacy.ts", ts, "typescript");
+        assert_eq!(reasons(&spots, ""), [Reason::Risky(Risk::Unchecked, 2)]);
+        let vue = "<template>\n  <div v-html=\"post.body\" />\n</template>\n<script setup lang=\"ts\">\nconst post = { body: '' }\n</script>\n";
+        let spots = scan_file("src/Post.vue", vue, "vue");
+        assert_eq!(reasons(&spots, ""), [Reason::Risky(Risk::RawHtml, 1)]);
+        let svelte = "<script>\n  export let html = '';\n</script>\n{@html html}\n";
+        let spots = scan_file("src/Raw.svelte", svelte, "svelte");
+        assert_eq!(reasons(&spots, ""), [Reason::Risky(Risk::RawHtml, 1)]);
     }
 }

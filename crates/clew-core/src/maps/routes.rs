@@ -54,12 +54,16 @@ pub fn maps(corpus: &Corpus) -> Vec<ProjectMap> {
     for source in &corpus.files {
         match source.lang {
             Some(Lang::Python) => python(&mut routes, source),
-            Some(Lang::JavaScript | Lang::TypeScript | Lang::Tsx) => {
+            Some(Lang::JavaScript | Lang::TypeScript | Lang::Tsx)
+                if !super::is_js_test(&source.rel) =>
+            {
                 javascript(&mut routes, source);
                 if next {
                     nextjs(&mut routes, source);
                 }
-                if let Some(tree) = source.tree() {
+                if js::may_route(&source.text)
+                    && let Some(tree) = source.tree()
+                {
                     let root = tree.root_node();
                     js::bun(&mut routes, source, root);
                     js::hapi(&mut routes, source, root);
@@ -750,6 +754,16 @@ const SERVER_NAMES: &[&str] = &[
 ];
 
 fn javascript(routes: &mut Routes, source: &Source) {
+    // A route is a verb's call or a NestJS controller's: a file with
+    // neither has none (and is not parsed for it).
+    let says = |word: &str| source.text.contains(word);
+    let calls = VERBS
+        .iter()
+        .chain(&["all", "route", "use", "on"])
+        .any(|v| says(&format!(".{v}(")));
+    if !(calls || says("@Controller")) {
+        return;
+    }
     let Some(tree) = source.tree() else {
         return;
     };

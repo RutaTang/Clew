@@ -3353,6 +3353,23 @@ pub(crate) fn map_text(english: &str) -> String {
     if let Some(props) = english.strip_prefix("props: ") {
         return tr!("props: {props}", props = props).to_string();
     }
+    // A store's parts (`clew_core::maps`' state map), and its kind with its
+    // own id: `Pinia store · cart`.
+    if let Some(names) = english.strip_prefix("state: ") {
+        return tr!("state: {names}", names = names).to_string();
+    }
+    if let Some(names) = english.strip_prefix("getters: ") {
+        return tr!("getters: {names}", names = names).to_string();
+    }
+    if let Some(names) = english.strip_prefix("actions: ") {
+        return tr!("actions: {names}", names = names).to_string();
+    }
+    if let Some((kind, id)) = english.split_once(" · ") {
+        let said = crate::i18n::lookup(kind);
+        if said != kind {
+            return format!("{said} · {id}");
+        }
+    }
     if let Some(sources) = english.strip_prefix("reads ") {
         return tr!("reads {sources}", sources = sources).to_string();
     }

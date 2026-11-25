@@ -2,9 +2,7 @@
 //! with the class each is a member of: what a route, a callback or a
 //! reference written as text resolves to.
 
-use std::collections::HashMap;
-
-use super::Corpus;
+use super::{Corpus, Source};
 use crate::highlight::Lang;
 
 /// One definition.
@@ -19,10 +17,14 @@ pub struct Def {
     pub class: Option<String>,
 }
 
-/// The definitions of a corpus, by name.
-#[derive(Debug, Clone, Default)]
-pub struct Defs {
-    by_name: HashMap<String, Vec<Def>>,
+/// The definitions of a corpus, looked up by name: each file outlined the
+/// first time a name it says is looked for, and kept. A map that places a
+/// few names reads the few files that say them, not every file of the
+/// project (bulletproof-react's routes spent a third of a second outlining
+/// all 500 to place a dozen handlers).
+#[derive(Clone, Copy)]
+pub struct Defs<'c> {
+    corpus: &'c Corpus,
 }
 
 /// Kinds a member is declared in.
@@ -42,85 +44,90 @@ const CONTAINERS: &[&str] = &[
     "namespace",
 ];
 
-impl Defs {
-    pub fn of(corpus: &Corpus) -> Defs {
-        let mut by_name: HashMap<String, Vec<Def>> = HashMap::new();
-        for source in &corpus.files {
-            // Code's definitions only: a schema dump's thousands of tables
-            // and columns (GitLab's: 1,500 and 30,000) are no class a map
-            // looks for, and took most of a minute to index.
-            if matches!(
-                source.lang,
-                Some(Lang::Sql | Lang::Json | Lang::Yaml | Lang::Toml | Lang::Html | Lang::Css)
-            ) {
-                continue;
-            }
-            let (Some(lang), Some(tree)) = (source.lang, source.tree()) else {
-                continue;
-            };
-            let located = crate::outline::located_in(&tree, &source.text, lang);
-            let containers: Vec<(&str, usize, usize)> = located
-                .iter()
-                .filter(|l| CONTAINERS.contains(&l.symbol.kind.as_str()))
-                .map(|l| (l.symbol.name.as_str(), l.symbol.line, l.symbol.end_line))
-                .collect();
-            for l in &located {
-                let s = &l.symbol;
-                // The innermost container around it, itself aside.
-                let class = containers
-                    .iter()
-                    .filter(|(name, start, end)| {
-                        *start <= s.line
-                            && s.end_line <= *end
-                            && !(*name == s.name && *start == s.line)
-                    })
-                    .min_by_key(|(_, start, end)| end - start)
-                    .map(|(name, _, _)| name.to_string());
-                by_name.entry(s.name.clone()).or_default().push(Def {
-                    name: s.name.clone(),
-                    kind: s.kind.clone(),
-                    rel: source.rel.clone(),
-                    line: s.line,
-                    end_line: s.end_line,
-                    class,
-                });
-            }
-        }
-        Defs { by_name }
+/// The definitions of one file: each with the innermost container around it.
+pub(super) fn of_file(source: &Source) -> Vec<Def> {
+    // Code's definitions only: a schema dump's thousands of tables
+    // and columns (GitLab's: 1,500 and 30,000) are no class a map
+    // looks for, and took most of a minute to index.
+    if matches!(
+        source.lang,
+        Some(Lang::Sql | Lang::Json | Lang::Yaml | Lang::Toml | Lang::Html | Lang::Css)
+    ) {
+        return Vec::new();
+    }
+    let (Some(lang), Some(tree)) = (source.lang, source.tree()) else {
+        return Vec::new();
+    };
+    let located = crate::outline::located_in(&tree, &source.text, lang);
+    let containers: Vec<(&str, usize, usize)> = located
+        .iter()
+        .filter(|l| CONTAINERS.contains(&l.symbol.kind.as_str()))
+        .map(|l| (l.symbol.name.as_str(), l.symbol.line, l.symbol.end_line))
+        .collect();
+    let mut out = Vec::with_capacity(located.len());
+    for l in &located {
+        let s = &l.symbol;
+        // The innermost container around it, itself aside.
+        let class = containers
+            .iter()
+            .filter(|(name, start, end)| {
+                *start <= s.line && s.end_line <= *end && !(*name == s.name && *start == s.line)
+            })
+            .min_by_key(|(_, start, end)| end - start)
+            .map(|(name, _, _)| name.to_string());
+        out.push(Def {
+            name: s.name.clone(),
+            kind: s.kind.clone(),
+            rel: source.rel.clone(),
+            line: s.line,
+            end_line: s.end_line,
+            class,
+        });
+    }
+    out
+}
+
+impl<'c> Defs<'c> {
+    pub fn of(corpus: &'c Corpus) -> Defs<'c> {
+        Defs { corpus }
     }
 
     /// The definitions named `name`.
-    pub fn named(&self, name: &str) -> &[Def] {
-        self.by_name.get(name).map_or(&[], Vec::as_slice)
+    pub fn named(&self, name: &str) -> Vec<&'c Def> {
+        if name.is_empty() {
+            return Vec::new();
+        }
+        self.corpus
+            .files
+            .iter()
+            .filter(|s| s.text.contains(name))
+            .flat_map(|s| s.defs())
+            .filter(|d| d.name == name)
+            .collect()
     }
 
     /// The definition `name` most likely meant from `from` (a file): a
     /// member of `class` when one is named, else the one in `from`, then
     /// the one nearest it by path.
-    pub fn find(&self, name: &str, class: Option<&str>, from: &str) -> Option<&Def> {
-        let candidates = self.named(name);
-        let candidates: Vec<&Def> = match class {
-            Some(class) => candidates
-                .iter()
-                .filter(|d| d.class.as_deref() == Some(class))
-                .collect(),
-            None => candidates.iter().collect(),
-        };
-        candidates.into_iter().max_by_key(|d| {
-            let shared = d
-                .rel
-                .split('/')
-                .zip(from.split('/'))
-                .take_while(|(a, b)| a == b)
-                .count();
-            (d.rel == from, shared, std::cmp::Reverse(d.line))
-        })
+    pub fn find(&self, name: &str, class: Option<&str>, from: &str) -> Option<&'c Def> {
+        self.named(name)
+            .into_iter()
+            .filter(|d| class.is_none() || d.class.as_deref() == class)
+            .max_by_key(|d| {
+                let shared = d
+                    .rel
+                    .split('/')
+                    .zip(from.split('/'))
+                    .take_while(|(a, b)| a == b)
+                    .count();
+                (d.rel == from, shared, std::cmp::Reverse(d.line))
+            })
     }
 
     /// The class (or other container) called `name`.
-    pub fn class(&self, name: &str) -> Option<&Def> {
+    pub fn class(&self, name: &str) -> Option<&'c Def> {
         self.named(name)
-            .iter()
+            .into_iter()
             .find(|d| CONTAINERS.contains(&d.kind.as_str()))
     }
 }

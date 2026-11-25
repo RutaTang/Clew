@@ -137,7 +137,11 @@ fn injection(corpus: &Corpus) -> Option<ProjectMap> {
             _ => {}
         }
     }
-    // Where each component is declared.
+    // Where each component is declared — the definitions indexed only when
+    // a component needs placing.
+    if map.is_empty() {
+        return None;
+    }
     let defs = corpus.defs();
     for at in 0..usize::MAX {
         let Some(node) = map.get(at) else {
@@ -268,6 +272,16 @@ fn dotnet_constructors(
 }
 
 fn injectables(map: &mut MapBuilder, source: &Source) {
+    const DECORATORS: &[&str] = &[
+        "@Injectable",
+        "@Controller",
+        "@Component",
+        "@Module",
+        "@Resolver",
+    ];
+    if !DECORATORS.iter().any(|d| source.text.contains(d)) {
+        return;
+    }
     let Some(tree) = source.tree() else {
         return;
     };
@@ -744,6 +758,9 @@ fn mapped_target(annotation: &str) -> Option<(String, bool)> {
 }
 
 fn typeorm(orm: &mut Orm, source: &Source) {
+    if !source.text.contains("@Entity") {
+        return;
+    }
     let Some(tree) = source.tree() else {
         return;
     };

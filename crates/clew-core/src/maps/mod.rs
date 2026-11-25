@@ -59,6 +59,10 @@ pub struct Source {
     pub text: String,
     /// Its parse tree, made once for every map that reads it.
     parsed: std::cell::OnceCell<Option<Tree>>,
+    /// A component file's script, blanked around and parsed once.
+    script: std::cell::OnceCell<Option<(Lang, String, Tree)>>,
+    /// Its definitions, outlined once — when a name it says is looked for.
+    defs: std::cell::OnceCell<Vec<defs::Def>>,
 }
 
 impl Source {
@@ -68,6 +72,8 @@ impl Source {
             lang,
             text,
             parsed: Default::default(),
+            script: Default::default(),
+            defs: Default::default(),
         }
     }
 
@@ -76,6 +82,35 @@ impl Source {
         self.parsed
             .get_or_init(|| highlight::parse(&self.text, self.lang?))
             .clone()
+    }
+
+    /// The JavaScript or TypeScript the file runs, and its parse tree: a
+    /// script file's own text, or a Vue, Svelte or Astro component's
+    /// scripts with the rest blanked (every byte where the file has it,
+    /// see [`highlight::script_view`]) — parsed once.
+    pub fn script(&self) -> Option<(Lang, &str, Tree)> {
+        match self.lang? {
+            l @ (Lang::JavaScript | Lang::TypeScript | Lang::Tsx) => {
+                Some((l, self.text.as_str(), self.tree()?))
+            }
+            l @ (Lang::Vue | Lang::Svelte | Lang::Astro) => {
+                let (lang, text, tree) = self
+                    .script
+                    .get_or_init(|| {
+                        let (lang, text) = highlight::script_view(&self.text, l)?;
+                        let tree = highlight::parse(&text, lang)?;
+                        Some((lang, text, tree))
+                    })
+                    .as_ref()?;
+                Some((*lang, text.as_str(), tree.clone()))
+            }
+            _ => None,
+        }
+    }
+
+    /// The file's definitions ([`defs::of_file`]), outlined once.
+    pub fn defs(&self) -> &[defs::Def] {
+        self.defs.get_or_init(|| defs::of_file(self))
     }
 
     /// The file's name (its last path component).
@@ -88,8 +123,6 @@ impl Source {
 #[derive(Debug, Clone, Default)]
 pub struct Corpus {
     pub files: Vec<Source>,
-    /// Every definition in the files, indexed once for every map.
-    defs: std::cell::OnceCell<defs::Defs>,
 }
 
 impl Corpus {
@@ -120,13 +153,16 @@ impl Corpus {
             }
             let text = String::from_utf8_lossy(&bytes).into_owned();
             let lang = lang.and_then(|l| Lang::for_source(l.key(), &text));
-            out.push(Source::new(&entry.rel.replace('\\', "/"), lang, text));
+            let rel = entry.rel.replace('\\', "/");
+            if matches!(lang, Some(Lang::JavaScript | Lang::TypeScript | Lang::Tsx))
+                && is_build_output(&rel, &text)
+            {
+                continue;
+            }
+            out.push(Source::new(&rel, lang, text));
         }
         out.sort_by(|a, b| a.rel.cmp(&b.rel));
-        Corpus {
-            files: out,
-            defs: Default::default(),
-        }
+        Corpus { files: out }
     }
 
     /// A corpus of in-memory files, for tests and callers that hold the
@@ -141,15 +177,13 @@ impl Corpus {
             })
             .collect();
         out.sort_by(|a, b| a.rel.cmp(&b.rel));
-        Corpus {
-            files: out,
-            defs: Default::default(),
-        }
+        Corpus { files: out }
     }
 
-    /// Every definition in the corpus — indexed once.
-    pub fn defs(&self) -> &defs::Defs {
-        self.defs.get_or_init(|| defs::Defs::of(self))
+    /// The corpus's definitions, looked up by name (each file outlined
+    /// once, when a name it says is first looked for).
+    pub fn defs(&self) -> defs::Defs<'_> {
+        defs::Defs::of(self)
     }
 
     /// The files in any of `langs`.
@@ -163,6 +197,39 @@ impl Corpus {
     pub fn get(&self, rel: &str) -> Option<&Source> {
         self.files.iter().find(|s| s.rel == rel)
     }
+}
+
+/// Whether a JavaScript or TypeScript file is a test's, a story's or a
+/// mock's: their routes, components and stores are fixtures, not the app's
+/// (`request(app).get('/users')` in a test is no route) — and the test
+/// files of a front-end project are its largest, so not parsing them for
+/// the maps is most of what they cost.
+pub fn is_js_test(rel: &str) -> bool {
+    let name = rel.rsplit('/').next().unwrap_or(rel);
+    [".test.", ".spec.", ".stories.", ".story.", ".cy.", ".e2e."]
+        .iter()
+        .any(|m| name.contains(m))
+        || rel.split('/').any(|d| {
+            matches!(
+                d,
+                "__tests__" | "__mocks__" | "__fixtures__" | "e2e" | "cypress"
+            )
+        })
+}
+
+/// Whether a JavaScript file is a build's output, not code anyone wrote: a
+/// bundle or a minified file (`dist/js/bootstrap.bundle.js`, `*.min.js`),
+/// or one a generator marked. Its routes, components and stores are its
+/// sources' again, under names a reader cannot look up — and parsing a
+/// few hundred KiB of it is most of what reading a project's maps costs.
+fn is_build_output(rel: &str, text: &str) -> bool {
+    let name = rel.rsplit('/').next().unwrap_or(rel);
+    name.contains(".min.")
+        || name.contains(".bundle.")
+        || name.ends_with("-min.js")
+        || rel.split('/').rev().skip(1).any(|dir| dir == "dist")
+        || crate::fs_scan::is_minified_source(text)
+        || crate::fs_scan::is_generated_source(text.get(..text.len().min(4096)).unwrap_or(text))
 }
 
 /// Files read though Clew parses no language of theirs: what a map is

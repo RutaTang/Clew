@@ -171,6 +171,9 @@ pub(crate) const MAP_DESCRIPTIONS: &[&str] = &[
         "each component and an arrow to each of the project's components it renders, labelled with the props it passes"
     ),
     tr_noop!(
+        "each store — Pinia, Redux, Zustand, Vuex, Svelte, Jotai, nanostores, MobX, NgRx, contexts — with the state and actions it holds, and an arrow from each component, hook or module that uses it, labelled with what it uses"
+    ),
+    tr_noop!(
         "each package of the monorepo (its version and exports in the detail) and an arrow to each of the others it depends on"
     ),
     tr_noop!(
@@ -379,4 +382,18 @@ pub(crate) const MAP_WORDS: &[&str] = &[
     tr_noop!("inferred error set"),
     tr_noop!("system library"),
     tr_noop!("no consistent method resolution order, so Python can't create this class"),
+    tr_noop!("derives from"),
+    tr_noop!("Pinia store"),
+    tr_noop!("Redux slice"),
+    tr_noop!("Redux store"),
+    tr_noop!("Zustand store"),
+    tr_noop!("Vuex store"),
+    tr_noop!("Vuex module"),
+    tr_noop!("Svelte store"),
+    tr_noop!("Jotai atom"),
+    tr_noop!("Nanostore"),
+    tr_noop!("Context"),
+    tr_noop!("MobX store"),
+    tr_noop!("NgRx feature"),
+    tr_noop!("NgRx signal store"),
 ];

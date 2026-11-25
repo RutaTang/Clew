@@ -105,7 +105,11 @@ fn instances(corpus: &Corpus) -> Option<ProjectMap> {
             }
         }
     }
-    // Each type and class where it is declared.
+    // Each type and class where it is declared — the definitions indexed
+    // only when there is one to place.
+    if map.is_empty() {
+        return None;
+    }
     let defs = corpus.defs();
     for at in 0.. {
         let Some(node) = map.get(at) else {
