@@ -378,7 +378,9 @@ pub fn extract_located(source: &str, lang_key: &str) -> Vec<Located> {
 /// [`extract_located`], telling "this language has no outline" and "its query
 /// is broken" apart from "this file declares nothing".
 pub fn try_extract_located(source: &str, lang_key: &str) -> Result<Vec<Located>, QueryError> {
-    let lang = Lang::for_source(lang_key, source).ok_or(QueryError::Unsupported)?;
+    let (lang, source) =
+        crate::highlight::read_as(lang_key, source).ok_or(QueryError::Unsupported)?;
+    let source = &*source;
     // Compile (or fetch) the query before parsing, so a language without an
     // outline costs nothing.
     crate::highlight::tags_query(lang)?;
@@ -875,11 +877,14 @@ fn located_in_tree(tree: &Tree, source: &str, lang: Lang) -> Vec<Located> {
         let (Some(kind), Some(name), Some(def)) = (kind, name, def) else {
             continue;
         };
-        let name = match lang {
-            Lang::Lean => lean_name(def, source).unwrap_or(name),
-            Lang::Sql => crate::apidoc::unquote_sql(name),
-            _ => name,
+        let name: std::borrow::Cow<str> = match lang {
+            Lang::Lean => lean_name(def, source).unwrap_or(name).into(),
+            Lang::Sql => crate::apidoc::unquote_sql(name).into(),
+            Lang::Css | Lang::Scss | Lang::Less => stylesheet_name(kind, name).into(),
+            Lang::Html => markup_name(kind, name).into(),
+            _ => name.into(),
         };
+        let name = &*name;
         let line = def.start_position().row + 1;
         let (decl_line, body) = shape_of(def, lang);
         let (declaration, signature_end, declaration_line) = declaration_bytes(def, lang, source);
@@ -1167,13 +1172,102 @@ fn member_access(mut def: Node, access: &HashMap<usize, bool>) -> Option<bool> {
 /// (`MAX_RETRIES`), else a variable (`logger = make()`, `app = Flask(…)`),
 /// or a type when it makes one (`Vector: TypeAlias = …`, `NewType`,
 /// `TypeVar`).
+/// What a stylesheet's outline entry is called: a rule by its selectors and
+/// an at-rule by its head (`@media (max-width: 600px)`), each on one line
+/// and cut at 80 chars.
+fn stylesheet_name(kind: &str, name: &str) -> String {
+    let head = match kind {
+        "module" => name.split(['{', ';']).next().unwrap_or(name),
+        _ => name,
+    };
+    one_line(head, 80)
+}
+
+/// What a page's outline entry is called: an element with an `id` as
+/// `#id`, a heading by its text on one line.
+fn markup_name(kind: &str, name: &str) -> String {
+    match kind {
+        "field" => format!("#{}", name.trim()),
+        _ => one_line(name, 80),
+    }
+}
+
+/// `text` on one line, its runs of whitespace one space, cut at `max`
+/// chars with an ellipsis.
+fn one_line(text: &str, max: usize) -> String {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    let line = words.join(" ");
+    match line.char_indices().nth(max) {
+        Some((at, _)) => format!("{}…", &line[..at]),
+        None => line,
+    }
+}
+
+/// What a JavaScript or TypeScript module's binding is, by its value: a
+/// function (an arrow or function expression, or a component a wrapper
+/// makes of one — `memo(…)`, `forwardRef(…)`, `observer(…)`, a callback
+/// `useCallback(…)` keeps), a class (a class expression), and otherwise a
+/// constant (`const`) or a variable (`let`, `var`).
+fn ecma_binding_kind(def: Node, name: &str, source: &str) -> &'static str {
+    let mut cursor = def.walk();
+    let value = def
+        .named_children(&mut cursor)
+        .filter(|d| d.kind() == "variable_declarator")
+        .find(|d| {
+            d.child_by_field_name("name")
+                .and_then(|n| source.get(n.byte_range()))
+                == Some(name)
+        })
+        .and_then(|d| d.child_by_field_name("value"));
+    let is_function = |n: Node| {
+        matches!(
+            n.kind(),
+            "arrow_function" | "function_expression" | "function" | "generator_function"
+        )
+    };
+    match value {
+        Some(v) if is_function(v) => return "function",
+        Some(v) if v.kind() == "class" => return "class",
+        Some(v) if v.kind() == "call_expression" => {
+            let callee = v.child_by_field_name("function").map(|f| match f.kind() {
+                "member_expression" => f.child_by_field_name("property").unwrap_or(f),
+                _ => f,
+            });
+            let wraps = callee
+                .and_then(|c| source.get(c.byte_range()))
+                .is_some_and(|c| {
+                    matches!(
+                        c,
+                        "memo" | "forwardRef" | "observer" | "useCallback" | "lazy"
+                    )
+                });
+            let first = v
+                .child_by_field_name("arguments")
+                .and_then(|a| a.named_child(0));
+            if wraps && first.is_some_and(is_function) {
+                return "function";
+            }
+        }
+        _ => {}
+    }
+    match def.child(0).map(|k| k.kind()) {
+        Some("const") => "constant",
+        _ => "variable",
+    }
+}
+
 fn refine_kind<'a>(def: Node, kind: &'a str, lang: Lang, name: &str, source: &str) -> &'a str {
     let function_valued = || {
         def.child_by_field_name("value")
             .is_some_and(|v| matches!(v.kind(), "arrow_function" | "function_expression"))
     };
     match lang {
-        Lang::TypeScript | Lang::Tsx if kind == "field" && function_valued() => "method",
+        Lang::JavaScript | Lang::TypeScript | Lang::Tsx if kind == "field" && function_valued() => {
+            "method"
+        }
+        Lang::JavaScript | Lang::TypeScript | Lang::Tsx if kind == "constant" => {
+            ecma_binding_kind(def, name, source)
+        }
         Lang::Lean => {
             let keyword = def
                 .child_by_field_name("kind")
@@ -1655,7 +1749,8 @@ pub fn analyze_scoped(source: &str, lang_key: &str) -> Option<Analysis> {
 }
 
 fn analyze_impl(source: &str, lang_key: &str, scope_rust: bool) -> Option<Analysis> {
-    let lang = Lang::for_source(lang_key, source)?;
+    let (lang, source) = crate::highlight::read_as(lang_key, source)?;
+    let source = &*source;
     let tree = crate::highlight::parse(source, lang)?;
     let symbols = located_in(&tree, source, lang);
     let mut imports = crate::imports::imports_in(&tree, source, lang);
@@ -1680,7 +1775,8 @@ fn analyze_impl(source: &str, lang_key: &str, scope_rust: bool) -> Option<Analys
 /// spans): one parse, no import or call-site pass — `imports` and `calls` are
 /// left empty. `None` for an unknown language key or a parser failure.
 pub fn analyze_definitions(source: &str, lang_key: &str) -> Option<Analysis> {
-    let lang = Lang::for_source(lang_key, source)?;
+    let (lang, source) = crate::highlight::read_as(lang_key, source)?;
+    let source = &*source;
     let tree = crate::highlight::parse(source, lang)?;
     Some(Analysis {
         lang,
@@ -5366,6 +5462,255 @@ mod language_tests {
         assert_eq!(
             unqualified("<T as core::ops::Add>::Output"),
             "<T as Add>::Output"
+        );
+    }
+}
+
+#[cfg(test)]
+mod frontend_outline_tests {
+    /// Each outline entry of `src` read as `key`: (line, kind, name).
+    fn outline(src: &str, key: &str) -> Vec<(usize, String, String)> {
+        super::extract(src, key)
+            .into_iter()
+            .map(|s| (s.line, s.kind, s.name))
+            .collect()
+    }
+
+    fn has(outline: &[(usize, String, String)], line: usize, kind: &str, name: &str) -> bool {
+        outline
+            .iter()
+            .any(|(l, k, n)| *l == line && k == kind && n == name)
+    }
+
+    /// A TypeScript module's outline holds what a reader looks for: its
+    /// own bindings by what they hold, its namespaces and ambient modules,
+    /// an enum's members, a type's object members, a class's `#private`
+    /// members, and a test file's suites and tests — and not a function's
+    /// locals.
+    #[test]
+    fn a_typescript_modules_bindings_namespaces_members_and_tests() {
+        let src = "/** The API's base. */\nexport const API_URL = 'https://x';\nlet cache = new Map();\nexport const Card = memo(function Card() { return null });\nconst Button = styled.button`color: red;`;\nexport default function () {}\nnamespace Api { export function get() {} }\ndeclare module \"vue\" { interface X {} }\nenum Color { Red, Green = 2 }\ntype Props = { title: string; onClose(): void };\nclass Store { #items = []; #add() {} count = 0; inc = () => {} }\ndescribe('cart', () => {\n  it('adds', () => {});\n  test.each([1])('adds %i', () => {});\n  it.skip('skips', () => {});\n});\ntest.describe('login', () => { test('works', async () => {}); });\nDeno.test('parses', () => {});\nfunction helper() { const local = 1; }\n";
+        let o = outline(src, "typescript");
+        for (line, kind, name) in [
+            (2, "constant", "API_URL"),
+            (3, "variable", "cache"),
+            (4, "function", "Card"),
+            (5, "constant", "Button"),
+            (6, "function", "default"),
+            (7, "module", "Api"),
+            (7, "function", "get"),
+            (8, "module", "vue"),
+            (9, "variant", "Red"),
+            (9, "variant", "Green"),
+            (10, "property", "title"),
+            (11, "field", "#items"),
+            (11, "method", "#add"),
+            (11, "field", "count"),
+            (11, "method", "inc"),
+            (12, "suite", "cart"),
+            (13, "test", "adds"),
+            (14, "test", "adds %i"),
+            (15, "test", "skips"),
+            (17, "suite", "login"),
+            (17, "test", "works"),
+            (18, "test", "parses"),
+            (19, "function", "helper"),
+        ] {
+            assert!(
+                has(&o, line, kind, name),
+                "no {kind} {name} on line {line} in {o:?}"
+            );
+        }
+        assert!(
+            !o.iter().any(|(_, _, n)| n == "local"),
+            "a function's local: {o:?}"
+        );
+        assert_eq!(
+            o.iter().filter(|(_, _, n)| n == "Card").count(),
+            1,
+            "a binding once, whatever matched it: {o:?}"
+        );
+        let suite = super::extract(src, "typescript")
+            .into_iter()
+            .find(|s| s.name == "cart")
+            .unwrap();
+        assert_eq!(
+            (suite.line, suite.end_line),
+            (12, 16),
+            "a suite spans its tests"
+        );
+    }
+
+    #[test]
+    fn a_javascript_modules_bindings_fields_and_default_export() {
+        let o = outline(
+            "export const routes = [];\nclass A { count = 0; #secret = 1; onClick = () => {}; #hide() {} }\nexport default () => {};\nconst Comp = forwardRef((props, ref) => null);\n",
+            "javascript",
+        );
+        for (line, kind, name) in [
+            (1, "constant", "routes"),
+            (2, "field", "count"),
+            (2, "field", "#secret"),
+            (2, "method", "onClick"),
+            (2, "method", "#hide"),
+            (3, "function", "default"),
+            (4, "function", "Comp"),
+        ] {
+            assert!(
+                has(&o, line, kind, name),
+                "no {kind} {name} on line {line} in {o:?}"
+            );
+        }
+    }
+
+    /// A stylesheet's outline: its rules by their selectors, nested in the
+    /// at-rules that hold them, its keyframes and custom properties; SCSS's
+    /// mixins, functions and variables, Less's mixins and variables.
+    #[test]
+    fn a_stylesheets_rules_at_rules_and_variables() {
+        let o = outline(
+            ":root {\n  --brand: #333;\n}\n.card > h2,\n.card   h3 { color: red; }\n@media (max-width: 600px) {\n  .card { padding: 0; }\n}\n@keyframes spin { from { opacity: 0 } }\n@layer base {\n  a { color: blue }\n}\n",
+            "css",
+        );
+        for (line, kind, name) in [
+            (1, "rule", ":root"),
+            (2, "variable", "--brand"),
+            (4, "rule", ".card > h2, .card h3"),
+            (6, "module", "@media (max-width: 600px)"),
+            (7, "rule", ".card"),
+            (9, "module", "@keyframes spin"),
+            (10, "module", "@layer base"),
+            (11, "rule", "a"),
+        ] {
+            assert!(
+                has(&o, line, kind, name),
+                "no {kind} {name} on line {line} in {o:?}"
+            );
+        }
+        let o = outline(
+            "$gap: 4px;\n@mixin pad($n) { padding: $n; }\n@function double($n) { @return $n * 2; }\n.card { &__title { color: red; } }\n",
+            "scss",
+        );
+        for (line, kind, name) in [
+            (1, "variable", "$gap"),
+            (2, "macro", "pad"),
+            (3, "function", "double"),
+            (4, "rule", ".card"),
+            (4, "rule", "&__title"),
+        ] {
+            assert!(
+                has(&o, line, kind, name),
+                "no {kind} {name} on line {line} in {o:?}"
+            );
+        }
+        let o = outline(
+            "@gap: 4px;\n.bordered() { border: 1px; }\n.card { .bordered(); }\n",
+            "less",
+        );
+        for (line, kind, name) in [
+            (1, "variable", "@gap"),
+            (2, "macro", "bordered"),
+            (3, "rule", ".card"),
+        ] {
+            assert!(
+                has(&o, line, kind, name),
+                "no {kind} {name} on line {line} in {o:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_pages_headings_and_ids_and_a_json_files_keys() {
+        let o = outline(
+            "<html><body>\n<h1>Pricing   plans</h1>\n<section id=\"faq\"><h2>FAQ</h2></section>\n<div id=app></div>\n</body></html>\n",
+            "html",
+        );
+        for (line, kind, name) in [
+            (2, "section", "Pricing plans"),
+            (3, "field", "#faq"),
+            (3, "section", "FAQ"),
+            (4, "field", "#app"),
+        ] {
+            assert!(
+                has(&o, line, kind, name),
+                "no {kind} {name} on line {line} in {o:?}"
+            );
+        }
+        let o = outline(
+            "{\n  \"name\": \"web\",\n  \"scripts\": {\n    \"build\": \"vite build\"\n  },\n  \"deep\": { \"a\": { \"b\": 1 } }\n}\n",
+            "json",
+        );
+        for (line, name) in [
+            (2, "name"),
+            (3, "scripts"),
+            (4, "build"),
+            (6, "deep"),
+            (6, "a"),
+        ] {
+            assert!(
+                has(&o, line, "field", name),
+                "no {name} on line {line} in {o:?}"
+            );
+        }
+        assert!(!o.iter().any(|(_, _, n)| n == "b"), "two levels: {o:?}");
+    }
+
+    /// A component file's outline is its script's, each symbol on the line
+    /// the file has it.
+    #[test]
+    fn a_component_files_outline_is_its_scripts() {
+        let o = outline(
+            "<template>\n  <p>{{ n }}</p>\n</template>\n<script setup lang=\"ts\">\nconst n = ref(0)\nfunction inc() { n.value++ }\n</script>\n<style>p { color: red }</style>\n",
+            "vue",
+        );
+        assert_eq!(
+            o,
+            [
+                (5, "constant".into(), "n".into()),
+                (6, "function".into(), "inc".into())
+            ]
+        );
+        let o = outline(
+            "<script>\n  export let name = 'x';\n  function greet() {}\n</script>\n<h1>{name}</h1>\n",
+            "svelte",
+        );
+        assert_eq!(
+            o,
+            [
+                (2, "variable".into(), "name".into()),
+                (3, "function".into(), "greet".into())
+            ]
+        );
+        let o = outline(
+            "---\nconst title = 'Hi'\nfunction slug(s: string) { return s }\n---\n<h1>{title}</h1>\n",
+            "astro",
+        );
+        assert_eq!(
+            o,
+            [
+                (2, "constant".into(), "title".into()),
+                (3, "function".into(), "slug".into())
+            ]
+        );
+        let (lang, view) = crate::highlight::read_as(
+            "vue",
+            "<template><a/></template>\n<script>\nlet x = 1\n</script>\n",
+        )
+        .unwrap();
+        assert_eq!(lang, crate::highlight::Lang::JavaScript);
+        assert_eq!(
+            view.lines().nth(2),
+            Some("let x = 1"),
+            "every line where the file has it"
+        );
+        assert_eq!(
+            view.len(),
+            "<template><a/></template>\n<script>\nlet x = 1\n</script>\n".len()
+        );
+        assert!(
+            crate::highlight::read_as("vue", "<template><a/></template>\n")
+                .is_some_and(|(l, _)| l == crate::highlight::Lang::Vue),
+            "no script: the component as it is"
         );
     }
 }

@@ -404,11 +404,19 @@ impl App {
                 })
             })
         else {
+            // A language with no server (a Vue component, a stylesheet):
+            // its definitions as the outline knows them.
+            if matches!(kind, GotoKind::Definition) {
+                return self.goto_by_name(pane, line, col, None);
+            }
             return Task::none();
         };
 
         let client = match self.proj.link.lsp.get(lang) {
             Some(LspSlot::Ready(c)) => c.clone(),
+            _ if matches!(kind, GotoKind::Definition) => {
+                return self.goto_by_name(pane, line, col, Some(lang));
+            }
             _ => {
                 self.status = tr!(
                     "No {language} server ready",
@@ -466,6 +474,80 @@ impl App {
                 }
             },
         )
+    }
+
+    /// Go to the definition of the name at (`line`, `col`) of `pane` as the
+    /// project's outline knows it, where no language server answers: a
+    /// name the file defines itself, or else one the project's files of the
+    /// same language family define — one jumped to, several listed in the
+    /// Search sidebar to pick from as a server's several are. `lang`, the
+    /// language whose server is not ready, says so when nothing is found.
+    fn goto_by_name(
+        &mut self,
+        pane: usize,
+        line: usize,
+        col: usize,
+        lang: Option<&'static str>,
+    ) -> Task<Message> {
+        let found = self.definitions_by_name(pane, line, col);
+        let Some((word, targets)) = found else {
+            self.status = match lang {
+                Some(lang) => tr!(
+                    "No {language} server ready",
+                    language = crate::app::languages::language_name(lang)
+                ),
+                None => tr!("No definition found").into(),
+            };
+            return Task::none();
+        };
+        self.proj.goto_term = Some(word);
+        self.proj.goto_encoding = viewer::PositionEncoding::Utf8;
+        self.on_definition_result(Ok(targets))
+    }
+
+    /// The definitions of the name at (`line`, `col`) of `pane` in the
+    /// project's symbol index: the file's own, or else those of its
+    /// language family's files (a `.vue` component's script names a `.ts`
+    /// module's), in file and line order.
+    pub(crate) fn definitions_by_name(
+        &self,
+        pane: usize,
+        line: usize,
+        col: usize,
+    ) -> Option<(String, Vec<lsp::client::Target>)> {
+        let v = self.proj.panes.get(pane)?.as_ref()?;
+        let source_line = v.source_line(line)?;
+        let word = word_at_byte(
+            source_line,
+            viewer::Col(col).to_offset(source_line, viewer::PositionEncoding::Utf8),
+        )?;
+        let target = |s: &SymbolEntry| lsp::client::Target {
+            path: s.abs.clone(),
+            line: s.line.saturating_sub(1),
+            character: 0,
+        };
+        let index = &self.proj.symbol_index_by_file;
+        if let Some(own) = index.get(&v.abs) {
+            let found: Vec<_> = own.iter().filter(|s| s.name == word).map(target).collect();
+            if !found.is_empty() {
+                return Some((word, found));
+            }
+        }
+        let here = v.lang_key.and_then(clew_core::highlight::Lang::from_key);
+        let mut found: Vec<lsp::client::Target> = index
+            .iter()
+            .filter(|(path, _)| {
+                let there = clew_core::highlight::detect(path)
+                    .and_then(clew_core::highlight::Lang::from_key);
+                match (here, there) {
+                    (Some(a), Some(b)) => a.shares_namespace_with(b),
+                    _ => true,
+                }
+            })
+            .flat_map(|(_, symbols)| symbols.iter().filter(|s| s.name == word).map(target))
+            .collect();
+        found.sort_by(|a, b| (&a.path, a.line).cmp(&(&b.path, b.line)));
+        (!found.is_empty()).then_some((word, found))
     }
 
     /// Resolve the definition at a clicked (line, display col) in `pane`.

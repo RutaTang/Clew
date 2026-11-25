@@ -144,7 +144,12 @@ pub fn index_language(rel: &str, abs: &Path) -> Option<&'static str> {
         return None;
     }
     let lang = crate::highlight::detect(abs)?;
-    crate::highlight::tags_for(lang).map(|_| lang)
+    match lang {
+        // A JSON file's keys are its outline, not symbols to look for: data
+        // files would spend the index's cap.
+        "json" => None,
+        _ => crate::highlight::has_outline(lang).then_some(lang),
+    }
 }
 
 /// Whether `rel` sits under one of [`NOISE_DIRS`] at any depth: what the walk

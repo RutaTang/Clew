@@ -96,9 +96,10 @@ fn extract_with(
     mut targets: Vec<Target>,
     max: usize,
 ) -> HashMap<usize, String> {
-    let Some(lang) = Lang::for_source(lang_key, source) else {
+    let Some((lang, source)) = crate::highlight::read_as(lang_key, source) else {
         return HashMap::new();
     };
+    let source = &*source;
     let style = DocStyle::for_lang(lang);
     if matches!(style, DocStyle::None) || targets.is_empty() {
         return HashMap::new();
@@ -1077,9 +1078,9 @@ fn collect_block(
 fn clean_doc_text(s: &str, lang: Lang) -> String {
     match lang {
         Lang::Dart => strip_dart_directives(s),
-        Lang::JavaScript | Lang::TypeScript | Lang::Tsx | Lang::Java | Lang::C | Lang::Cpp => {
-            render_inline_tags(s)
-        }
+        Lang::JavaScript => jsdoc_markdown(s, "js"),
+        Lang::TypeScript | Lang::Tsx => jsdoc_markdown(s, "ts"),
+        Lang::Java | Lang::C | Lang::Cpp => render_inline_tags(s),
         Lang::Python => simplify_rest_roles(s),
         Lang::Php => render_inline_tags(s),
         Lang::CSharp => render_xml_doc(s),
@@ -1229,6 +1230,248 @@ fn strip_dart_directives(s: &str) -> String {
 }
 
 /// Render Javadoc/JSDoc inline tags as the text they stand for.
+/// A JSDoc or TSDoc comment as the Markdown the doc cards render, its block
+/// tags in sections as a Python docstring's are: `@param`s under
+/// **Parameters** (`- `name` (type): text`, an optional one — `[name]`,
+/// `[name=default]` — saying so), `@returns` under **Returns** with its
+/// type in code, `@throws` under **Throws**, each `@example` a code block
+/// (its own fences kept, its caption above it), `@deprecated` under
+/// **Deprecated**, `@see` under **See also**, `@template` and `@typeParam`
+/// under **Type parameters**, TSDoc's `@remarks` as prose; another tag
+/// (`@internal`, `@since 2.0`) a line as written. Inline tags (`{@link
+/// Cart}`) read as their text. `fence` is the language an example is.
+fn jsdoc_markdown(s: &str, fence: &str) -> String {
+    let s = render_inline_tags(s);
+    // The summary, then each block tag with the lines under it — a line in
+    // an example's own fence is the example's, whatever it starts with.
+    let mut summary: Vec<&str> = Vec::new();
+    let mut tags: Vec<(&str, &str, Vec<&str>)> = Vec::new();
+    let mut fenced = false;
+    for line in s.lines() {
+        let t = line.trim();
+        if !fenced
+            && let Some(tag) = t.strip_prefix('@')
+            && tag.starts_with(|c: char| c.is_ascii_alphabetic())
+        {
+            let (tag, rest) = tag.split_once(char::is_whitespace).unwrap_or((tag, ""));
+            tags.push((tag, rest.trim(), Vec::new()));
+            continue;
+        }
+        if t.starts_with("```") {
+            fenced = !fenced;
+        }
+        match tags.last_mut() {
+            Some((_, _, body)) => body.push(line),
+            None => summary.push(line),
+        }
+    }
+    if tags.is_empty() {
+        return s;
+    }
+    let mut sections: Vec<(&str, Vec<String>)> = Vec::new();
+    let mut lines_of: Vec<String> = Vec::new();
+    for (tag, first, body) in &tags {
+        let text = jsdoc_text(first, body);
+        let (heading, line) = match *tag {
+            "param" | "arg" | "argument" | "prop" | "property" => {
+                let (kind, rest) = jsdoc_typed(&text);
+                let (name, optional, default, rest) = jsdoc_named(&rest);
+                let mut what: Vec<String> = kind.into_iter().collect();
+                if optional {
+                    what.push("optional".to_string());
+                }
+                if let Some(d) = default {
+                    what.push(format!("default `{d}`"));
+                }
+                let what = match what.is_empty() {
+                    true => String::new(),
+                    false => format!(" ({})", what.join(", ")),
+                };
+                let rest = match rest.is_empty() {
+                    true => String::new(),
+                    false => format!(": {rest}"),
+                };
+                let heading = match *tag {
+                    "prop" | "property" => "Properties",
+                    _ => "Parameters",
+                };
+                (heading, format!("- `{name}`{what}{rest}"))
+            }
+            "returns" | "return" | "yields" | "yield" => {
+                let (kind, rest) = jsdoc_typed(&text);
+                let line = match kind {
+                    Some(k) if rest.is_empty() => format!("`{k}`"),
+                    Some(k) => format!("`{k}`: {rest}"),
+                    None => rest,
+                };
+                let heading = match tag.starts_with("yield") {
+                    true => "Yields",
+                    false => "Returns",
+                };
+                (heading, line)
+            }
+            "throws" | "exception" => {
+                let (kind, rest) = jsdoc_typed(&text);
+                let line = match kind {
+                    Some(k) if rest.is_empty() => format!("- `{k}`"),
+                    Some(k) => format!("- `{k}`: {rest}"),
+                    None => format!("- {rest}"),
+                };
+                ("Throws", line)
+            }
+            "template" | "typeParam" | "typeparam" => {
+                let (_, rest) = jsdoc_typed(&text);
+                let (name, _, _, rest) = jsdoc_named(&rest);
+                let rest = match rest.is_empty() {
+                    true => String::new(),
+                    false => format!(": {rest}"),
+                };
+                ("Type parameters", format!("- `{name}`{rest}"))
+            }
+            "example" => ("Examples", jsdoc_example(first, body, fence)),
+            "deprecated" => ("Deprecated", text),
+            "see" => ("See also", format!("- {text}")),
+            "remarks" => (
+                "Remarks",
+                body.iter()
+                    .map(|l| l.trim())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+                    .trim()
+                    .to_string(),
+            ),
+            _ => {
+                lines_of.push(format!(
+                    "`@{tag}`{}",
+                    match text.is_empty() {
+                        true => String::new(),
+                        false => format!(" {text}"),
+                    }
+                ));
+                continue;
+            }
+        };
+        match sections.iter_mut().find(|(h, _)| *h == heading) {
+            Some((_, lines)) => lines.push(line),
+            None => sections.push((heading, vec![line])),
+        }
+    }
+    let mut out: Vec<String> = Vec::new();
+    let summary = summary.join("\n").trim().to_string();
+    if !summary.is_empty() {
+        out.push(summary);
+    }
+    for (heading, lines) in sections {
+        // A list's entries one after another; an example's (or a remark's)
+        // blocks apart.
+        let joint = match lines.first().is_some_and(|l| l.starts_with("- ")) {
+            true => "\n",
+            false => "\n\n",
+        };
+        out.push(format!("**{heading}**\n\n{}", lines.join(joint)));
+    }
+    if !lines_of.is_empty() {
+        out.push(lines_of.join("\n"));
+    }
+    out.join("\n\n")
+}
+
+/// A block tag's text: the rest of its line and the lines under it, one
+/// line.
+fn jsdoc_text(first: &str, body: &[&str]) -> String {
+    let mut all = vec![first.trim()];
+    all.extend(body.iter().map(|l| l.trim()));
+    all.retain(|l| !l.is_empty());
+    all.join(" ")
+}
+
+/// `{Type} rest` as (`Type`, rest), braces nesting (`{Record<K, {a: 1}>}`);
+/// a tag that writes no type, (`None`, the text).
+fn jsdoc_typed(text: &str) -> (Option<String>, String) {
+    let t = text.trim_start();
+    let Some(after) = t.strip_prefix('{') else {
+        return (None, t.to_string());
+    };
+    match matching_brace(after) {
+        Some(close) => (
+            Some(after[..close].trim().to_string()),
+            after[close + 1..].trim_start().to_string(),
+        ),
+        None => (None, t.to_string()),
+    }
+}
+
+/// `name - text`, `name text` or `[name=default] text`: (name, whether it
+/// is optional, its default, the text).
+fn jsdoc_named(text: &str) -> (String, bool, Option<String>, String) {
+    let t = text.trim_start();
+    let optional = t.starts_with('[');
+    let (head, rest) = match t.strip_prefix('[') {
+        Some(inner) => match inner.find(']') {
+            Some(close) => (&inner[..close], &inner[close + 1..]),
+            None => (inner, ""),
+        },
+        None => t.split_once(char::is_whitespace).unwrap_or((t, "")),
+    };
+    let (name, default) = match head.split_once('=') {
+        Some((n, d)) if optional => (n.trim(), Some(d.trim().to_string())),
+        _ => (head.trim(), None),
+    };
+    let rest = rest.trim_start();
+    let rest = rest
+        .strip_prefix("- ")
+        .or_else(|| rest.strip_prefix("— "))
+        .unwrap_or(rest);
+    (name.to_string(), optional, default, rest.trim().to_string())
+}
+
+/// An `@example` as Markdown: the caption on the tag's line (`@example
+/// <caption>Adding two</caption>`) as prose, then its code — in the fences
+/// it was written in, or in a block of `fence`'s language.
+fn jsdoc_example(first: &str, body: &[&str], fence: &str) -> String {
+    let mut lines: Vec<&str> = body.to_vec();
+    while lines.first().is_some_and(|l| l.trim().is_empty()) {
+        lines.remove(0);
+    }
+    while lines.last().is_some_and(|l| l.trim().is_empty()) {
+        lines.pop();
+    }
+    let indent = lines
+        .iter()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.len() - l.trim_start().len())
+        .min()
+        .unwrap_or(0);
+    let code: Vec<&str> = lines
+        .iter()
+        .map(|l| l.get(indent..).unwrap_or(l.trim()))
+        .collect();
+    let mut block: Vec<String> = Vec::new();
+    let caption = first.replace("<caption>", "").replace("</caption>", "");
+    let caption = caption.trim();
+    // A one-line example written on the tag's own line is code, not a
+    // caption.
+    let (caption, code) = match (caption.is_empty(), code.is_empty()) {
+        (false, true) => ("", vec![caption]),
+        _ => (caption, code),
+    };
+    if !caption.is_empty() {
+        block.push(caption.to_string());
+        block.push(String::new());
+    }
+    if code
+        .first()
+        .is_some_and(|l| l.trim_start().starts_with("```"))
+    {
+        block.extend(code.iter().map(|l| l.to_string()));
+    } else if !code.is_empty() {
+        block.push(format!("```{fence}"));
+        block.extend(code.iter().map(|l| l.to_string()));
+        block.push("```".to_string());
+    }
+    block.join("\n")
+}
+
 fn render_inline_tags(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut rest = s;
@@ -2607,6 +2850,39 @@ def request(
         let docs = docs_of(src, "python");
         let d = docs.values().next().expect("a docstring");
         assert_eq!(d, "Hi\n中文注释");
+    }
+
+    /// A JSDoc or TSDoc comment's block tags read as sections, as a
+    /// Python docstring's do: parameters with their types and defaults,
+    /// what it returns and throws, its examples as code, and the rest.
+    #[test]
+    fn jsdoc_block_tags_read_as_markdown() {
+        let doc = "Add an item to the cart.\n\n@param {Cart} cart - The cart to add to.\n@param {Item} item the item,\n  priced.\n@param {number} [qty=1] - How many.\n@param [note] A note.\n@returns {Promise<Cart>} The cart, saved.\n@throws {RangeError} If `qty` is negative.\n@example\n  await add(cart, apple)\n  await add(cart, pear, 2)\n@deprecated Use {@link addAll} instead.\n@see https://example.com/cart\n@since 2.0";
+        assert_eq!(
+            jsdoc_markdown(doc, "ts"),
+            "Add an item to the cart.\n\n\
+             **Parameters**\n\n- `cart` (Cart): The cart to add to.\n- `item` (Item): the item, priced.\n\
+             - `qty` (number, optional, default `1`): How many.\n- `note` (optional): A note.\n\n\
+             **Returns**\n\n`Promise<Cart>`: The cart, saved.\n\n\
+             **Throws**\n\n- `RangeError`: If `qty` is negative.\n\n\
+             **Examples**\n\n```ts\nawait add(cart, apple)\nawait add(cart, pear, 2)\n```\n\n\
+             **Deprecated**\n\nUse addAll instead.\n\n\
+             **See also**\n\n- https://example.com/cart\n\n\
+             `@since` 2.0"
+        );
+        // An example's own fences and caption are kept, a tag inside the
+        // fence stays code, and TSDoc's type parameters and remarks read too.
+        let doc = "Map a list.\n\n@typeParam T - What it holds.\n@remarks\nRuns in place.\n@example <caption>Doubling</caption>\n```js\n// @ts-expect-error\nmap([1], (x) => x * 2)\n```";
+        assert_eq!(
+            jsdoc_markdown(doc, "ts"),
+            "Map a list.\n\n**Type parameters**\n\n- `T`: What it holds.\n\n**Remarks**\n\nRuns in place.\n\n\
+             **Examples**\n\nDoubling\n\n```js\n// @ts-expect-error\nmap([1], (x) => x * 2)\n```"
+        );
+        // A comment with no block tags is left as written, its inline tags read.
+        assert_eq!(
+            jsdoc_markdown("See {@link Cart} for more.", "js"),
+            "See Cart for more."
+        );
     }
 
     #[test]

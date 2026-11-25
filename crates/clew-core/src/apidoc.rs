@@ -383,9 +383,18 @@ fn lean_module_doc<'a>(lines: impl Iterator<Item = &'a str>) -> String {
 /// under their enclosing type/module by source-range containment. Returns an
 /// empty list when the language has no outline.
 pub fn build_file(source: &str, lang_key: &str) -> Vec<DocItem> {
-    let Some(lang) = Lang::for_source(lang_key, source) else {
+    let Some((lang, source)) = crate::highlight::read_as(lang_key, source) else {
         return Vec::new();
     };
+    let source = &*source;
+    // A stylesheet's rules, a page's headings and a JSON file's keys are its
+    // outline, not an API to document.
+    if matches!(
+        lang,
+        Lang::Css | Lang::Scss | Lang::Less | Lang::Html | Lang::Json
+    ) {
+        return Vec::new();
+    }
     // A SQL file's tree is read twice, for its outline and its foreign keys:
     // parsed once.
     let sql_tree = match lang {

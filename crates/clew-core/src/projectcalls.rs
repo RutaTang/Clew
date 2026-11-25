@@ -287,7 +287,8 @@ impl FileCalls {
     /// Parse `source` once and read off its call sites. `None` for a file in
     /// a language without a call model.
     pub fn read(file: &Path, source: &str) -> Option<FileCalls> {
-        let lang = Lang::for_source(crate::highlight::detect(file)?, source)?;
+        let (lang, source) = crate::highlight::read_as(crate::highlight::detect(file)?, source)?;
+        let source = &*source;
         lang_spec(lang)?;
         let tree = crate::highlight::parse(source, lang)?;
         let symbols = crate::outline::located_in(&tree, source, lang);

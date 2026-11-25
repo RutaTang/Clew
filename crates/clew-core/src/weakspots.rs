@@ -254,9 +254,10 @@ pub fn scan_file(rel: &str, source: &str, lang_key: &str) -> Vec<Spot> {
     if is_test_path(rel) {
         return Vec::new();
     }
-    let Some(lang) = Lang::for_source(lang_key, source) else {
+    let Some((lang, source)) = highlight::read_as(lang_key, source) else {
         return Vec::new();
     };
+    let source = &*source;
     if lang == Lang::Lean {
         return lean_spots(rel, source);
     }

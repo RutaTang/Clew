@@ -50,9 +50,10 @@ pub struct RawImport {
 /// languages without an import model or when parsing fails. Blocking; run off
 /// the UI thread.
 pub fn imports_of(source: &str, lang: &str) -> Vec<RawImport> {
-    let Some(lang) = Lang::for_source(lang, source) else {
+    let Some((lang, source)) = crate::highlight::read_as(lang, source) else {
         return Vec::new();
     };
+    let source = &*source;
     // Fetch (or compile) the query first, so a language without an import
     // model is not parsed at all.
     if import_query(lang).is_err() {

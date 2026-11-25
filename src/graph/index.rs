@@ -166,9 +166,10 @@ pub fn analyze_file(abs: &Path, rel: &str, content: &str, lang: &'static str) ->
     )
     .filter(|calls| !calls.is_empty())
     .map(Arc::new);
-    let symbols = if highlight::tags_for(lang).is_some() {
+    let symbols = if highlight::has_outline(lang) {
         let lines: Vec<&str> = content.lines().collect();
-        let entries = clew_core::outline::EntryPoints::new(&lines, lang, rel);
+        // A component file's entry points and tests are its script's.
+        let entries = clew_core::outline::EntryPoints::new(&lines, analysis.lang.key(), rel);
         analysis
             .symbols
             .into_iter()

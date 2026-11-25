@@ -510,12 +510,12 @@ impl Lang {
         match self {
             Lang::Rust => &[RUST_TAGS],
             Lang::Python => &[tree_sitter_python::TAGS_QUERY, PYTHON_EXTRA_TAGS],
-            Lang::JavaScript => &[tree_sitter_javascript::TAGS_QUERY, JS_EXTRA_TAGS],
+            Lang::JavaScript => &[tree_sitter_javascript::TAGS_QUERY, JS_EXTRA_TAGS, ECMA_TAGS],
             // The crate's bundled TAGS_QUERY only captures declaration-file
             // constructs (function_signature, method_signature, interface, …),
             // so real .ts source (class/function/method/type) yields almost no
             // symbols. Use a source-oriented tags query instead.
-            Lang::TypeScript | Lang::Tsx => &[TS_TAGS],
+            Lang::TypeScript | Lang::Tsx => &[TS_TAGS, ECMA_TAGS],
             Lang::Go => &[tree_sitter_go::TAGS_QUERY],
             Lang::Dart => &[tree_sitter_dart_orchard::TAGS_QUERY],
             Lang::C => &[tree_sitter_c::TAGS_QUERY],
@@ -529,17 +529,13 @@ impl Lang {
             Lang::Erlang => &[ERLANG_TAGS],
             Lang::Haskell => &[HASKELL_TAGS],
             Lang::Zig => &[ZIG_TAGS],
-            Lang::Json
-            | Lang::Bash
-            | Lang::Yaml
-            | Lang::Toml
-            | Lang::Html
-            | Lang::Css
-            | Lang::Scss
-            | Lang::Less
-            | Lang::Vue
-            | Lang::Svelte
-            | Lang::Astro => &[],
+            Lang::Css => &[CSS_TAGS],
+            Lang::Scss => &[CSS_TAGS, SCSS_TAGS],
+            Lang::Less => &[CSS_TAGS, LESS_TAGS],
+            Lang::Html => &[HTML_TAGS],
+            Lang::Json => &[JSON_TAGS],
+            // A component file's outline is its script's ([`script_view`]).
+            Lang::Bash | Lang::Yaml | Lang::Toml | Lang::Vue | Lang::Svelte | Lang::Astro => &[],
         }
     }
 
@@ -871,7 +867,20 @@ const TS_TAGS: &str = r#"
 (interface_body
   (property_signature name: (property_identifier) @name) @definition.property)
 (class_body
-  (public_field_definition name: (property_identifier) @name) @definition.field)
+  (public_field_definition name: [(property_identifier) (private_property_identifier)] @name) @definition.field)
+;; A type alias's object type, which declares its members as an interface
+;; does (`type Props = { title: string }`).
+(type_alias_declaration
+  value: (object_type
+    (property_signature name: (property_identifier) @name) @definition.property))
+;; A namespace (`namespace Api {}`, `module Api {}`) and an ambient module
+;; (`declare module "vue" {}`), with what each declares inside.
+(internal_module name: [(identifier) (nested_identifier)] @name) @definition.module
+(module name: [(identifier) (nested_identifier)] @name) @definition.module
+(module name: (string (string_fragment) @name)) @definition.module
+;; An enum's members.
+(enum_body (property_identifier) @name @definition.variant)
+(enum_body (enum_assignment name: (property_identifier) @name) @definition.variant)
 "#;
 
 /// Added to tree-sitter-javascript's own tags query: a class field holding a
@@ -1044,6 +1053,141 @@ const JS_EXTRA_TAGS: &str = r#"
 (field_definition
   property: (property_identifier) @name
   value: [(arrow_function) (function_expression)]) @definition.method
+;; A class's fields, `#private` ones too; one holding a function is a method
+;; (`outline::refine_kind`).
+(field_definition
+  property: [(property_identifier) (private_property_identifier)] @name) @definition.field
+"#;
+
+/// JavaScript's and TypeScript's outline, beyond each one's own query.
+///
+/// - A module's own bindings — `export const routes = [...]`, `const store =
+///   defineStore(…)`, a styled component, `let cache = new Map()` — each a
+///   constant or a variable, or a function when its value is one: a
+///   component made by `memo(…)` or `forwardRef(…)` too
+///   (`outline::refine_kind`). A function's locals are not listed.
+/// - `export default function () {}` and `export default () => …`, which
+///   have no name of their own: the module's `default`.
+/// - A class's `#private` methods.
+/// - A test file's suites and tests as Jest, Vitest, Mocha, node:test, Bun,
+///   Playwright and Deno write them: `describe('cart', …)`, `it.only('adds',
+///   …)`, `test.each(rows)('adds %i', …)`, `test.describe('login', …)`,
+///   `Deno.test('parses', …)` — each named by its title, a test in the
+///   suite that holds it.
+const ECMA_TAGS: &str = r#"
+(program
+  (lexical_declaration
+    (variable_declarator name: (identifier) @name)) @definition.constant)
+(program
+  (variable_declaration
+    (variable_declarator name: (identifier) @name)) @definition.constant)
+(program
+  (export_statement
+    declaration: (lexical_declaration
+      (variable_declarator name: (identifier) @name)) @definition.constant))
+(program
+  (export_statement
+    declaration: (variable_declaration
+      (variable_declarator name: (identifier) @name)) @definition.constant))
+(export_statement
+  "default" @name
+  value: [(function_expression) (arrow_function)]) @definition.function
+(export_statement
+  "default" @name
+  value: (class)) @definition.class
+(method_definition name: (private_property_identifier) @name) @definition.method
+(call_expression
+  function: [
+    (identifier) @_fn
+    (member_expression object: (identifier) @_fn)
+    (member_expression object: (member_expression object: (identifier) @_fn))
+    (call_expression function: (member_expression object: (identifier) @_fn))
+  ]
+  arguments: (arguments . [(string (string_fragment) @name) (template_string) @name])
+  (#any-of? @_fn "describe" "suite" "context")) @definition.suite
+(call_expression
+  function: [
+    (member_expression object: (identifier) @_obj property: (property_identifier) @_fn)
+    (member_expression object: (member_expression object: (identifier) @_obj property: (property_identifier) @_fn))
+  ]
+  arguments: (arguments . [(string (string_fragment) @name) (template_string) @name])
+  (#eq? @_obj "test")
+  (#eq? @_fn "describe")) @definition.suite
+(call_expression
+  function: [
+    (identifier) @_fn
+    (member_expression object: (identifier) @_fn property: (property_identifier) @_how)
+    (member_expression object: (member_expression object: (identifier) @_fn property: (property_identifier) @_how))
+    (call_expression function: (member_expression object: (identifier) @_fn))
+  ]
+  arguments: (arguments . [(string (string_fragment) @name) (template_string) @name])
+  (#any-of? @_fn "it" "test" "specify" "bench")
+  (#not-any-of? @_how "describe" "beforeEach" "afterEach" "beforeAll" "afterAll" "use" "extend" "step" "fixme")) @definition.test
+(call_expression
+  function: (member_expression object: (identifier) @_obj property: (property_identifier) @_fn)
+  arguments: (arguments . [(string (string_fragment) @name) (template_string) @name])
+  (#eq? @_obj "Deno")
+  (#eq? @_fn "test")) @definition.test
+"#;
+
+/// A stylesheet's outline (CSS's, and the base of SCSS's and Less's): each
+/// rule by its selectors, each `@media`, `@supports`, `@container`,
+/// `@layer` or other block at-rule holding the rules inside it (its name
+/// the at-rule's head, `outline::stylesheet_name`), each `@keyframes`, and
+/// each custom property (`--brand: #333`).
+const CSS_TAGS: &str = r#"
+(rule_set (selectors) @name) @definition.rule
+(media_statement) @name @definition.module
+(supports_statement) @name @definition.module
+(at_rule (block)) @name @definition.module
+(keyframes_statement) @name @definition.module
+(declaration (property_name) @name (#match? @name "^--")) @definition.variable
+"#;
+
+/// SCSS's own declarations over CSS's outline: a mixin, a function, and a
+/// variable the stylesheet declares at its top (`$gap: 4px`).
+const SCSS_TAGS: &str = r#"
+(mixin_statement name: (identifier) @name) @definition.macro
+(function_statement name: (identifier) @name) @definition.function
+(stylesheet (declaration (property_name) @name (#match? @name "^\\$")) @definition.variable)
+"#;
+
+/// Less's own declarations over CSS's outline: a mixin (`.bordered() {}`)
+/// and a variable declared at the top (`@gap: 4px`).
+const LESS_TAGS: &str = r#"
+(mixin_definition [(class_name) (id_name)] @name) @definition.macro
+(stylesheet (declaration (property_name) @name (#match? @name "^@")) @definition.variable)
+"#;
+
+/// A page's outline: its headings (`<h2>Pricing</h2>`, by their text), and
+/// each element with an `id` — what a link or a script names it by — as
+/// `#id` (`outline::markup_name`).
+const HTML_TAGS: &str = r#"
+(element
+  (start_tag (tag_name) @_tag)
+  (text) @name
+  (#match? @_tag "^[hH][1-6]$")) @definition.section
+(element
+  (start_tag
+    (attribute
+      (attribute_name) @_attr
+      [(attribute_value) @name (quoted_attribute_value (attribute_value) @name)]))
+  (#eq? @_attr "id")) @definition.field
+"#;
+
+/// A JSON file's outline: its top-level keys and the keys of each of their
+/// objects — a `package.json`'s `scripts` and each script, a `tsconfig`'s
+/// `compilerOptions` and each option — two levels, however deep the file
+/// goes.
+const JSON_TAGS: &str = r#"
+(document
+  (object
+    (pair key: (string (string_content) @name)) @definition.field))
+(document
+  (object
+    (pair
+      value: (object
+        (pair key: (string (string_content) @name)) @definition.field))))
 "#;
 
 /// Added to tree-sitter-python's own tags query, which has a module's
@@ -1408,6 +1552,100 @@ pub fn lang_for_fence(tag: &str) -> Option<&'static str> {
         .map(|l| l.key())
 }
 
+/// The code a component file runs, as the language it is written in: a Vue
+/// or Svelte component's `<script>` blocks (`<script setup>` and the
+/// module script alike) and an Astro component's frontmatter and scripts,
+/// with everything else in the file — the template, the styles — blanked to
+/// spaces, so every byte and line is where the file has it. TypeScript
+/// where a script says `lang="ts"` (`"tsx"`, TSX) and in Astro, which
+/// compiles its scripts as TypeScript; JavaScript otherwise. A script of
+/// another `type` (JSON, a template) is not code. `None` for a file of any
+/// other language, or a component with no script.
+pub fn script_view(source: &str, lang: Lang) -> Option<(Lang, String)> {
+    if !matches!(lang, Lang::Vue | Lang::Svelte | Lang::Astro) {
+        return None;
+    }
+    let tree = parse(source, lang)?;
+    let mut ranges: Vec<std::ops::Range<usize>> = Vec::new();
+    let mut script = match lang {
+        Lang::Astro => Lang::TypeScript,
+        _ => Lang::JavaScript,
+    };
+    if lang == Lang::Astro
+        && let Some((inner, close, _)) = astro_frontmatter(source)
+    {
+        ranges.push(inner..close);
+    }
+    let mut stack = vec![tree.root_node()];
+    while let Some(node) = stack.pop() {
+        if node.kind() != "script_element" {
+            let mut cursor = node.walk();
+            stack.extend(node.named_children(&mut cursor));
+            continue;
+        }
+        let mut cursor = node.walk();
+        let children: Vec<_> = node.named_children(&mut cursor).collect();
+        let tag = children
+            .iter()
+            .find(|c| c.kind() == "start_tag")
+            .and_then(|t| source.get(t.byte_range()))
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        let attr = |name: &str| -> Option<String> {
+            let at = tag.find(&format!(" {name}="))? + name.len() + 2;
+            let value = tag[at..].trim_start_matches(['"', '\'']);
+            Some(
+                value
+                    .split(['"', '\'', ' ', '>'])
+                    .next()
+                    .unwrap_or("")
+                    .to_string(),
+            )
+        };
+        let code = match attr("type").as_deref() {
+            None
+            | Some("module" | "text/javascript" | "application/javascript" | "text/typescript") => {
+                true
+            }
+            Some(_) => false,
+        };
+        if !code {
+            continue;
+        }
+        match attr("lang").as_deref() {
+            Some("ts" | "typescript") if script == Lang::JavaScript => script = Lang::TypeScript,
+            Some("tsx") => script = Lang::Tsx,
+            _ => {}
+        }
+        if let Some(raw) = children.iter().find(|c| c.kind() == "raw_text") {
+            ranges.push(raw.byte_range());
+        }
+    }
+    if ranges.is_empty() {
+        return None;
+    }
+    let mut view: Vec<u8> = source
+        .bytes()
+        .map(|b| if matches!(b, b'\n' | b'\r') { b } else { b' ' })
+        .collect();
+    for range in ranges {
+        view[range.clone()].copy_from_slice(&source.as_bytes()[range]);
+    }
+    Some((script, String::from_utf8(view).ok()?))
+}
+
+/// The language to read `source` as for what is IN its code — its
+/// outline, imports, calls, docs and weak spots — and the text to read:
+/// [`Lang::for_source`]'s, with a component file's script read as the
+/// code it is ([`script_view`]).
+pub fn read_as<'a>(key: &str, source: &'a str) -> Option<(Lang, std::borrow::Cow<'a, str>)> {
+    let lang = Lang::for_source(key, source)?;
+    Some(match script_view(source, lang) {
+        Some((script, view)) => (script, std::borrow::Cow::Owned(view)),
+        None => (lang, std::borrow::Cow::Borrowed(source)),
+    })
+}
+
 /// Resolve a runtime language string (e.g. notebook kernel metadata) to the
 /// `'static` key `highlight_lines` accepts, when it names a supported language.
 pub fn static_key(name: &str) -> Option<&'static str> {
@@ -1424,6 +1662,13 @@ pub fn lang_name(key: &str) -> Option<&'static str> {
 pub fn tags_for(key: &str) -> Option<(Language, &'static str)> {
     let lang = Lang::from_key(key)?;
     Some((lang.grammar(), lang.tags_text()?))
+}
+
+/// Whether files of `key` have an outline: a language with an outline
+/// query, or a component file, whose outline is its script's
+/// ([`script_view`]).
+pub fn has_outline(key: &str) -> bool {
+    tags_for(key).is_some() || matches!(key, "vue" | "svelte" | "astro")
 }
 
 /// Bare tree-sitter grammar for a language key, for callers that run their own

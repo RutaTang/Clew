@@ -17784,6 +17784,73 @@ fn a_name_in_sql_peeks_and_goes_to_where_the_schema_makes_it() {
     assert_eq!(app.schema_hit(pane, 0, 5), None, "no SQL on the line");
 }
 
+/// Where no language server answers — a Vue component, which has none
+/// here — Go to Definition finds the name as the project's outline knows
+/// it: one the file defines itself first (a template's handler, its
+/// script's function), else one a file of the same language family defines
+/// (the `.ts` module its script imports from) — and nothing for a name no
+/// file defines.
+#[test]
+fn go_to_definition_without_a_server_finds_the_name_the_project_defines() {
+    let root = clew_core::testutil::TempDir::new("app-def-by-name");
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("src/cart.ts"),
+        "export function addItem(cart: number[], item: number) {\n  return [...cart, item]\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src/App.vue"),
+        "<template>\n  <button @click=\"add\">+</button>\n</template>\n<script setup lang=\"ts\">\nimport { addItem } from './cart'\nfunction add() { addItem([], 1) }\n</script>\n",
+    )
+    .unwrap();
+    let root = root.canonicalize().unwrap();
+    let mut app = blank_app();
+    scan_synchronously(&mut app, root.clone());
+    let files = app.proj.project.as_ref().unwrap().files.clone();
+    let indexed = app.update(Message::Watch(WatchMsg::SymbolIndexDone {
+        stamp: Stamp {
+            root: Some(root.clone()),
+            epoch: app.project_epoch,
+            conn: None,
+        },
+        indexed: index::build_indexed(&root, files),
+    }));
+    settle_imports(&mut app, indexed);
+    open_synchronously(&mut app, "src/App.vue", None);
+    let pane = app.proj.active;
+    let at = |app: &App, line, col| {
+        app.definitions_by_name(pane, line, col)
+            .map(|(word, targets)| {
+                (
+                    word,
+                    targets
+                        .into_iter()
+                        .map(|t| (t.path, t.line))
+                        .collect::<Vec<_>>(),
+                )
+            })
+    };
+    assert_eq!(
+        at(&app, 5, 18),
+        Some(("addItem".to_string(), vec![(root.join("src/cart.ts"), 0)])),
+        "the module the script imports it from"
+    );
+    assert_eq!(
+        at(&app, 1, 18),
+        Some(("add".to_string(), vec![(root.join("src/App.vue"), 5)])),
+        "the template's handler: the component's own function"
+    );
+    assert_eq!(at(&app, 1, 4), None, "a tag no file defines");
+    // Go to Definition itself: Vue has no server here, so it jumps there.
+    let jump = app.goto_request(pane, 5, 18, GotoKind::Definition);
+    settle(&mut app, jump);
+    assert_eq!(
+        app.active_viewer().map(|v| v.abs.clone()),
+        Some(root.join("src/cart.ts"))
+    );
+}
+
 /// The Maps overlay reads a local project's maps when it opens, lays out
 /// the first, keeps the one chosen across a rebuild, and reads them again
 /// only once a file changed.
