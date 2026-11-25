@@ -4110,5 +4110,6 @@
  "The build ended before its JVM started under the debugger. See its output.": "デバッガーの下で JVM が起動する前にビルドが終了しました。出力を確認してください。",
  "cannot write {arg1}: {e}": "{arg1} を書き込めません: {e}",
  "Elixir (OTP interpreter)": "Elixir（OTP インタープリター）",
- "{expression} is not bound here": "{expression} はここでは束縛されていません"
+ "{expression} is not bound here": "{expression} はここでは束縛されていません",
+ "This program was built without debug information, so breakpoints won't bind and variables can't be read. Build it for debugging (CMake: -DCMAKE_BUILD_TYPE=Debug; a compiler: -g), then debug it again.": "このプログラムはデバッグ情報なしでビルドされているため、ブレークポイントは設定されず、変数も読み取れません。デバッグ用にビルドし（CMake: -DCMAKE_BUILD_TYPE=Debug、コンパイラー: -g）、もう一度デバッグしてください。"
 }

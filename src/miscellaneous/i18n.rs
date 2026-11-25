@@ -1503,6 +1503,9 @@ mod tests {
         let start = "const ZIG_BACKEND_NOTICE: &str = \"";
         let at = notice.find(start).expect("the Zig notice") + start.len();
         written.push(literal(&notice[at..]).unwrap().0);
+        let start = "const NO_DEBUG_INFO_NOTICE: &str = \"";
+        let at = notice.find(start).expect("the debug information notice") + start.len();
+        written.push(literal(&notice[at..]).unwrap().0);
         let search = std::fs::read_to_string(core.join("search.rs")).unwrap();
         assert!(search.contains(
             "\"not a regular file inside the project (a link, or moved since the scan)\""

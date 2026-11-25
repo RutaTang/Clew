@@ -4110,5 +4110,6 @@
  "The build ended before its JVM started under the debugger. See its output.": "构建在其 JVM 于调试器下启动之前就结束了，请查看其输出。",
  "cannot write {arg1}: {e}": "无法写入 {arg1}：{e}",
  "Elixir (OTP interpreter)": "Elixir（OTP 解释器）",
- "{expression} is not bound here": "{expression} 在此处未绑定"
+ "{expression} is not bound here": "{expression} 在此处未绑定",
+ "This program was built without debug information, so breakpoints won't bind and variables can't be read. Build it for debugging (CMake: -DCMAKE_BUILD_TYPE=Debug; a compiler: -g), then debug it again.": "这个程序构建时没有调试信息，因此断点无法绑定，变量也无法读取。请以调试方式构建它（CMake：-DCMAKE_BUILD_TYPE=Debug；编译器：-g），然后再次调试。"
 }

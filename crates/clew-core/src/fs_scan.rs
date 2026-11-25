@@ -256,6 +256,27 @@ pub const NOISE_DIRS: &[&str] = &[
     ".netlify",
     ".yarn",
     ".pnpm-store",
+    // The compiled languages' builds and tools' caches, only ever
+    // generated: CMake's `CMakeFiles` (its `compiler_depend.ts` is a
+    // timestamp, and made a C++ project look like TypeScript's), Gradle's
+    // and Kotlin's caches, Scala's build servers (BSP, Bloop, Metals,
+    // scala-cli), Mix's and rebar3's `_build`, ElixirLS's, Zig's cache
+    // and output, Cabal's and Stack's builds, clangd's index (`.cache`).
+    "CMakeFiles",
+    ".gradle",
+    ".kotlin",
+    ".bsp",
+    ".bloop",
+    ".metals",
+    ".scala-build",
+    "_build",
+    ".elixir_ls",
+    ".zig-cache",
+    "zig-cache",
+    "zig-out",
+    "dist-newstyle",
+    ".stack-work",
+    ".cache",
 ];
 
 /// Whether a directory with this name is one of [`NOISE_DIRS`].
@@ -878,6 +899,14 @@ mod tests {
             (".mypy_cache/3.12", "x.json"),
             (".pytest_cache/v", "x"),
             (".ruff_cache/0.5", "x"),
+            // The compiled languages' builds: CMake's timestamp named
+            // `.ts` (a C++ project read as TypeScript's), Mix's build,
+            // Gradle's and Zig's caches, Stack's build.
+            ("build/CMakeFiles/cart.dir", "compiler_depend.ts"),
+            ("_build/dev/lib/cart/ebin", "Elixir.Cart.beam"),
+            (".gradle/8.14", "x.bin"),
+            (".zig-cache/o", "x"),
+            (".stack-work/dist", "x.hs"),
         ] {
             std::fs::create_dir_all(dir.join(folder)).unwrap();
             std::fs::write(dir.join(folder).join(file), "x\n").unwrap();
@@ -893,6 +922,11 @@ mod tests {
             ".mypy_cache",
             ".pytest_cache",
             ".ruff_cache",
+            "build/CMakeFiles",
+            "_build",
+            ".gradle",
+            ".zig-cache",
+            ".stack-work",
         ] {
             assert!(
                 !rels.iter().any(|r| r.starts_with(noise)),

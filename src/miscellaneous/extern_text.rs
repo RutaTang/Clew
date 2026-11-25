@@ -287,6 +287,9 @@ pub(crate) const NOTICES: &[&str] = &[
     tr_noop!(
         "This is a Bun project, and Bun's debugger speaks WebKit's inspector protocol, which Clew's JavaScript debugger does not: the file is debugged under Node.js, where Bun's own APIs (Bun.serve, Bun.file) are missing. Run runs it with Bun."
     ),
+    tr_noop!(
+        "This program was built without debug information, so breakpoints won't bind and variables can't be read. Build it for debugging (CMake: -DCMAKE_BUILD_TYPE=Debug; a compiler: -g), then debug it again."
+    ),
     tr_noop!("larger than 64 MB"),
     tr_noop!("not a regular file inside the project (a link, or moved since the scan)"),
 ];

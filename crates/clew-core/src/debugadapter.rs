@@ -284,6 +284,11 @@ pub fn resolve(
                 .file_name()
                 .is_some_and(|n| n.to_string_lossy().starts_with("lldb-dap"));
             let mut spec = native_spec(command, &binary.to_string_lossy(), args, cwd);
+            // Built without debug information, no breakpoint binds and no
+            // variable reads: said, with how to build it for debugging.
+            if has_debug_info(&in_dir(cwd, &binary.to_string_lossy())) == Some(false) {
+                spec.launch[NOTICE] = json!(NO_DEBUG_INFO_NOTICE);
+            }
             match dwarf_language(&in_dir(cwd, &binary.to_string_lossy())) {
                 Some(DW_LANG_ZIG) => spec.launch[NOTICE] = json!(ZIG_BACKEND_NOTICE),
                 Some(DW_LANG_RUST) => {
@@ -791,6 +796,8 @@ const DW_LANG_ZIG: u16 = 0x27;
 /// speaks V8's inspector protocol and Bun's inspector speaks WebKit's.
 const BUN_NOTICE: &str = "This is a Bun project, and Bun's debugger speaks WebKit's inspector protocol, which Clew's JavaScript debugger does not: the file is debugged under Node.js, where Bun's own APIs (Bun.serve, Bun.file) are missing. Run runs it with Bun.";
 
+const NO_DEBUG_INFO_NOTICE: &str = "This program was built without debug information, so breakpoints won't bind and variables can't be read. Build it for debugging (CMake: -DCMAKE_BUILD_TYPE=Debug; a compiler: -g), then debug it again.";
+
 const ZIG_BACKEND_NOTICE: &str = "This program's debug information comes from Zig's built-in code generator (the default for Debug builds on x86-64), and lldb can't read variables from it. Breakpoints and stepping work, but no variables show. Build it with -fllvm (or .use_llvm = true in build.zig) to see them.";
 
 /// Whether the test file at `path` runs its own tests when run as a script
@@ -921,6 +928,46 @@ fn build_zig_as(
 /// (`DW_AT_language`), if it has one this can read: 64-bit little-endian
 /// ELF, DWARF 2 to 5, sections not compressed.
 fn dwarf_language(binary: &Path) -> Option<u16> {
+    let (mut file, sections) = elf_sections(binary)?;
+    let find = |wanted: &[u8]| {
+        sections
+            .iter()
+            // SHF_COMPRESSED: not read here.
+            .find(|(name, flags, ..)| name == wanted && flags & 0x800 == 0)
+            .map(|(_, _, offset, size)| (*offset, *size))
+    };
+    let (info_at, info_size) = find(b".debug_info")?;
+    let (abbrev_at, abbrev_size) = find(b".debug_abbrev")?;
+    let info = read_at(&mut file, info_at, info_size, 1 << 16)?;
+    let abbrev = read_at(&mut file, abbrev_at, abbrev_size, 16 << 20)?;
+    first_unit_language(&info, &abbrev)
+}
+
+/// Whether an ELF program carries debug information — in itself, or in a
+/// file it names (`.gnu_debuglink`); none when it is not one this reads.
+fn has_debug_info(binary: &Path) -> Option<bool> {
+    let (_, sections) = elf_sections(binary)?;
+    Some(sections.iter().any(|(name, ..)| {
+        matches!(
+            name.as_slice(),
+            b".debug_info" | b".zdebug_info" | b".gnu_debuglink" | b".gnu_debugaltlink"
+        )
+    }))
+}
+
+/// `size` bytes of `file` from `offset`, at most `cap`.
+fn read_at(file: &mut std::fs::File, offset: u64, size: u64, cap: u64) -> Option<Vec<u8>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut bytes = vec![0u8; size.min(cap) as usize];
+    file.seek(SeekFrom::Start(offset)).ok()?;
+    file.read_exact(&mut bytes).ok()?;
+    Some(bytes)
+}
+
+/// An ELF file's sections — 64-bit, little-endian — each one's name,
+/// flags, file offset and size, with the file open to read them.
+#[allow(clippy::type_complexity)]
+fn elf_sections(binary: &Path) -> Option<(std::fs::File, Vec<(Vec<u8>, u64, u64, u64)>)> {
     use std::io::{Read, Seek, SeekFrom};
     let mut file = std::fs::File::open(binary).ok()?;
     let mut head = [0u8; 64];
@@ -957,35 +1004,16 @@ fn dwarf_language(binary: &Path) -> Option<u16> {
             u64_at(&table, at + 0x20)?,
         ))
     };
-    let mut read = |offset: u64, size: u64, cap: u64| -> Option<Vec<u8>> {
-        let mut bytes = vec![0u8; size.min(cap) as usize];
-        file.seek(SeekFrom::Start(offset)).ok()?;
-        file.read_exact(&mut bytes).ok()?;
-        Some(bytes)
-    };
     let (_, _, names_at, names_size) = section(shstrndx)?;
-    let names = read(names_at, names_size, 1 << 20)?;
-    let mut info = None;
-    let mut abbrev = None;
+    let names = read_at(&mut file, names_at, names_size, 1 << 20)?;
+    let mut sections = Vec::with_capacity(shnum);
     for i in 0..shnum {
         let (name, flags, offset, size) = section(i)?;
         let name = names.get(name as usize..)?;
-        let name = &name[..name.iter().position(|b| *b == 0)?];
-        // SHF_COMPRESSED: not read here.
-        if flags & 0x800 != 0 {
-            continue;
-        }
-        match name {
-            b".debug_info" => info = Some((offset, size)),
-            b".debug_abbrev" => abbrev = Some((offset, size)),
-            _ => {}
-        }
+        let name = name[..name.iter().position(|b| *b == 0)?].to_vec();
+        sections.push((name, flags, offset, size));
     }
-    let (info_at, info_size) = info?;
-    let (abbrev_at, abbrev_size) = abbrev?;
-    let info = read(info_at, info_size, 1 << 16)?;
-    let abbrev = read(abbrev_at, abbrev_size, 16 << 20)?;
-    first_unit_language(&info, &abbrev)
+    Some((file, sections))
 }
 
 /// The `DW_AT_language` of the first compile unit in `info` (a
@@ -2425,6 +2453,18 @@ mod tests {
         std::fs::write(dir.join("cut"), &whole[..whole.len() - 70]).unwrap();
         assert_eq!(dwarf_language(&dir.join("cut")), None);
         assert_eq!(dwarf_language(&dir.join("missing")), None);
+        // Whether a program has debug information at all: a binary built
+        // without it has no `.debug_info`; what is not ELF says nothing.
+        assert_eq!(has_debug_info(&c), Some(true));
+        let mut stripped = whole.clone();
+        let at = stripped
+            .windows(11)
+            .position(|w| w == b".debug_info")
+            .unwrap();
+        stripped[at..at + 11].copy_from_slice(b".comment\0\0\0");
+        std::fs::write(dir.join("stripped"), &stripped).unwrap();
+        assert_eq!(has_debug_info(&dir.join("stripped")), Some(false));
+        assert_eq!(has_debug_info(&dir.join("script")), None);
         let (mut info, abbrev) = dwarf_unit(5, 0x27, 0x0b);
         info[12] = 9;
         assert_eq!(first_unit_language(&info, &abbrev), None);
