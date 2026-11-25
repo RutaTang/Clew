@@ -279,6 +279,26 @@ pub const NOISE_DIRS: &[&str] = &[
     ".cache",
 ];
 
+/// Whether `dir` is a .NET project's build output: its `bin` or `obj`
+/// beside a `.csproj`, `.fsproj` or `.vbproj`. Their names alone say too
+/// little to skip them everywhere — a `bin/` of scripts is a project's own.
+pub fn is_dotnet_build_dir(dir: &Path) -> bool {
+    let named = dir.file_name().is_some_and(|n| n == "bin" || n == "obj");
+    named
+        && dir
+            .parent()
+            .and_then(|p| std::fs::read_dir(p).ok())
+            .is_some_and(|entries| {
+                entries.flatten().any(|e| {
+                    let name = e.file_name();
+                    let name = name.to_string_lossy();
+                    name.ends_with(".csproj")
+                        || name.ends_with(".fsproj")
+                        || name.ends_with(".vbproj")
+                })
+            })
+}
+
 /// Whether a directory with this name is one of [`NOISE_DIRS`].
 pub fn is_noise_dir(name: &OsStr) -> bool {
     name.to_str().is_some_and(|n| NOISE_DIRS.contains(&n))
@@ -465,7 +485,8 @@ pub fn scan_with_report(root: PathBuf) -> (ScanResult, ScanReport) {
                 skipped.fetch_add(1, Ordering::Relaxed);
                 return false;
             }
-            !(entry.file_type().is_some_and(|t| t.is_dir()) && is_noise_dir(entry.file_name()))
+            !(entry.file_type().is_some_and(|t| t.is_dir())
+                && (is_noise_dir(entry.file_name()) || is_dotnet_build_dir(entry.path())))
         })
         .build();
 
@@ -907,13 +928,22 @@ mod tests {
             (".gradle/8.14", "x.bin"),
             (".zig-cache/o", "x"),
             (".stack-work/dist", "x.hs"),
+            // A .NET project's build, beside its project file.
+            ("Shop/bin/Debug/net8.0", "Shop.dll"),
+            ("Shop/obj", "project.assets.json"),
         ] {
             std::fs::create_dir_all(dir.join(folder)).unwrap();
             std::fs::write(dir.join(folder).join(file), "x\n").unwrap();
         }
 
+        std::fs::write(dir.join("Shop/Shop.csproj"), "<Project/>\n").unwrap();
+        // A `bin/` of a project's own scripts, beside no project file, stays.
+        std::fs::create_dir_all(dir.join("bin")).unwrap();
+        std::fs::write(dir.join("bin/deploy.sh"), "echo\n").unwrap();
         let result = scan(dir);
         let rels: Vec<&str> = result.files.iter().map(|f| f.rel.as_str()).collect();
+        assert!(rels.contains(&"bin/deploy.sh"), "{rels:?}");
+        assert!(rels.contains(&"Shop/Shop.csproj"), "{rels:?}");
         for noise in [
             ".lake",
             "lake-packages",
@@ -927,6 +957,8 @@ mod tests {
             ".gradle",
             ".zig-cache",
             ".stack-work",
+            "Shop/bin",
+            "Shop/obj",
         ] {
             assert!(
                 !rels.iter().any(|r| r.starts_with(noise)),

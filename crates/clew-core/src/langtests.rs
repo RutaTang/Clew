@@ -802,6 +802,9 @@ pub enum DebugStart {
     /// Dart's test adapter (`dart debug_adapter --test`) — Flutter's, by
     /// the `flutter` given, for a Flutter package's tests.
     DartTests { flutter: Option<PathBuf> },
+    /// `dotnet test` with its test host waiting for netcoredbg to attach:
+    /// clew-server's `dotnet-test-debug` in front of netcoredbg.
+    DotnetTests,
 }
 
 /// The JVM's debugging agent as a test's JVM is started under it: held at
@@ -821,6 +824,7 @@ pub fn test_debugger(root: &Path, file: &Path, lang: &str) -> Option<&'static st
         "go" => Some("go"),
         "ruby" => Some("ruby"),
         "dart" => Some("dart"),
+        "csharp" => Some("csharp"),
         "zig" => Some("native"),
         "c" | "cpp" => ctest_dir(root).map(|_| "native"),
         "java" | "kotlin" | "scala" => jvm_debug_build(root, file).map(|_| "java"),
@@ -832,8 +836,68 @@ pub fn test_debugger(root: &Path, file: &Path, lang: &str) -> Option<&'static st
             (!suite).then_some("erlang")
         }
         "elixir" => above(root, file, &["mix.exs"]).map(|_| "elixir"),
+        // A Cabal test suite's: its `main`, under GHCi's debugger.
+        "haskell" => haskell_suite(root, file).map(|_| "haskell"),
         _ => None,
     }
+}
+
+/// The Cabal test suite `file` is in: its project's folder, its name, and
+/// its `main-is` file — the suite whose `hs-source-dirs` hold the file,
+/// or the project's only one.
+fn haskell_suite(root: &Path, file: &Path) -> Option<(PathBuf, String, PathBuf)> {
+    let cabal = above_matching(root, file, |n| n.ends_with(".cabal"))?;
+    let dir = cabal.parent()?.to_path_buf();
+    let text = crate::statefile::read_capped(&cabal, 1 << 20)?;
+    let mut suites: Vec<(String, Option<String>, Vec<String>)> = Vec::new();
+    for line in text.lines() {
+        let t = line.trim();
+        let field = |name: &str| {
+            t.to_ascii_lowercase()
+                .starts_with(&format!("{name}:"))
+                .then(|| t[name.len() + 1..].trim().to_string())
+        };
+        if !line.starts_with([' ', '\t']) {
+            let lower = t.to_ascii_lowercase();
+            if let Some(name) = lower.strip_prefix("test-suite ") {
+                let name = t[t.len() - name.len()..].trim().to_string();
+                suites.push((name, None, Vec::new()));
+            } else if !t.is_empty() && !t.starts_with("--") {
+                // Another stanza, or a top-level field: the suite ended.
+                suites.push((String::new(), None, Vec::new()));
+            }
+            continue;
+        }
+        let Some(suite) = suites.last_mut().filter(|s| !s.0.is_empty()) else {
+            continue;
+        };
+        if let Some(main) = field("main-is") {
+            suite.1 = Some(main);
+        } else if let Some(dirs) = field("hs-source-dirs") {
+            suite.2.extend(
+                dirs.split([',', ' '])
+                    .filter(|d| !d.is_empty())
+                    .map(str::to_string),
+            );
+        }
+    }
+    let suites: Vec<_> = suites
+        .into_iter()
+        .filter(|(name, main, _)| !name.is_empty() && main.is_some())
+        .collect();
+    let holds = |dirs: &[String]| dirs.iter().any(|d| file.starts_with(dir.join(d)));
+    let (name, main, dirs) = match suites.iter().find(|(_, _, dirs)| holds(dirs)) {
+        Some(suite) => suite.clone(),
+        None if suites.len() == 1 => suites[0].clone(),
+        None => return None,
+    };
+    let main = main?;
+    let path = dirs
+        .iter()
+        .map(|d| dir.join(d).join(&main))
+        .find(|p| p.is_file())
+        .unwrap_or_else(|| dir.join(&main));
+    Some((dir, name, path))
 }
 
 /// The build a JVM test is debugged through.
@@ -1109,6 +1173,52 @@ pub fn debug_test(
         "ruby" => {
             let mut debug = test("ruby", run.program, run.args, run.cwd);
             debug.start = DebugStart::RubyCommand;
+            Ok(debug)
+        }
+        "haskell" => {
+            // The suite's own `main`, under GHCi's debugger in the suite's
+            // REPL (`cabal repl test:spec`, `stack ghci`), asked for the
+            // test as Run Test asks (`--match`, Tasty's `--pattern`).
+            let Some((dir, suite, main)) = haskell_suite(root, file) else {
+                return Err(format!("{rel} has no tests to run", rel = lang));
+            };
+            let ghci = match above(root, file, &["stack.yaml"]) {
+                Some(_) => {
+                    let package = std::fs::read_dir(&dir)
+                        .ok()
+                        .into_iter()
+                        .flatten()
+                        .flatten()
+                        .find_map(|e| {
+                            let name = e.file_name().to_string_lossy().into_owned();
+                            name.strip_suffix(".cabal").map(str::to_string)
+                        })
+                        .unwrap_or_default();
+                    ["stack ghci ", &package, ":test:", &suite].concat()
+                }
+                // Commands, not words: put together, not formatted.
+                None => ["cabal repl test:", &suite].concat(),
+            };
+            let mut args = Vec::new();
+            if !whole_file {
+                let tasty = source.contains("Test.Tasty");
+                args.push(if tasty { "--pattern" } else { "--match" }.to_string());
+                args.push(runnable.name.clone());
+            }
+            let mut debug = test("haskell", main, args, dir);
+            debug.launch.insert("ghci".into(), ghci.into());
+            Ok(debug)
+        }
+        "csharp" => {
+            // `dotnet test` as Run Test runs it, its test host waiting for
+            // netcoredbg to attach (VSTest's host debugging).
+            let mut command = vec![serde_json::Value::from(
+                run.program.to_string_lossy().into_owned(),
+            )];
+            command.extend(run.args.iter().cloned().map(serde_json::Value::from));
+            let mut debug = test("csharp", run.program, run.args, run.cwd);
+            debug.launch.insert("command".into(), command.into());
+            debug.start = DebugStart::DotnetTests;
             Ok(debug)
         }
         "dart" => {
@@ -2041,6 +2151,8 @@ mod tests {
             "mix",
             "kotlinc",
             "scala-cli",
+            "dotnet",
+            "cabal",
         ] {
             let path = write(&format!("bin/{name}"), "#!/bin/sh\n");
             #[cfg(unix)]
@@ -2174,9 +2286,40 @@ mod tests {
         let forked = write("fk/src/test/scala/acme/CartSuite.scala", "");
         assert_eq!(test_debugger(&root, &forked, "scala"), None);
 
-        for lang in ["csharp", "haskell"] {
-            assert_eq!(test_debugger(&root, &go, lang), None, "{lang}");
-        }
+        assert_eq!(test_debugger(&root, &go, "haskell"), None);
+
+        // A Cabal suite's `main` under GHCi, in the suite's REPL, asked for
+        // the test by hspec's `--match`.
+        write(
+            "hs/cart.cabal",
+            "name: cart\n\nlibrary\n  hs-source-dirs: src\n\ntest-suite spec\n  type: exitcode-stdio-1.0\n  main-is: Spec.hs\n  hs-source-dirs: test\n",
+        );
+        write("hs/test/Spec.hs", "main = hspec CartSpec.spec\n");
+        let hs = write(
+            "hs/test/CartSpec.hs",
+            "module CartSpec (spec) where\n\nspec = describe \"Cart\" $ do\n  it \"adds\" $\n    1 `shouldBe` 1\n",
+        );
+        assert_eq!(test_debugger(&root, &hs, "haskell"), Some("haskell"));
+        let d = debug("haskell", &hs, 4);
+        assert_eq!(d.adapter, "haskell");
+        assert_eq!(d.program, root.join("hs/test/Spec.hs"));
+        assert_eq!(d.args, ["--match", "adds"]);
+        assert_eq!(d.launch["ghci"], "cabal repl test:spec");
+
+        // C#'s by `dotnet test`, its host waiting for the debugger.
+        write("cs/Shop.Tests.csproj", "<Project/>\n");
+        let cs = write(
+            "cs/CartTests.cs",
+            "namespace Shop.Tests;\n\npublic class CartTests\n{\n    [Fact]\n    public void Adds()\n    {\n    }\n}\n",
+        );
+        assert_eq!(test_debugger(&root, &cs, "csharp"), Some("csharp"));
+        let d = debug("csharp", &cs, 6);
+        assert_eq!((d.adapter, &d.start), ("csharp", &DebugStart::DotnetTests));
+        assert_eq!(
+            d.launch["command"][0],
+            bin.join("dotnet").to_string_lossy().as_ref()
+        );
+        assert_eq!(d.launch["command"][1], "test");
 
         // EUnit's under OTP's interpreter, compiled with TEST, by EUnit's
         // own call; a Common Test suite's, without.

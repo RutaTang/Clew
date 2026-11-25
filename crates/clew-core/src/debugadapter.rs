@@ -731,6 +731,7 @@ pub fn set_up_for_test(
     command: &mut PathBuf,
     args: &mut Vec<String>,
     launch: &mut serde_json::Value,
+    server: Option<&Path>,
 ) {
     use crate::langtests::DebugStart;
     if let Some(fields) = launch.as_object_mut() {
@@ -750,6 +751,18 @@ pub fn set_up_for_test(
                 *command = flutter.clone();
             }
             *args = vec!["debug_adapter".into(), "--test".into()];
+        }
+        // clew-server's `dotnet-test-debug` in front of the netcoredbg
+        // resolved for it.
+        DebugStart::DotnetTests => {
+            if let Some(server) = server {
+                *args = vec![
+                    "dotnet-test-debug".into(),
+                    "--netcoredbg".into(),
+                    command.to_string_lossy().into_owned(),
+                ];
+                *command = server.to_path_buf();
+            }
         }
     }
 }

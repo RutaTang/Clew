@@ -182,6 +182,28 @@ fn main() {
         runtime.shutdown_timeout(SHUTDOWN_GRACE);
         std::process::exit(code);
     }
+    if args.first().map(String::as_str) == Some("dotnet-test-debug") {
+        let netcoredbg = match args.get(1..) {
+            Some([flag, netcoredbg]) if flag == "--netcoredbg" => {
+                std::path::PathBuf::from(netcoredbg)
+            }
+            _ => {
+                eprintln!(
+                    "[clew-server] usage: clew-server dotnet-test-debug --netcoredbg <netcoredbg>"
+                );
+                std::process::exit(2);
+            }
+        };
+        let code = match runtime.block_on(clew_server::dotnettestdebug::run(netcoredbg)) {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("[clew-server] dotnet-test-debug: {e}");
+                1
+            }
+        };
+        runtime.shutdown_timeout(SHUTDOWN_GRACE);
+        std::process::exit(code);
+    }
     if args.first().map(String::as_str) == Some("haskell-debug") {
         let ghci = match args.get(1..) {
             Some([flag, ghci @ ..]) if flag == "--ghci" && !ghci.is_empty() => ghci.to_vec(),

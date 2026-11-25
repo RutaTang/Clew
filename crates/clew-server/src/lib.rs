@@ -46,6 +46,7 @@ pub mod agent;
 pub mod agent_lsp;
 pub mod dapbridge;
 mod dapout;
+pub mod dotnettestdebug;
 pub mod erlangdebug;
 mod files;
 mod gitops;

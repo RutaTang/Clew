@@ -31,8 +31,11 @@ use tokio::sync::{Mutex, oneshot, watch};
 
 use crate::dapout::{Out, forward};
 
-/// GHCi's prompt while the adapter drives it: what ends each reply.
-const PROMPT: &str = "<<clew-ghci-ready>>";
+/// GHCi's prompt while the adapter drives it: what ends each reply. A line
+/// of its own: a program that set its output line-buffered (hspec does)
+/// left a prompt with no newline unwritten, in GHCi's buffer, until the
+/// next command — and the adapter waited for it for ever.
+const PROMPT: &str = "<<clew-ghci-ready>>\n";
 
 /// How long GHCi has to start and load the program.
 const LOAD_TIMEOUT: Duration = Duration::from_secs(300);
@@ -262,7 +265,8 @@ impl Adapter {
         };
         // Our own prompt, and stops on uncaught exceptions.
         ghci.write(&format!(
-            ":set prompt \"{PROMPT}\"\n:set prompt-cont \"\"\n:set -fbreak-on-error\n"
+            ":set prompt \"{}\\n\"\n:set prompt-cont \"\"\n:set -fbreak-on-error\n",
+            PROMPT.trim_end()
         ))
         .await?;
         for _ in 0..3 {
@@ -377,6 +381,27 @@ impl Adapter {
             if !printed.is_empty() {
                 out.output("stdout", printed).await;
             }
+            // Stopped at the program's own exit — `exitWith`, a test
+            // runner's `exitFailure` — no error to stop at: it ends, with
+            // its code. It stopped at `<unknown>`, and then ended "0".
+            if stopped
+                .as_ref()
+                .is_some_and(|at| at.name == "<exception thrown>")
+            {
+                let named = ghci
+                    .command(
+                        "show (Unsafe.Coerce.unsafeCoerce _exception :: Control.Exception.SomeException)",
+                        COMMAND_TIMEOUT,
+                    )
+                    .await
+                    .unwrap_or_default();
+                if let Some(code) = exit_code_of(&named) {
+                    let _ = ghci.command(":continue", Duration::MAX).await;
+                    *stop.lock().await = None;
+                    out.terminated(Some(code)).await;
+                    return;
+                }
+            }
             match stopped {
                 Some(at) => {
                     let exception = at.name == "<exception thrown>";
@@ -390,7 +415,13 @@ impl Adapter {
                 }
                 None => {
                     *stop.lock().await = None;
-                    out.terminated(Some(0)).await;
+                    // Ended by an exception (`*** Exception: ExitFailure
+                    // 1`): its code, not 0.
+                    let code = match reply.rfind("*** Exception:") {
+                        Some(at) => exit_code_of(&reply[at..]).unwrap_or(1),
+                        None => 0,
+                    };
+                    out.terminated(Some(code)).await;
                 }
             }
         });
@@ -815,6 +846,22 @@ fn is_identifier(text: &str) -> bool {
             .all(|c| c.is_alphanumeric() || matches!(c, '_' | '\'' | '.'))
 }
 
+/// The exit code an `ExitCode` exception says (`ExitFailure 3`: 3,
+/// `ExitSuccess`: 0); none for another exception.
+fn exit_code_of(said: &str) -> Option<i32> {
+    if said.contains("ExitSuccess") {
+        return Some(0);
+    }
+    let rest = &said[said.find("ExitFailure")? + "ExitFailure".len()..];
+    let digits: String = rest
+        .trim_start()
+        .trim_start_matches('(')
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '-')
+        .collect();
+    digits.parse().ok()
+}
+
 /// A Haskell string literal for `text`, as `:set args` takes them.
 fn haskell_string(text: &str) -> String {
     format!("{text:?}")
@@ -856,6 +903,15 @@ fn source_dirs(root: &Path) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A program's exit, read off the `ExitCode` exception GHCi names.
+    #[test]
+    fn a_programs_exit_is_read_off_its_exception() {
+        assert_eq!(exit_code_of("\"ExitFailure 1\""), Some(1));
+        assert_eq!(exit_code_of("*** Exception: ExitFailure 3\n"), Some(3));
+        assert_eq!(exit_code_of("\"ExitSuccess\""), Some(0));
+        assert_eq!(exit_code_of("\"Prelude.head: empty list\""), None);
+    }
     use crate::dapout::testing::Client;
 
     #[test]

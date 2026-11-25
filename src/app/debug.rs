@@ -2631,6 +2631,7 @@ impl App {
                             &mut adapter.command,
                             &mut adapter.args,
                             &mut adapter.launch,
+                            crate::backend::server::server_bin_path().as_deref(),
                         );
                     }
                     if cancelled(&live) {

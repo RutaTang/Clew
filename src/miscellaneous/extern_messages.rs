@@ -39,6 +39,7 @@ pub(crate) const MESSAGES: &[&str] = &[
         "This build runs its tests where the debugger can't reach them, so they run without it."
     ),
     tr_noop!("The build ended before its JVM started under the debugger. See its output."),
+    tr_noop!("The tests ended before their host waited for the debugger. See their output."),
     tr_noop!("{rel} is not JavaScript or TypeScript"),
     tr_noop!(
         "clew's own {what} is missing from the {arg1} install — without it the server would run the project's copy; remove the server and install it again"

@@ -37,6 +37,11 @@ impl Out {
         let _ = writer.flush().await;
     }
 
+    /// Pass on a message another adapter wrote, numbered in this stream.
+    pub(crate) async fn pass(&self, message: Value) {
+        self.send(message).await;
+    }
+
     /// Answer `request`: its body, or why it failed.
     pub(crate) async fn respond(&self, request: &Value, body: Result<Value, String>) {
         let mut response = json!({

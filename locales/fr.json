@@ -4111,5 +4111,6 @@
  "cannot write {arg1}: {e}": "impossible d’écrire {arg1} : {e}",
  "Elixir (OTP interpreter)": "Elixir (interpréteur OTP)",
  "{expression} is not bound here": "{expression} n’est pas lié ici",
- "This program was built without debug information, so breakpoints won't bind and variables can't be read. Build it for debugging (CMake: -DCMAKE_BUILD_TYPE=Debug; a compiler: -g), then debug it again.": "Ce programme a été compilé sans informations de débogage : les points d’arrêt ne se lieront pas et les variables ne pourront pas être lues. Compilez-le pour le débogage (CMake : -DCMAKE_BUILD_TYPE=Debug ; un compilateur : -g), puis déboguez-le à nouveau."
+ "This program was built without debug information, so breakpoints won't bind and variables can't be read. Build it for debugging (CMake: -DCMAKE_BUILD_TYPE=Debug; a compiler: -g), then debug it again.": "Ce programme a été compilé sans informations de débogage : les points d’arrêt ne se lieront pas et les variables ne pourront pas être lues. Compilez-le pour le débogage (CMake : -DCMAKE_BUILD_TYPE=Debug ; un compilateur : -g), puis déboguez-le à nouveau.",
+ "The tests ended before their host waited for the debugger. See their output.": "Les tests se sont terminés avant que leur hôte n’attende le débogueur. Consultez leur sortie."
 }
