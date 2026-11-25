@@ -685,15 +685,12 @@ pub(crate) fn overview_home(app: &App) -> Element<'_, Message> {
     container(
         column![
             header,
-            scrollable(
-                Column::with_children(items)
-                    .spacing(10)
-                    .width(Fill)
-                    .max_width(860)
-            )
-            .direction(thin_scroll())
-            .style(theme::overlay_scrollbar)
-            .height(Fill),
+            // As wide as the page: the map, held to a column of 860,
+            // was a knot in a band of nothing as wide again.
+            scrollable(Column::with_children(items).spacing(10).width(Fill))
+                .direction(thin_scroll())
+                .style(theme::overlay_scrollbar)
+                .height(Fill),
         ]
         .spacing(14),
     )
@@ -1155,8 +1152,7 @@ pub(crate) fn stats_home(app: &App) -> Element<'_, Message> {
         files,
     ]
     .spacing(8)
-    .width(Fill)
-    .max_width(860);
+    .width(Fill);
 
     container(
         column![
@@ -1181,9 +1177,6 @@ pub(crate) const GLOSSARY_ROWS_SHOWN: usize = 200;
 
 /// The Glossary page: the project's terms, in sections by kind, each a
 /// button to its definition; a filter on top (`app::glossary`).
-/// The glossary's column, header to list: as wide as its terms read well.
-pub(crate) const GLOSSARY_W: f32 = 860.0;
-
 pub(crate) fn glossary_home(app: &App) -> Element<'_, Message> {
     super::heard::list();
     use crate::app::glossary::TermKind;
@@ -1343,9 +1336,8 @@ pub(crate) fn glossary_home(app: &App) -> Element<'_, Message> {
         );
     }
 
-    // One column, as wide as its terms read well: the list was held to it
-    // and the filter and header ran on to the panel's edge, the locations
-    // ending some 215 px short of the filter's end.
+    // One column, as wide as the page, header, filter and list alike: held
+    // to a column, a wide window's page was bands of nothing round it.
     container(
         column![
             header,
@@ -1367,13 +1359,10 @@ pub(crate) fn glossary_home(app: &App) -> Element<'_, Message> {
             .height(Fill),
         ]
         .spacing(10)
-        .max_width(GLOSSARY_W),
+        .width(Fill),
     )
     .width(Fill)
     .height(Fill)
     .padding([20, 28])
-    // In the middle of a wider page: held to the left, the page's right
-    // was a band of nothing as wide as a sidebar.
-    .align_x(iced::Center)
     .into()
 }

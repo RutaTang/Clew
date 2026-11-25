@@ -316,15 +316,10 @@ pub(crate) fn plugin_page<'a>(
     container(
         column![
             header,
-            scrollable(
-                Column::with_children(blocks)
-                    .spacing(14)
-                    .width(Fill)
-                    .max_width(960)
-            )
-            .direction(thin_scroll())
-            .style(theme::overlay_scrollbar)
-            .height(Fill),
+            scrollable(Column::with_children(blocks).spacing(14).width(Fill))
+                .direction(thin_scroll())
+                .style(theme::overlay_scrollbar)
+                .height(Fill),
         ]
         .spacing(14),
     )

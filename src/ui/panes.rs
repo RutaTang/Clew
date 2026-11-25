@@ -1257,7 +1257,7 @@ pub(crate) fn markdown_pane<'a>(
         theme::document_markdown_settings_at(theme::DOCUMENT_SIZE),
     )
     .map(|url| Message::Content(ContentMsg::OpenLink(url.to_string())));
-    let body = container(doc).padding([16, 28]).max_width(920);
+    let body = container(doc).padding([16, 28]).width(Fill);
     mouse_area(reader_scroll(
         scrollable(body)
             .width(Fill)

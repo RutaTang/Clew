@@ -13182,8 +13182,8 @@ fn a_long_glossary_section_does_not_hide_the_next() {
     );
     assert!(shows(&mut sim, "Talks to the server"));
     drop(sim);
-    // L20: on a page wider than its column, the column is in the middle:
-    // held to the left, the page's right was a band of nothing.
+    // On a wide page the glossary is as wide as the page: held to a
+    // column, its sides were bands of nothing.
     let wide = 1600.0;
     let mut sim = iced_test::Simulator::with_size(
         Default::default(),
@@ -13191,12 +13191,7 @@ fn a_long_glossary_section_does_not_hide_the_next() {
         super::glossary_home(&app),
     );
     let title = text_at(&mut sim, |t| t == "Glossary", 0).expect("its title");
-    let left = title.x;
-    let right = wide - (left + super::docs_stats::GLOSSARY_W);
-    assert!(
-        (left - right).abs() < 4.0,
-        "in the middle: {left} left, {right} right"
-    );
+    assert!(title.x < 40.0, "at the page's left: {}", title.x);
 }
 
 /// The settings' build choices, language by language: what each group

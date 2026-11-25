@@ -186,15 +186,10 @@ pub(crate) fn weak_home(app: &App) -> Element<'_, Message> {
         column![
             header,
             count,
-            scrollable(
-                Column::with_children(rows)
-                    .spacing(2)
-                    .width(Fill)
-                    .max_width(960)
-            )
-            .direction(thin_scroll())
-            .style(theme::overlay_scrollbar)
-            .height(Fill),
+            scrollable(Column::with_children(rows).spacing(2).width(Fill))
+                .direction(thin_scroll())
+                .style(theme::overlay_scrollbar)
+                .height(Fill),
         ]
         .spacing(12),
     )
