@@ -94,6 +94,24 @@ pub enum RunPlan {
         name: String,
         tested: Tested,
     },
+    /// A test debugged under its language's own debugger — a Go, Ruby,
+    /// Dart, JVM (Gradle, Maven, sbt), CTest or Zig test — run as Run Test
+    /// runs it, as `clew_core::langtests::debug_test` works out when the
+    /// session starts (it may list CTest's tests, or build a Zig test).
+    LangDebugTest {
+        /// The test's file, its language's key, and its text as read.
+        file: PathBuf,
+        lang: &'static str,
+        source: std::sync::Arc<String>,
+        /// The test (or group) asked for.
+        test: clew_core::runnables::Runnable,
+        /// The debugger it runs under.
+        debugger: crate::dap::Lang,
+        /// What the run is called: the test's name, its group's, or its
+        /// file's.
+        name: String,
+        tested: Tested,
+    },
     /// A Lean file's `main`, run by Lean in its Lake project (`lake env
     /// lean --run`): no debugger, its output and how it ended.
     Lean {
@@ -159,7 +177,8 @@ impl RunPlan {
             },
             RunPlan::Pytest { name, .. }
             | RunPlan::Django { name, .. }
-            | RunPlan::JsDebugTest { name, .. } => name.clone(),
+            | RunPlan::JsDebugTest { name, .. }
+            | RunPlan::LangDebugTest { name, .. } => name.clone(),
             RunPlan::Doctest { item, file, .. } => {
                 tr!("Doctest of {item}", item = doctest_item(item, file))
             }
@@ -181,7 +200,8 @@ impl RunPlan {
             } => Some(&test.name),
             RunPlan::Pytest { name, .. }
             | RunPlan::Django { name, .. }
-            | RunPlan::JsDebugTest { name, .. } => Some(name),
+            | RunPlan::JsDebugTest { name, .. }
+            | RunPlan::LangDebugTest { name, .. } => Some(name),
             RunPlan::Cargo { test: None, .. }
             | RunPlan::Script { .. }
             | RunPlan::Lean { .. }
@@ -242,6 +262,9 @@ impl RunPlan {
             } | RunPlan::JsDebugTest {
                 tested: Tested::Group,
                 ..
+            } | RunPlan::LangDebugTest {
+                tested: Tested::Group,
+                ..
             } | RunPlan::Cargo {
                 test: Some(CargoTest {
                     runs: CargoTests::Under(_),
@@ -290,6 +313,7 @@ impl RunPlan {
             | RunPlan::Django { .. }
             | RunPlan::Script { .. }
             | RunPlan::JsDebugTest { .. }
+            | RunPlan::LangDebugTest { .. }
             | RunPlan::Lean { .. }
             | RunPlan::Lake { .. }
             | RunPlan::Remote { .. }
@@ -347,6 +371,14 @@ impl RunPlan {
                 cwd.clone(),
                 Some(crate::dap::Lang::Node),
             ),
+            // Stand-ins: what runs is worked out as the session starts.
+            RunPlan::LangDebugTest { file, debugger, .. } => (
+                file.clone(),
+                Vec::new(),
+                file.parent()
+                    .map_or_else(|| root.to_path_buf(), Path::to_path_buf),
+                Some(*debugger),
+            ),
             RunPlan::Lean { file, project, .. } => {
                 (file.clone(), Vec::new(), project.clone(), None)
             }
@@ -377,6 +409,7 @@ impl RunPlan {
             RunPlan::Pytest { file, .. }
             | RunPlan::Django { file, .. }
             | RunPlan::Script { file }
+            | RunPlan::LangDebugTest { file, .. }
             | RunPlan::Lean { file, .. } => {
                 file.parent().map(Path::to_path_buf).unwrap_or_default()
             }

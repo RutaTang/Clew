@@ -8343,7 +8343,18 @@ fn a_failed_debug_run_stops_what_it_started() {
         run,
         error: "initialize: refused".into(),
     }));
-    assert!(app.debug.session.is_none());
+    // Its tab kept, not run, with why in it — and nothing of it live.
+    let kept = app.debug.session.as_ref().expect("the failed run's tab");
+    assert!(kept.client.is_none());
+    assert_eq!(kept.status, DebugStatus::Terminated);
+    assert!(
+        kept.output
+            .iter()
+            .any(|(_, t)| t.contains("initialize: refused")),
+        "{:?}",
+        kept.output
+    );
+    assert!(app.debug.not_run.contains(&app.debug.tab));
     assert_ne!(
         app.debug_run_live.load(std::sync::atomic::Ordering::SeqCst),
         run,
@@ -30517,8 +30528,12 @@ fn a_js_debug_child_session_reports_its_failure_and_brings_its_promise() {
     // The first child — the real target — fails: so does the run.
     let (app, out, _rt, run, seen, parent_seen, _) = child(false, |_| Err("no target".into()));
     assert!(failed_child(&out), "{out:?}");
+    // Its tab stays, ended and holding nothing live, with why in it.
     assert!(
-        app.debug.session.is_none(),
+        app.debug
+            .session
+            .as_ref()
+            .is_none_or(|s| s.status == DebugStatus::Terminated && s.client.is_none()),
         "the parent was left running with no target behind it"
     );
     assert!(

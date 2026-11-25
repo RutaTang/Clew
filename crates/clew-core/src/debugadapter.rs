@@ -691,6 +691,39 @@ fn rust_setup(launch: &mut serde_json::Value, sysroot: Option<&Path>, quiet: boo
     launch["preRunCommands"] = json!([format!("{mark}breakpoint set --name rust_panic")]);
 }
 
+/// A test's session, as `test` asks it debugged
+/// ([`crate::langtests::debug_test`]): its `launch` fields set over the
+/// program's (Delve's test mode, the JVM build to run), rdbg told its
+/// program is a command, Dart's or Flutter's test adapter in place of its
+/// program adapter.
+pub fn set_up_for_test(
+    test: &crate::langtests::DebugTest,
+    command: &mut PathBuf,
+    args: &mut Vec<String>,
+    launch: &mut serde_json::Value,
+) {
+    use crate::langtests::DebugStart;
+    if let Some(fields) = launch.as_object_mut() {
+        for (key, value) in &test.launch {
+            fields.insert(key.clone(), value.clone());
+        }
+    }
+    match &test.start {
+        DebugStart::Program => {}
+        DebugStart::RubyCommand => {
+            if let Some(at) = args.iter().position(|a| a == "--") {
+                args.insert(at, "--command".into());
+            }
+        }
+        DebugStart::DartTests { flutter } => {
+            if let Some(flutter) = flutter {
+                *command = flutter.clone();
+            }
+            *args = vec!["debug_adapter".into(), "--test".into()];
+        }
+    }
+}
+
 /// A native launch (lldb-dap's, `adapter` the adapter run) for a program
 /// known to be Rust's — Cargo built it — set up as [`resolve`] sets up one
 /// whose debug information says Rust: Rust's type summaries and the stop at
@@ -763,7 +796,7 @@ fn is_zig_source(program: &str) -> bool {
 
 /// The `zig` compiler: the one chosen for the project (Settings →
 /// Languages), else the PATH's.
-fn zig_for(choices: &clew_protocol::LanguageChoices) -> Result<PathBuf, String> {
+pub(crate) fn zig_for(choices: &clew_protocol::LanguageChoices) -> Result<PathBuf, String> {
     match choices.zig.as_deref().filter(|z| !z.trim().is_empty()) {
         Some(chosen) => store::find_program(chosen)
             .map_err(|why| format!("the Zig toolchain you chose cannot be run: {why}")),
@@ -777,9 +810,33 @@ fn zig_for(choices: &clew_protocol::LanguageChoices) -> Result<PathBuf, String> 
 /// a Zig built without LLVM builds it its own way. The build and Zig's cache
 /// for it go in Clew's data directory, not the project.
 fn build_zig(zig: &Path, source: &Path, cwd: &Path) -> Result<PathBuf, String> {
+    build_zig_as(zig, source, cwd, None)
+}
+
+/// Build `source`'s tests for a session as [`build_zig`] builds a program:
+/// `zig test`, built and not run (`--test-no-exec`), keeping the tests
+/// `filter` names (`--test-filter`). The binary runs them as `zig test`
+/// would.
+pub(crate) fn build_zig_test(
+    zig: &Path,
+    source: &Path,
+    filter: Option<&str>,
+    cwd: &Path,
+) -> Result<PathBuf, String> {
+    build_zig_as(zig, source, cwd, Some(filter))
+}
+
+/// [`build_zig`], or with `test` its tests (and the filter for them).
+fn build_zig_as(
+    zig: &Path,
+    source: &Path,
+    cwd: &Path,
+    test: Option<Option<&str>>,
+) -> Result<PathBuf, String> {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     source.hash(&mut hasher);
+    test.hash(&mut hasher);
     let out = store::data_root()
         .ok_or("no data directory to build the Zig program in")?
         .join("debug-builds")
@@ -796,7 +853,17 @@ fn build_zig(zig: &Path, source: &Path, cwd: &Path) -> Result<PathBuf, String> {
     });
     let build = |llvm: bool| {
         let mut cmd = crate::spawn::command(zig);
-        cmd.args(["build-exe", "-O", "Debug"]);
+        match test {
+            None => {
+                cmd.args(["build-exe", "-O", "Debug"]);
+            }
+            Some(filter) => {
+                cmd.args(["test", "-O", "Debug", "--test-no-exec"]);
+                if let Some(filter) = filter {
+                    cmd.arg("--test-filter").arg(filter);
+                }
+            }
+        }
         if llvm {
             cmd.arg("-fllvm");
         }
@@ -1469,6 +1536,11 @@ fn go_spec(
         // The program's output as DAP output, not on delve's own stdout —
         // which no one reads (and, remotely, which is on another host).
         "outputMode": "remote",
+        // The binary Delve builds, in the temporary folder: by default it
+        // was `__debug_bin…` in the project's folder, in its file tree for
+        // as long as the session ran. Delve deletes it when the session
+        // ends.
+        "output": go_debug_binary().to_string_lossy(),
     });
     if let Some(tags) = tags {
         launch["buildFlags"] = json!(tags);
@@ -1479,6 +1551,19 @@ fn go_spec(
         launch,
         transport: AdapterTransport::Tcp,
     }
+}
+
+/// Where Delve builds a session's program: a name of its own in the
+/// temporary folder.
+fn go_debug_binary() -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let name = format!("clew-go-debug-{}-{n}", std::process::id());
+    std::env::temp_dir().join(match cfg!(windows) {
+        true => format!("{name}.exe"),
+        false => name,
+    })
 }
 
 /// vscode-js-debug for JS/TS: `node dapDebugServer.js <port> <host>` listens

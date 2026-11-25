@@ -32,6 +32,13 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!(
         "This project's tests run by CTest from a CMake build: build it, then run the test again."
     ),
+    tr_noop!("CTest lists no test of {name}: build the project again, then debug it."),
+    tr_noop!("CTest's list of tests could not be read."),
+    tr_noop!("These tests are in more than one program: debug them one at a time."),
+    tr_noop!(
+        "This build runs its tests where the debugger can't reach them, so they run without it."
+    ),
+    tr_noop!("The build ended before its JVM started under the debugger. See its output."),
     tr_noop!("{rel} is not JavaScript or TypeScript"),
     tr_noop!(
         "clew's own {what} is missing from the {arg1} install — without it the server would run the project's copy; remove the server and install it again"
@@ -168,6 +175,7 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("cannot make a scratch directory: {last}"),
     tr_noop!("cannot make the staged command executable: {e}"),
     tr_noop!("cannot make {arg1}: {e}"),
+    tr_noop!("cannot write {arg1}: {e}"),
     tr_noop!("cannot open {rel}: {e}"),
     tr_noop!("cannot reach Node's inspector: {e}"),
     tr_noop!("cannot reach the JVM's agent: {e}"),

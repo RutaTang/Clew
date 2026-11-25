@@ -516,7 +516,18 @@ pub fn test_command(
             let package = format!("./{}", rel_slash(&module, dir));
             let mut args = vec!["test".to_string(), "-v".to_string()];
             match (whole_file, runnable.name.strip_prefix("Benchmark")) {
-                (true, _) => {}
+                // The file's own tests, not its package's every one.
+                (true, _) => {
+                    let names: Vec<String> = go_tests(&source.lines().collect::<Vec<_>>())
+                        .into_iter()
+                        .map(|t| t.name)
+                        .filter(|n| !n.starts_with("Benchmark"))
+                        .collect();
+                    if !names.is_empty() {
+                        args.push("-run".into());
+                        args.push(format!("^({})$", names.join("|")));
+                    }
+                }
                 (false, Some(_)) => {
                     args.extend(["-run".into(), "^$".into(), "-bench".into()]);
                     args.push(format!("^{}$", runnable.name));
@@ -560,9 +571,12 @@ pub fn test_command(
                 ],
             ) {
                 let gradle = wrapper(root, &dir, "gradlew").map_or_else(|| tool("gradle"), Ok)?;
+                // `cleanTest` first: a test run again, nothing changed,
+                // was Gradle's "up to date", and ran nothing.
                 let mut args = vec![
                     "-p".to_string(),
                     dir.to_string_lossy().into_owned(),
+                    "cleanTest".into(),
                     "test".into(),
                 ];
                 if let Some((class, method)) = class {
@@ -759,6 +773,355 @@ pub fn test_command(
         }
         _ => Err(format!("{rel} has no tests to run", rel = lang)),
     }
+}
+
+/// A test debugged: the program its debugger is given, and how the
+/// debugger is started for a test rather than a program.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DebugTest {
+    /// The debugger, by [`crate::debugadapter::resolve`]'s name for its
+    /// language: `go`, `ruby`, `dart`, `java` or `native`.
+    pub adapter: &'static str,
+    pub program: PathBuf,
+    pub args: Vec<String>,
+    pub cwd: PathBuf,
+    /// Set on the debugger's `launch` over what it asks for a program:
+    /// Delve's test mode, the build the JVM debugger runs.
+    pub launch: serde_json::Map<String, serde_json::Value>,
+    /// How the debugger itself is started for it.
+    pub start: DebugStart,
+}
+
+/// How a debugger is started for a test ([`DebugTest`]).
+#[derive(Debug, Clone, PartialEq)]
+pub enum DebugStart {
+    /// As for a program.
+    Program,
+    /// rdbg running a command (`bundle exec rspec …`), not a script.
+    RubyCommand,
+    /// Dart's test adapter (`dart debug_adapter --test`) — Flutter's, by
+    /// the `flutter` given, for a Flutter package's tests.
+    DartTests { flutter: Option<PathBuf> },
+}
+
+/// The JVM's debugging agent as a test's JVM is started under it: held at
+/// its start, listening on a free loopback port it announces
+/// (`Listening for transport dt_socket at address: …`).
+pub const JDWP_AGENT: &str =
+    "-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=127.0.0.1:0";
+
+/// The debugger a test of `lang` in `file` is debugged under, where Clew
+/// has one that runs it — [`crate::debugadapter::resolve`]'s name for it —
+/// and none where its tests run without one: C#'s, Erlang's, Elixir's,
+/// Haskell's, and a JVM build's that runs them out of reach (Mill, a
+/// scala-cli folder, an sbt build that forks them). Cheap: it reads only
+/// which build files there are.
+pub fn test_debugger(root: &Path, file: &Path, lang: &str) -> Option<&'static str> {
+    match lang {
+        "go" => Some("go"),
+        "ruby" => Some("ruby"),
+        "dart" => Some("dart"),
+        "zig" => Some("native"),
+        "c" | "cpp" => ctest_dir(root).map(|_| "native"),
+        "java" | "kotlin" | "scala" => jvm_debug_build(root, file).map(|_| "java"),
+        _ => None,
+    }
+}
+
+/// The build a JVM test is debugged through.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum JvmBuild {
+    Gradle,
+    Maven,
+    Sbt,
+}
+
+/// The build that runs `file`'s tests where the JVM debugger reaches them,
+/// found as [`test_command`] finds it: Gradle's and Maven's (each test JVM
+/// started under the agent), and sbt's when it runs them in its own JVM —
+/// with `fork := true` they run in one it starts without it.
+fn jvm_debug_build(root: &Path, file: &Path) -> Option<JvmBuild> {
+    if let Some(dir) = above(root, file, &["build.sbt"]) {
+        let forks =
+            crate::statefile::read_capped(&dir.join("build.sbt"), 1 << 20).is_some_and(|text| {
+                text.lines()
+                    .any(|l| l.contains("fork") && l.contains(":= true"))
+            });
+        return (!forks).then_some(JvmBuild::Sbt);
+    }
+    if above(root, file, &["build.mill", "build.sc"]).is_some() {
+        return None;
+    }
+    if above(
+        root,
+        file,
+        &[
+            "build.gradle.kts",
+            "build.gradle",
+            "settings.gradle.kts",
+            "settings.gradle",
+        ],
+    )
+    .is_some()
+    {
+        return Some(JvmBuild::Gradle);
+    }
+    above(root, file, &["pom.xml"]).map(|_| JvmBuild::Maven)
+}
+
+/// How `runnable`, a test of `file`, is debugged: run as [`test_command`]
+/// runs it, under its language's debugger — Go's by Delve's test mode,
+/// Ruby's command under rdbg, Dart's and Flutter's by their test adapters,
+/// a JVM build's with each test JVM under the debugging agent (Gradle by
+/// an init script of Clew's, Maven by Surefire's `maven.surefire.debug`,
+/// sbt's own JVM by `-J`), a CTest test's own program and arguments (as
+/// CTest lists them) under lldb, a Zig test built alone for it. It may run
+/// CTest or build a Zig test: off the UI thread.
+pub fn debug_test(
+    root: &Path,
+    file: &Path,
+    lang: &str,
+    source: &str,
+    runnable: &Runnable,
+    search: &OsStr,
+    choices: &clew_protocol::LanguageChoices,
+) -> Result<DebugTest, String> {
+    let whole_file = runnable.kind == RunnableKind::Tests && runnable.name.is_empty();
+    let test = |adapter, program, args, cwd| DebugTest {
+        adapter,
+        program,
+        args,
+        cwd,
+        launch: serde_json::Map::new(),
+        start: DebugStart::Program,
+    };
+    match lang {
+        "c" | "cpp" => return ctest_debug(root, file, lang, source, runnable, search),
+        "zig" => {
+            let zig = crate::debugadapter::zig_for(choices)?;
+            let filter = (!whole_file).then_some(runnable.name.as_str());
+            let dir = file.parent().unwrap_or(root);
+            let binary = crate::debugadapter::build_zig_test(&zig, file, filter, dir)?;
+            return Ok(test("native", binary, Vec::new(), dir.to_path_buf()));
+        }
+        _ => {}
+    }
+    let run = test_command(root, file, lang, source, runnable, search)?;
+    match lang {
+        "go" => {
+            // Delve builds the package's tests and runs them, in its
+            // folder, as `go test` does: asked for the test as `go test`
+            // asks, in the test binary's own words.
+            let dir = file.parent().unwrap_or(root).to_path_buf();
+            let args = run
+                .args
+                .iter()
+                .skip(1)
+                .filter(|a| !a.starts_with("./"))
+                .map(|a| match a.as_str() {
+                    "-v" | "-run" | "-bench" => format!("-test.{}", &a[1..]),
+                    _ => a.clone(),
+                })
+                .collect();
+            let mut debug = test("go", dir.clone(), args, dir);
+            debug.launch.insert("mode".into(), "test".into());
+            Ok(debug)
+        }
+        "ruby" => {
+            let mut debug = test("ruby", run.program, run.args, run.cwd);
+            debug.start = DebugStart::RubyCommand;
+            Ok(debug)
+        }
+        "dart" => {
+            let flutter = run
+                .program
+                .file_stem()
+                .is_some_and(|n| n.to_string_lossy() == "flutter");
+            let mut args = Vec::new();
+            if !whole_file {
+                args.push("--plain-name".into());
+                args.push(runnable.name.clone());
+            }
+            let mut debug = test("dart", file.to_path_buf(), args, run.cwd);
+            debug.start = DebugStart::DartTests {
+                flutter: flutter.then_some(run.program),
+            };
+            Ok(debug)
+        }
+        "java" | "kotlin" | "scala" => {
+            let Some(build) = jvm_debug_build(root, file) else {
+                return Err("This build runs its tests where the debugger can't reach them, so they run without it.".to_string());
+            };
+            let mut args = run.args;
+            match build {
+                JvmBuild::Gradle => {
+                    args.push("--init-script".into());
+                    args.push(gradle_debug_script()?.to_string_lossy().into_owned());
+                }
+                JvmBuild::Maven => args.push(format!("-Dmaven.surefire.debug={JDWP_AGENT}")),
+                JvmBuild::Sbt => args.insert(0, format!("-J{JDWP_AGENT}")),
+            }
+            let mut command = vec![serde_json::Value::from(
+                run.program.to_string_lossy().into_owned(),
+            )];
+            command.extend(args.iter().cloned().map(serde_json::Value::from));
+            let mut debug = test("java", run.program, args, run.cwd);
+            debug.launch.insert("command".into(), command.into());
+            Ok(debug)
+        }
+        _ => Err(format!("{rel} has no tests to run", rel = lang)),
+    }
+}
+
+/// Gradle's init script that starts each test JVM, and an application's
+/// `run`, under the debugging agent — one JVM at a time — written once to
+/// Clew's data directory.
+fn gradle_debug_script() -> Result<PathBuf, String> {
+    const SCRIPT: &str = "// Written by Clew to debug a test or a program: its JVM starts under\n// the debugging agent, held until the debugger attaches.\ngradle.allprojects { project ->\n    project.tasks.withType(Test).configureEach { task ->\n        task.jvmArgs '-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=127.0.0.1:0'\n        task.maxParallelForks = 1\n    }\n    project.tasks.withType(JavaExec).configureEach { task ->\n        if (task.name == 'run') {\n            task.jvmArgs '-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=127.0.0.1:0'\n        }\n    }\n}\n";
+    let dir = crate::lsp::store::data_root()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("debug-adapters")
+        .join("gradle");
+    let path = dir.join("clew-debug.gradle");
+    if std::fs::read_to_string(&path).ok().as_deref() != Some(SCRIPT) {
+        std::fs::create_dir_all(&dir)
+            .and_then(|()| std::fs::write(&path, SCRIPT))
+            .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    }
+    Ok(path)
+}
+
+/// A CTest test debugged: the program CTest runs for it and its arguments
+/// (GoogleTest's `--gtest_filter`, Catch2's test name), in its working
+/// directory, as `ctest --show-only=json-v1` lists them. A file's tests in
+/// one program run together, by one filter naming them all.
+fn ctest_debug(
+    root: &Path,
+    file: &Path,
+    lang: &str,
+    source: &str,
+    runnable: &Runnable,
+    search: &OsStr,
+) -> Result<DebugTest, String> {
+    let Some(build) = ctest_dir(root) else {
+        return Err("This project's tests run by CTest from a CMake build: build it, then run the test again.".to_string());
+    };
+    let ctest = crate::lsp::store::find_in_unresolved(search, "ctest")
+        .ok_or_else(|| format!("{other} wasn't found here.", other = "ctest"))?;
+    let mut cmd = crate::spawn::command(&ctest);
+    cmd.arg("--test-dir")
+        .arg(&build)
+        .arg("--show-only=json-v1")
+        .current_dir(root);
+    let out = crate::lsp::store::run_bounded(cmd, std::time::Duration::from_secs(60))?;
+    let listed: serde_json::Value = serde_json::from_slice(&out.stdout)
+        .map_err(|_| "CTest's list of tests could not be read.".to_string())?;
+    let whole_file = runnable.kind == RunnableKind::Tests && runnable.name.is_empty();
+    let names: Vec<String> = match whole_file {
+        true => tests(lang, &file.to_string_lossy(), source)
+            .into_iter()
+            .filter(|t| t.kind == RunnableKind::Test)
+            .map(|t| t.name)
+            .collect(),
+        false => vec![runnable.name.clone()],
+    };
+    let found: Vec<&serde_json::Value> = listed["tests"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|t| {
+            t["name"]
+                .as_str()
+                .is_some_and(|n| names.iter().any(|w| w == n))
+        })
+        .collect();
+    let command = |t: &serde_json::Value| -> Vec<String> {
+        t["command"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|a| a.as_str().map(str::to_string))
+            .collect()
+    };
+    let Some(first) = found.first() else {
+        let name = match whole_file {
+            true => file
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            false => runnable.name.clone(),
+        };
+        return Err(format!(
+            "CTest lists no test of {name}: build the project again, then debug it."
+        ));
+    };
+    let first_command = command(first);
+    let Some((program, rest)) = first_command.split_first() else {
+        return Err("CTest's list of tests could not be read.".to_string());
+    };
+    let mut args = rest.to_vec();
+    if found.len() > 1 {
+        if found.iter().any(|t| command(t).first() != Some(program)) {
+            return Err(
+                "These tests are in more than one program: debug them one at a time.".to_string(),
+            );
+        }
+        let names: Vec<&str> = found.iter().filter_map(|t| t["name"].as_str()).collect();
+        // GoogleTest's filter, or Catch2's test name: each test's, joined.
+        if let Some(at) = args.iter().position(|a| a.starts_with("--gtest_filter=")) {
+            args[at] = format!("--gtest_filter={}", names.join(":"));
+        } else if args.first().map(String::as_str) == first["name"].as_str() {
+            args[0] = names.join(",");
+        }
+    }
+    let cwd = first["properties"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|p| p["name"] == "WORKING_DIRECTORY")
+        .and_then(|p| p["value"].as_str())
+        .map_or(build, PathBuf::from);
+    Ok(DebugTest {
+        adapter: "native",
+        program: PathBuf::from(program),
+        args,
+        cwd,
+        launch: serde_json::Map::new(),
+        start: DebugStart::Program,
+    })
+}
+
+/// How a debugged test run ended, read off its runner's last words where
+/// its debugger says no exit code (Delve, rdbg): Go's `PASS` or `FAIL`;
+/// Minitest's `… 0 failures, 0 errors …`; RSpec's `… examples, 0
+/// failures`. 0 when its tests passed, 1 when not; none when it said
+/// neither — stopped before its end.
+pub fn test_end(lang: &str, said: &str) -> Option<i64> {
+    let count = |line: &str, word: &str| -> Option<u64> {
+        let at = line.find(word)?;
+        line[..at]
+            .trim_end()
+            .rsplit([' ', ','])
+            .next()?
+            .parse()
+            .ok()
+    };
+    said.lines().rev().find_map(|line| {
+        let line = line.trim();
+        match lang {
+            "go" => match line {
+                "PASS" => Some(0),
+                "FAIL" => Some(1),
+                _ => None,
+            },
+            "ruby" if line.contains(" runs, ") || line.contains(" run, ") => {
+                let failed = count(line, " failure")? + count(line, " error")?;
+                Some(i64::from(failed > 0))
+            }
+            "ruby" if line.contains(" example") => Some(i64::from(count(line, " failure")? > 0)),
+            _ => None,
+        }
+    })
 }
 
 /// The languages whose programs [`main_command`] runs: Kotlin's, Scala's
@@ -1221,6 +1584,16 @@ mod tests {
         let c = run("go", &go, 3);
         assert_eq!(c.args, ["test", "-v", "-run", "^TestAdd$", "./cart"]);
         assert_eq!(c.cwd, root.join("svc"));
+        // The file's tests, not its package's every one.
+        let two = write(
+            "svc/cart/two_test.go",
+            "package cart\n\nfunc TestA(t *testing.T) {\n}\n\nfunc BenchmarkB(b *testing.B) {\n}\n\nfunc ExampleC() {\n}\n",
+        );
+        let c = run("go", &two, 1);
+        assert_eq!(
+            c.args,
+            ["test", "-v", "-run", "^(TestA|ExampleC)$", "./cart"]
+        );
 
         write("app/settings.gradle.kts", "");
         write("app/gradlew", "#!/bin/sh\n");
@@ -1236,6 +1609,7 @@ mod tests {
             [
                 "-p".to_string(),
                 root.join("app/lib").to_string_lossy().into_owned(),
+                "cleanTest".into(),
                 "test".into(),
                 "--tests".into(),
                 "com.acme.CartTest.adds".into()
@@ -1353,5 +1727,202 @@ mod tests {
         );
         let loose = write("loose/hello.exs", "IO.puts(1)\n");
         assert_eq!(main("elixir", &loose).program, bin.join("elixir"));
+    }
+
+    /// A debugged test's end, by its runner's last words.
+    #[test]
+    fn a_tests_end_is_read_off_its_runners_last_words() {
+        assert_eq!(
+            test_end("go", "=== RUN   TestA\n--- PASS: TestA (0.00s)\nPASS\n"),
+            Some(0)
+        );
+        assert_eq!(test_end("go", "--- FAIL: TestB (0.00s)\nFAIL\n"), Some(1));
+        assert_eq!(
+            test_end("go", "=== RUN   TestA\n"),
+            None,
+            "stopped before its end"
+        );
+        assert_eq!(
+            test_end(
+                "ruby",
+                "Finished in 0.1s.\n\n1 runs, 1 assertions, 0 failures, 0 errors, 0 skips\n"
+            ),
+            Some(0)
+        );
+        assert_eq!(
+            test_end(
+                "ruby",
+                "2 runs, 2 assertions, 0 failures, 1 errors, 0 skips\n"
+            ),
+            Some(1)
+        );
+        assert_eq!(test_end("ruby", "3 examples, 1 failure\n"), Some(1));
+        assert_eq!(
+            test_end("ruby", "1 example, 0 failures, 1 pending\n"),
+            Some(0)
+        );
+        assert_eq!(test_end("ruby", "# Running:\n"), None);
+        assert_eq!(
+            test_end("java", "BUILD SUCCESSFUL\n"),
+            None,
+            "its build says its code"
+        );
+    }
+
+    /// Each debugged test runs as Run Test runs it, under its language's
+    /// debugger: Go's by Delve's test mode in its package's folder, in the
+    /// test binary's words; Ruby's command under rdbg; Dart's by the test
+    /// adapter, Flutter's by Flutter's; a Gradle, Maven or sbt build with
+    /// the test JVM under the agent; none for a build that forks its tests
+    /// out of reach, nor for languages whose tests no debugger runs.
+    #[test]
+    fn each_debugged_test_runs_under_its_languages_debugger() {
+        // Gradle's init script is written to the data directory: a test's.
+        let _data = crate::testutil::DataDir::new("langtests-debug-data");
+        let tmp = crate::testutil::TempDir::new("langtests-debug");
+        let root = tmp.path().to_path_buf();
+        let write = |rel: &str, text: &str| {
+            let path = root.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, text).unwrap();
+            path
+        };
+        let bin = root.join("bin");
+        for name in ["go", "dart", "flutter", "bundle", "mvn", "sbt", "gradle"] {
+            let path = write(&format!("bin/{name}"), "#!/bin/sh\n");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
+        let search = bin.as_os_str();
+        let choices = clew_protocol::LanguageChoices::default();
+        let debug = |lang: &str, file: &Path, line: usize| {
+            let source = std::fs::read_to_string(file).unwrap();
+            let rel = file
+                .strip_prefix(&root)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
+            let found = tests(lang, &rel, &source);
+            let r = crate::runnables::runnable_at(&found, line).unwrap().clone();
+            debug_test(&root, file, lang, &source, &r, search, &choices)
+                .unwrap_or_else(|e| panic!("{lang}: {e}"))
+        };
+
+        write("svc/go.mod", "module acme/svc\n");
+        let go = write(
+            "svc/cart/cart_test.go",
+            "package cart\n\nfunc TestAdd(t *testing.T) {\n}\n\nfunc BenchmarkSum(b *testing.B) {\n}\n",
+        );
+        assert_eq!(test_debugger(&root, &go, "go"), Some("go"));
+        let d = debug("go", &go, 3);
+        assert_eq!(d.adapter, "go");
+        assert_eq!(d.program, root.join("svc/cart"));
+        assert_eq!(d.cwd, root.join("svc/cart"));
+        assert_eq!(d.args, ["-test.v", "-test.run", "^TestAdd$"]);
+        assert_eq!(d.launch["mode"], "test");
+        let d = debug("go", &go, 6);
+        assert_eq!(
+            d.args,
+            [
+                "-test.v",
+                "-test.run",
+                "^$",
+                "-test.bench",
+                "^BenchmarkSum$"
+            ]
+        );
+
+        write("rb/Gemfile", "");
+        let spec = write(
+            "rb/spec/cart_spec.rb",
+            "describe Cart do\n  it 'adds' do\n  end\nend\n",
+        );
+        let d = debug("ruby", &spec, 2);
+        assert_eq!((d.adapter, &d.start), ("ruby", &DebugStart::RubyCommand));
+        assert_eq!(d.program, bin.join("bundle"));
+        assert_eq!(d.args, ["exec", "rspec", "spec/cart_spec.rb:2"]);
+
+        write(
+            "fl/pubspec.yaml",
+            "dependencies:\n  flutter:\n    sdk: flutter\n",
+        );
+        let dart = write(
+            "fl/test/a_test.dart",
+            "void main() {\n  test('adds', () {});\n}\n",
+        );
+        let d = debug("dart", &dart, 2);
+        assert_eq!(d.program, dart);
+        assert_eq!(d.args, ["--plain-name", "adds"]);
+        assert_eq!(
+            d.start,
+            DebugStart::DartTests {
+                flutter: Some(bin.join("flutter"))
+            }
+        );
+
+        write("gr/build.gradle.kts", "");
+        let kt = write(
+            "gr/src/test/kotlin/acme/CartTest.kt",
+            "package acme\n\nclass CartTest {\n    @Test\n    fun adds() {\n    }\n}\n",
+        );
+        assert_eq!(test_debugger(&root, &kt, "kotlin"), Some("java"));
+        let d = debug("kotlin", &kt, 5);
+        assert_eq!(d.adapter, "java");
+        let script = gradle_debug_script().unwrap();
+        assert!(
+            std::fs::read_to_string(&script)
+                .unwrap()
+                .contains(JDWP_AGENT)
+        );
+        assert_eq!(
+            d.args[d.args.len() - 4..],
+            [
+                "--tests".to_string(),
+                "acme.CartTest.adds".into(),
+                "--init-script".into(),
+                script.to_string_lossy().into_owned()
+            ]
+        );
+        let command: Vec<&str> = d.launch["command"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|w| w.as_str().unwrap())
+            .collect();
+        assert_eq!(command[0], bin.join("gradle").to_string_lossy());
+        assert_eq!(
+            command[1..],
+            d.args.iter().map(String::as_str).collect::<Vec<_>>()
+        );
+
+        write("mv/pom.xml", "<project/>\n");
+        let java = write(
+            "mv/src/test/java/acme/CartTest.java",
+            "package acme;\nclass CartTest {\n  @Test\n  void adds() {}\n}\n",
+        );
+        let d = debug("java", &java, 4);
+        assert_eq!(
+            d.args.last().unwrap(),
+            &format!("-Dmaven.surefire.debug={JDWP_AGENT}")
+        );
+
+        write("sb/build.sbt", "");
+        let scala = write(
+            "sb/src/test/scala/acme/CartSuite.scala",
+            "package acme\n\nclass CartSuite extends munit.FunSuite {\n  test(\"adds\") {\n  }\n}\n",
+        );
+        let d = debug("scala", &scala, 4);
+        assert_eq!(d.args[0], format!("-J{JDWP_AGENT}"));
+        // Forked, its tests run in a JVM the agent is not in.
+        write("fk/build.sbt", "Test / fork := true\n");
+        let forked = write("fk/src/test/scala/acme/CartSuite.scala", "");
+        assert_eq!(test_debugger(&root, &forked, "scala"), None);
+
+        for lang in ["csharp", "erlang", "elixir", "haskell"] {
+            assert_eq!(test_debugger(&root, &go, lang), None, "{lang}");
+        }
     }
 }

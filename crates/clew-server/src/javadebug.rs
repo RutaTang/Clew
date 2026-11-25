@@ -49,7 +49,15 @@ const MAX_CHILDREN: usize = 100;
 const MAX_PACKET: usize = 64 * 1024 * 1024;
 
 /// Classes stepping does not stop in.
-const NOT_STEPPED_INTO: &[&str] = &["java.*", "javax.*", "jdk.*", "sun.*", "com.sun.*"];
+const NOT_STEPPED_INTO: &[&str] = &[
+    "java.*",
+    "javax.*",
+    "jdk.*",
+    "sun.*",
+    "com.sun.*",
+    "kotlin.*",
+    "scala.*",
+];
 
 /// Run the adapter on this process's stdin/stdout.
 pub async fn run(java: PathBuf, javac: PathBuf) -> Result<(), String> {
@@ -480,6 +488,22 @@ impl Jdwp {
         Ok(classes)
     }
 
+    /// Every class loaded, with its signature (`VirtualMachine.AllClasses`).
+    async fn all_classes(&self) -> Result<Vec<(u64, String)>, String> {
+        let reply = self.call(1, 3, self.data()).await?;
+        let mut r = self.reader(&reply);
+        let n = r.count()?;
+        let mut classes = Vec::new();
+        for _ in 0..n {
+            r.u8()?;
+            let class = r.reference()?;
+            let signature = r.string()?;
+            r.i32()?;
+            classes.push((class, signature));
+        }
+        Ok(classes)
+    }
+
     async fn signature(&self, class: u64) -> Result<String, String> {
         let reply = self.call(2, 1, self.data().reference(class)).await?;
         self.reader(&reply).string()
@@ -858,10 +882,37 @@ enum VarRef {
     Object { object: u64, array: bool },
 }
 
+/// The classes a file's breakpoints are in: a Java file's class, its
+/// nested ones its own; a Kotlin or Scala file's, by its package and its
+/// name as their source file — `Cart.kt`'s `CartKt` and classes, its
+/// lambdas, Scala's objects (`Cart$`).
+#[derive(Debug, Clone, PartialEq)]
+enum InFile {
+    Class(String),
+    Source {
+        package: Option<String>,
+        file: String,
+    },
+}
+
+impl InFile {
+    /// Whether `class`, of `signature`, is one of the file's.
+    async fn holds(&self, vm: &Jdwp, class: u64, signature: &str) -> bool {
+        let name = class_name(signature);
+        match self {
+            InFile::Class(of) => name.split('$').next() == Some(of.as_str()),
+            InFile::Source { package, file } => {
+                name.rsplit_once('.').map(|(p, _)| p) == package.as_deref()
+                    && vm.source_file(class).await.is_ok_and(|f| f == *file)
+            }
+        }
+    }
+}
+
 #[derive(Default)]
 struct State {
-    /// Each source file's breakpoints, and the classes they are for.
-    breakpoints: HashMap<String, (String, Vec<Wanted>)>,
+    /// Each source file's breakpoints, and the classes they are in.
+    breakpoints: HashMap<String, (InFile, Vec<Wanted>)>,
     /// The DAP frame ids handed out since the program last stopped: each
     /// frame's thread, depth and location.
     frames: Vec<(u64, usize, Location)>,
@@ -988,6 +1039,12 @@ impl Adapter {
                     .and_then(|p| p.parent().map(Path::to_path_buf))
             })
             .unwrap_or_else(|| PathBuf::from("."));
+        // A build that starts the JVM under the agent — a test debugged
+        // through Gradle, Maven or sbt: run, its output the session's, and
+        // the JVM it starts attached to.
+        if let Some(command) = args["command"].as_array() {
+            return self.launch_build(command, &cwd).await;
+        }
         let mut classpath: Vec<PathBuf> = args["classPaths"]
             .as_array()
             .map(|a| {
@@ -1060,7 +1117,76 @@ impl Adapter {
         if let Some(stderr) = child.stderr.take() {
             tokio::spawn(forward(Box::new(stderr), "stderr", self.out.clone()));
         }
-        let (exit_tx, mut exited) = watch::channel(None);
+        let mut exited = self.watch_exit(child);
+        // The agent says where it listens, on stdout, before the program
+        // prints anything; the rest is the program's.
+        let mut stdout = BufReader::new(stdout);
+        let port = tokio::select! {
+            found = tokio::time::timeout(START_TIMEOUT, listening_port(&mut stdout)) => match found {
+                Ok(Ok(port)) => port,
+                Ok(Err(e)) => return Err(e),
+                Err(_) => return Err("the JVM did not say where its debugger listens".into()),
+            },
+            _ = exited.wait_for(Option::is_some) => {
+                return Err("the JVM exited before its debugger started. See its output".into());
+            }
+        };
+        tokio::spawn(forward(Box::new(stdout), "stdout", self.out.clone()));
+        self.attach(port).await
+    }
+
+    /// Run `command`, a build whose JVM starts under the agent, in `cwd`:
+    /// its output is the session's, as it goes, and the first JVM that says
+    /// where its agent listens is the one debugged. The session ends with
+    /// the build, as its run would.
+    async fn launch_build(&mut self, command: &[Value], cwd: &Path) -> Result<(), String> {
+        let words: Vec<String> = command
+            .iter()
+            .filter_map(|w| w.as_str().map(str::to_string))
+            .collect();
+        let (program, rest) = words.split_first().ok_or("the build to run is empty")?;
+        self.roots = source_roots(cwd);
+        let mut child = clew_core::spawn::tokio_command(Path::new(program))
+            .args(rest)
+            .current_dir(cwd)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|e| format!("cannot run {}: {e}", program))?;
+        let (port_tx, mut ports) = tokio::sync::mpsc::unbounded_channel::<u16>();
+        if let Some(stdout) = child.stdout.take() {
+            tokio::spawn(watch_lines(
+                Box::new(stdout),
+                "stdout",
+                self.out.clone(),
+                port_tx.clone(),
+            ));
+        }
+        if let Some(stderr) = child.stderr.take() {
+            tokio::spawn(watch_lines(
+                Box::new(stderr),
+                "stderr",
+                self.out.clone(),
+                port_tx,
+            ));
+        }
+        let mut exited = self.watch_exit(child);
+        // As long as the build takes to start it: compiling comes first.
+        let port = tokio::select! {
+            Some(port) = ports.recv() => port,
+            _ = exited.wait_for(Option::is_some) => {
+                return Err("The build ended before its JVM started under the debugger. See its output.".into());
+            }
+        };
+        self.attach(port).await
+    }
+
+    /// Watch the process the session runs: its end is the session's, and
+    /// the session's end kills it.
+    fn watch_exit(&mut self, mut child: tokio::process::Child) -> watch::Receiver<Option<i32>> {
+        let (exit_tx, exited) = watch::channel(None);
         let (kill, killed) = oneshot::channel::<()>();
         let out = self.out.clone();
         tokio::spawn(async move {
@@ -1079,20 +1205,11 @@ impl Adapter {
             exited: exited.clone(),
             kill: Some(kill),
         });
-        // The agent says where it listens, on stdout, before the program
-        // prints anything; the rest is the program's.
-        let mut stdout = BufReader::new(stdout);
-        let port = tokio::select! {
-            found = tokio::time::timeout(START_TIMEOUT, listening_port(&mut stdout)) => match found {
-                Ok(Ok(port)) => port,
-                Ok(Err(e)) => return Err(e),
-                Err(_) => return Err("the JVM did not say where its debugger listens".into()),
-            },
-            _ = exited.wait_for(Option::is_some) => {
-                return Err("the JVM exited before its debugger started. See its output".into());
-            }
-        };
-        tokio::spawn(forward(Box::new(stdout), "stdout", self.out.clone()));
+        exited
+    }
+
+    /// Connect to the JVM's agent at `port`, and read its events.
+    async fn attach(&mut self, port: u16) -> Result<(), String> {
         let (events_tx, events) = tokio::sync::mpsc::unbounded_channel();
         let vm = Jdwp::connect(
             std::net::SocketAddr::from(([127, 0, 0, 1], port)),
@@ -1162,16 +1279,27 @@ impl Adapter {
             })
             .unwrap_or_default();
         let vm = self.vm()?;
-        let class = std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|source| {
-                let stem = Path::new(&path).file_stem()?.to_string_lossy().into_owned();
-                Some(match package_of(&source) {
+        let source = std::fs::read_to_string(&path).map_err(|_| "not a source file")?;
+        let file = Path::new(&path)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .ok_or("not a source file")?;
+        let in_file = match Path::new(&path).extension().is_some_and(|e| e == "java") {
+            true => {
+                let stem = Path::new(&path)
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                InFile::Class(match package_of(&source) {
                     Some(package) => format!("{package}.{stem}"),
                     None => stem,
                 })
-            })
-            .ok_or("not a Java source file")?;
+            }
+            false => InFile::Source {
+                package: package_of(&source),
+                file,
+            },
+        };
         let mut state = self.state.lock().await;
         if let Some((_, old)) = state.breakpoints.remove(&path) {
             for wanted in old {
@@ -1188,18 +1316,41 @@ impl Adapter {
                 request: None,
             })
             .collect();
-        // The class and its nested ones, loaded now…
-        let signature = format!("L{};", class.replace('.', "/"));
-        for loaded in vm
-            .classes_by_signature(&signature)
-            .await
-            .unwrap_or_default()
-        {
-            place(&vm, loaded, &mut wanted).await;
-        }
-        // …and when they load.
-        for pattern in [class.clone(), format!("{class}$*")] {
-            let _ = vm.request(8, vec![vm.data().u8(5).string(&pattern)]).await;
+        match &in_file {
+            InFile::Class(class) => {
+                // The class and its nested ones, loaded now…
+                let signature = format!("L{};", class.replace('.', "/"));
+                for loaded in vm
+                    .classes_by_signature(&signature)
+                    .await
+                    .unwrap_or_default()
+                {
+                    place(&vm, loaded, &mut wanted).await;
+                }
+                // …and when they load.
+                for pattern in [class.clone(), format!("{class}$*")] {
+                    let _ = vm.request(8, vec![vm.data().u8(5).string(&pattern)]).await;
+                }
+            }
+            InFile::Source { package, file } => {
+                // The file's classes loaded now, found in its package by
+                // their source file…
+                let prefix = package
+                    .as_deref()
+                    .map(|p| format!("L{}/", p.replace('.', "/")))
+                    .unwrap_or_else(|| "L".into());
+                for (loaded, signature) in vm.all_classes().await.unwrap_or_default() {
+                    let in_package = signature
+                        .strip_prefix(&prefix)
+                        .is_some_and(|rest| !rest.contains('/'));
+                    if in_package && in_file.holds(&vm, loaded, &signature).await {
+                        place(&vm, loaded, &mut wanted).await;
+                    }
+                }
+                // …and those that load, by their source file's name
+                // (`SourceNameMatch`), their package checked as they do.
+                let _ = vm.request(8, vec![vm.data().u8(12).string(file)]).await;
+            }
         }
         let answers: Vec<Value> = wanted
             .iter()
@@ -1211,7 +1362,7 @@ impl Adapter {
                 }),
             })
             .collect();
-        state.breakpoints.insert(path, (class, wanted));
+        state.breakpoints.insert(path, (in_file, wanted));
         Ok(json!({ "breakpoints": answers }))
     }
 
@@ -1477,11 +1628,9 @@ async fn event_loop(
                     started.store(true, Ordering::SeqCst);
                 }
                 Event::ClassPrepared { class, signature } => {
-                    let name = class_name(&signature);
-                    let outer = name.split('$').next().unwrap_or(&name).to_string();
                     let mut state = state.lock().await;
-                    for (for_class, wanted) in state.breakpoints.values_mut() {
-                        if *for_class != outer {
+                    for (in_file, wanted) in state.breakpoints.values_mut() {
+                        if !in_file.holds(&vm, class, &signature).await {
                             continue;
                         }
                         for id in place(&vm, class, wanted).await {
@@ -1545,6 +1694,10 @@ async fn locals(
             location.index >= *start && location.index < start + u64::from(*length)
         })
         .map(|(_, _, name, signature, slot)| (name, slot, signature.as_bytes()[0]))
+        // `this` is read as the frame's own, below: a class compiled with
+        // its local variables (Gradle's and Maven's are) lists it too, and
+        // it was shown twice.
+        .filter(|(name, ..)| name != "this")
         .collect();
     let mut named = Vec::new();
     if let Ok(this) = vm.this_object(thread, frame).await
@@ -2698,21 +2851,34 @@ fn parameter_types(signature: &str) -> Vec<String> {
 
 /// The package a Java source declares.
 fn package_of(source: &str) -> Option<String> {
+    // Scala's packages may be chained (`package acme` then `package
+    // shop`): acme.shop.
+    let mut parts: Vec<String> = Vec::new();
     for line in source.lines() {
         let line = line.trim();
-        if let Some(rest) = line.strip_prefix("package ") {
+        if let Some(rest) = line
+            .strip_prefix("package ")
+            .filter(|r| !r.starts_with("object "))
+        {
             let name: String = rest
                 .chars()
                 .take_while(|c| c.is_alphanumeric() || matches!(c, '.' | '_' | '$'))
                 .collect();
-            return (!name.is_empty()).then_some(name);
+            if !name.is_empty() {
+                parts.push(name);
+            }
+            continue;
         }
-        if line.starts_with("import ") || line.starts_with("public ") || line.starts_with("class ")
-        {
-            return None;
+        let code = !line.is_empty()
+            && !line.starts_with("//")
+            && !line.starts_with("/*")
+            && !line.starts_with('*')
+            && !line.starts_with('@');
+        if code {
+            break;
         }
     }
-    None
+    (!parts.is_empty()).then(|| parts.join("."))
 }
 
 /// The directory a source file's package path starts at.
@@ -2732,6 +2898,9 @@ fn source_roots(root: &Path) -> Vec<PathBuf> {
         "src/main/java",
         "src/test/java",
         "src/main/kotlin",
+        "src/test/kotlin",
+        "src/main/scala",
+        "src/test/scala",
         "src",
         ".",
     ]
@@ -2755,6 +2924,57 @@ fn build_outputs(root: &Path) -> Vec<PathBuf> {
     .map(|r| root.join(r))
     .filter(|r| r.is_dir())
     .collect()
+}
+
+/// A build's output, line by line, as the session's output — but for the
+/// agent's line (`Listening for transport dt_socket at address: 34567`),
+/// whose port is sent to `ports`.
+async fn watch_lines(
+    stream: Box<dyn AsyncRead + Unpin + Send>,
+    category: &'static str,
+    out: Out,
+    ports: tokio::sync::mpsc::UnboundedSender<u16>,
+) {
+    let mut lines = BufReader::new(stream);
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match lines.read_line(&mut line).await {
+            Ok(0) | Err(_) => return,
+            Ok(_) => {}
+        }
+        if line.contains("Listening for transport dt_socket")
+            && let Some(port) = agent_port(&line)
+        {
+            let _ = ports.send(port);
+            continue;
+        }
+        // Each JVM the build starts says which options it picked up from
+        // the environment: the JVM's notice, not the build's or the tests'.
+        if is_jvm_options_notice(&line) {
+            continue;
+        }
+        out.output(category, line.clone()).await;
+    }
+}
+
+/// The JVM's notice of the options it took from the environment
+/// (`Picked up JAVA_TOOL_OPTIONS: …`, `_JAVA_OPTIONS`, `JDK_JAVA_OPTIONS`).
+fn is_jvm_options_notice(line: &str) -> bool {
+    let line = line.trim_start();
+    ["JAVA_TOOL_OPTIONS:", "_JAVA_OPTIONS:", "JDK_JAVA_OPTIONS:"]
+        .iter()
+        .any(|v| {
+            line.strip_prefix("Picked up ")
+                .is_some_and(|r| r.starts_with(v))
+        })
+}
+
+/// The port in the agent's `… at address: 127.0.0.1:34567` line.
+fn agent_port(line: &str) -> Option<u16> {
+    let at = line.find("at address:")?;
+    let address = line[at + "at address:".len()..].trim();
+    address.rsplit(':').next().unwrap_or(address).parse().ok()
 }
 
 /// The port in `Listening for transport dt_socket at address: 34567`, the
@@ -2825,6 +3045,36 @@ mod tests {
         assert_eq!(line_at(&[(0, 10), (4, 11), (9, 12)], 6), Some(11));
         assert_eq!(line_at(&[(3, 10)], 1), None);
         assert_eq!(package_of("import java.util.List;\nclass A {}"), None);
+        assert_eq!(
+            package_of("package demo.shop;\nclass A {}").as_deref(),
+            Some("demo.shop")
+        );
+        // Kotlin's, after a file annotation; Scala's, chained; a package
+        // object is no package clause.
+        assert_eq!(
+            package_of("@file:JvmName(\"Carts\")\n\npackage acme.cart\n\nfun add() = 1\n")
+                .as_deref(),
+            Some("acme.cart")
+        );
+        assert_eq!(
+            package_of("// a cart\npackage acme\npackage cart\n\nobject Cart\n").as_deref(),
+            Some("acme.cart")
+        );
+        assert_eq!(package_of("package object acme {\n}\n"), None);
+        // The agent's line, and the JVM's notices of its options.
+        assert_eq!(
+            agent_port("Listening for transport dt_socket at address: 41007\n"),
+            Some(41007)
+        );
+        assert_eq!(
+            agent_port("Listening for transport dt_socket at address: 127.0.0.1:5005"),
+            Some(5005)
+        );
+        assert!(is_jvm_options_notice(
+            "Picked up JAVA_TOOL_OPTIONS: -Dx=y\n"
+        ));
+        assert!(is_jvm_options_notice("Picked up _JAVA_OPTIONS: -Xmx1g"));
+        assert!(!is_jvm_options_notice("CartTest > adds() PASSED"));
         assert_eq!(
             source_root(Path::new("/p/src/demo/shop/Main.java"), Some("demo.shop")),
             Path::new("/p/src")

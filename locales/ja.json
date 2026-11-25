@@ -4102,5 +4102,11 @@
  "These tests run without the debugger: {status}": "これらのテストはデバッガーなしで実行されます: {status}",
  "{rel} has no program to run": "{rel} に実行するプログラムはありません",
  "No {manifest} was found above {name}, so it has no build to run it.": "{name} より上に {manifest} が見つからないため、それを実行するビルドがありません。",
- "This language's programs run without the debugger: {status}": "この言語のプログラムはデバッガーなしで実行されます: {status}"
+ "This language's programs run without the debugger: {status}": "この言語のプログラムはデバッガーなしで実行されます: {status}",
+ "CTest lists no test of {name}: build the project again, then debug it.": "CTest の一覧に {name} のテストがありません。プロジェクトをもう一度ビルドしてから、デバッグしてください。",
+ "CTest's list of tests could not be read.": "CTest のテスト一覧を読み取れませんでした。",
+ "These tests are in more than one program: debug them one at a time.": "これらのテストは複数のプログラムに分かれています。1 つずつデバッグしてください。",
+ "This build runs its tests where the debugger can't reach them, so they run without it.": "このビルドはデバッガーの届かないところでテストを実行するため、テストはデバッガーなしで実行されます。",
+ "The build ended before its JVM started under the debugger. See its output.": "デバッガーの下で JVM が起動する前にビルドが終了しました。出力を確認してください。",
+ "cannot write {arg1}: {e}": "{arg1} を書き込めません: {e}"
 }

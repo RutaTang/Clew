@@ -141,6 +141,36 @@ fn without_debugger(launch: &mut serde_json::Value) {
 /// Rust's lldb formatters print when lldb cannot read an enum they were
 /// asked to show — each one a chunk of its own, beside the program's own
 /// output, saying nothing of the program.
+/// What a debugger says to a terminal's user, not the program: Delve's
+/// greeting ("Type 'dlv help' …"), rdbg's REPL greeting and its
+/// `DEBUGGER: Connected.` and `Disconnected.` — there is no command line
+/// here to type at, and the run's output was the debugger's first.
+fn is_debugger_chatter(category: &str, text: &str) -> bool {
+    let text = text.trim();
+    match category {
+        "console" => {
+            text == "Type 'dlv help' for list of commands."
+                || text.starts_with("Ruby REPL: You can run any Ruby expression here.")
+        }
+        "stderr" => {
+            !text.is_empty()
+                && text
+                    .lines()
+                    .all(|l| l.trim_start().starts_with("DEBUGGER: "))
+        }
+        _ => false,
+    }
+}
+
+/// The program's own output of a run, as one text.
+fn program_said(output: &[(String, String)]) -> String {
+    output
+        .iter()
+        .filter(|(category, _)| matches!(category.as_str(), "stdout" | "stderr"))
+        .map(|(_, text)| text.as_str())
+        .collect()
+}
+
 fn is_formatter_noise(text: &str) -> bool {
     text.starts_with("Traceback (most recent call last):")
         && (text.contains("lldb_lookup.py") || text.contains("lldb_providers.py"))
@@ -1404,6 +1434,30 @@ impl App {
             let Some(rel) = self.project_rel(&viewer.abs.clone()) else {
                 return Task::none();
             };
+            // Debug Test, on this computer, where the language's debugger
+            // runs its tests: Go's, Ruby's, Dart's, a Gradle, Maven or sbt
+            // build's, CTest's, Zig's — run as Run Test runs them.
+            let root = self.proj.project.as_ref().map(|p| p.root.clone());
+            let debugger = root
+                .as_ref()
+                .filter(|_| !no_debug && !self.connection.is_remote())
+                .and_then(|root| clew_core::langtests::test_debugger(root, &viewer.abs, lang))
+                .and_then(|slug| dap::Lang::detect(Some(slug), Path::new("")));
+            if let Some(debugger) = debugger {
+                let plan = crate::app::runplan::RunPlan::LangDebugTest {
+                    file: viewer.abs.clone(),
+                    lang,
+                    source: viewer.source.clone(),
+                    test: test.clone(),
+                    debugger,
+                    name,
+                    tested: match tests {
+                        Some(true) => crate::app::runplan::Tested::Group,
+                        _ => crate::app::runplan::Tested::One,
+                    },
+                };
+                return self.start_session(false, Some(plan));
+            }
             let task = self.start_session(
                 true,
                 Some(crate::app::runplan::RunPlan::Remote {
@@ -2371,7 +2425,57 @@ impl App {
                     // A Rust program is built first, by Cargo, its words in
                     // the run's output as it builds: what runs is what the
                     // reader is reading, built as `cargo run` builds it.
+                    // A test debugged under its language's debugger: what
+                    // runs is worked out now, off the UI thread (it may list
+                    // CTest's tests or build a Zig test).
+                    let mut test_setup: Option<clew_core::langtests::DebugTest> = None;
                     let (program, args, cwd, cargo_env) = match &plan {
+                        Some(crate::app::runplan::RunPlan::LangDebugTest {
+                            file,
+                            lang,
+                            source,
+                            test,
+                            ..
+                        }) => {
+                            let (root, file, lang, source, test, choices) = (
+                                root.clone(),
+                                file.clone(),
+                                *lang,
+                                source.clone(),
+                                test.clone(),
+                                choices.clone(),
+                            );
+                            let worked = tokio::task::spawn_blocking(move || {
+                                let search = clew_core::linerpc::search_path().unwrap_or_default();
+                                clew_core::langtests::debug_test(
+                                    &root, &file, lang, &source, &test, &search, &choices,
+                                )
+                            })
+                            .await
+                            .unwrap_or_else(|e| Err(e.to_string()));
+                            match worked {
+                                Ok(debug) => {
+                                    let ran = (
+                                        debug.program.clone(),
+                                        debug.args.clone(),
+                                        debug.cwd.clone(),
+                                        None,
+                                    );
+                                    test_setup = Some(debug);
+                                    ran
+                                }
+                                Err(why) => {
+                                    let _ = output
+                                        .send(Message::Debug(DebugMsg::Failed {
+                                            stamp: stamp.clone(),
+                                            run,
+                                            error: crate::i18n::message(&why),
+                                        }))
+                                        .await;
+                                    return;
+                                }
+                            }
+                        }
                         Some(crate::app::runplan::RunPlan::Cargo { target, test }) => {
                             let built = build_with_cargo(
                                 &mut output,
@@ -2456,6 +2560,14 @@ impl App {
                     };
                     if let Some(env) = &cargo_env {
                         clew_core::cargorun::with_cargo_env(&mut adapter.launch, env);
+                    }
+                    if let Some(test) = &test_setup {
+                        clew_core::debugadapter::set_up_for_test(
+                            test,
+                            &mut adapter.command,
+                            &mut adapter.args,
+                            &mut adapter.launch,
+                        );
                     }
                     if cancelled(&live) {
                         return; // stopped before anything was spawned
@@ -3639,6 +3751,7 @@ impl App {
             // program's: the protocol has it kept from the user.
             dap::DapEvent::Output(o) if o.category == "telemetry" => Task::none(),
             dap::DapEvent::Output(o) if is_formatter_noise(&o.text) => Task::none(),
+            dap::DapEvent::Output(o) if is_debugger_chatter(&o.category, &o.text) => Task::none(),
             dap::DapEvent::Output(o) => {
                 push_debug_output(session, o.category, o.text);
                 Task::none()
@@ -3672,8 +3785,29 @@ impl App {
                 session.current = None;
                 session.frames.clear();
                 session.scopes.clear();
+                // Delve and rdbg say no exit code: a test's runner says how
+                // its tests went at its output's end (`PASS`, `0 failures`)
+                // — the run ended "terminated", its verdict unsaid.
+                let tested = match &self.debug.plan {
+                    Some(crate::app::runplan::RunPlan::LangDebugTest { lang, .. }) => Some(*lang),
+                    _ => None,
+                };
+                let ended = match (tested, session.exit_code) {
+                    (Some(lang), None) => {
+                        clew_core::langtests::test_end(lang, &program_said(&session.output))
+                    }
+                    _ => None,
+                };
+                if ended.is_some() {
+                    session.exit_code = ended;
+                }
                 self.bump_debug_stop();
                 self.unsay_debug_state();
+                if let Some(verdict) =
+                    ended.and_then(|code| self.debug.plan.as_ref().and_then(|p| p.verdict(code)))
+                {
+                    self.status = verdict;
+                }
                 Task::none()
             }
             dap::DapEvent::StartDebugging(config) => {
@@ -3853,11 +3987,47 @@ impl App {
         Task::none()
     }
 
+    /// The run could not start — its debugger was not found, or refused
+    /// to launch it: what it started is stopped, and its tab kept, marked
+    /// not run, with why in its output. It was emptied ("Nothing is
+    /// running"), and the reason left to a status line too short to hold
+    /// it ("Failed to launch tests of /home/…/cart: Go version go1.24 is
+    /// too old…" ended at the path).
     pub(crate) fn on_debug_failed(&mut self, run: u64, error: String) -> Task<Message> {
         if run != self.debug_run {
             return Task::none();
         }
+        let kept = self.debug.session.as_ref().map(|s| {
+            (
+                s.program.clone(),
+                s.args.clone(),
+                s.cwd.clone(),
+                s.output.clone(),
+            )
+        });
         let teardown = self.stop_debug_session();
+        if let Some((program, args, cwd, output)) = kept {
+            let mut session = DebugSession {
+                client: None,
+                status: DebugStatus::Terminated,
+                exit_code: None,
+                thread_id: None,
+                frames: Vec::new(),
+                scopes: Vec::new(),
+                watches: Vec::new(),
+                output,
+                current: None,
+                program,
+                args,
+                cwd,
+                addr: None,
+                takes_input: false,
+            };
+            push_debug_output(&mut session, "stderr".into(), format!("{error}\n"));
+            self.debug.session = Some(session);
+            self.debug.not_run.insert(self.debug.tab);
+        }
+        self.unsay_debug_state();
         self.status = tr!("Debug failed: {error}", error = error);
         teardown
     }
@@ -5195,6 +5365,34 @@ mod tests {
 
     /// Clew's notice comes out of the launch body — the adapter never sees
     /// it — and is what the console shows; a body without one is untouched.
+    /// The debuggers' words to a terminal's user are not the run's output;
+    /// the program's own are, whatever they say.
+    #[test]
+    fn a_debuggers_chatter_is_not_the_runs_output() {
+        assert!(is_debugger_chatter(
+            "console",
+            "Type 'dlv help' for list of commands.\n"
+        ));
+        assert!(is_debugger_chatter(
+            "console",
+            "Ruby REPL: You can run any Ruby expression here.\nNote that output to the STDOUT/ERR printed on the TERMINAL.\n"
+        ));
+        assert!(is_debugger_chatter("stderr", "DEBUGGER: Connected.\n"));
+        assert!(is_debugger_chatter(
+            "stderr",
+            "DEBUGGER: wait for debugger connection...\nDEBUGGER: Connected.\n"
+        ));
+        assert!(!is_debugger_chatter("stderr", "DEBUGGER: on\nboom\n"));
+        assert!(!is_debugger_chatter("stdout", "DEBUGGER: Connected.\n"));
+        assert_eq!(
+            program_said(&[
+                ("console".into(), "PASS\n".into()),
+                ("stdout".into(), "ok\n".into())
+            ]),
+            "ok\n"
+        );
+    }
+
     #[test]
     fn a_launch_notice_is_taken_out_for_the_console() {
         let launch = serde_json::json!({

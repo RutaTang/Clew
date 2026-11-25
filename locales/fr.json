@@ -4102,5 +4102,11 @@
  "These tests run without the debugger: {status}": "Ces tests s’exécutent sans le débogueur : {status}",
  "{rel} has no program to run": "{rel} n’a aucun programme à exécuter",
  "No {manifest} was found above {name}, so it has no build to run it.": "Aucun {manifest} n’a été trouvé au-dessus de {name} : aucune build ne peut l’exécuter.",
- "This language's programs run without the debugger: {status}": "Les programmes de ce langage s’exécutent sans le débogueur : {status}"
+ "This language's programs run without the debugger: {status}": "Les programmes de ce langage s’exécutent sans le débogueur : {status}",
+ "CTest lists no test of {name}: build the project again, then debug it.": "CTest ne liste aucun test de {name} : recompilez le projet, puis déboguez-le.",
+ "CTest's list of tests could not be read.": "La liste des tests de CTest n’a pas pu être lue.",
+ "These tests are in more than one program: debug them one at a time.": "Ces tests se trouvent dans plusieurs programmes : déboguez-les un par un.",
+ "This build runs its tests where the debugger can't reach them, so they run without it.": "Cette build exécute ses tests hors de portée du débogueur : ils s’exécutent donc sans lui.",
+ "The build ended before its JVM started under the debugger. See its output.": "La build s’est terminée avant que sa JVM ne démarre sous le débogueur. Consultez sa sortie.",
+ "cannot write {arg1}: {e}": "impossible d’écrire {arg1} : {e}"
 }

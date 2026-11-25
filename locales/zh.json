@@ -4102,5 +4102,11 @@
  "These tests run without the debugger: {status}": "这些测试在没有调试器的情况下运行：{status}",
  "{rel} has no program to run": "{rel} 中没有可运行的程序",
  "No {manifest} was found above {name}, so it has no build to run it.": "在 {name} 之上没有找到 {manifest}，因此没有可以运行它的构建。",
- "This language's programs run without the debugger: {status}": "这种语言的程序在没有调试器的情况下运行：{status}"
+ "This language's programs run without the debugger: {status}": "这种语言的程序在没有调试器的情况下运行：{status}",
+ "CTest lists no test of {name}: build the project again, then debug it.": "CTest 中没有 {name} 的测试：请重新构建项目，然后再调试。",
+ "CTest's list of tests could not be read.": "无法读取 CTest 的测试列表。",
+ "These tests are in more than one program: debug them one at a time.": "这些测试分布在多个程序中：请逐个调试。",
+ "This build runs its tests where the debugger can't reach them, so they run without it.": "此构建在调试器无法触及的地方运行测试，因此测试会在没有调试器的情况下运行。",
+ "The build ended before its JVM started under the debugger. See its output.": "构建在其 JVM 于调试器下启动之前就结束了，请查看其输出。",
+ "cannot write {arg1}: {e}": "无法写入 {arg1}：{e}"
 }

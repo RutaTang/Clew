@@ -4102,5 +4102,11 @@
  "These tests run without the debugger: {status}": "이 테스트는 디버거 없이 실행됩니다: {status}",
  "{rel} has no program to run": "{rel}에는 실행할 프로그램이 없습니다",
  "No {manifest} was found above {name}, so it has no build to run it.": "{name} 위에서 {manifest}을(를) 찾지 못해 이를 실행할 빌드가 없습니다.",
- "This language's programs run without the debugger: {status}": "이 언어의 프로그램은 디버거 없이 실행됩니다: {status}"
+ "This language's programs run without the debugger: {status}": "이 언어의 프로그램은 디버거 없이 실행됩니다: {status}",
+ "CTest lists no test of {name}: build the project again, then debug it.": "CTest 목록에 {name}의 테스트가 없습니다. 프로젝트를 다시 빌드한 다음 디버그하세요.",
+ "CTest's list of tests could not be read.": "CTest의 테스트 목록을 읽을 수 없습니다.",
+ "These tests are in more than one program: debug them one at a time.": "이 테스트들은 여러 프로그램에 나뉘어 있습니다. 하나씩 디버그하세요.",
+ "This build runs its tests where the debugger can't reach them, so they run without it.": "이 빌드는 디버거가 닿지 않는 곳에서 테스트를 실행하므로, 테스트는 디버거 없이 실행됩니다.",
+ "The build ended before its JVM started under the debugger. See its output.": "디버거에서 JVM이 시작되기 전에 빌드가 끝났습니다. 출력을 확인하세요.",
+ "cannot write {arg1}: {e}": "{arg1} 파일을 쓸 수 없음: {e}"
 }
