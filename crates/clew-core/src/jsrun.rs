@@ -440,6 +440,91 @@ fn is_typescript(file: &Path) -> bool {
         .is_some_and(|e| matches!(e, "ts" | "mts" | "cts"))
 }
 
+/// How Node.js runs a file of the project: as it is, with TypeScript's
+/// types stripped, or by the project's own tsx.
+#[derive(Debug, Clone, PartialEq)]
+pub enum NodeLoader {
+    Plain,
+    StripTypes,
+    Tsx(PathBuf),
+}
+
+/// What the reader is told to do once tsx is added: what they asked for.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Then {
+    Run,
+    Debug,
+}
+
+/// How Node runs `file`: a TypeScript or JSX file by the project's own tsx
+/// where it has one — it reads JSX, and finds an import as a bundler does —
+/// else TypeScript with its types stripped (Node 22.6 and later), which
+/// reads no JSX and loads a relative import only by its file's full name
+/// (`./util.ts`, not `./util`, `./util.js` or a folder). `Err` says why it
+/// cannot, and the command that adds tsx: Debug on a Bun project's file
+/// (debugged under Node) stopped at its first `import … from '../src'`.
+pub fn node_loader(root: &Path, file: &Path, then: Then) -> Result<NodeLoader, String> {
+    let ext = file
+        .extension()
+        .and_then(OsStr::to_str)
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let jsx = matches!(ext.as_str(), "jsx" | "tsx");
+    if !jsx && !is_typescript(file) {
+        return Ok(NodeLoader::Plain);
+    }
+    if let Some(tsx) = local_bin(root, file, "tsx") {
+        return Ok(NodeLoader::Tsx(tsx));
+    }
+    let cwd = package_dirs(root, file)
+        .first()
+        .cloned()
+        .unwrap_or_else(|| root.to_path_buf());
+    let add = add_dev_command(root, &cwd, "tsx");
+    if jsx {
+        return Err(match then {
+            Then::Run => format!(
+                "Node.js cannot run JSX by itself: add tsx to the project ({add}), then run again."
+            ),
+            Then::Debug => format!(
+                "Node.js cannot run JSX by itself: add tsx to the project ({add}), then debug again."
+            ),
+        });
+    }
+    if let Some(import) = unloadable_import(file) {
+        return Err(match then {
+            Then::Run => format!(
+                "Node.js loads an import only by its file's full name, so it cannot load {import}: add tsx to the project ({add}), then run again."
+            ),
+            Then::Debug => format!(
+                "Node.js loads an import only by its file's full name, so it cannot load {import}: add tsx to the project ({add}), then debug again."
+            ),
+        });
+    }
+    Ok(NodeLoader::StripTypes)
+}
+
+/// The first relative import of the TypeScript file `file` that names no
+/// file of its own (`'./util'`, `'../src'`, `'./util.js'` for `util.ts`),
+/// quoted — what Node's own TypeScript cannot load. A type-only import
+/// (`import type …`) is erased, and loads nothing.
+fn unloadable_import(file: &Path) -> Option<String> {
+    let text = crate::statefile::read_capped(file, 4 * 1024 * 1024)?;
+    let dir = file.parent()?;
+    let lines: Vec<&str> = text.lines().collect();
+    crate::imports::imports_of(&text, "typescript")
+        .into_iter()
+        .filter(|i| i.module.starts_with("./") || i.module.starts_with("../"))
+        .filter(|i| {
+            let line = lines
+                .get(i.line.saturating_sub(1))
+                .map_or("", |l| l.trim_start());
+            !(line.starts_with("import type ") || line.starts_with("export type "))
+        })
+        .find(|i| !dir.join(&i.module).is_file())
+        .map(|i| format!("'{}'", i.module))
+}
+
 /// The runtime `file`'s project runs it with, as [`main_command`] picks it:
 /// `"deno"` in a Deno project, `"bun"` in a Bun project, else `"node"`.
 pub fn runtime_of(root: &Path, file: &Path) -> &'static str {
@@ -456,16 +541,11 @@ pub fn runtime_of(root: &Path, file: &Path) -> &'static str {
 /// What runs `file` as a program: Deno, in a Deno project; Bun, in a Bun
 /// project (TypeScript and JSX alike); else Node — TypeScript with its
 /// types stripped (Node 22.6 and later), or by the project's own `tsx`,
-/// which JSX needs. `Err` says why it cannot run.
+/// which JSX needs ([`node_loader`]). `Err` says why it cannot run.
 pub fn main_command(root: &Path, file: &Path, search: &OsStr) -> Result<JsCommand, String> {
     let dirs = package_dirs(root, file);
     let cwd = dirs.first().cloned().unwrap_or_else(|| root.to_path_buf());
     let rel = rel_arg(&cwd, file);
-    let ext = file
-        .extension()
-        .and_then(OsStr::to_str)
-        .unwrap_or("")
-        .to_ascii_lowercase();
     let command = |program: PathBuf, args: Vec<String>| JsCommand {
         program,
         args,
@@ -482,19 +562,11 @@ pub fn main_command(root: &Path, file: &Path, search: &OsStr) -> Result<JsComman
     if runtime_name == "bun" {
         return Ok(command(runtime(search, "bun")?, vec!["run".into(), rel]));
     }
-    let jsx = matches!(ext.as_str(), "jsx" | "tsx");
-    if let Some(tsx) = local_bin(root, file, "tsx").filter(|_| jsx || is_typescript(file)) {
-        return Ok(command(tsx, vec![rel]));
-    }
-    if jsx {
-        return Err(format!(
-            "Node.js cannot run JSX by itself: add tsx to the project ({add}), then run again.",
-            add = add_dev_command(root, &cwd, "tsx"),
-        ));
-    }
     let mut args = Vec::new();
-    if is_typescript(file) {
-        args.push("--experimental-strip-types".to_string());
+    match node_loader(root, file, Then::Run)? {
+        NodeLoader::Tsx(tsx) => return Ok(command(tsx, vec![rel])),
+        NodeLoader::StripTypes => args.push("--experimental-strip-types".to_string()),
+        NodeLoader::Plain => {}
     }
     args.push(rel);
     Ok(command(runtime(search, "node")?, args))
@@ -1041,6 +1113,59 @@ mod tests {
         );
         let cmd = script_command(&root, &web, "dev", &search).unwrap();
         assert_eq!((cmd.program, cmd.cwd), (tools.join("yarn"), web.clone()));
+    }
+    /// Node runs TypeScript with its types stripped only where the file's
+    /// imports name their files (`./util.ts`); a Bun project's
+    /// `from '../src'` it cannot load — said, with the command that adds
+    /// tsx, for Run and Debug alike — and JSX not at all. The project's tsx
+    /// runs either.
+    #[test]
+    fn node_runs_typescript_as_its_imports_allow() {
+        let tmp = crate::testutil::TempDir::new("jsrun-node-loader");
+        let root = tmp.path().to_path_buf();
+        write(&root, "package.json", r#"{"packageManager": "bun@1.3.0"}"#);
+        write(&root, "src/index.ts", "export const a = 1;\n");
+        write(&root, "src/util.ts", "export const b = 2;\n");
+        let plain = write(&root, "tool.js", "console.log(1)\n");
+        let named = write(
+            &root,
+            "src/named.ts",
+            "import { b } from './util.ts';\nimport type { T } from './types';\nconsole.log(b)\n",
+        );
+        let bare = write(
+            &root,
+            "example/a.ts",
+            "import type { T } from '../src/types'\nimport { a } from '../src'\nconsole.log(a)\n",
+        );
+        let jsx = write(&root, "src/App.tsx", "export const App = () => <div />;\n");
+        assert_eq!(
+            node_loader(&root, &plain, Then::Debug),
+            Ok(NodeLoader::Plain)
+        );
+        assert_eq!(
+            node_loader(&root, &named, Then::Debug),
+            Ok(NodeLoader::StripTypes)
+        );
+        assert_eq!(
+            node_loader(&root, &bare, Then::Debug),
+            Err("Node.js loads an import only by its file's full name, so it cannot load '../src': add tsx to the project (bun add -d tsx), then debug again.".to_string())
+        );
+        let Err(run) = node_loader(&root, &bare, Then::Run) else {
+            panic!("Run cannot either");
+        };
+        assert!(run.ends_with("then run again."), "{run}");
+        assert_eq!(
+            node_loader(&root, &jsx, Then::Debug),
+            Err("Node.js cannot run JSX by itself: add tsx to the project (bun add -d tsx), then debug again.".to_string())
+        );
+        let tsx = bin(&root, ".", "tsx");
+        for file in [&bare, &jsx, &named] {
+            assert_eq!(
+                node_loader(&root, file, Then::Debug),
+                Ok(NodeLoader::Tsx(tsx.clone()))
+            );
+        }
+        assert_eq!(node_loader(&root, &plain, Then::Run), Ok(NodeLoader::Plain));
     }
 }
 

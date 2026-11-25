@@ -4084,5 +4084,8 @@
  "Running the launch configuration “{name}”.": "Exécution de la configuration de lancement « {name} ».",
  "Its preLaunchTask “{task}” was not run: run it first if the program needs it.": "Sa tâche preLaunchTask « {task} » n’a pas été exécutée : lancez-la d’abord si le programme en a besoin.",
  "Could not serve the page: {error}": "Impossible de servir la page : {error}",
- "The page is served at {url} while it runs.": "La page est servie à {url} pendant son exécution."
+ "The page is served at {url} while it runs.": "La page est servie à {url} pendant son exécution.",
+ "Node.js cannot run JSX by itself: add tsx to the project ({add}), then debug again.": "Node.js ne sait pas exécuter le JSX tout seul : ajoutez tsx au projet ({add}), puis relancez le débogage.",
+ "Node.js loads an import only by its file's full name, so it cannot load {import}: add tsx to the project ({add}), then run again.": "Node.js ne charge un import que par le nom complet de son fichier, il ne peut donc pas charger {import} : ajoutez tsx au projet ({add}), puis relancez.",
+ "Node.js loads an import only by its file's full name, so it cannot load {import}: add tsx to the project ({add}), then debug again.": "Node.js ne charge un import que par le nom complet de son fichier, il ne peut donc pas charger {import} : ajoutez tsx au projet ({add}), puis relancez le débogage."
 }

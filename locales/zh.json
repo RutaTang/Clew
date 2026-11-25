@@ -4084,5 +4084,8 @@
  "Running the launch configuration “{name}”.": "正在运行启动配置“{name}”。",
  "Its preLaunchTask “{task}” was not run: run it first if the program needs it.": "未运行它的 preLaunchTask“{task}”：如果程序需要，请先运行它。",
  "Could not serve the page: {error}": "无法提供该页面：{error}",
- "The page is served at {url} while it runs.": "运行期间，页面在 {url} 提供。"
+ "The page is served at {url} while it runs.": "运行期间，页面在 {url} 提供。",
+ "Node.js cannot run JSX by itself: add tsx to the project ({add}), then debug again.": "Node.js 本身无法运行 JSX：请将 tsx 添加到项目中（{add}），然后重新调试。",
+ "Node.js loads an import only by its file's full name, so it cannot load {import}: add tsx to the project ({add}), then run again.": "Node.js 只能按文件的完整名称加载 import，因此无法加载 {import}：请将 tsx 添加到项目中（{add}），然后重新运行。",
+ "Node.js loads an import only by its file's full name, so it cannot load {import}: add tsx to the project ({add}), then debug again.": "Node.js 只能按文件的完整名称加载 import，因此无法加载 {import}：请将 tsx 添加到项目中（{add}），然后重新调试。"
 }

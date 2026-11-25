@@ -4084,5 +4084,8 @@
  "Running the launch configuration “{name}”.": "실행 구성 “{name}”을(를) 실행합니다.",
  "Its preLaunchTask “{task}” was not run: run it first if the program needs it.": "preLaunchTask “{task}”은(는) 실행되지 않았습니다. 프로그램에 필요하면 먼저 실행하세요.",
  "Could not serve the page: {error}": "페이지를 제공할 수 없습니다: {error}",
- "The page is served at {url} while it runs.": "실행되는 동안 페이지는 {url}에서 제공됩니다."
+ "The page is served at {url} while it runs.": "실행되는 동안 페이지는 {url}에서 제공됩니다.",
+ "Node.js cannot run JSX by itself: add tsx to the project ({add}), then debug again.": "Node.js는 JSX를 직접 실행할 수 없습니다. 프로젝트에 tsx를 추가한 뒤({add}) 다시 디버그하세요.",
+ "Node.js loads an import only by its file's full name, so it cannot load {import}: add tsx to the project ({add}), then run again.": "Node.js는 파일의 전체 이름으로만 import를 불러오므로 {import}을(를) 불러올 수 없습니다. 프로젝트에 tsx를 추가한 뒤({add}) 다시 실행하세요.",
+ "Node.js loads an import only by its file's full name, so it cannot load {import}: add tsx to the project ({add}), then debug again.": "Node.js는 파일의 전체 이름으로만 import를 불러오므로 {import}을(를) 불러올 수 없습니다. 프로젝트에 tsx를 추가한 뒤({add}) 다시 디버그하세요."
 }

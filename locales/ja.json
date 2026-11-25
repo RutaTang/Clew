@@ -4084,5 +4084,8 @@
  "Running the launch configuration “{name}”.": "起動構成「{name}」を実行しています。",
  "Its preLaunchTask “{task}” was not run: run it first if the program needs it.": "preLaunchTask「{task}」は実行されていません。プログラムに必要なら先に実行してください。",
  "Could not serve the page: {error}": "ページを配信できませんでした: {error}",
- "The page is served at {url} while it runs.": "実行中、ページは {url} で配信されます。"
+ "The page is served at {url} while it runs.": "実行中、ページは {url} で配信されます。",
+ "Node.js cannot run JSX by itself: add tsx to the project ({add}), then debug again.": "Node.js は単体では JSX を実行できません。プロジェクトに tsx を追加してから（{add}）、もう一度デバッグしてください。",
+ "Node.js loads an import only by its file's full name, so it cannot load {import}: add tsx to the project ({add}), then run again.": "Node.js はファイルの完全な名前でしか import を読み込めないため、{import} を読み込めません。プロジェクトに tsx を追加してから（{add}）、もう一度実行してください。",
+ "Node.js loads an import only by its file's full name, so it cannot load {import}: add tsx to the project ({add}), then debug again.": "Node.js はファイルの完全な名前でしか import を読み込めないため、{import} を読み込めません。プロジェクトに tsx を追加してから（{add}）、もう一度デバッグしてください。"
 }

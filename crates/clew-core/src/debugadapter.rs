@@ -372,14 +372,31 @@ pub fn resolve(
                         .ok_or("deno not found — install Deno")?;
                     Ok(deno_with(node, &deno, program, args, cwd))
                 }
-                Some("bun") => {
+                runtime => {
+                    // TypeScript and JSX as Node can run them: by the
+                    // project's tsx, or with the types stripped — or why not.
+                    let loader = match is_script {
+                        true => {
+                            crate::jsrun::node_loader(root, &script, crate::jsrun::Then::Debug)?
+                        }
+                        false => crate::jsrun::NodeLoader::Plain,
+                    };
                     let mut resolution = node_with(node, program, args, cwd);
                     if let Resolution::Ready(spec) = &mut resolution {
-                        spec.launch[NOTICE] = json!(BUN_NOTICE);
+                        if let crate::jsrun::NodeLoader::Tsx(tsx) = loader {
+                            // tsx starts Node with its loader, js-debug
+                            // attaching to it, as VS Code's guide sets it up.
+                            spec.launch["runtimeExecutable"] = json!(tsx.to_string_lossy());
+                            if let Some(launch) = spec.launch.as_object_mut() {
+                                launch.remove("runtimeArgs");
+                            }
+                        }
+                        if runtime == Some("bun") {
+                            spec.launch[NOTICE] = json!(BUN_NOTICE);
+                        }
                     }
                     Ok(resolution)
                 }
-                _ => Ok(node_with(node, program, args, cwd)),
             }
         }
         "browser" => {
