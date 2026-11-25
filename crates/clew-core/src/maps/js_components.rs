@@ -741,10 +741,10 @@ pub(super) fn map(corpus: &Corpus) -> Option<ProjectMap> {
 }
 
 /// What each of `found` (name, file) shows: its name, and where several
-/// share it, the folders that tell them apart — what their paths do not
-/// have in common: `Card · web` and `Card · admin` for
+/// share it, the first of the folders their paths do not have in common
+/// that tell it from the others: `Card · web` and `Card · admin` for
 /// `apps/web/src/components/card.tsx` and `apps/admin/src/components/card.tsx`,
-/// `Page · posts/[id]` and `Page · users`.
+/// `Page · posts` and `Page · users`.
 pub(super) fn labels(found: &[(&str, &str)]) -> Vec<String> {
     let mut groups: HashMap<&str, Vec<usize>> = HashMap::new();
     for (i, (name, _)) in found.iter().enumerate() {
@@ -770,11 +770,31 @@ pub(super) fn labels(found: &[(&str, &str)]) -> Vec<String> {
                 dirs.iter().all(|d| d[d.len() - 1 - k] == last)
             })
             .count();
+        let middles: Vec<&[&str]> = dirs.iter().map(|d| &d[head..d.len() - tail]).collect();
+        let deepest = middles.iter().map(|m| m.len()).max().unwrap_or(0);
+        // The first folders of what differs, as few as tell this one from
+        // the others: `PostCard · expo`, not `PostCard · expo/src/app`.
+        let at = |m: &[&str], k: usize| m[..k.min(m.len())].join("/");
         for (n, &i) in members.iter().enumerate() {
-            let middle = &dirs[n][head..dirs[n].len() - tail];
-            let place = match middle {
-                // Side by side in one folder: the file tells them apart.
-                [] => found[i].1.rsplit('/').next().unwrap_or("").to_string(),
+            let mine = middles[n];
+            let k = (1..=deepest)
+                .find(|&k| {
+                    let label = at(mine, k);
+                    middles
+                        .iter()
+                        .enumerate()
+                        .all(|(o, other)| o == n || at(other, k) != label)
+                })
+                .unwrap_or(deepest);
+            let place = match &mine[..k.min(mine.len())] {
+                // Side by side in one folder: the file tells them apart;
+                // one folder above the others: its own folder.
+                [] => match dirs[n].last() {
+                    Some(last) if dirs.iter().filter(|d| **d == dirs[n]).count() == 1 => {
+                        last.to_string()
+                    }
+                    _ => found[i].1.rsplit('/').next().unwrap_or("").to_string(),
+                },
                 [one] => one.to_string(),
                 [first, second] => format!("{first}/{second}"),
                 [first, .., last] => format!("{first}/…/{last}"),
@@ -1333,7 +1353,7 @@ mod tests {
         .unwrap();
         let got = edges(&tree);
         for want in [
-            e("Page · posts/[id]", "Card · web", "title"),
+            e("Page · posts", "Card · web", "title"),
             e("Page · users", "Card · web", "wide"),
             e("Home", "Card · admin", ""),
             e("Layout", "Button", "variant"),
@@ -1440,9 +1460,9 @@ mod tests {
         .unwrap();
         let got = edges(&tree);
         for want in [
-            e("Page", "Counter · src/lib", "start, value, change"),
-            e("Index · site/src", "Hero", "title"),
-            e("Index · site/src", "Counter · site/…/components", ""),
+            e("Page", "Counter · src", "start, value, change"),
+            e("Index · site", "Hero", "title"),
+            e("Index · site", "Counter · site", ""),
             e("Index · nuxt", "Button", "size"),
             e("Index · nuxt", "TheFooter", ""),
         ] {
