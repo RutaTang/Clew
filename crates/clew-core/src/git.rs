@@ -247,6 +247,9 @@ pub fn try_info(root: &Path, abs: &Path) -> Result<Option<GitInfo>, GitError> {
     let git = match Git::open(root) {
         Ok(git) => git,
         Err(GitError::NotARepository) => return Ok(None),
+        // No git to ask, in a folder no repository holds: nothing of git's
+        // to say — each file opened said git was not installed.
+        Err(GitError::Spawn(_)) if !in_a_repository(root) => return Ok(None),
         Err(e) => return Err(e),
     };
     let blame = git.blame(abs)?;
@@ -259,6 +262,12 @@ pub fn try_info(root: &Path, abs: &Path) -> Result<Option<GitInfo>, GitError> {
         status,
         deleted_at,
     }))
+}
+
+/// Whether `root` or a folder above it holds a repository (`.git`, a
+/// folder or a worktree's file), as git would find it — known without git.
+fn in_a_repository(root: &Path) -> bool {
+    root.ancestors().any(|dir| dir.join(".git").exists())
 }
 
 // ------------------------------------------------------------------ runner

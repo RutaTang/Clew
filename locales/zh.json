@@ -4079,5 +4079,10 @@
  "This needs the project's dependencies, which are not installed. Waiting for your approval.": "需要项目的依赖，但尚未安装。正在等待你的批准。",
  "Installing the project's dependencies…": "正在安装项目的依赖…",
  "The project's dependencies are installed": "项目的依赖已安装",
- "Installing the project's dependencies failed: {error}": "安装项目依赖失败：{error}"
+ "Installing the project's dependencies failed: {error}": "安装项目依赖失败：{error}",
+ "launch.json has no configuration that launches a program.": "launch.json 中没有启动程序的配置。",
+ "Running the launch configuration “{name}”.": "正在运行启动配置“{name}”。",
+ "Its preLaunchTask “{task}” was not run: run it first if the program needs it.": "未运行它的 preLaunchTask“{task}”：如果程序需要，请先运行它。",
+ "Could not serve the page: {error}": "无法提供该页面：{error}",
+ "The page is served at {url} while it runs.": "运行期间，页面在 {url} 提供。"
 }

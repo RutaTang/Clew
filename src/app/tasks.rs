@@ -1872,15 +1872,73 @@ pub(crate) fn dev_server_url(root: &Path) -> Option<String> {
 /// A missing/invalid file yields a helpful message. `file` is the file
 /// being read, for the `${file}` a launch file may name.
 pub(crate) fn read_launch_config(root: &Path, file: Option<&Path>) -> Result<LaunchConfig, String> {
-    let path = root.join(".clew").join("launch.json");
-    let text = clew_core::statefile::read_capped(&path, 1024 * 1024).ok_or_else(|| {
-        tr!(
-            "Create {path} with {example}",
-            path = Path::new(".clew").join("launch.json").display(),
-            example = r#"{"program": "path", "type": "python"}"#
-        )
-    })?;
-    parse_launch_config(root, &text, file, true)
+    let text = launch_file_path(root)
+        .and_then(|path| clew_core::statefile::read_capped(&path, 1024 * 1024))
+        .ok_or_else(|| {
+            tr!(
+                "Create {path} with {example}",
+                path = Path::new(".clew").join("launch.json").display(),
+                example = r#"{"program": "path", "type": "python"}"#
+            )
+        })?;
+    // VS Code's is JSON with comments and trailing commas.
+    parse_launch_config(root, &clew_core::imports::strip_jsonc(&text), file, true)
+}
+
+/// The project's launch file: Clew's own (`.clew/launch.json`), else the
+/// one VS Code reads (`.vscode/launch.json`) — where a web project keeps
+/// its browser's, and was told to write another.
+pub(crate) fn launch_file_path(root: &Path) -> Option<PathBuf> {
+    [
+        root.join(".clew").join("launch.json"),
+        root.join(".vscode").join("launch.json"),
+    ]
+    .into_iter()
+    .find(|p| p.is_file())
+}
+
+/// Of a VS Code launch file's `configurations`, the one Debug runs: of
+/// those that launch (not attach), the one in the language of the file
+/// being read that runs it, else one in its language — a browser's for a
+/// web page or a script one loads — else the first.
+fn chosen_configuration<'a>(
+    list: &'a [serde_json::Value],
+    root: &Path,
+    file: Option<&Path>,
+) -> Option<&'a serde_json::Value> {
+    let launches = list.iter().filter(|c| {
+        c.is_object()
+            && c.get("request")
+                .and_then(|r| r.as_str())
+                .is_none_or(|r| r == "launch")
+    });
+    let file_lang = file.and_then(|f| {
+        let page = f
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("html") || e.eq_ignore_ascii_case("htm"));
+        match page || clew_core::pageserver::page_of_script(root, f).is_some() {
+            true => Some(crate::dap::Lang::Browser),
+            false => crate::dap::Lang::detect(None, f),
+        }
+    });
+    launches
+        .enumerate()
+        .max_by_key(|(i, c)| {
+            let program = c
+                .get("program")
+                .and_then(|p| p.as_str())
+                .map(|p| resolve_rel(root, p));
+            let runs_file = file.is_some_and(|f| program.as_deref() == Some(f));
+            let lang = crate::dap::Lang::detect(
+                c.get("type").and_then(|t| t.as_str()),
+                program.as_deref().unwrap_or(Path::new("")),
+            );
+            let in_lang = file_lang.is_some() && lang == file_lang;
+            // `${file}` runs whatever is read — in its own language only:
+            // Python's ran a page's script.
+            (runs_file && in_lang, in_lang, std::cmp::Reverse(*i))
+        })
+        .map(|(_, c)| c)
 }
 
 /// What a launch file asks of a Python run beyond its program and its
@@ -2141,6 +2199,36 @@ pub(crate) fn parse_launch_config(
     let mut v: serde_json::Value =
         serde_json::from_str(text).map_err(|e| format!("launch.json: {e}"))?;
     substitute_all(&mut v, &|name| launch_var(name, root, file, local));
+    // VS Code's form: a list of configurations, of which one is run — and
+    // said, where there is a choice.
+    let mut said = Vec::new();
+    if let Some(list) = v.get("configurations").and_then(|c| c.as_array()) {
+        let chosen = chosen_configuration(list, root, file)
+            .cloned()
+            .ok_or_else(|| {
+                tr!("launch.json has no configuration that launches a program.").to_string()
+            })?;
+        let launches = list
+            .iter()
+            .filter(|c| c.get("request").and_then(|r| r.as_str()) != Some("attach"))
+            .count();
+        if let Some(name) = chosen.get("name").and_then(|n| n.as_str())
+            && launches > 1
+        {
+            said.push(tr!(
+                "Running the launch configuration “{name}”.",
+                name = name
+            ));
+        }
+        // A task VS Code runs first is not Clew's to run.
+        if let Some(task) = chosen.get("preLaunchTask").and_then(|t| t.as_str()) {
+            said.push(tr!(
+                "Its preLaunchTask “{task}” was not run: run it first if the program needs it.",
+                task = task
+            ));
+        }
+        v = chosen;
+    }
     let module = v
         .get("module")
         .and_then(|m| m.as_str())
@@ -2201,7 +2289,7 @@ pub(crate) fn parse_launch_config(
         .map(str::to_string)
         // A module is Python's to run.
         .or_else(|| module.as_ref().map(|_| "python".to_string()));
-    let mut notes = Vec::new();
+    let mut notes = said;
     let mut fields = serde_json::Map::new();
     let keys = match browser {
         Some(_) => BROWSER_LAUNCH_KEYS,

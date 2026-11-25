@@ -112,6 +112,7 @@ pub mod mcp;
 pub mod net;
 pub mod notebook;
 pub mod outline;
+pub mod pageserver;
 pub mod procgroup;
 pub mod projectcalls;
 pub mod runnables;

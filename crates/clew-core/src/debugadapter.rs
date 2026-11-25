@@ -1498,6 +1498,74 @@ fn deno_with(node: PathBuf, deno: &Path, program: &str, args: &[String], cwd: &P
     Resolution::Ready(spec)
 }
 
+/// The browser a page with no launch file is debugged in, as js-debug
+/// names it, and its program where Clew found it: Chrome (or Chromium)
+/// where it is installed, else Edge where that is — every Windows has it,
+/// and a Linux desktop may have it alone.
+pub fn page_browser() -> (&'static str, Option<PathBuf>) {
+    let on_path = |names: &[&str]| {
+        names
+            .iter()
+            .find_map(|n| crate::lsp::store::find_on_path(n))
+    };
+    let installed = |paths: Vec<PathBuf>| paths.into_iter().find(|p| p.exists());
+    let program_dirs = || -> Vec<PathBuf> {
+        ["ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"]
+            .iter()
+            .filter_map(std::env::var_os)
+            .map(PathBuf::from)
+            .collect()
+    };
+    let chrome = std::env::var_os("CHROME_PATH").is_some()
+        || on_path(&[
+            "google-chrome",
+            "google-chrome-stable",
+            "chromium",
+            "chromium-browser",
+        ])
+        .is_some()
+        || match () {
+            _ if cfg!(target_os = "macos") => installed(vec![
+                "/Applications/Google Chrome.app".into(),
+                "/Applications/Chromium.app".into(),
+            ]),
+            _ if cfg!(windows) => installed(
+                program_dirs()
+                    .iter()
+                    .map(|d| d.join("Google/Chrome/Application/chrome.exe"))
+                    .collect(),
+            ),
+            _ => None,
+        }
+        .is_some();
+    if chrome {
+        return ("pwa-chrome", None);
+    }
+    // On Linux js-debug is given the program it would look for; elsewhere
+    // it finds Edge where Edge installs itself.
+    if let Some(edge) = on_path(&["microsoft-edge", "microsoft-edge-stable", "msedge"])
+        .or_else(|| installed(vec!["/opt/microsoft/msedge/msedge".into()]))
+    {
+        return ("pwa-msedge", cfg!(target_os = "linux").then_some(edge));
+    }
+    let edge = match () {
+        _ if cfg!(target_os = "macos") => {
+            installed(vec!["/Applications/Microsoft Edge.app".into()])
+        }
+        _ if cfg!(windows) => installed(
+            program_dirs()
+                .iter()
+                .map(|d| d.join("Microsoft/Edge/Application/msedge.exe"))
+                .collect(),
+        ),
+        _ => None,
+    };
+    match edge {
+        Some(_) => ("pwa-msedge", None),
+        None => ("pwa-chrome", None),
+    }
+}
+
 /// A page debugged in a browser under vscode-js-debug: `url` opened in
 /// Chrome (a launch file's `"type": "msedge"` opens Edge, and its own
 /// fields — `webRoot`, `runtimeExecutable`, `userDataDir`… — are its), the

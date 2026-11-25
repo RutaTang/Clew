@@ -4079,5 +4079,10 @@
  "This needs the project's dependencies, which are not installed. Waiting for your approval.": "プロジェクトの依存関係が必要ですが、インストールされていません。承認を待っています。",
  "Installing the project's dependencies…": "プロジェクトの依存関係をインストールしています…",
  "The project's dependencies are installed": "プロジェクトの依存関係をインストールしました",
- "Installing the project's dependencies failed: {error}": "プロジェクトの依存関係のインストールに失敗しました：{error}"
+ "Installing the project's dependencies failed: {error}": "プロジェクトの依存関係のインストールに失敗しました：{error}",
+ "launch.json has no configuration that launches a program.": "launch.json に、プログラムを起動する構成がありません。",
+ "Running the launch configuration “{name}”.": "起動構成「{name}」を実行しています。",
+ "Its preLaunchTask “{task}” was not run: run it first if the program needs it.": "preLaunchTask「{task}」は実行されていません。プログラムに必要なら先に実行してください。",
+ "Could not serve the page: {error}": "ページを配信できませんでした: {error}",
+ "The page is served at {url} while it runs.": "実行中、ページは {url} で配信されます。"
 }

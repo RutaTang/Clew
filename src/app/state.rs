@@ -192,6 +192,9 @@ pub struct PendingAsk {
 pub struct DebugState {
     /// The active debug session (DAP), if any.
     pub session: Option<DebugSession>,
+    /// Each page run's own web server, by its run's tab: it serves the page
+    /// while the run goes on, and stops as the run ends.
+    pub page_servers: HashMap<u64, clew_core::pageserver::PageServer>,
     /// The session ended by the reader's Stop, not by itself: its output
     /// says it was stopped, not that the program printed nothing.
     pub stopped_by_reader: bool,

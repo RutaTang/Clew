@@ -44647,6 +44647,166 @@ fn a_web_apps_component_suggests_debugging_it_in_a_browser() {
     assert!(launch_example(&root, Some("tsx")).contains("localhost:3000"));
 }
 
+/// A web page's own script runs in its page, in a browser — under Node it
+/// stopped at its first `document`. Debug and Run serve the page for the
+/// run (its module scripts and root paths load as they do from a server)
+/// and open it; the run's end stops the server.
+#[test]
+fn a_pages_script_runs_in_its_page_served_for_the_run() {
+    let mut app = scanned_app("debug-page-script");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    std::fs::write(
+        root.join("index.html"),
+        "<h1 id=\"out\"></h1>\n<script type=\"module\" src=\"/app.js\"></script>\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("app.js"), "document.title = 'x';\n").unwrap();
+    std::fs::write(root.join("cli.js"), "console.log(1);\n").unwrap();
+    open_synchronously(&mut app, "app.js", None);
+    let _ = app.start_debug();
+    let tab = app.debug.tab;
+    let session = app.debug.session.as_ref().expect("a run");
+    let url = session.program.to_string_lossy().into_owned();
+    assert!(
+        url.starts_with("http://127.0.0.1:") && url.ends_with("/index.html"),
+        "{url}"
+    );
+    assert!(
+        session
+            .output
+            .iter()
+            .any(|(_, text)| text.contains("The page is served at")),
+        "said where"
+    );
+    // The page is there to load, and its script by its root path.
+    let addr = url
+        .trim_start_matches("http://")
+        .split('/')
+        .next()
+        .unwrap()
+        .to_string();
+    let fetch = |path: &str| {
+        use std::io::{Read, Write};
+        let mut stream = std::net::TcpStream::connect(&addr).unwrap();
+        write!(stream, "GET {path} HTTP/1.1\r\nHost: {addr}\r\n\r\n").unwrap();
+        let mut text = String::new();
+        stream.read_to_string(&mut text).unwrap();
+        text
+    };
+    assert!(fetch("/app.js").contains("document.title"));
+    assert!(app.debug.page_servers.contains_key(&tab));
+    let _ = app.update(Message::Debug(DebugMsg::DapEvent {
+        stamp: app.transport_stamp(),
+        run: app.debug_run,
+        event: dap::DapEvent::Terminated,
+    }));
+    assert!(
+        !app.debug.page_servers.contains_key(&tab),
+        "the run over, the page is no longer served"
+    );
+    assert!(std::net::TcpStream::connect(&addr).is_err());
+    // Run opens it too, without the debugger.
+    let _ = app.start_run();
+    let session = app.debug.session.as_ref().unwrap();
+    assert!(app.debug.no_debug);
+    assert!(
+        session
+            .program
+            .to_string_lossy()
+            .starts_with("http://127.0.0.1:")
+    );
+    // The page itself, read: the same.
+    open_synchronously(&mut app, "index.html", None);
+    let _ = app.start_debug();
+    let session = app.debug.session.as_ref().unwrap();
+    assert!(session.program.to_string_lossy().ends_with("/index.html"));
+    // A script no page loads is a program, Node's to run.
+    open_synchronously(&mut app, "cli.js", None);
+    let _ = app.start_debug();
+    let session = app.debug.session.as_ref().unwrap();
+    assert_eq!(session.program, root.join("cli.js"));
+}
+
+/// The launch file VS Code reads (`.vscode/launch.json`), with its
+/// comments and trailing commas, is read when the project has no
+/// `.clew/launch.json`; of its configurations, the one that runs the file
+/// being read, else one in its language (a browser's for a page's script),
+/// else the first that launches — named in the run's output, as a
+/// preLaunchTask it does not run is.
+#[test]
+fn a_vs_code_launch_file_runs_the_configuration_for_the_file() {
+    use crate::app::tasks::read_launch_config;
+    let root = test_dir("launch-vscode");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join(".vscode")).unwrap();
+    std::fs::write(
+        root.join("index.html"),
+        "<script src=\"page.js\"></script>\n",
+    )
+    .unwrap();
+    for file in ["page.js", "server.js", "tool.py"] {
+        std::fs::write(root.join(file), "").unwrap();
+    }
+    std::fs::write(
+        root.join(".vscode/launch.json"),
+        r#"{
+    // Use IntelliSense to learn about possible attributes.
+    "version": "0.2.0",
+    "configurations": [
+        { "type": "node", "request": "attach", "name": "Attach", "port": 9229 },
+        {
+            "type": "node",
+            "request": "launch",
+            "name": "Server",
+            "program": "${workspaceFolder}/server.js",
+            "preLaunchTask": "build",
+        },
+        { "type": "msedge", "request": "launch", "name": "Page", "url": "http://localhost:8080" },
+        /* Python's */
+        { "type": "debugpy", "request": "launch", "name": "Tool", "program": "${file}" },
+    ],
+}"#,
+    )
+    .unwrap();
+    let server = read_launch_config(&root, Some(&root.join("server.js"))).unwrap();
+    assert_eq!(server.program, root.join("server.js"));
+    assert_eq!(
+        server.notes,
+        [
+            "Running the launch configuration “Server”.",
+            "Its preLaunchTask “build” was not run: run it first if the program needs it."
+        ]
+    );
+    let page = read_launch_config(&root, Some(&root.join("page.js"))).unwrap();
+    assert_eq!(page.program, Path::new("http://localhost:8080"));
+    assert_eq!(page.extras.fields["type"], "pwa-msedge");
+    let tool = read_launch_config(&root, Some(&root.join("tool.py"))).unwrap();
+    assert_eq!(tool.program, root.join("tool.py"));
+    assert_eq!(tool.type_hint.as_deref(), Some("debugpy"));
+    // Nothing read: the first that launches.
+    let first = read_launch_config(&root, None).unwrap();
+    assert_eq!(first.program, root.join("server.js"));
+    // Clew's own file, where there is one, over VS Code's.
+    std::fs::create_dir_all(root.join(".clew")).unwrap();
+    std::fs::write(root.join(".clew/launch.json"), r#"{"program": "tool.py"}"#).unwrap();
+    let own = read_launch_config(&root, Some(&root.join("server.js"))).unwrap();
+    assert_eq!(own.program, root.join("tool.py"));
+    // Only attaching: said.
+    std::fs::remove_dir_all(root.join(".clew")).unwrap();
+    std::fs::write(
+        root.join(".vscode/launch.json"),
+        r#"{"configurations": [{"type": "node", "request": "attach", "port": 9229}]}"#,
+    )
+    .unwrap();
+    let Err(err) = read_launch_config(&root, None) else {
+        panic!("nothing launches");
+    };
+    assert_eq!(
+        err,
+        "launch.json has no configuration that launches a program."
+    );
+}
+
 /// A browser's launch file, as VS Code's "Launch Chrome against
 /// localhost": no program but the page's URL, js-debug's own fields kept,
 /// Edge's type read as Edge's — and the adapter's body is the file's.

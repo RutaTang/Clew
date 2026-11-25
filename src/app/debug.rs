@@ -691,7 +691,7 @@ impl App {
             .extension()
             .is_some_and(|e| e.eq_ignore_ascii_case("tsx") || e.eq_ignore_ascii_case("jsx"));
         let root = &self.proj.project.as_ref()?.root;
-        if jsx && crate::app::tasks::dev_server_url(root).is_some() {
+        if (jsx || self.reads_page_script()) && crate::app::tasks::dev_server_url(root).is_some() {
             return None;
         }
         // A test file runs its tests (under pytest): Run on
@@ -710,6 +710,85 @@ impl App {
             return Some(start);
         }
         Some(abs.clone())
+    }
+
+    /// The page Debug or Run opens in a browser when nothing names what to
+    /// run, and the folder it is served from: the HTML file being read, or
+    /// the page that loads the script being read — run under Node, a
+    /// page's script stopped at its first `document`. `None` for a project
+    /// with a dev server (its pages are its bundler's to serve, and Debug
+    /// suggests the launch file that opens its URL) or on another computer.
+    fn page_to_debug(&self) -> Option<(PathBuf, PathBuf)> {
+        if self.connection.is_remote() {
+            return None;
+        }
+        let abs = &self.active_viewer()?.abs;
+        let root = &self.proj.project.as_ref()?.root;
+        let ext = abs.extension()?.to_str()?.to_ascii_lowercase();
+        if !matches!(ext.as_str(), "html" | "htm" | "js" | "mjs" | "cjs")
+            || crate::app::tasks::dev_server_url(root).is_some()
+        {
+            return None;
+        }
+        match ext.as_str() {
+            "html" | "htm" => Some((
+                abs.clone(),
+                clew_core::pageserver::served_root_of_page(root, abs),
+            )),
+            _ => clew_core::pageserver::page_of_script(root, abs),
+        }
+    }
+
+    /// Whether the file being read is a script one of the project's pages
+    /// loads (`<script src>`): it runs in a browser, not under Node.
+    fn reads_page_script(&self) -> bool {
+        let (Some(viewer), Some(project)) = (self.active_viewer(), self.proj.project.as_ref())
+        else {
+            return false;
+        };
+        let script = viewer.abs.extension().is_some_and(|e| {
+            ["js", "mjs", "cjs", "ts", "mts", "tsx", "jsx"]
+                .iter()
+                .any(|x| e.eq_ignore_ascii_case(x))
+        });
+        script && clew_core::pageserver::page_of_script(&project.root, &viewer.abs).is_some()
+    }
+
+    /// A page served for its run, opened in the browser installed (Chrome,
+    /// else Edge): the launch js-debug is given.
+    fn page_launch(
+        page: &Path,
+        served: &Path,
+    ) -> Result<
+        (
+            crate::app::model::LaunchConfig,
+            clew_core::pageserver::PageServer,
+        ),
+        String,
+    > {
+        let server = clew_core::pageserver::PageServer::start(served)
+            .map_err(|e| tr!("Could not serve the page: {error}", error = e).to_string())?;
+        let url = server
+            .url_of(page)
+            .ok_or_else(|| tr!("Could not serve the page: {error}", error = page.display()))?;
+        let (browser, program) = clew_core::debugadapter::page_browser();
+        let mut cfg = crate::app::model::LaunchConfig::script(
+            PathBuf::from(&url),
+            server.root().to_path_buf(),
+        );
+        cfg.type_hint = Some(browser.to_string());
+        cfg.extras
+            .fields
+            .insert("type".into(), serde_json::json!(browser));
+        if let Some(program) = program {
+            cfg.extras.fields.insert(
+                "runtimeExecutable".into(),
+                serde_json::json!(program.to_string_lossy()),
+            );
+        }
+        cfg.notes
+            .push(tr!("The page is served at {url} while it runs.", url = url));
+        Ok((cfg, server))
     }
 
     /// Run or Debug on a Lean file with no launch file: its `main` runs, as
@@ -963,7 +1042,11 @@ impl App {
             return None;
         }
         let root = &self.proj.project.as_ref()?.root;
-        if root.join(".clew").join("launch.json").is_file() {
+        if crate::app::tasks::launch_file_path(root).is_some() {
+            return None;
+        }
+        // A page's script runs in its page, in a browser (`start_session`).
+        if self.reads_page_script() {
             return None;
         }
         let viewer = self.active_viewer()?;
@@ -1483,28 +1566,42 @@ impl App {
         // `envFile`: given to lldb as it is to debugpy.
         let mut file_env: Vec<(String, String)> = Vec::new();
         let mut file_notes: Vec<String> = Vec::new();
+        // A page's own server, held by its run's tab while it runs.
+        let mut page_server: Option<clew_core::pageserver::PageServer> = None;
         let (program, args, cwd, lang) = if remote {
             (root.clone(), Vec::new(), root.clone(), None)
         } else if let Some(plan) = &plan {
             plan.launch(&root)
         } else {
+            let has_launch_file = crate::app::tasks::launch_file_path(&root).is_some();
             let cfg = match read_launch_config(&root, reading_file.as_deref()) {
                 Ok(cfg) => cfg,
+                // A web page, or a script one loads: opened in a browser,
+                // the page served for the run.
+                Err(_) if !has_launch_file && let Some((page, served)) = self.page_to_debug() => {
+                    match Self::page_launch(&page, &served) {
+                        Ok((cfg, server)) => {
+                            page_server = Some(server);
+                            cfg
+                        }
+                        Err(e) => {
+                            self.status = e;
+                            return Task::none();
+                        }
+                    }
+                }
                 // No launch.json: a script open in the active pane is run as
                 // it is, as editors do — Debug on a Python file only told the
                 // reader to write a config first. A program that must be
                 // built (native, .NET) still needs one, to name the binary.
-                Err(_)
-                    if !root.join(".clew").join("launch.json").exists()
-                        && let Some(script) = self.debuggable_script() =>
-                {
+                Err(_) if !has_launch_file && let Some(script) = self.debuggable_script() => {
                     crate::app::model::LaunchConfig::script(script, root.clone())
                 }
                 // None at all: one for this project, in its language —
                 // or, a library crate, that it has nothing to run: a
                 // program named after the folder sent the reader to build
                 // one that would never be.
-                Err(_) if !root.join(".clew").join("launch.json").exists() => {
+                Err(_) if !has_launch_file => {
                     // A folder with no code has nothing to run: it was told
                     // to write a launch file for a program it has not got.
                     if self.no_code() {
@@ -1604,6 +1701,14 @@ impl App {
         // this one its tab — run again, not run beside it.
         let (tab, ended) = self.tab_for_new_run(&shown, no_debug, plan.as_ref());
         self.debug.tab = tab;
+        match page_server {
+            Some(server) => {
+                self.debug.page_servers.insert(tab, server);
+            }
+            None => {
+                self.debug.page_servers.remove(&tab);
+            }
+        }
         self.debug.build_failed.remove(&tab);
         self.debug.not_run.remove(&tab);
         self.run_shown = Some(crate::app::state::RunTab::Real(tab));
@@ -1654,7 +1759,7 @@ impl App {
         // program named in launch.json runs whatever is open, and the file
         // read may well run on its own.
         let picked =
-            !self.connection.is_remote() && !root.join(".clew").join("launch.json").exists();
+            !self.connection.is_remote() && crate::app::tasks::launch_file_path(&root).is_none();
         let reading = match &plan {
             // A library's module, its package's program run for it.
             Some(RunPlan::Cargo { target, test: None }) => self
@@ -3459,6 +3564,7 @@ impl App {
             // it again under it.
             dap::DapEvent::Exited { code } => {
                 session.status = DebugStatus::Terminated;
+                self.debug.page_servers.remove(&self.debug.tab);
                 session.exit_code = Some(code);
                 session.current = None;
                 // The program is gone: an inspection still loading for the last
@@ -3473,6 +3579,7 @@ impl App {
             }
             dap::DapEvent::Terminated => {
                 session.status = DebugStatus::Terminated;
+                self.debug.page_servers.remove(&self.debug.tab);
                 session.current = None;
                 session.frames.clear();
                 session.scopes.clear();

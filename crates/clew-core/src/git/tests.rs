@@ -2779,3 +2779,20 @@ fn a_files_log_follows_its_renames() {
     let subjects: Vec<&str> = page.commits.iter().map(|c| c.subject.as_str()).collect();
     assert_eq!(subjects, ["Grow", "Rename", "Start"]);
 }
+
+/// A folder is known to be in a repository without git — so a computer
+/// with no git says nothing of it for a folder none holds.
+#[test]
+fn a_repository_is_known_by_its_git_folder() {
+    let dir = std::env::temp_dir().join(format!("clew-no-repo-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("web/src")).unwrap();
+    assert!(!in_a_repository(&dir.join("web/src")));
+    std::fs::create_dir_all(dir.join("web/.git")).unwrap();
+    assert!(in_a_repository(&dir.join("web/src")));
+    // A worktree's `.git` is a file.
+    std::fs::remove_dir_all(dir.join("web/.git")).unwrap();
+    std::fs::write(dir.join("web/.git"), "gitdir: /elsewhere\n").unwrap();
+    assert!(in_a_repository(&dir.join("web")));
+    let _ = std::fs::remove_dir_all(&dir);
+}

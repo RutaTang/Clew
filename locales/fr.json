@@ -4079,5 +4079,10 @@
  "This needs the project's dependencies, which are not installed. Waiting for your approval.": "Il faut les dépendances du projet, qui ne sont pas installées. En attente de votre accord.",
  "Installing the project's dependencies…": "Installation des dépendances du projet…",
  "The project's dependencies are installed": "Les dépendances du projet sont installées",
- "Installing the project's dependencies failed: {error}": "L'installation des dépendances du projet a échoué : {error}"
+ "Installing the project's dependencies failed: {error}": "L'installation des dépendances du projet a échoué : {error}",
+ "launch.json has no configuration that launches a program.": "launch.json n’a aucune configuration qui lance un programme.",
+ "Running the launch configuration “{name}”.": "Exécution de la configuration de lancement « {name} ».",
+ "Its preLaunchTask “{task}” was not run: run it first if the program needs it.": "Sa tâche preLaunchTask « {task} » n’a pas été exécutée : lancez-la d’abord si le programme en a besoin.",
+ "Could not serve the page: {error}": "Impossible de servir la page : {error}",
+ "The page is served at {url} while it runs.": "La page est servie à {url} pendant son exécution."
 }
