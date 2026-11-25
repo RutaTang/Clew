@@ -405,7 +405,9 @@ impl Viewer {
             return found.clone();
         }
         let found: Arc<[clew_core::runnables::Runnable]> = match self.lang_key {
-            Some(lang @ ("rust" | "python" | "lean")) if self.notebook.is_none() => {
+            Some(lang @ ("rust" | "python" | "lean" | "javascript" | "typescript" | "tsx"))
+                if self.notebook.is_none() =>
+            {
                 clew_core::runnables::runnables(lang, &self.source).into()
             }
             _ => Arc::from(Vec::new()),

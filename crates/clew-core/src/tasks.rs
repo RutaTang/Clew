@@ -1,6 +1,7 @@
 //! The project's tasks, run where the project is ([`ProjectTask`]): a Lean
 //! file's `main`, Lake's build and tests, Mathlib's build cache, a Rust
-//! program, a Rust test. What runs is worked out here, on the project's
+//! program, a Rust test, a JavaScript or TypeScript test or program, a
+//! package's script. What runs is worked out here, on the project's
 //! host, from what the task is — the program, its arguments, the folder it
 //! runs in — and never from a command line the asker names: clew-server
 //! runs them for a remote project ([`clew_protocol::Request::RunTask`]).
@@ -43,9 +44,16 @@ fn run_with(
         | ProjectTask::Lake { file, .. }
         | ProjectTask::MathlibCache { file }
         | ProjectTask::RustMain { file }
-        | ProjectTask::RustTest { file, .. } => file,
+        | ProjectTask::RustTest { file, .. }
+        | ProjectTask::JsTest { file, .. }
+        | ProjectTask::JsMain { file }
+        | ProjectTask::PackageScript { dir: file, .. } => file,
     };
-    let file = crate::confine::confine(root, rel).map_err(|e| format!("{rel}: {e}"))?;
+    // A package at the project's root names its folder as nothing.
+    let file = match rel.is_empty() {
+        true => std::fs::canonicalize(root).map_err(|e| e.to_string())?,
+        false => crate::confine::confine(root, rel).map_err(|e| format!("{rel}: {e}"))?,
+    };
     match task {
         ProjectTask::LeanMain { .. } => {
             let (lake, project) = lake_project(root, &file, choices, search)?;
@@ -62,8 +70,32 @@ fn run_with(
         }
         ProjectTask::RustMain { .. } => rust_main(root, &file, choices, said, cancel),
         ProjectTask::RustTest { line, .. } => rust_test(&file, *line, choices, said, cancel),
+        ProjectTask::JsTest { line, .. } => {
+            let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+            let source = crate::statefile::read_capped(&file, MAX_SOURCE_BYTES)
+                .ok_or_else(|| format!("{rel} could not be read"))?;
+            let lang = crate::highlight::detect(&file)
+                .filter(|l| matches!(*l, "javascript" | "typescript" | "tsx"))
+                .ok_or_else(|| format!("{rel} is not JavaScript or TypeScript"))?;
+            let (command, _) =
+                crate::jsrun::test_command(&root, &file, lang, &source, *line, search)?;
+            crate::jsrun::run(&command, said, cancel)
+        }
+        ProjectTask::JsMain { .. } => {
+            let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+            let command = crate::jsrun::main_command(&root, &file, search)?;
+            crate::jsrun::run(&command, said, cancel)
+        }
+        ProjectTask::PackageScript { script, .. } => {
+            let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+            let command = crate::jsrun::script_command(&root, &file, script, search)?;
+            crate::jsrun::run(&command, said, cancel)
+        }
     }
 }
+
+/// The most of a test file a JavaScript test task reads to find its test.
+const MAX_SOURCE_BYTES: u64 = 4 << 20;
 
 /// The `lake` a Lean task runs with — the toolchain chosen for the project
 /// (a program chosen for its Lean, run as `lake`), else the one on the

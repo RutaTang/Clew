@@ -11,6 +11,17 @@ use crate::tr_noop;
 /// Every such message, as its crate writes it.
 pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!(
+        "Node.js cannot run JSX by itself: add tsx to the project (npm install --save-dev tsx), then run again."
+    ),
+    tr_noop!("The package has no script named {script}."),
+    tr_noop!(
+        "{arg1} is not installed in this project: install its dependencies (npm install), then run again."
+    ),
+    tr_noop!("{other} wasn't found here."),
+    tr_noop!("{pm} wasn't found here. Install Node.js, then run again."),
+    tr_noop!("{rel} could not be read"),
+    tr_noop!("{rel} is not JavaScript or TypeScript"),
+    tr_noop!(
         "clew's own {what} is missing from the {arg1} install — without it the server would run the project's copy; remove the server and install it again"
     ),
     tr_noop!("'{arg1}' not found in archive"),

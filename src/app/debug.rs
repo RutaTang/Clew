@@ -938,7 +938,7 @@ impl App {
         let viewer = self.proj.panes.get(pane).and_then(Option::as_ref)?;
         let lang = viewer
             .lang_key
-            .filter(|l| matches!(*l, "rust" | "python"))?;
+            .filter(|l| matches!(*l, "rust" | "python" | "javascript" | "typescript" | "tsx"))?;
         let remote = self.connection.is_remote();
         let found = clew_core::runnables::runnables(lang, &viewer.source);
         let test = clew_core::runnables::runnable_at(&found, line)?;
@@ -1104,6 +1104,50 @@ impl App {
             return Task::none();
         };
         let lang = viewer.lang_key;
+        // A JavaScript or TypeScript test, suite or test file: run by the
+        // project's own test runner where the project is — on this computer
+        // or on a remote project's host (`ProjectTask::JsTest`).
+        if let Some(lang @ ("javascript" | "typescript" | "tsx")) = lang {
+            use clew_core::runnables::{RunnableKind, runnable_at, runnables};
+            let found = runnables(lang, &viewer.source);
+            let Some(test) = runnable_at(&found, line)
+                .filter(|r| matches!(r.kind, RunnableKind::Test | RunnableKind::Tests))
+            else {
+                self.status =
+                    tr!("No test here. Put the cursor in a test function to run it.").into();
+                return Task::none();
+            };
+            let (name, tests) = match test.kind {
+                RunnableKind::Tests if test.name.is_empty() => (
+                    viewer
+                        .abs
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                    Some(true),
+                ),
+                RunnableKind::Tests => (test.name.clone(), Some(true)),
+                _ => (test.name.clone(), Some(false)),
+            };
+            let Some(rel) = self.project_rel(&viewer.abs.clone()) else {
+                return Task::none();
+            };
+            let task = self.start_session(
+                true,
+                Some(crate::app::runplan::RunPlan::Remote {
+                    task: clew_protocol::ProjectTask::JsTest { file: rel, line },
+                    name,
+                    tests,
+                }),
+            );
+            if !no_debug {
+                self.status = tr!(
+                    "JavaScript and TypeScript tests run without the debugger: {status}",
+                    status = self.status
+                );
+            }
+            return task;
+        }
         // A remote project's Rust tests: built, and run or debugged, on its
         // host; named, and told one from a group, from the file. A doc
         // example is rustdoc's, with no debugger.
@@ -1181,7 +1225,7 @@ impl App {
                     Some("rust" | "python") => {
                         tr!("No test here. Put the cursor in a test function to run it.")
                     }
-                    _ => tr!("Run Test runs Rust and Python tests."),
+                    _ => tr!("Run Test runs Rust, Python, JavaScript and TypeScript tests."),
                 }
                 .into();
                 Task::none()
@@ -1563,6 +1607,12 @@ impl App {
                     test = plan.as_ref().map(RunPlan::label).unwrap_or_default()
                 )
             }
+            // A project task run on this computer (a JavaScript test): run
+            // here, said as a run is.
+            None if no_debug && !remote && matches!(plan, Some(RunPlan::Remote { .. })) => tr!(
+                "Running {file}…",
+                file = plan.as_ref().map(RunPlan::label).unwrap_or_default()
+            ),
             None if no_debug && matches!(plan, Some(RunPlan::Remote { .. })) => tr!(
                 "Running {test} on the remote host…",
                 test = plan.as_ref().map(RunPlan::label).unwrap_or_default()
@@ -1599,7 +1649,7 @@ impl App {
         // A task of a remote project's, run: started on its host now, its
         // output shown by the run's stream.
         let remote_run = match &plan {
-            Some(RunPlan::Remote { task, .. }) if remote_debug.is_none() => {
+            Some(RunPlan::Remote { task, .. }) if remote_debug.is_none() && remote => {
                 Some(self.remote_run(task.clone()))
             }
             _ => None,
@@ -1676,6 +1726,16 @@ impl App {
                                 .await;
                         }
                     }
+                    return;
+                }
+                // A project task on this computer (a JavaScript test): run in
+                // place, as its host's clew-server runs a remote project's.
+                if let (false, Some(RunPlan::Remote { task, .. })) = (remote, &plan) {
+                    let (task, root, choices) = (task.clone(), root.clone(), choices.clone());
+                    run_plain(&mut output, &stamp, run, &live, move |said, cancel| {
+                        clew_core::tasks::run(&root, &task, &choices, said, cancel)
+                    })
+                    .await;
                     return;
                 }
                 let (started, launch, addr, proxied) = if let (true, Some((task, build))) =

@@ -159,7 +159,11 @@ pub use payload::*;
 /// v33: a [`MapNode`] has [`MapField`]s (a table's columns: type, keys,
 /// nullability, defaults) and a [`MapEdge`] the fields it joins (a foreign
 /// key's columns): the schema is drawn as tables.
-pub const PROTOCOL_VERSION: u32 = 33;
+///
+/// v34: [`ProjectTask::JsTest`], [`ProjectTask::JsMain`] and
+/// [`ProjectTask::PackageScript`]: JavaScript and TypeScript tests, programs
+/// and a package's scripts, run where the project is.
+pub const PROTOCOL_VERSION: u32 = 34;
 
 /// A hash of this crate's source as a token stream — comments and whitespace
 /// removed — computed at build time (see `build.rs`). Carried in `Hello` /
@@ -1575,6 +1579,16 @@ pub enum ProjectTask {
     /// The test, or the tests, at 1-based `line` of `file`, built by Cargo
     /// and run as Run Test runs them; a doc example, by rustdoc.
     RustTest { file: Rel, line: usize },
+    /// The JavaScript or TypeScript test, suite or test file at 1-based
+    /// `line` of `file`, run by the project's own test runner (Vitest, Jest,
+    /// Mocha, Playwright, Bun's, Node's, Deno's).
+    JsTest { file: Rel, line: usize },
+    /// `file` run as a program by its project's runtime: Deno, Bun, or Node
+    /// (TypeScript with its types stripped, or by the project's `tsx`).
+    JsMain { file: Rel },
+    /// The script `script` of the package in `dir` (its `package.json`'s),
+    /// run by the package manager the project uses.
+    PackageScript { dir: Rel, script: String },
 }
 
 /// What the user chose for one project's languages, in Settings, where clew

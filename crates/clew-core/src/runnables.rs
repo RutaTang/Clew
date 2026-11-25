@@ -55,10 +55,11 @@ pub struct Runnable {
 const MAX_SCOPES: usize = 32;
 
 /// The runnables of `source`, in language `lang` (a key), in order.
-/// Rust and Python have them, and Lean its `main`; other languages none
-/// yet.
+/// Rust and Python have them, JavaScript and TypeScript their tests, and
+/// Lean its `main`; other languages none yet.
 pub fn runnables(lang: &str, source: &str) -> Vec<Runnable> {
     let language = match lang {
+        "javascript" | "typescript" | "tsx" => return ecma_tests(lang, source),
         "rust" => Lang::Rust,
         "python" => Lang::Python,
         "lean" => {
@@ -111,6 +112,58 @@ pub fn runnables(lang: &str, source: &str) -> Vec<Runnable> {
     // own group stays first).
     if language == Lang::Rust {
         out.sort_by_key(|r| r.line);
+    }
+    out
+}
+
+/// A JavaScript or TypeScript file's tests, as its outline has them
+/// (`describe`, `it`, `test`, `Deno.test`, …): each test named by its title
+/// through the suites around it, each suite a group of tests, and the file
+/// all of them.
+fn ecma_tests(lang: &str, source: &str) -> Vec<Runnable> {
+    let symbols = crate::outline::extract(source, lang);
+    let suites: Vec<&crate::outline::Symbol> =
+        symbols.iter().filter(|s| s.kind == "suite").collect();
+    let mut out: Vec<Runnable> = symbols
+        .iter()
+        .filter(|s| matches!(s.kind.as_str(), "suite" | "test"))
+        .map(|s| {
+            // The suites that hold it, outermost first.
+            let scopes = suites
+                .iter()
+                .filter(|o| {
+                    !std::ptr::eq(**o, s)
+                        && o.line <= s.line
+                        && s.end_line <= o.end_line
+                        && (o.line, o.end_line) != (s.line, s.end_line)
+                })
+                .take(MAX_SCOPES)
+                .map(|o| o.name.clone())
+                .collect();
+            Runnable {
+                kind: match s.kind.as_str() {
+                    "suite" => RunnableKind::Tests,
+                    _ => RunnableKind::Test,
+                },
+                name: s.name.clone(),
+                line: s.line,
+                span: (s.line, s.end_line.max(s.line)),
+                scopes,
+            }
+        })
+        .collect();
+    out.sort_by_key(|r| (r.line, r.span.1 == r.span.0));
+    if out.iter().any(|r| r.kind == RunnableKind::Test) {
+        out.insert(
+            0,
+            Runnable {
+                kind: RunnableKind::Tests,
+                name: String::new(),
+                line: 1,
+                span: (1, source.lines().count().max(1)),
+                scopes: Vec::new(),
+            },
+        );
     }
     out
 }
@@ -513,8 +566,11 @@ fn python(
 
 /// The runnable at 1-based `line`: the innermost whose span holds it.
 pub fn runnable_at(runnables: &[Runnable], line: usize) -> Option<&Runnable> {
+    // Of two that span the same lines — a file's tests and the one suite
+    // or class that fills it — the one listed later, inside the other.
     runnables
         .iter()
+        .rev()
         .filter(|r| r.span.0 <= line && line <= r.span.1)
         .min_by_key(|r| r.span.1 - r.span.0)
 }

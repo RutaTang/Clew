@@ -993,3 +993,103 @@ fn missing_rust_sources_are_added_on_request() {
     }));
     assert_eq!(app.proj.rust_src, RustSrc::Missing(None));
 }
+
+/// Run Test on a JavaScript or TypeScript test runs it by the project's own
+/// test runner where the project is: the test at the line by its title, its
+/// suite's tests from the suite's line, and the file's from anywhere else;
+/// its end says how it went. Debug Test runs it too, saying it runs without
+/// the debugger. The gutter marks each, and the code menu names it.
+#[test]
+fn run_test_runs_the_javascript_test_at_the_line() {
+    let mut app = scanned_app("runplan-js-test");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    write(
+        &root,
+        "package.json",
+        r#"{"devDependencies": {"vitest": "^3"}}"#,
+    );
+    write(
+        &root,
+        "test/cart.test.ts",
+        "import { describe, it } from 'vitest'\n\ndescribe('cart', () => {\n  it('adds', () => {})\n  it('drops', () => {})\n})\n",
+    );
+    open_synchronously(&mut app, "test/cart.test.ts", None);
+    let run = |app: &mut App, line: usize, no_debug: bool| {
+        let _ = app.update(Message::Debug(DebugMsg::RunTest {
+            line: Some(line),
+            no_debug,
+        }));
+        app.debug.plan.clone()
+    };
+    let task = |line| clew_protocol::ProjectTask::JsTest {
+        file: "test/cart.test.ts".into(),
+        line,
+    };
+    assert_eq!(
+        run(&mut app, 4, true),
+        Some(RunPlan::Remote {
+            task: task(4),
+            name: "adds".into(),
+            tests: Some(false),
+        })
+    );
+    assert!(app.debug.no_debug);
+    assert_eq!(app.status, "Running adds…", "here, not on a remote host");
+    let _ = app.update(Message::Debug(DebugMsg::DapEvent {
+        stamp: app.transport_stamp(),
+        run: app.debug_run,
+        event: dap::DapEvent::Exited { code: 0 },
+    }));
+    assert_eq!(app.status, "Test adds passed");
+    assert_eq!(
+        run(&mut app, 3, true),
+        Some(RunPlan::Remote {
+            task: task(3),
+            name: "cart".into(),
+            tests: Some(true),
+        })
+    );
+    let _ = app.update(Message::Debug(DebugMsg::DapEvent {
+        stamp: app.transport_stamp(),
+        run: app.debug_run,
+        event: dap::DapEvent::Exited { code: 1 },
+    }));
+    assert_eq!(app.status, "Some tests in cart failed");
+    assert_eq!(
+        run(&mut app, 1, true),
+        Some(RunPlan::Remote {
+            task: task(1),
+            name: "cart.test.ts".into(),
+            tests: Some(true),
+        })
+    );
+    // Debug Test: run, and said to be without the debugger.
+    let _ = run(&mut app, 5, false);
+    assert!(app.debug.no_debug);
+    assert!(
+        app.status
+            .starts_with("JavaScript and TypeScript tests run without the debugger"),
+        "{}",
+        app.status
+    );
+    // The gutter marks the suite and its tests; the code menu names what
+    // runs at a line.
+    let marks = app.run_marks(app.active_viewer().unwrap());
+    assert_eq!(marks, [3, 4, 5].into_iter().collect());
+    let pane = app.proj.active;
+    assert_eq!(app.test_at(pane, 4), Some(crate::TestAt::One));
+    assert_eq!(
+        app.test_at(pane, 3),
+        Some(crate::TestAt::Group("cart".into()))
+    );
+    // Not a test: said so.
+    write(&root, "src/util.ts", "export const one = 1\n");
+    open_synchronously(&mut app, "src/util.ts", None);
+    let before = app.debug.plan.clone();
+    let _ = run(&mut app, 1, true);
+    assert_eq!(app.debug.plan, before);
+    assert_eq!(
+        app.status,
+        "No test here. Put the cursor in a test function to run it."
+    );
+}

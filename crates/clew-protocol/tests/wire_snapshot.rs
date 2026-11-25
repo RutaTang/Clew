@@ -230,6 +230,9 @@ fn project_task_index(t: &ProjectTask) -> usize {
         ProjectTask::MathlibCache { .. } => 2,
         ProjectTask::RustMain { .. } => 3,
         ProjectTask::RustTest { .. } => 4,
+        ProjectTask::JsTest { .. } => 5,
+        ProjectTask::JsMain { .. } => 6,
+        ProjectTask::PackageScript { .. } => 7,
     }
 }
 
@@ -251,6 +254,17 @@ fn project_tasks() -> Vec<ProjectTask> {
         ProjectTask::RustTest {
             file: "src/lib.rs".into(),
             line: 12,
+        },
+        ProjectTask::JsTest {
+            file: "src/cart.test.ts".into(),
+            line: 7,
+        },
+        ProjectTask::JsMain {
+            file: "scripts/seed.ts".into(),
+        },
+        ProjectTask::PackageScript {
+            dir: "packages/web".into(),
+            script: "dev".into(),
         },
     ]
 }
