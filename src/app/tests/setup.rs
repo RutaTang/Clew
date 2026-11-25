@@ -769,13 +769,29 @@ fn a_server_on_this_computer_is_used_not_installed_again() {
     assert_eq!(servers[0].fetch, Fetch::OnPath(program.clone()));
     assert_eq!(servers_line(&servers), "pyright: already installed");
 
+    let npm_only = test_dir("on-path-setup-npm-only");
+    std::fs::create_dir_all(&npm_only).unwrap();
+    let npm = npm_only.join("npm");
+    std::fs::write(&npm, "#!/bin/sh\n").unwrap();
+    std::fs::set_permissions(&npm, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let servers = look(&npm_only).servers_for(&root, &python);
+    assert_eq!(
+        servers[0].fetch,
+        Fetch::Install("npm".into()),
+        "none here: Clew's copy"
+    );
+    // And no npm to install it with: how to get it, not an install that
+    // could only fail.
     let empty = test_dir("on-path-setup-empty");
     std::fs::create_dir_all(&empty).unwrap();
     let servers = look(&empty).servers_for(&root, &python);
     assert_eq!(
         servers[0].fetch,
-        Fetch::Install("npm".into()),
-        "none here: Clew's copy"
+        Fetch::Missing("install Node.js, which brings npm")
+    );
+    assert_eq!(
+        servers_line(&servers),
+        "pyright: not installed: install Node.js, which brings npm"
     );
 }
 

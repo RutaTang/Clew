@@ -2809,6 +2809,7 @@
  "install Lean with elan": "elan で Lean",
  "install Node.js, which brings npm": "npm を含む Node.js をインストール",
  "install Deno": "Deno をインストール",
+ "clew's own {what} is missing from the {arg1} install — without it the server would run the project's copy; remove the server and install it again": "{arg1} のインストールに Clew 自身の {what} がありません。これがないとサーバーはプロジェクトのものを実行してしまいます。サーバーを削除して、もう一度インストールしてください",
  "install completed but '{arg1}' is missing": "インストールは完了しましたが、'{arg1}' が見つかりません",
  "install failed: {e}": "インストールに失敗しました: {e}",
  "install it with “dotnet tool install --global csharp-ls”": "「dotnet tool install --global csharp-ls」で",

@@ -10,6 +10,9 @@ use crate::tr_noop;
 
 /// Every such message, as its crate writes it.
 pub(crate) const MESSAGES: &[&str] = &[
+    tr_noop!(
+        "clew's own {what} is missing from the {arg1} install — without it the server would run the project's copy; remove the server and install it again"
+    ),
     tr_noop!("'{arg1}' not found in archive"),
     tr_noop!("'{binary}' was not found on PATH. To fix this, {arg1}, or choose where it is"),
     tr_noop!(
