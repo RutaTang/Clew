@@ -39,7 +39,8 @@ mod editor;
 pub(crate) use editor::{analyze, codeview, find, flow, highlight, viewer};
 mod graph;
 pub(crate) use graph::{
-    callgraph, graphlayout, imports, index, projectcalls, schemalayout, structure, typegraph,
+    architecture, callgraph, graphlayout, imports, index, projectcalls, schemalayout, structure,
+    typegraph,
 };
 mod ai;
 pub(crate) use ai::{fakerun, overview, render, richmd, walkthrough};

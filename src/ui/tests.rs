@@ -3893,38 +3893,50 @@ fn finder_rows_stay_aligned_with_their_results() {
     );
 }
 
-/// The overview's module map stands without a caption telling how to use
-/// it, drawn flat or in 3D.
+/// The overview opens on the project's architecture: its title and a line
+/// on how to read it, over the written overview — of packages or of the
+/// source's parts, as it was read.
 #[test]
-fn the_overview_map_has_no_caption() {
+fn the_overview_opens_on_the_architecture() {
+    use crate::architecture::{Architecture, Basis, Component, Link};
     let mut app = reader_app();
     app.proj.overview.showing = true;
     app.proj.overview.markdown = Some("## What it does\nA thing.".into());
-    let node = |name: &str| crate::graphlayout::NodeInput {
-        label: name.into(),
-        file: PathBuf::from("/nonexistent/clew-ui-test").join(name),
-        line: 1,
-        weight: 1.0,
-        cyclic: false,
+    let component = |name: &str| Component {
+        name: name.into(),
+        rel: name.into(),
+        kind: None,
+        language: Some("rust"),
+        files: 3,
+        about: None,
+        parts: Vec::new(),
+        more_parts: 0,
+        entry: None,
+        built_on: Vec::new(),
+        members: 1,
     };
-    app.proj.overview.map = Some(crate::graphlayout::layout(
-        vec![node("a.rs"), node("b.rs")],
-        vec![(0, 1)],
-    ));
-    for graph_3d in [false, true] {
-        app.graph_3d = graph_3d;
+    for (basis, how) in [
+        (Basis::Packages, "Each box is one of the project's packages"),
+        (Basis::Folders, "Each box is a part of the project's source"),
+    ] {
+        app.proj.overview.architecture = Some(std::sync::Arc::new(Architecture {
+            components: vec![component("app"), component("core")],
+            links: vec![Link {
+                from: 0,
+                to: 1,
+                imports: 2,
+            }],
+            basis,
+        }));
+        app.proj.overview.arch_rev += 1;
         let mut sim = sim_of(&app);
-        assert!(shows(&mut sim, "Module graph"), "3D {graph_3d}: no map");
-        assert!(
-            text_at(
-                &mut sim,
-                |t| t.contains("drag") || t.contains("click") || t.contains("size ="),
-                0
-            )
-            .is_none(),
-            "3D {graph_3d}: a caption says how to use the map"
-        );
+        assert!(shows(&mut sim, "Architecture"));
+        assert!(shows(&mut sim, how), "{basis:?}");
+        assert!(!shows(&mut sim, "Module graph"));
     }
+    // Nothing read: no section.
+    app.proj.overview.architecture = None;
+    assert!(!shows(&mut sim_of(&app), "Each box is"));
 }
 
 /// E2-12: the chrome geometry the tutorial's spotlight places its holes with
@@ -21845,17 +21857,6 @@ fn a_long_search_result_ends_in_an_ellipsis() {
         super::sidebar::fit_pieces(pieces.clone(), shown, 10_000.0),
         pieces
     );
-}
-
-/// The Overview's module map takes over half the window's height, within
-/// bounds: at a fixed 320 it was a knot some 200 high across a page 900
-/// wide, its labels running into one another.
-#[test]
-fn the_overview_map_takes_room_from_the_window() {
-    use super::docs_stats::overview_map_h;
-    assert!(overview_map_h(860.0) > 450.0, "{}", overview_map_h(860.0));
-    assert_eq!(overview_map_h(400.0), super::chrome::OVERVIEW_MAP_H);
-    assert_eq!(overview_map_h(4000.0), 640.0);
 }
 
 /// A server program of the reader's own is added from a form of its own,

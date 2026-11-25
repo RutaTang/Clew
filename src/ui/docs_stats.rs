@@ -5,31 +5,6 @@ use super::*;
 // iced's column!/row! from the prelude macros of the same name.
 use iced::widget::{column, row};
 
-/// The overview home's embedded module map. Never idly spinning: this is
-/// the landing page, and a spinning map never settles — it re-tessellated
-/// every frame for as long as the page was open. The spin belongs to the
-/// graph modal, whose header toggles it. Nor does the wheel zoom it: the
-/// page around it scrolls.
-pub(crate) fn overview_map_canvas<'a>(
-    app: &'a App,
-    layout: &'a crate::graphlayout::Layout,
-) -> GraphCanvas<'a> {
-    GraphCanvas::new(
-        layout,
-        app.proj.overview.map_rev,
-        crate::Overlay::ProjectImports,
-        false,
-        app.graph_3d,
-        false,
-    )
-    .with_heat(
-        app.graph_heat
-            .then_some(app.proj.churn.as_deref())
-            .flatten(),
-        app.proj.churn_rev,
-    )
-}
-
 pub(crate) fn group_header(rel: &str) -> Element<'_, Message> {
     // The file tree's own mark for the file.
     let name = rel.rsplit_once('/').map_or(rel, |(_, name)| name);
@@ -627,8 +602,8 @@ pub(crate) fn docs_page<'a>(page: &'a crate::DocPage) -> Element<'a, Message> {
         .into()
 }
 
-/// The architecture-overview "home": the module map and, under it, the
-/// written overview — or, in a card where it will be, what it is and the
+/// The architecture-overview "home": the architecture diagram and, under
+/// it, the written overview — or, in a card where it will be, what it is and the
 /// one step that gets there ([`overview_to_write`]). Writing it again is
 /// one icon beside the close button, as the chrome's actions are, turning
 /// while it writes: the page was replaced by a line of words.
@@ -659,9 +634,31 @@ pub(crate) fn overview_home(app: &App) -> Element<'_, Message> {
     .spacing(8)
     .align_y(iced::Center);
 
-    // The architecture, drawn from the imports, before any prose about it.
+    // The page's width, for the diagram laid out to it.
+    let body = iced::widget::responsive(move |size| {
+        // The architecture, drawn from the project, before any prose about it.
+        let width = (size.width - super::chrome::SCROLLBAR_W - 4.0).max(0.0);
+        let mut items: Vec<Element<'_, Message>> = Vec::new();
+        items.extend(super::archview::architecture_section(app, width));
+        items.extend(overview_written(app, generated));
+        scrollable(Column::with_children(items).spacing(10).width(Fill))
+            .direction(thin_scroll())
+            .style(theme::overlay_scrollbar)
+            .height(Fill)
+            .into()
+    });
+
+    container(column![header, body].spacing(14))
+        .width(Fill)
+        .height(Fill)
+        .padding([20, 28])
+        .into()
+}
+
+/// The overview's prose under its diagram: as written, or what it is and
+/// the one step that gets there.
+fn overview_written(app: &App, generated: bool) -> Vec<Element<'_, Message>> {
     let mut items: Vec<Element<'_, Message>> = Vec::new();
-    items.extend(module_map(app));
     if generated {
         items.extend(render_prepared(app, &app.proj.overview.prepared));
     } else if app.no_code() {
@@ -681,23 +678,7 @@ pub(crate) fn overview_home(app: &App) -> Element<'_, Message> {
     } else {
         items.push(overview_to_write(app));
     }
-
-    container(
-        column![
-            header,
-            // As wide as the page: the map, held to a column of 860,
-            // was a knot in a band of nothing as wide again.
-            scrollable(Column::with_children(items).spacing(10).width(Fill))
-                .direction(thin_scroll())
-                .style(theme::overlay_scrollbar)
-                .height(Fill),
-        ]
-        .spacing(14),
-    )
-    .width(Fill)
-    .height(Fill)
-    .padding([20, 28])
-    .into()
+    items
 }
 
 /// Where the written overview will be, while it is not: what it is, and
@@ -791,43 +772,6 @@ fn overview_to_write(app: &App) -> Element<'_, Message> {
         .width(Fill)
         .style(theme::form_card)
         .into()
-}
-
-/// The overview's module map — the project's most connected files and the
-/// imports between them, drawn as the Import Graph is — when there is
-/// structure enough to draw.
-fn module_map(app: &App) -> Option<Element<'_, Message>> {
-    let layout = app
-        .proj
-        .overview
-        .map
-        .as_ref()
-        .filter(|l| !l.nodes.is_empty())?;
-    Some(
-        column![
-            text(tr!("Module graph"))
-                .size(ts::SUBTITLE)
-                .color(theme::fg_muted()),
-            // Clipped to its frame: a canvas draws where its geometry
-            // says, and a map zoomed or panned drew over the page around
-            // it.
-            super::clipped::Clipped::new(
-                iced::widget::canvas::Canvas::new(overview_map_canvas(app, layout))
-                    .width(Fill)
-                    .height(iced::Length::Fixed(overview_map_h(app.window_height))),
-            ),
-        ]
-        .spacing(6)
-        .into(),
-    )
-}
-
-/// The module map's height in a window `window_h` tall: over half of it.
-/// At a fixed 320 the map, fitted to hold at every angle of its spin, was a
-/// knot some 200 high across a page 900 wide, its labels running into one
-/// another; the written overview follows it, a scroll away.
-pub(crate) fn overview_map_h(window_h: f32) -> f32 {
-    (window_h * 0.55).clamp(OVERVIEW_MAP_H, 640.0)
 }
 
 /// Group a large integer with thousands separators, e.g. `12345` → `12,345`

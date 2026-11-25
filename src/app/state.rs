@@ -577,13 +577,15 @@ pub struct OverviewState {
     /// The module diagram is injected fresh at prepare time from the current
     /// import graph (never baked into the cache), so it can't go stale.
     pub markdown: Option<String>,
-    /// The module map, drawn natively on a canvas in the overview home (like the
-    /// Import Graph overlay) — laid out from the current import graph, not baked
-    /// into the prose or a mermaid diagram.
-    pub map: Option<graphlayout::Layout>,
-    /// The revision of `map`'s content (`ui::next_layout_rev`), bumped where
-    /// it is laid out — what tells the map's cached drawing it is stale.
-    pub map_rev: u64,
+    /// The project's architecture, drawn on the overview above its prose
+    /// (`architecture::read`): its packages or its source's parts, what each
+    /// is and uses — read from the files, the import graph, the manifests
+    /// and the folders' summaries while the overview is shown, and let go
+    /// while it is not, to be read afresh on Show.
+    pub architecture: Option<Arc<crate::architecture::Architecture>>,
+    /// The revision of `architecture` (`ui::next_layout_rev`), bumped where
+    /// it is read: what tells the diagram's layout and hover it is stale.
+    pub arch_rev: u64,
     /// The overview prepared for display (markdown + math/mermaid SVG segments).
     pub prepared: Vec<PreparedSeg>,
     /// True while the overview is being generated.

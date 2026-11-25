@@ -86,6 +86,7 @@ mod connect;
 pub(crate) use connect::*;
 mod graph;
 pub(crate) use graph::*;
+mod archview;
 mod graph_labels;
 mod history;
 mod memo;

@@ -949,12 +949,12 @@ impl App {
             self.proj.overview.prompt_hash = Some(cached.prompt_hash);
             let display = self.overview_display(&cached.markdown);
             self.proj.overview.markdown = Some(cached.markdown);
-            // The module map lays out from the import graph; if imports aren't
-            // resolved yet, it fills in when indexing completes
-            // (`refresh_overview_map`).
+            // The architecture is read from the import graph too; if imports
+            // aren't resolved yet, it fills in when they are
+            // (`refresh_architecture`).
             let (prepared, task) = self.prepare_segments(&display);
             self.proj.overview.prepared = prepared;
-            self.set_overview_map();
+            self.refresh_architecture();
             tasks.push(task);
         }
         if let Some(report) = state.stats

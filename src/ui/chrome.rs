@@ -61,9 +61,6 @@ pub(crate) const TIP_MAX_W: f32 = 320.0;
 pub(crate) const NOTES_MAX_W: f32 = 520.0;
 /// Height of the remote folder picker's listing.
 pub(crate) const REMOTE_LIST_H: f32 = 300.0;
-/// Least height of the overview home's embedded module map (see
-/// `docs_stats::overview_map_h`).
-pub(crate) const OVERVIEW_MAP_H: f32 = 320.0;
 
 /// Where a modal's panel sits in the window.
 #[derive(Debug, Clone, Copy, PartialEq)]

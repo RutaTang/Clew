@@ -127,19 +127,22 @@ fn a_remote_projects_weak_spots_are_read_from_its_host() {
     );
 }
 
-/// The overview's module map — the architecture, drawn from the imports —
-/// is on the page a project opens on before any overview is written, and
-/// laid out on Show when it is not yet.
+/// The overview's architecture — read from the project, its imports among
+/// them — is on the page a project opens on before any overview is written,
+/// its parts linked as they import one another; and read on Show when it is
+/// not yet — let go while the page is put away and the graph moves on.
 #[test]
-fn the_overview_shows_its_module_map_before_any_prose() {
+fn the_overview_shows_its_architecture_before_any_prose() {
     let mut app = scanned_app("overview-map-first");
     let root = app.proj.project.as_ref().unwrap().root.clone();
-    std::fs::create_dir_all(root.join("py")).unwrap();
+    for dir in ["src/web", "src/data"] {
+        std::fs::create_dir_all(root.join(dir)).unwrap();
+    }
     for (rel, text) in [
-        ("py/main.py", "import a\nimport b\nimport c\n"),
-        ("py/a.py", "import b\nimport c\n"),
-        ("py/b.py", "import c\n"),
-        ("py/c.py", "X = 1\n"),
+        ("src/web/__init__.py", ""),
+        ("src/web/views.py", "from ..data import orders\n"),
+        ("src/data/__init__.py", ""),
+        ("src/data/orders.py", "X = 1\n"),
     ] {
         std::fs::write(root.join(rel), text).unwrap();
     }
@@ -152,16 +155,81 @@ fn the_overview_shows_its_module_map_before_any_prose() {
     settle_imports(&mut app, indexed);
     assert!(app.proj.overview.markdown.is_none(), "no prose written");
     assert!(app.proj.overview.showing, "the page a project opens on");
-    let map = app
+    let arch = app
         .proj
         .overview
-        .map
-        .as_ref()
-        .expect("a map on the landing page");
-    assert!(map.nodes.len() >= 3, "{}", map.nodes.len());
-    // Put away and the map dropped: Show lays it out again.
+        .architecture
+        .clone()
+        .expect("the architecture on the landing page");
+    let at = |name: &str| arch.components.iter().position(|c| c.name == name);
+    let (web, data) = (at("web").expect("web"), at("data").expect("data"));
+    assert!(
+        arch.links.iter().any(|l| l.from == web && l.to == data),
+        "{arch:?}"
+    );
+    // Put away, the graph moving on: let go. Show reads it again.
     let _ = app.update(Message::Overview(OverviewMsg::Close));
-    app.proj.overview.map = None;
+    app.refresh_architecture();
+    assert!(app.proj.overview.architecture.is_none(), "let go unseen");
     let _ = app.update(Message::Overview(OverviewMsg::Show));
-    assert!(app.proj.overview.map.is_some(), "laid out on Show");
+    assert!(app.proj.overview.architecture.is_some(), "read on Show");
+}
+
+/// The architecture of the project `ARCH_PROBE` names, read as the app
+/// reads it — scanned, indexed, its imports resolved — printed. Not a test
+/// of anything: a way to look at a real project's. Without it, it passes.
+#[test]
+#[ignore = "needs ARCH_PROBE"]
+fn probe_a_projects_architecture() {
+    let Some(root) = std::env::var_os("ARCH_PROBE").map(std::path::PathBuf::from) else {
+        eprintln!("skipped: ARCH_PROBE is not set");
+        return;
+    };
+    let mut app = blank_app();
+    scan_synchronously(&mut app, root.canonicalize().unwrap());
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let files = app.proj.project.as_ref().unwrap().files.clone();
+    let started = std::time::Instant::now();
+    let indexed = app.update(Message::Watch(WatchMsg::SymbolIndexDone {
+        stamp: app.stamp(),
+        indexed: index::build_indexed(&root, files),
+    }));
+    settle_imports(&mut app, indexed);
+    let read = std::time::Instant::now();
+    let arch = app.compute_architecture().expect("a project");
+    eprintln!(
+        "{:?}: {} components, {} links, read in {:?} (indexed in {:?})",
+        arch.basis,
+        arch.components.len(),
+        arch.links.len(),
+        read.elapsed(),
+        read - started
+    );
+    for (i, c) in arch.components.iter().enumerate() {
+        eprintln!(
+            "[{i}] {} ({}) {:?} {:?} {} files{} — {:?}\n     parts: {:?} +{}\n     entry: {:?} on: {:?}",
+            c.name,
+            c.rel,
+            c.kind,
+            c.language,
+            c.files,
+            if c.members > 1 {
+                format!(", {} packages", c.members)
+            } else {
+                String::new()
+            },
+            c.about,
+            c.parts.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
+            c.more_parts,
+            c.entry,
+            c.built_on
+        );
+    }
+    for l in &arch.links {
+        eprintln!(
+            "  {} -> {} ({})",
+            arch.components[l.from].name, arch.components[l.to].name, l.imports
+        );
+    }
+    eprintln!("rows: {:?}", crate::architecture::layers(&arch));
 }

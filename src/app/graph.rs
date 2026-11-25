@@ -1205,17 +1205,14 @@ impl App {
                 relayout = self.refresh_graph_layout();
             }
         }
-        // The overview's module map is laid out from the resolved graph; one
-        // drawn before the imports were resolved fills in now.
-        let overview = if refresh_overview {
-            self.refresh_overview_map()
-        } else {
-            Task::none()
-        };
+        // The overview's architecture is read from the resolved graph; one
+        // read before the imports were resolved fills in now.
+        if refresh_overview {
+            self.refresh_architecture();
+        }
         let next = self.schedule_imports();
         Task::batch([
             retired,
-            overview,
             calls,
             relayout,
             next,

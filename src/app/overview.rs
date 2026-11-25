@@ -1,5 +1,5 @@
 //! The two project "homes": the architecture overview (generation, freshness,
-//! the native module map) and the code statistics.
+//! the architecture diagram) and the code statistics.
 //!
 //! Its messages, [`OverviewMsg`], arrive through `App::update_overview`.
 
@@ -32,31 +32,91 @@ impl App {
         overview::strip_module_map(raw)
     }
 
-    /// Lay out the module map from the current import graph, or None when there's
-    /// too little structure to show.
-    pub(crate) fn compute_overview_map(&self) -> Option<graphlayout::Layout> {
-        let (nodes, edges) = overview::module_layout_inputs(&self.proj.import_graph.scope_map())?;
-        Some(graphlayout::layout(nodes, edges))
-    }
-
-    /// Recompute the native module-map layout, e.g. once the import graph finishes
-    /// resolving. Cheap and synchronous — the map is a canvas, not a prose segment.
-    /// Kept up to date while it is shown — with the overview's prose, or on
-    /// the page before any prose is written — or once it has been laid out.
-    pub(crate) fn refresh_overview_map(&mut self) -> Task<Message> {
-        if self.proj.overview.markdown.is_some()
-            || self.proj.overview.showing
-            || self.proj.overview.map.is_some()
-        {
-            self.set_overview_map();
+    /// The project's architecture, read from its files, its import graph,
+    /// its manifests and doc comments (a local project's: a remote one's
+    /// files are not here to read) and the AI's summaries of its folders;
+    /// `None` with no project open.
+    pub(crate) fn compute_architecture(&self) -> Option<crate::architecture::Architecture> {
+        let project = self.proj.project.as_ref()?;
+        let root = project.root.clone();
+        let graph = &self.proj.import_graph;
+        let rel_of = |p: &Path| {
+            p.strip_prefix(&root)
+                .ok()
+                .map(|r| r.to_string_lossy().replace('\\', "/"))
+        };
+        let mut imports: Vec<(String, String)> = Vec::new();
+        let mut externals: Vec<(String, String)> = Vec::new();
+        for f in project.files.iter() {
+            for e in graph.imports(&f.abs) {
+                if !e.kind.is_dependency() {
+                    continue;
+                }
+                match &e.target {
+                    imports::Target::Internal(to) => {
+                        if let Some(to) = rel_of(to) {
+                            imports.push((f.rel.clone(), to));
+                        }
+                    }
+                    imports::Target::External(name) => {
+                        externals.push((f.rel.clone(), name.clone()))
+                    }
+                    imports::Target::Unresolved(_) => {}
+                }
+            }
         }
-        Task::none()
+        let summaries = self
+            .proj
+            .explain
+            .cache
+            .iter()
+            .filter_map(|(node, cached)| match node {
+                explain::Node::Folder(p) => rel_of(p).map(|rel| (rel, cached.summary.clone())),
+                _ => None,
+            })
+            .collect();
+        let mains = self
+            .proj
+            .symbol_index_by_file
+            .values()
+            .flat_map(|syms| syms.iter())
+            .filter(|s| s.entry == Some(index::EntryKind::Main))
+            .map(|s| s.rel.clone())
+            .collect();
+        let local = !self.connection.is_remote();
+        let read = |rel: &str| -> Option<String> {
+            local
+                .then(|| {
+                    clew_core::fs_scan::read_confined_capped(&root, &root.join(rel), 256 * 1024)
+                })
+                .flatten()
+        };
+        Some(crate::architecture::read(&crate::architecture::Inputs {
+            files: project.files.iter().map(|f| f.rel.as_str()).collect(),
+            imports,
+            externals,
+            read: &read,
+            summaries,
+            mains,
+        }))
     }
 
-    /// Lay out the overview's module map from the current import graph.
-    pub(crate) fn set_overview_map(&mut self) {
-        self.proj.overview.map = self.compute_overview_map();
-        self.proj.overview.map_rev = ui::next_layout_rev();
+    /// Read the architecture anew — the import graph resolved, the overview
+    /// written — while the overview is shown; else let it go, to be read
+    /// on Show: it reads manifests and doc comments, which a project being
+    /// edited need not pay for at every save while nobody looks.
+    pub(crate) fn refresh_architecture(&mut self) {
+        if self.proj.overview.showing {
+            self.set_architecture();
+        } else if self.proj.overview.architecture.take().is_some() {
+            self.proj.overview.arch_rev = ui::next_layout_rev();
+        }
+    }
+
+    /// Read the overview's architecture.
+    pub(crate) fn set_architecture(&mut self) {
+        self.proj.overview.architecture = self.compute_architecture().map(Arc::new);
+        self.proj.overview.arch_rev = ui::next_layout_rev();
     }
 
     /// Assemble the overview prompt inputs from clew's existing artifacts:
@@ -214,8 +274,8 @@ impl App {
         self.proj.overview.generating = false;
         match result {
             Ok(markdown) => {
-                // Persist the raw prose; fold the live module map in only
-                // for display so the cache never carries a stale diagram.
+                // Persist the raw prose; the architecture is drawn live beside
+                // it, never cached with it.
                 let saved = match &self.proj.derived_dir {
                     Some(store) => overview::save(
                         store,
@@ -230,7 +290,7 @@ impl App {
                 let (prepared, task) = self.prepare_segments(&display);
                 self.proj.overview.prepared = prepared;
                 self.proj.overview.markdown = Some(markdown);
-                self.set_overview_map();
+                self.refresh_architecture();
                 self.proj.overview.prompt_hash = Some(prompt_hash);
                 self.status = match saved {
                     Ok(()) => tr!("Architecture overview ready").into(),
@@ -389,8 +449,8 @@ impl App {
             OverviewMsg::Show => {
                 // The architecture, drawn from the imports, is there before
                 // any prose is written about it.
-                if self.proj.overview.map.is_none() {
-                    self.set_overview_map();
+                if self.proj.overview.architecture.is_none() {
+                    self.set_architecture();
                 }
                 self.proj.overview.showing = true;
                 self.proj.stats.showing = false;

@@ -3,13 +3,11 @@
 //!
 //! It's assembled from artifacts clew already has — the folder/file explanation
 //! summaries, the import graph, and the symbol index — plus one LLM call that
-//! writes the narrative and reading order. The module map is computed
-//! deterministically from the import graph (not hallucinated) and drawn on a
-//! native canvas beside the text ([`module_layout_inputs`]); an overview saved
-//! by an older version that embedded it as a mermaid section has that section
-//! removed ([`strip_module_map`]).
+//! writes the narrative and reading order. The architecture diagram above it
+//! is read deterministically from the project (`architecture::read`), not
+//! hallucinated; an overview saved by an older version that embedded a
+//! mermaid module map has that section removed ([`strip_module_map`]).
 
-use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::incremental::Version;
@@ -129,165 +127,9 @@ pub fn strip_module_map(markdown: &str) -> String {
     }
 }
 
-/// Select the most-connected files and the internal import edges among them, as
-/// inputs to clew's native graph layout — the module map is drawn on a canvas
-/// (like the Import Graph overlay), not as a mermaid diagram. `scope` maps each
-/// file to the internal files it imports. Returns None when there's too little
-/// structure to be worth showing.
-#[allow(clippy::type_complexity)] // (nodes, edges) layout inputs, used once
-pub fn module_layout_inputs(
-    scope: &HashMap<PathBuf, HashSet<PathBuf>>,
-) -> Option<(Vec<crate::graphlayout::NodeInput>, Vec<(usize, usize)>)> {
-    const MAX_NODES: usize = 14;
-
-    // Degree = fan-out (files it imports) + fan-in (files importing it).
-    let mut fan_in: HashMap<&PathBuf, usize> = HashMap::new();
-    for deps in scope.values() {
-        for d in deps {
-            *fan_in.entry(d).or_default() += 1;
-        }
-    }
-    let deg = |f: &PathBuf| {
-        scope.get(f).map(|d| d.len()).unwrap_or(0) + fan_in.get(f).copied().unwrap_or(0)
-    };
-    // Every file in the graph is a node — both importers (`scope` keys) AND the
-    // leaf modules they import (values). Ranking off keys alone would drop a
-    // widely-imported file that imports nothing itself (e.g. a `lexer`/`ast`),
-    // leaving the map incomplete.
-    let mut node_set: HashSet<&PathBuf> = scope.keys().collect();
-    for deps in scope.values() {
-        node_set.extend(deps.iter());
-    }
-    let mut ranked: Vec<&PathBuf> = node_set.into_iter().collect();
-    ranked.sort_by_key(|f| (std::cmp::Reverse(deg(f)), (*f).clone())); // deterministic tie-break
-    let top: Vec<&PathBuf> = ranked.into_iter().take(MAX_NODES).collect();
-    let idx: HashMap<&PathBuf, usize> = top.iter().enumerate().map(|(i, f)| (*f, i)).collect();
-
-    let labels = module_labels(&top);
-    let nodes: Vec<crate::graphlayout::NodeInput> = top
-        .iter()
-        .zip(labels)
-        .map(|(f, label)| crate::graphlayout::NodeInput {
-            label,
-            file: (*f).clone(),
-            line: 1,
-            weight: deg(f) as f32,
-            cyclic: false,
-        })
-        .collect();
-    let mut edges = Vec::new();
-    for f in &top {
-        if let Some(deps) = scope.get(*f) {
-            for d in deps {
-                if let (Some(&a), Some(&b)) = (idx.get(f), idx.get(d)) {
-                    edges.push((a, b));
-                }
-            }
-        }
-    }
-    // Need at least a couple of nodes and one edge to be informative.
-    (nodes.len() >= 3 && !edges.is_empty()).then_some((nodes, edges))
-}
-
-/// Each file's name on the module graph, as its module is called: a
-/// package's `__init__.py`, a Rust `mod.rs`, a JavaScript `index.js` by
-/// their folder — "__init__" named no package of the project's — and
-/// `__main__.py` by its package, as `python -m` runs it. Two files of one
-/// name ("utils") are told apart by their folders.
-fn module_labels(files: &[&PathBuf]) -> Vec<String> {
-    let name_of = |p: Option<&Path>| {
-        p.and_then(Path::file_name)
-            .and_then(|n| n.to_str())
-            .map(str::to_string)
-    };
-    // Each file's name, and the folder that tells two of one name apart.
-    let named: Vec<(String, Option<String>)> = files
-        .iter()
-        .map(|f| {
-            let stem = f.file_stem().and_then(|s| s.to_str()).unwrap_or("?");
-            let dir = f.parent();
-            let package = name_of(dir).filter(|_| matches!(stem, "__init__" | "mod" | "index"));
-            let main = name_of(dir).filter(|_| stem == "__main__");
-            match (package, main) {
-                (Some(package), _) => (package, name_of(dir.and_then(Path::parent))),
-                (_, Some(package)) => (
-                    format!("{package}.__main__"),
-                    name_of(dir.and_then(Path::parent)),
-                ),
-                _ => (stem.to_string(), name_of(dir)),
-            }
-        })
-        .collect();
-    named
-        .iter()
-        .map(|(name, folder)| {
-            let twice = named.iter().filter(|(other, _)| other == name).count() > 1;
-            match (twice, folder) {
-                (true, Some(folder)) => format!("{folder}/{name}"),
-                _ => name.clone(),
-            }
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// A package's `__init__.py` is named by its package, `__main__.py` as
-    /// `python -m` runs it, and two files of one name by their folders.
-    #[test]
-    fn modules_are_named_as_they_are_imported() {
-        let files: Vec<PathBuf> = [
-            "src/library/__init__.py",
-            "src/library/__main__.py",
-            "src/library/services/loans.py",
-            "src/library/models/utils.py",
-            "src/library/services/utils.py",
-            "src/shapes/mod.rs",
-            "web/widgets/index.ts",
-        ]
-        .iter()
-        .map(PathBuf::from)
-        .collect();
-        let refs: Vec<&PathBuf> = files.iter().collect();
-        assert_eq!(
-            module_labels(&refs),
-            [
-                "library",
-                "library.__main__",
-                "loans",
-                "models/utils",
-                "services/utils",
-                "shapes",
-                "widgets",
-            ]
-        );
-    }
-
-    #[test]
-    fn layout_inputs_from_imports_or_none() {
-        let mut scope: HashMap<PathBuf, HashSet<PathBuf>> = HashMap::new();
-        let f = |s: &str| PathBuf::from(s);
-        // b and c are imported but import nothing themselves — pure leaf targets,
-        // never keys of `scope`. They must still show up as nodes with edges.
-        scope.insert(f("a.rs"), HashSet::from([f("b.rs"), f("c.rs")]));
-        scope.insert(f("b.rs"), HashSet::from([f("c.rs")]));
-        let (nodes, edges) = module_layout_inputs(&scope).expect("inputs");
-        let labels: HashSet<&str> = nodes.iter().map(|n| n.label.as_str()).collect();
-        assert!(
-            labels.contains("a") && labels.contains("b"),
-            "labels from stems"
-        );
-        // c is only ever a target, yet must appear (the leaf-node fix).
-        assert!(labels.contains("c"), "leaf-only target missing: {labels:?}");
-        assert_eq!(edges.len(), 3, "all three import edges kept: {edges:?}");
-
-        // Too flat → None.
-        let mut flat: HashMap<PathBuf, HashSet<PathBuf>> = HashMap::new();
-        flat.insert(f("x.rs"), HashSet::new());
-        assert!(module_layout_inputs(&flat).is_none());
-    }
 
     /// Summaries are a model's words about repository code, and names are the
     /// repository's: both arrive fenced and framed as data, and none of it can

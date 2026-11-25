@@ -14261,10 +14261,10 @@ fn a_project_switch_drops_every_anchor_into_the_old_project() {
     // A walkthrough generation whose result the epoch guard will discard.
     app.proj.walk.generating = Some(String::new());
     app.proj.walk.retried = true;
-    // The module map is laid out from the OLD import graph. Project B has no
+    // The architecture is read from the OLD project. Project B has no
     // cached overview, so the recompute at the end of `on_scan_done` does not
     // run and only an explicit reset retires it.
-    app.proj.overview.map = Some(graphlayout::Layout::default());
+    app.proj.overview.architecture = Some(Arc::new(Default::default()));
 
     scan_synchronously(&mut app, fixture_project("switch-anchors-b"));
 
@@ -14299,8 +14299,8 @@ fn a_project_switch_drops_every_anchor_into_the_old_project() {
         "collapsed trail nodes index the history that was just replaced"
     );
     assert!(
-        app.proj.overview.map.is_none(),
-        "the module map belongs to the import graph it was laid out from"
+        app.proj.overview.architecture.is_none(),
+        "the architecture belongs to the project it was read from"
     );
     assert!(
         app.proj.walk.generating.is_none() && !app.proj.walk.retried,
@@ -35536,11 +35536,10 @@ fn the_trail_writer_keeps_only_the_newest_trail_of_each_project() {
 
 /// E2-2 / E2-3: every change to a map's layout — installed anew, or its cycle
 /// rings re-marked in place — moves its revision, which is what tells the
-/// canvas its cached drawing is stale; and the overview home's embedded map
-/// never idly spins (a spinning map never settles, so the landing page
-/// re-tessellated every frame).
+/// canvas its cached drawing is stale; and so does the overview's
+/// architecture, each time it is read.
 #[test]
-fn map_layouts_are_revised_on_every_change_and_the_landing_map_rests() {
+fn map_layouts_and_the_architecture_are_revised_on_every_change() {
     let mut app = scanned_app("layout-revisions");
     let root = app.proj.project.as_ref().unwrap().root.clone();
     let opened = app.update(Message::Graph(GraphMsg::OpenOverlay(
@@ -35580,12 +35579,9 @@ fn map_layouts_are_revised_on_every_change_and_the_landing_map_rests() {
         "a layout laid out anew kept the re-marked one's revision"
     );
 
-    let map = app.proj.overview.map_rev;
-    app.set_overview_map();
-    assert!(app.proj.overview.map_rev > map);
-    app.graph_spin = true;
-    let layout = graphlayout::Layout::default();
-    assert!(!crate::ui::overview_map_canvas(&app, &layout).spin);
+    let read = app.proj.overview.arch_rev;
+    app.set_architecture();
+    assert!(app.proj.overview.arch_rev > read);
 }
 
 /// E2-5: the Language Servers panel's log is copied from the server only when
