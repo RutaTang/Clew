@@ -669,6 +669,19 @@ pub(super) fn map(corpus: &Corpus) -> Option<ProjectMap> {
                     };
                     nearest(wanted, &rel, Some(dir))
                 }),
+                // A Vite plugin's virtual module, as Starlight serves its
+                // components by (`virtual:starlight/components/Search`,
+                // the user's override or its own `Search.astro`): the
+                // project's component its last part names.
+                None if spec.starts_with("virtual:") => {
+                    let last = spec.rsplit(['/', ':']).next().unwrap_or(spec);
+                    let wanted = match (capitalised(last), exported.as_str()) {
+                        (true, _) => last,
+                        (false, "default") => name,
+                        (false, exported) => exported,
+                    };
+                    nearest(wanted, &file.rel, None)
+                }
                 // A workspace package that did not resolve to a file: the
                 // component of that name in it; any other package is not
                 // the project's.
@@ -1538,6 +1551,14 @@ mod tests {
                 "export default function Counter() { return <button />; }\n",
             ),
             (
+                "site/src/components/Header.astro",
+                "---\nimport Search from 'virtual:starlight/components/Search';\nimport config from 'virtual:starlight/user-config';\n---\n<header><Search /></header>\n",
+            ),
+            (
+                "site/src/components/Search.astro",
+                "---\n---\n<button>search</button>\n",
+            ),
+            (
                 "nuxt/pages/index.vue",
                 "<template><BaseButton size=\"lg\" /><LazyTheFooter /></template>\n",
             ),
@@ -1554,6 +1575,7 @@ mod tests {
             // Quoted and braced values whole, not their words.
             e("Index · site", "Hero", "title, tagline, count"),
             e("Index · site", "Counter · site", ""),
+            e("Header", "Search", ""),
             e("Index · nuxt", "Button", "size"),
             e("Index · nuxt", "TheFooter", ""),
         ] {
