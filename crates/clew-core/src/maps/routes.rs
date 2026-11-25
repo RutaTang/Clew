@@ -33,6 +33,9 @@ use tree_sitter::Node;
 use super::{Corpus, MapBuilder, Source, all_of, last_name, line, text, unquote};
 use crate::highlight::Lang;
 
+#[path = "routes_js.rs"]
+mod js;
+
 pub fn maps(corpus: &Corpus) -> Vec<ProjectMap> {
     let mut routes = Routes {
         map: MapBuilder::new(
@@ -42,6 +45,7 @@ pub fn maps(corpus: &Corpus) -> Vec<ProjectMap> {
         ),
         corpus,
         mounts: python_mounts(corpus),
+        js_mounts: js::Mounts::read(corpus),
     };
     let next = corpus.files.iter().any(|s| {
         s.name().starts_with("next.config.")
@@ -55,6 +59,14 @@ pub fn maps(corpus: &Corpus) -> Vec<ProjectMap> {
                 if next {
                     nextjs(&mut routes, source);
                 }
+                if let Some(tree) = source.tree() {
+                    let root = tree.root_node();
+                    js::bun(&mut routes, source, root);
+                    js::hapi(&mut routes, source, root);
+                    js::route_objects(&mut routes, source, root);
+                    js::route_elements(&mut routes, source, root);
+                    js::tanstack(&mut routes, source, root);
+                }
             }
             Some(Lang::Java) => java(&mut routes, source),
             Some(Lang::CSharp) => csharp(&mut routes, source),
@@ -66,6 +78,8 @@ pub fn maps(corpus: &Corpus) -> Vec<ProjectMap> {
             _ => {}
         }
     }
+    js::trpc(&mut routes, corpus);
+    js::file_routes(&mut routes, corpus);
     routes.map.finish().into_iter().collect()
 }
 
@@ -89,6 +103,8 @@ struct Routes<'c> {
     corpus: &'c Corpus,
     /// Where each Python router or blueprint is served ([`python_mounts`]).
     mounts: PyMounts,
+    /// Where each JavaScript router is mounted ([`js::Mounts`]).
+    js_mounts: js::Mounts,
 }
 
 impl Routes<'_> {
@@ -739,28 +755,23 @@ fn javascript(routes: &mut Routes, source: &Source) {
     };
     let src = source.text.as_str();
     let root = tree.root_node();
-    // Variables made servers or routers: `const x = express()`, `Router()`, …
-    let mut servers: Vec<String> = SERVER_NAMES.iter().map(|s| s.to_string()).collect();
+    // Variables made servers or routers — `const x = express()`,
+    // `Router()`, `new Hono()` — each with its framework; the usual names
+    // with the file's.
+    let usual = js::file_framework(src);
+    let mut servers: Vec<(String, &str)> = SERVER_NAMES
+        .iter()
+        .map(|s| (s.to_string(), usual))
+        .collect();
     for declarator in all_of(root, "variable_declarator") {
         if let (Some(name), Some(value)) = (
             declarator.child_by_field_name("name"),
             declarator.child_by_field_name("value"),
-        ) {
-            let v = text(value, src);
-            if [
-                "express(",
-                "Router(",
-                "fastify(",
-                "new Koa",
-                "new Router",
-                "new Hono",
-                "express.Router(",
-            ]
-            .iter()
-            .any(|k| v.starts_with(k) || v.contains(&format!(".{k}")))
-            {
-                servers.push(text(name, src).to_string());
-            }
+        ) && let Some(framework) = js::made_by(text(value, src))
+        {
+            let name = text(name, src).to_string();
+            servers.retain(|(n, _)| *n != name);
+            servers.push((name, framework));
         }
     }
     for call in all_of(root, "call_expression") {
@@ -781,6 +792,15 @@ fn javascript(routes: &mut Routes, source: &Source) {
             continue;
         }
         let all = args(call);
+        // What the route is made on: a server variable, or an app made in
+        // place and chained (`new Hono().get(…).post(…)`).
+        let root = js::chain_root(object);
+        let on = text(root, src);
+        let server = servers
+            .iter()
+            .find(|(n, _)| n == on)
+            .map(|(n, f)| (n.clone(), *f))
+            .or_else(|| js::made_by(on).map(|f| (String::new(), f)));
         // `router.route("/x").get(h).post(h2)`: the path is the route's,
         // down the chain.
         let (path, handlers) = if let Some(route) = route_call(object, src) {
@@ -789,7 +809,7 @@ fn javascript(routes: &mut Routes, source: &Source) {
             };
             (path, all.as_slice())
         } else {
-            if !servers.iter().any(|s| s == text(object, src)) {
+            if server.is_none() {
                 continue;
             }
             let Some(path) = all.first().and_then(|a| string(*a, src)) else {
@@ -800,6 +820,7 @@ fn javascript(routes: &mut Routes, source: &Source) {
             }
             (path, &all[1..])
         };
+        let (var, framework) = server.unwrap_or_else(|| (on.to_string(), usual));
         if !path.starts_with('/') && path != "*" {
             continue;
         }
@@ -811,7 +832,8 @@ fn javascript(routes: &mut Routes, source: &Source) {
             _ => Handler::Inline,
         };
         let method = if verb == "all" { "ANY" } else { verb };
-        routes.add("Express", method, &path, &source.rel, line(call), handler);
+        let path = join(&routes.js_mounts.prefix(&source.rel, &var), &path);
+        routes.add(framework, method, &path, &source.rel, line(call), handler);
     }
     nest(routes, source, root);
 }
@@ -934,11 +956,13 @@ fn nextjs(routes: &mut Routes, source: &Source) {
     };
     let stem = file.rsplit_once('.').map_or(file, |(s, _)| s);
     let segments: Vec<&str> = dir.split('/').filter(|s| !s.is_empty()).collect();
+    // `[id]` read as `:id`, `[...slug]` as `*slug`, as every other
+    // framework's routes are said.
     let route_of = |parts: &[&str]| -> String {
         parts
             .iter()
-            .filter(|p| !(p.starts_with('@') || p.starts_with('(') && p.ends_with(')')))
-            .copied()
+            .filter(|p| !p.starts_with('@'))
+            .filter_map(|p| js::segment(p))
             .collect::<Vec<_>>()
             .join("/")
     };
@@ -1955,6 +1979,250 @@ mod tests {
         assert_eq!(framework(route), "FastAPI / Flask");
     }
 
+    /// A route node's framework (its detail).
+    fn frameworks_of(files: &[(&str, &str)]) -> Vec<(String, String)> {
+        let maps = maps(&Corpus::of(files));
+        let mut out: Vec<(String, String)> = maps
+            .first()
+            .map(|m| {
+                m.nodes
+                    .iter()
+                    .filter(|n| n.kind == "route")
+                    .map(|n| (n.label.clone(), n.detail.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        out.sort();
+        out
+    }
+
+    /// Each server framework by its name; an app made in place and
+    /// chained; a router mounted under a prefix, in its own file or
+    /// imported from another, and a file mounted in a mounted file under
+    /// both prefixes.
+    #[test]
+    fn js_server_frameworks_and_mounts() {
+        let got = frameworks_of(&[
+            (
+                "src/index.ts",
+                "import { Hono } from 'hono'\nimport books from './books'\nconst app = new Hono()\napp.get('/', (c) => c.text('hi'))\napp.route('/books', books)\nexport default app\n",
+            ),
+            (
+                "src/books.ts",
+                "import { Hono } from 'hono'\nconst app = new Hono().get('/', list).post('/:id', create)\nexport default app\n",
+            ),
+            (
+                "api/server.js",
+                "const express = require('express')\nconst users = require('./users')\nconst app = express()\nconst admin = express.Router()\nadmin.get('/stats', stats)\napp.use('/admin', admin)\napp.use('/api', users)\n",
+            ),
+            (
+                "api/users.js",
+                "const router = require('express').Router()\nrouter.get('/:id', show)\nmodule.exports = router\n",
+            ),
+            (
+                "f/app.ts",
+                "import Fastify from 'fastify'\nconst app = Fastify()\napp.get('/ping', async () => 'pong')\n",
+            ),
+            (
+                "e/app.ts",
+                "import { Elysia } from 'elysia'\nnew Elysia().get('/e', () => 'x').listen(3000)\n",
+            ),
+        ]);
+        for (label, framework) in [
+            ("GET /", "Hono"),
+            ("GET /books", "Hono"),
+            ("POST /books/:id", "Hono"),
+            ("GET /admin/stats", "Express"),
+            ("GET /api/:id", "Express"),
+            ("GET /ping", "Fastify"),
+            ("GET /e", "Elysia"),
+        ] {
+            assert!(
+                got.contains(&(label.to_string(), framework.to_string())),
+                "{label} {framework} in {got:?}"
+            );
+        }
+    }
+
+    /// Bun's routes table, Hapi's route objects and tRPC's procedures, by
+    /// the path a client calls them by.
+    #[test]
+    fn bun_hapi_and_trpc_routes() {
+        let got = frameworks_of(&[
+            (
+                "server.ts",
+                "Bun.serve({ routes: { '/api/status': new Response('OK'), '/users/:id': getUser, '/api/posts': { GET: listPosts, POST: async (req) => create(req) } } })\n",
+            ),
+            (
+                "hapi.js",
+                "server.route({ method: 'GET', path: '/h/{id}', handler: show });\n",
+            ),
+            (
+                "packages/api/src/router/post.ts",
+                "export const postRouter = {\n  all: publicProcedure.query(({ ctx }) => ctx.db.query.Post.findMany()),\n  create: protectedProcedure.input(z.object({})).mutation(({ input }) => input),\n} satisfies TRPCRouterRecord;\n",
+            ),
+            (
+                "packages/api/src/root.ts",
+                "export const appRouter = createTRPCRouter({\n  post: postRouter,\n  health: publicProcedure.query(() => 'ok'),\n});\n",
+            ),
+        ]);
+        for (label, framework) in [
+            ("ANY /api/status", "Bun"),
+            ("ANY /users/:id", "Bun"),
+            ("GET /api/posts", "Bun"),
+            ("POST /api/posts", "Bun"),
+            ("GET /h/{id}", "Hapi"),
+            ("QUERY post.all", "tRPC"),
+            ("MUTATION post.create", "tRPC"),
+            ("QUERY health", "tRPC"),
+        ] {
+            assert!(
+                got.contains(&(label.to_string(), framework.to_string())),
+                "{label} {framework} in {got:?}"
+            );
+        }
+    }
+
+    /// The client's routes: React Router's route objects and `<Route>`
+    /// elements, nested; Vue Router's, a lazy page by its file; TanStack
+    /// Router's file routes; and the file-routed frameworks' pages.
+    #[test]
+    fn client_routes_and_file_routed_pages() {
+        let got = routes_of(&[
+            (
+                "src/router.tsx",
+                "import { createBrowserRouter } from 'react-router-dom'\nexport const router = createBrowserRouter([\n  { path: '/', element: <Root />, children: [\n    { path: 'posts/:id', element: <Post /> },\n  ] },\n])\n",
+            ),
+            (
+                "src/App.tsx",
+                "import { Routes, Route } from 'react-router-dom'\nexport function App() {\n  return <Routes><Route path=\"/shop\" element={<Shop />}><Route path=\"cart\" element={<Cart />} /></Route></Routes>\n}\nfunction Root() {}\nfunction Post() {}\nfunction Shop() {}\nfunction Cart() {}\n",
+            ),
+            (
+                "web/src/router/index.ts",
+                "import { createRouter } from 'vue-router'\nexport default createRouter({ routes: [\n  { path: '/', component: Home },\n  { path: '/about', component: () => import('../views/About.vue') },\n] })\n",
+            ),
+            (
+                "web/src/views/About.vue",
+                "<template><p>about</p></template>\n",
+            ),
+        ]);
+        for (route, handler) in [
+            ("PAGE /", "Root"),
+            ("PAGE /posts/:id", "Post"),
+            ("PAGE /shop", "Shop"),
+            ("PAGE /shop/cart", "Cart"),
+            ("PAGE /about", "About.vue"),
+        ] {
+            assert!(
+                got.iter().any(|(r, h, _)| r == route && h == handler),
+                "{route} → {handler} in {got:?}"
+            );
+        }
+        let pages = route_labels(&[
+            ("nuxt.config.ts", "export default defineNuxtConfig({})\n"),
+            ("pages/index.vue", "<template/>\n"),
+            ("pages/posts/[id].vue", "<template/>\n"),
+            (
+                "server/api/users/[id].get.ts",
+                "export default defineEventHandler(() => 1)\n",
+            ),
+            (
+                "src/routes/posts.$postId.tsx",
+                "export const Route = createFileRoute('/posts/$postId')({ component: Post })\n",
+            ),
+        ]);
+        for page in [
+            "PAGE /",
+            "PAGE /posts/:id",
+            "GET /api/users/:id",
+            "PAGE /posts/:postId",
+        ] {
+            assert!(pages.contains(&page.to_string()), "{page} in {pages:?}");
+        }
+        let kit = route_labels(&[
+            ("svelte.config.js", "export default {}\n"),
+            (
+                "package.json",
+                "{\"devDependencies\": {\"@sveltejs/kit\": \"2\"}}",
+            ),
+            ("src/routes/+page.svelte", "<h1/>\n"),
+            ("src/routes/blog/[slug]/+page.svelte", "<h1/>\n"),
+            (
+                "src/routes/api/(v1)/items/+server.ts",
+                "export async function GET() {}\nexport const POST = async () => {}\n",
+            ),
+        ]);
+        for page in [
+            "PAGE /",
+            "PAGE /blog/:slug",
+            "GET /api/items",
+            "POST /api/items",
+        ] {
+            assert!(kit.contains(&page.to_string()), "{page} in {kit:?}");
+        }
+        let remix = route_labels(&[
+            (
+                "package.json",
+                "{\"dependencies\": {\"@remix-run/react\": \"2\"}}",
+            ),
+            (
+                "app/routes/_index.tsx",
+                "export default function Index() {}\n",
+            ),
+            (
+                "app/routes/posts.$id.tsx",
+                "export default function Post() {}\n",
+            ),
+            (
+                "app/routes/_auth.login.tsx",
+                "export default function Login() {}\n",
+            ),
+            (
+                "app/routes/api.health.ts",
+                "export const loader = () => 1\n",
+            ),
+        ]);
+        for page in [
+            "PAGE /",
+            "PAGE /posts/:id",
+            "PAGE /login",
+            "ANY /api/health",
+        ] {
+            assert!(remix.contains(&page.to_string()), "{page} in {remix:?}");
+        }
+        let astro = route_labels(&[
+            ("astro.config.mjs", "export default {}\n"),
+            ("src/pages/index.astro", "---\n---\n<h1/>\n"),
+            ("src/pages/blog/[slug].md", "# x\n"),
+            (
+                "src/pages/api/search.json.ts",
+                "export const GET = () => new Response('[]')\n",
+            ),
+        ]);
+        for page in ["PAGE /", "PAGE /blog/:slug", "GET /api/search"] {
+            assert!(astro.contains(&page.to_string()), "{page} in {astro:?}");
+        }
+    }
+
+    /// A route's path by a constant the project declares
+    /// (`paths.app.root.path`), in another file.
+    #[test]
+    fn route_paths_by_constants() {
+        let got = route_labels(&[
+            (
+                "src/config/paths.ts",
+                "export const paths = {\n  home: { path: '/', getHref: () => '/' },\n  app: { root: { path: '/app' }, users: { path: 'users' } },\n} as const;\n",
+            ),
+            (
+                "src/app/router.tsx",
+                "import { createBrowserRouter } from 'react-router';\nimport { paths } from '@/config/paths';\nexport const r = () => createBrowserRouter([\n  { path: paths.home.path, lazy: () => import('./routes/landing') },\n  { path: paths.app.root.path, element: <Root />, children: [\n    { path: paths.app.users.path, lazy: () => import('./routes/users') },\n  ] },\n]);\n",
+            ),
+        ]);
+        for page in ["PAGE /", "PAGE /app", "PAGE /app/users"] {
+            assert!(got.contains(&page.to_string()), "{page} in {got:?}");
+        }
+    }
+
     #[test]
     fn express_nest_and_next_routes() {
         let got = routes_of(&[
@@ -2039,7 +2307,7 @@ mod tests {
                 "GET /",
                 "GET /api/orders",
                 "GET /cart",
-                "GET /posts/[id]",
+                "GET /posts/:id",
                 "POST /api/orders",
                 "POST /login",
             ]
