@@ -36,24 +36,60 @@ pub(crate) fn page<'a>(parts: Vec<Element<'a, Message>>) -> Element<'a, Message>
 }
 
 /// A group: `title` (with `aside` at its right — something that acts on
-/// the whole group) and under it `about`, then its rows in a card with a
-/// hairline between each. An empty title shows the card alone.
+/// the whole group), what it is for (`info`) behind an ⓘ beside it, then
+/// its rows in a card with a hairline between each. An empty title shows
+/// the card alone, `info` over it.
 pub(crate) fn group<'a>(
     title: &str,
+    info: Option<String>,
+    aside: Option<Element<'a, Message>>,
+    rows: Vec<Element<'a, Message>>,
+) -> Element<'a, Message> {
+    group_with(title, info, None, aside, rows)
+}
+
+/// [`group`] with `note` said under its title: how it stands — none yet, a
+/// failure, what is still being checked — which is not to be looked for
+/// behind an ⓘ.
+pub(crate) fn group_note<'a>(
+    title: &str,
+    note: Option<String>,
+    aside: Option<Element<'a, Message>>,
+    rows: Vec<Element<'a, Message>>,
+) -> Element<'a, Message> {
+    group_with(title, None, note, aside, rows)
+}
+
+/// [`group`] with both: what it is for behind an ⓘ, how it stands under it.
+pub(crate) fn group_with<'a>(
+    title: &str,
+    info: Option<String>,
     about: Option<String>,
     aside: Option<Element<'a, Message>>,
     rows: Vec<Element<'a, Message>>,
 ) -> Element<'a, Message> {
     let mut col = Column::new().spacing(8).width(Fill);
+    // With no title to stand beside, what it is for is said over the card.
+    let (info, about) = match (title.is_empty(), info, about) {
+        (true, Some(info), None) => (None, Some(info)),
+        (true, Some(info), Some(about)) => (None, Some(format!("{info} {about}"))),
+        (_, info, about) => (info, about),
+    };
     if !title.is_empty() || aside.is_some() {
         let mut head = row![
             text(title.to_string())
                 .size(ts::BASE)
                 .font(crate::fonts::UI_MEDIUM)
                 .color(theme::fg()),
-            space().width(Fill),
         ]
+        .spacing(4)
         .align_y(iced::Center);
+        if let Some(info) = info {
+            head = head.push(super::toolbar::info_tip(
+                crate::i18n::quoted(&info).into_owned(),
+            ));
+        }
+        head = head.push(space().width(Fill));
         if let Some(aside) = aside {
             head = head.push(aside);
         }
@@ -102,7 +138,27 @@ fn label<'a>(label: String, about: Option<String>) -> Element<'a, Message> {
 /// [`label`], its line under the name what is wrong (in the danger colour)
 /// when `wrong`.
 fn label_saying<'a>(label: String, about: Option<String>, wrong: bool) -> Element<'a, Message> {
-    let mut col = column![text(label).size(ts::BASE).color(theme::fg())].spacing(2);
+    label_full(label, None, about, wrong)
+}
+
+/// [`label_saying`], what it is for (`info`) behind an ⓘ beside its name.
+fn label_full<'a>(
+    label: String,
+    info: Option<String>,
+    about: Option<String>,
+    wrong: bool,
+) -> Element<'a, Message> {
+    let name: Element<'a, Message> = match info {
+        Some(info) => row![
+            text(label).size(ts::BASE).color(theme::fg()),
+            super::toolbar::info_tip(crate::i18n::quoted(&info).into_owned()),
+        ]
+        .spacing(4)
+        .align_y(iced::Center)
+        .into(),
+        None => text(label).size(ts::BASE).color(theme::fg()).into(),
+    };
+    let mut col = column![name].spacing(2);
     if let Some(about) = about {
         // Its names in the reader's quotation marks, not backticks.
         let about = crate::i18n::quoted(&about).into_owned();
@@ -132,6 +188,26 @@ pub(crate) fn item<'a>(
     control: impl Into<Element<'a, Message>>,
 ) -> Element<'a, Message> {
     item_saying(name, about, false, control)
+}
+
+/// [`item`] whose name says what it is for behind an ⓘ (`info`), not in a
+/// line under it; `about` under it is how it stands, if anything.
+pub(crate) fn item_info<'a>(
+    name: impl Into<String>,
+    info: impl Into<String>,
+    about: Option<String>,
+    control: impl Into<Element<'a, Message>>,
+) -> Element<'a, Message> {
+    let name = name.into();
+    let control = super::jump::field_named(control, &name);
+    row![
+        container(label_full(name, Some(info.into()), about, false)).width(Fill),
+        control,
+    ]
+    .spacing(16)
+    .align_y(iced::Center)
+    .padding([ROW_PAD_Y, ROW_PAD_X])
+    .into()
 }
 
 /// [`item`] whose `about` says what went wrong (`wrong`): in the danger

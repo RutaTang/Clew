@@ -197,9 +197,10 @@ fn speech_row_of<'a>(app: &'a App, model: &'static VoiceModel) -> Vec<Element<'a
             form::action(&label, msg).into()
         }
     };
-    let mut rows = vec![form::item(
+    let mut rows = vec![form::item_info(
         crate::i18n::lookup(model.name),
-        Some(crate::i18n::lookup(model.about).to_string()),
+        crate::i18n::lookup(model.about),
+        None,
         state,
     )];
     if let Some(e) = app.voice.speech.download_errors.get(model.id) {
@@ -300,7 +301,7 @@ fn turn_rows_of(app: &App) -> Vec<Element<'_, Message>> {
     let about = tr!(
         "Knows when you've finished speaking. It acts on a finished sentence at once and waits through a pause to think."
     );
-    let mut rows = vec![form::item(MODEL.name, Some(about.to_string()), state)];
+    let mut rows = vec![form::item_info(MODEL.name, about, None, state)];
     let warning = |said: String| {
         form::plain(
             text(said)
@@ -359,9 +360,10 @@ fn wake_model_rows(app: &App) -> Vec<Element<'_, Message>> {
         .into()
     };
     let about = tr!("Listens only for “Hey, Clew”.");
-    let mut rows = vec![form::item(
+    let mut rows = vec![form::item_info(
         crate::i18n::lookup(MODEL.name),
-        Some(about.to_string()),
+        about,
+        None,
         state,
     )];
     let warning = |said: String| {
@@ -408,12 +410,10 @@ fn wake_model_rows(app: &App) -> Vec<Element<'_, Message>> {
 /// How Clew answers aloud: whether it does, how fast, and the models it
 /// speaks with.
 fn speaking_rows(app: &App) -> Vec<Element<'_, Message>> {
-    let mut rows = vec![form::item(
+    let mut rows = vec![form::item_info(
         tr!("Read answers aloud"),
-        Some(
-            tr!("Read aloud on this computer, for spoken questions only or for every question.")
-                .into(),
-        ),
+        tr!("Read aloud on this computer, for spoken questions only or for every question."),
+        None,
         form::pick(
             tr!("Read answers aloud"),
             &crate::app::voice::ReadAloud::ALL[..],

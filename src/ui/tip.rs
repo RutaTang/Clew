@@ -4,7 +4,9 @@
 //! touched. Once one is shown, the next is shown at once (until the pointer
 //! has been off them all for [`WARM`]), so reading along a row of controls
 //! is as quick as before. A click puts it away until the pointer leaves:
-//! what was named has been chosen.
+//! what was named has been chosen — unless it is [`Tip::sticky`], an ⓘ
+//! whose words are what it is for: a click keeps those up until the next
+//! click, on it or anywhere, or Esc.
 
 use std::cell::Cell;
 use std::time::{Duration, Instant};
@@ -56,6 +58,7 @@ pub(crate) fn tip<'a, Message: 'a>(
         tip: tip.into(),
         position,
         gap: 0.0,
+        sticky: false,
     }
 }
 
@@ -64,12 +67,21 @@ pub(crate) struct Tip<'a, Message> {
     tip: Element<'a, Message>,
     position: Position,
     gap: f32,
+    sticky: bool,
 }
 
 impl<Message> Tip<'_, Message> {
     /// The room between what is named and its tooltip.
     pub(crate) fn gap(mut self, gap: f32) -> Self {
         self.gap = gap;
+        self
+    }
+
+    /// A click shows it and keeps it up — until the next click, on it or
+    /// anywhere else, or Esc — rather than putting it away: for an ⓘ, whose
+    /// words are what it is clicked for.
+    pub(crate) fn sticky(mut self) -> Self {
+        self.sticky = true;
         self
     }
 }
@@ -85,6 +97,8 @@ enum State {
     Shown,
     /// Clicked: not shown again until the pointer has left.
     PutAway,
+    /// A sticky one clicked: shown until the next click or Esc.
+    Pinned,
 }
 
 impl<Message> Widget<Message, Theme, Renderer> for Tip<'_, Message> {
@@ -151,10 +165,18 @@ impl<Message> Widget<Message, Theme, Renderer> for Tip<'_, Message> {
         let inner = INNER_OVER.get();
         let on = cursor.position_over(layout.bounds()).is_some();
         INNER_OVER.set(before || inner || on);
+        let escape = matches!(
+            event,
+            Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape),
+                ..
+            })
+        );
         if matches!(
             event,
             Event::Mouse(_) | Event::Window(window::Event::RedrawRequested(_))
-        ) {
+        ) || (escape && self.sticky)
+        {
             let state = tree.state.downcast_mut::<State>();
             let now = Instant::now();
             let moved = matches!(event, Event::Mouse(mouse::Event::CursorMoved { .. }));
@@ -162,11 +184,17 @@ impl<Message> Widget<Message, Theme, Renderer> for Tip<'_, Message> {
             // A press on it puts its tip away whether or not the pointer
             // rested there first: a control come up under a still pointer,
             // clicked, showed its tip at the first nudge after the click.
-            let pressed = on && matches!(event, Event::Mouse(mouse::Event::ButtonPressed(_)));
-            let next = step(*state, over, pressed, now);
+            let press = matches!(event, Event::Mouse(mouse::Event::ButtonPressed(_)));
+            let pressed = on && press;
+            let next = if self.sticky {
+                pin(*state, over, pressed, (press && !on) || escape, now)
+            } else {
+                step(*state, over, pressed, now)
+            };
             if next != *state {
                 // Shown or put away: the overlay comes or goes.
-                if matches!(next, State::Shown) || matches!(*state, State::Shown) {
+                let up = |s: State| matches!(s, State::Shown | State::Pinned);
+                if up(next) || up(*state) {
                     shell.invalidate_layout();
                     shell.request_redraw();
                 }
@@ -224,7 +252,10 @@ impl<Message> Widget<Message, Theme, Renderer> for Tip<'_, Message> {
         viewport: &Rectangle,
         translation: Vector,
     ) -> Option<overlay::Element<'b, Message, Theme, Renderer>> {
-        let shown = matches!(tree.state.downcast_ref::<State>(), State::Shown);
+        let shown = matches!(
+            tree.state.downcast_ref::<State>(),
+            State::Shown | State::Pinned
+        );
         let mut children = tree.children.iter_mut();
         let content = self.content.as_widget_mut().overlay(
             children.next()?,
@@ -290,6 +321,19 @@ fn step(state: State, over: bool, pressed: bool, now: Instant) -> State {
         }
         (_, false) => State::Idle,
         (state, true) => state,
+    }
+}
+
+/// Where a sticky tooltip goes from `state`: a click on it shows it, kept
+/// up, or puts away the one it kept up; a click elsewhere or Esc
+/// (`dismissed`) puts that away; resting on it shows it as any other does.
+fn pin(state: State, over: bool, pressed: bool, dismissed: bool, now: Instant) -> State {
+    match (state, pressed) {
+        (State::Pinned, true) => State::PutAway,
+        (_, true) => State::Pinned,
+        (State::Pinned, false) if dismissed => State::Idle,
+        (State::Pinned, false) => State::Pinned,
+        (state, false) => step(state, over, false, now),
     }
 }
 
@@ -385,6 +429,38 @@ mod tests {
         assert_eq!(s, State::Resting { at: t0 });
         assert_eq!(step(s, false, false, t0 + DELAY / 2), State::Idle);
         assert_eq!(step(s, true, false, t0 + DELAY), State::Shown);
+    }
+
+    /// An ⓘ's words: a click shows them at once and keeps them up as the
+    /// pointer goes, until the next click — on it, which puts them away
+    /// until the pointer leaves, or anywhere — or Esc; resting on it shows
+    /// them as any tooltip.
+    #[test]
+    fn a_sticky_tip_is_kept_up_by_a_click() {
+        cool();
+        let t0 = Instant::now();
+        let pinned = pin(State::Idle, true, true, false, t0);
+        assert_eq!(pinned, State::Pinned);
+        assert_eq!(
+            pin(pinned, false, false, false, t0),
+            State::Pinned,
+            "the pointer gone"
+        );
+        assert_eq!(
+            pin(pinned, false, false, true, t0),
+            State::Idle,
+            "a click elsewhere, or Esc"
+        );
+        let put_away = pin(pinned, true, true, false, t0);
+        assert_eq!(put_away, State::PutAway, "clicked again");
+        assert_eq!(
+            pin(put_away, true, false, false, t0 + DELAY),
+            State::PutAway
+        );
+        assert_eq!(
+            pin(State::Idle, true, false, false, t0),
+            State::Resting { at: t0 }
+        );
     }
 
     /// Once one is shown, the next is shown at once — until the pointer has

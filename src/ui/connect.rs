@@ -182,9 +182,10 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
     // from what Settings opened on, with the way back.
     let unsaved = || {
         app.settings_drafts_changed().then(|| {
-            form::item(
+            form::item_info(
                 tr!("Not saved yet"),
-                Some(tr!("Saved when Settings closes.").into()),
+                tr!("Saved when Settings closes."),
+                None,
                 form::action(
                     tr!("Discard changes"),
                     Some(Message::Settings(SettingsMsg::Discard)),
@@ -198,16 +199,20 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
             None,
             None,
             vec![
-                form::item(
-                    tr!("Display language"),
-                    // macOS draws its own parts of the window (the Open
-                    // panel, alerts) in the language it was started in.
-                    cfg!(target_os = "macos").then(|| {
-                        tr!("The Open dialog and system alerts switch language the next time you start Clew.")
-                            .to_string()
-                    }),
-                    language,
-                ),
+                // macOS draws its own parts of the window (the Open panel,
+                // alerts) in the language it was started in.
+                if cfg!(target_os = "macos") {
+                    form::item_info(
+                        tr!("Display language"),
+                        tr!(
+                            "The Open dialog and system alerts switch language the next time you start Clew."
+                        ),
+                        None,
+                        language,
+                    )
+                } else {
+                    form::item(tr!("Display language"), None, language)
+                },
                 form::item(tr!("Mode"), None, mode),
                 form::item(tr!("Light theme"), None, light_pick),
                 form::item(tr!("Dark theme"), None, dark_pick),
@@ -238,8 +243,9 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
             "",
             // Opened by an AI action asked without a key: why, above the
             // field it needs — it opened on the form with no word of it.
-            (app.settings.key_asked && app.settings.key.trim().is_empty())
-                .then(|| tr!("That needs an AI model. Add an API key below, then try again.").to_string()),
+            (app.settings.key_asked && app.settings.key.trim().is_empty()).then(|| {
+                tr!("That needs an AI model. Add an API key below, then try again.").to_string()
+            }),
             None,
             [
                 form::field(tr!("Provider"), None, provider),
@@ -552,15 +558,6 @@ fn project_sets_note(sets: &[String]) -> Option<String> {
     })
 }
 
-/// A group's line under its title: what it sets, then what the project's
-/// lsp.toml also sets.
-fn about_with(about: &str, sets: Option<String>) -> Option<String> {
-    Some(match sets {
-        Some(sets) => format!("{about} {sets}"),
-        None => about.to_string(),
-    })
-}
-
 /// The open project's languages: each one's server and how it stands, and
 /// what the user chooses for them — the Python interpreter, the Rust
 /// features and target, the Go build tags and platform, the C/C++
@@ -767,7 +764,7 @@ pub(crate) fn languages_section(app: &App) -> Element<'_, Message> {
     };
     // Under the page's own title, "Language servers": its first group is
     // each language's, not the page's name again.
-    parts.push(form::group(
+    parts.push(form::group_note(
         tr!("By language"),
         servers_about,
         listed.then(|| {
@@ -920,13 +917,11 @@ pub(crate) fn installed_servers(app: &App) -> Element<'_, Message> {
             )
         })
         .collect::<Vec<_>>();
-    form::group(
+    form::group_with(
         tr!("Downloaded servers"),
-        Some(if rows.is_empty() {
-            tr!("No servers downloaded yet. They are shared by all projects.").to_string()
-        } else {
-            tr!("Shared by all projects.").to_string()
-        }),
+        Some(tr!("Shared by all projects.").to_string()),
+        rows.is_empty()
+            .then(|| tr!("No servers downloaded yet.").to_string()),
         None,
         rows,
     )
@@ -1227,12 +1222,10 @@ pub(super) fn rust_block<'a>(
         .align_y(iced::Center),
     ]
     .spacing(8);
-    form::group(
+    form::group_with(
         "Rust",
-        about_with(
-            tr!("What rust-analyzer checks the project with."),
-            options.and_then(|o| project_sets_note(&o.project_sets)),
-        ),
+        Some(tr!("What rust-analyzer checks the project with.").to_string()),
+        options.and_then(|o| project_sets_note(&o.project_sets)),
         None,
         vec![
             // Its first line is a checkbox's words: on the label's line,
@@ -1331,12 +1324,10 @@ pub(super) fn go_block<'a>(
         ),
     ]
     .spacing(8);
-    form::group(
+    form::group_with(
         "Go",
-        about_with(
-            tr!("The build tags and platform gopls uses for the project."),
-            options.and_then(|o| project_sets_note(&o.project_sets)),
-        ),
+        Some(tr!("The build tags and platform gopls uses for the project.").to_string()),
+        options.and_then(|o| project_sets_note(&o.project_sets)),
         None,
         vec![
             if no_tags {
@@ -1421,12 +1412,10 @@ fn c_block<'a>(app: &'a App, options: Option<&'a clew_protocol::COptions>) -> El
         ),
     };
     rows.push(form::field(tr!("Flags"), Some(flags_about), flags_row));
-    form::group(
+    form::group_with(
         tr!("C and C++"),
-        about_with(
-            tr!("The compilation database and flags clangd compiles with."),
-            options.and_then(|o| project_sets_note(&o.project_sets)),
-        ),
+        Some(tr!("The compilation database and flags clangd compiles with.").to_string()),
+        options.and_then(|o| project_sets_note(&o.project_sets)),
         None,
         rows,
     )
@@ -1577,14 +1566,10 @@ fn toolchain_block<'a>(
             choose_with(choices, |_| {}),
         ));
     }
-    let about = match found.is_empty() {
-        true => format!(
-            "{about} {}",
-            tr!("No other {program} found.", program = program)
-        ),
-        false => about.to_string(),
-    };
-    form::group(title, Some(about), None, rows)
+    let none_found = found
+        .is_empty()
+        .then(|| tr!("No other {program} found.", program = program).to_string());
+    form::group_with(title, Some(about.to_string()), none_found, None, rows)
 }
 
 /// The server programs the user chose, and, apart, the form to add one —
@@ -2054,7 +2039,7 @@ fn integrations_section(app: &App) -> Element<'_, Message> {
                 .into(),
         );
     }
-    parts.push(form::group(
+    parts.push(form::group_note(
         tr!("MCP servers"),
         servers
             .is_empty()
@@ -2064,7 +2049,7 @@ fn integrations_section(app: &App) -> Element<'_, Message> {
     ));
     parts.push(registry);
     parts.push(add_mcp);
-    parts.push(form::group(
+    parts.push(form::group_note(
         tr!("ACP agents"),
         agents
             .is_empty()
@@ -3043,12 +3028,12 @@ fn embed_model_rows(app: &App) -> Vec<Element<'_, Message>> {
         )
         .into()
     };
-    let mut rows = vec![form::item(
+    let mut rows = vec![form::item_info(
         MODEL.name,
-        Some(
-            tr!("Made by Google DeepMind and run by Clew. Nothing leaves this computer, and no key is needed.")
-                .to_string(),
+        tr!(
+            "Made by Google DeepMind and run by Clew. Nothing leaves this computer, and no key is needed."
         ),
+        None,
         state,
     )];
     // Here, but nothing to run it with.

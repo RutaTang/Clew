@@ -376,7 +376,7 @@ fn spent_group<'a>(s: &usage::Summary) -> Element<'a, Message> {
     // Said only when it changes how the figures read: a call with no
     // price is left out of them.
     let unpriced = s.month.unpriced;
-    form::group(
+    form::group_note(
         tr!("Spent"),
         (unpriced > 0).then(|| {
             trn!(
@@ -461,7 +461,7 @@ fn cost_text<'a>(t: &Totals) -> Element<'a, Message> {
 /// in for prices Clew already had.
 fn prices_group<'a>(app: &'a App, model: &str) -> Element<'a, Message> {
     if model.is_empty() {
-        return form::group(
+        return form::group_note(
             tr!("Prices"),
             Some(tr!("Set a model on the Language model page first.").to_string()),
             None,
@@ -632,7 +632,7 @@ fn prices_group<'a>(app: &'a App, model: &str) -> Element<'a, Message> {
         ),
         Some(_) => model.to_string(),
     };
-    form::group(tr!("Prices"), Some(about), None, rows)
+    form::group_note(tr!("Prices"), Some(about), None, rows)
 }
 
 /// A price per million tokens as the line says it: "$0.30", "$0.006".

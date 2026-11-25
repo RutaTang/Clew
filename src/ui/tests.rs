@@ -1398,7 +1398,8 @@ fn settings_say_what_closing_keeps_and_offer_to_discard_it() {
         app.settings.model = "typed".into();
         let mut sim = sim_of(&app);
         assert!(shows(&mut sim, "Not saved yet"), "{page:?}");
-        assert!(shows(&mut sim, "Saved when Settings closes."), "{page:?}");
+        // When it is saved: behind its ⓘ, not a line under it.
+        assert!(!shows(&mut sim, "Saved when Settings closes."), "{page:?}");
         assert!(
             matches!(
                 click(sim_of(&app), "Discard changes").as_slice(),
@@ -3893,9 +3894,10 @@ fn finder_rows_stay_aligned_with_their_results() {
     );
 }
 
-/// The overview opens on the project's architecture: its title and a line
-/// on how to read it, over the written overview — of packages or of the
-/// source's parts, as it was read.
+/// The overview opens on the project's architecture: its title, and how to
+/// read it — of packages or of the source's parts, as it was read — behind
+/// an ⓘ beside it, not in a grey line under it; a click on the ⓘ shows it,
+/// and keeps it up as the pointer goes.
 #[test]
 fn the_overview_opens_on_the_architecture() {
     use crate::architecture::{Architecture, Basis, Component, Link};
@@ -3931,8 +3933,28 @@ fn the_overview_opens_on_the_architecture() {
         app.proj.overview.arch_rev += 1;
         let mut sim = sim_of(&app);
         assert!(shows(&mut sim, "Architecture"));
-        assert!(shows(&mut sim, how), "{basis:?}");
+        assert!(!shows(&mut sim, how), "{basis:?}: said only when asked");
         assert!(!shows(&mut sim, "Module graph"));
+        // The ⓘ just after the title: clicked, its words; the pointer
+        // gone, still there.
+        let title = text_at(&mut sim, |t| t == "Architecture", 0).expect("the title");
+        let info = Point::new(title.x + title.width + 6.0 + 8.0, title.center_y());
+        let mut sim = sim_of(&app);
+        sim.point_at(info);
+        let _ = sim.simulate([
+            Event::Mouse(iced::mouse::Event::CursorMoved { position: info }),
+            Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left)),
+            Event::Mouse(iced::mouse::Event::ButtonReleased(
+                iced::mouse::Button::Left,
+            )),
+        ]);
+        assert!(shows(&mut sim, how), "{basis:?}: clicked");
+        let away = Point::new(title.x, title.y + 200.0);
+        sim.point_at(away);
+        let _ = sim.simulate([Event::Mouse(iced::mouse::Event::CursorMoved {
+            position: away,
+        })]);
+        assert!(shows(&mut sim, how), "{basis:?}: kept up");
     }
     // Nothing read: no section.
     app.proj.overview.architecture = None;
@@ -13276,24 +13298,32 @@ fn the_languages_section_offers_each_languages_build_choices() {
     }));
     let mut sim = sim_tall(super::connect::languages_section(&app));
     for shown in [
-        "What rust-analyzer checks the project with. \
-         .clew/lsp.toml also sets cargo.features. The settings here take precedence.",
+        ".clew/lsp.toml also sets cargo.features. The settings here take precedence.",
         "Features",
         "Target",
         "cli:",
         "tls (default)",
-        "The build tags and platform gopls uses for the project.",
         "e2e",
         "GOOS",
-        "The compilation database and flags clangd compiles with.",
         "Automatic",
         "/p/build",
-        "The toolchain the language server runs from.",
         "The lake found on the PATH",
         "elan (set by the project)",
         "Add a server program",
     ] {
         assert!(sim.find(shown).is_ok(), "{shown:?} is shown");
+    }
+    // What each group is for: behind the ⓘ by its title, not under it.
+    for behind in [
+        "What rust-analyzer checks the project with.",
+        "The build tags and platform gopls uses for the project.",
+        "The compilation database and flags clangd compiles with.",
+        "The toolchain the language server runs from.",
+    ] {
+        assert!(
+            sim.find(behind).is_err(),
+            "{behind:?} is said only when asked"
+        );
     }
     let _ = sim.click("serde");
     let _ = sim.click("integration");
@@ -13433,15 +13463,23 @@ fn the_languages_section_picks_a_jdk_a_php_a_solution_and_programs() {
         "PHP 8.2 — composer.json's floor",
         "C#",
         "src/App.sln",
-        "The Ruby that runs Ruby LSP.",
         "Ruby 3.3.0 (rbenv)",
         "The ruby-lsp found on the PATH",
-        "The Erlang Language Platform build to run.",
         "The elp found on the PATH",
-        "The Haskell language server to run.",
         "The haskell-language-server-wrapper found on the PATH",
     ] {
         assert!(sim.find(shown).is_ok(), "{shown:?} is shown");
+    }
+    // What each group is for: behind the ⓘ by its title.
+    for behind in [
+        "The Ruby that runs Ruby LSP.",
+        "The Erlang Language Platform build to run.",
+        "The Haskell language server to run.",
+    ] {
+        assert!(
+            sim.find(behind).is_err(),
+            "{behind:?} is said only when asked"
+        );
     }
     let _ = sim.click("Ruby 3.3.0 (rbenv)");
     let chosen: Vec<LanguageChoices> = sim
@@ -15397,7 +15435,10 @@ fn smart_turn_is_offered_in_voice_settings() {
     app.voice.store = Some(store.clone());
     let mut sim = sim_elem(super::voice_section(&app));
     assert!(shows(&mut sim, "Smart Turn"));
-    assert!(shows(&mut sim, "waits through a pause to think"));
+    assert!(
+        !shows(&mut sim, "waits through a pause to think"),
+        "what it is for, behind its ⓘ"
+    );
     assert!(matches!(
         click(sim, "Download (9 MB)").as_slice(),
         [Message::Voice(VoiceMsg::DownloadTurn)]

@@ -1181,8 +1181,9 @@ fn base_name(rel: &str) -> &str {
     rel.rsplit_once('/').map_or(rel, |(_, name)| name)
 }
 
-/// The overview's architecture: its title, a line on how to read it, and
-/// the diagram, `width` wide — or nothing, with no source to draw.
+/// The overview's architecture: its title, with how to read it behind an ⓘ
+/// beside it, and the diagram, `width` wide — or nothing, with no source to
+/// draw.
 pub(crate) fn architecture_section(app: &App, width: f32) -> Option<Element<'_, Message>> {
     let arch = app.proj.overview.architecture.as_ref()?;
     if arch.components.is_empty() {
@@ -1201,10 +1202,14 @@ pub(crate) fn architecture_section(app: &App, width: f32) -> Option<Element<'_, 
     let height = placed.height;
     Some(
         iced::widget::column![
-            iced::widget::text(tr!("Architecture"))
-                .size(ts::SUBTITLE)
-                .color(theme::fg_muted()),
-            iced::widget::text(how).size(ts::SMALL).color(theme::dim()),
+            iced::widget::row![
+                iced::widget::text(tr!("Architecture"))
+                    .size(ts::SUBTITLE)
+                    .color(theme::fg_muted()),
+                super::toolbar::info_tip(how),
+            ]
+            .spacing(6)
+            .align_y(iced::Center),
             iced::widget::Space::new().height(6),
             iced::widget::canvas::Canvas::new(ArchCanvas { arch, placed, rev })
                 .width(Fill)

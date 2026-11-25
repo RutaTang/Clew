@@ -291,6 +291,26 @@ pub(crate) fn tip_wrapped<'a>(
         .into()
 }
 
+/// An ⓘ beside a title or a name, with what it is for in a bubble: shown as
+/// the pointer rests on it, and kept up by a click until the next click or
+/// Esc. An explanation said once, where it is asked for — not a grey line
+/// under every title, read once and then in the way.
+pub(crate) fn info_tip<'a>(words: impl Into<String>) -> Element<'a, Message> {
+    let icon = iced::widget::mouse_area(
+        container(crate::glyph::icon(
+            crate::glyph::Glyph::Info,
+            theme::dim(),
+            13.0,
+        ))
+        .padding(2),
+    )
+    .interaction(iced::mouse::Interaction::Pointer);
+    super::tip::tip(icon, tip_bubble(words.into()), tooltip::Position::Bottom)
+        .gap(TIP_GAP)
+        .sticky()
+        .into()
+}
+
 /// A tooltip's bubble round `words`, wrapped no wider than [`TIP_WRAP_W`]:
 /// [`tip_wrapped`]'s, and the gutter's (`overlays::gutter_tip`), which
 /// is placed by Clew rather than by a control's tooltip.
