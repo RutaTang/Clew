@@ -351,6 +351,60 @@ pub(super) fn hapi(routes: &mut Routes, source: &Source, root: Node<'_>) {
     }
 }
 
+/// An Astro integration's pages: `injectRoute({ pattern: '/blog/[slug]',
+/// entrypoint: './src/post.astro' })` serves the entry point at the
+/// pattern — a page, or for a script an endpoint.
+pub(super) fn inject_route(routes: &mut Routes, source: &Source, root: Node<'_>) {
+    let src = source.text.as_str();
+    if !src.contains("injectRoute") {
+        return;
+    }
+    for call in all_of(root, "call_expression") {
+        let Some(function) = call.child_by_field_name("function") else {
+            continue;
+        };
+        if text(function, src).rsplit('.').next() != Some("injectRoute") {
+            continue;
+        }
+        let Some(options) = args(call)
+            .into_iter()
+            .next()
+            .filter(|a| a.kind() == "object")
+        else {
+            continue;
+        };
+        // A value's string, or its first (`prerender ? 'a.astro' : …`).
+        let field = |name: &str| {
+            let value = pairs(options)
+                .into_iter()
+                .find(|p| key(*p, src).as_deref() == Some(name))?
+                .child_by_field_name("value")?;
+            let first = all_of(value, "string").into_iter().next()?;
+            string(first, src)
+        };
+        let (Some(pattern), Some(entrypoint)) = (field("pattern"), field("entrypoint")) else {
+            continue;
+        };
+        let path: Vec<String> = pattern.split('/').filter_map(segment).collect();
+        let file = entrypoint.rsplit('/').next().unwrap_or(&entrypoint);
+        let page = [".astro", ".md", ".mdx", ".html"]
+            .iter()
+            .any(|e| file.ends_with(e));
+        routes.add(
+            "Astro",
+            if page { "PAGE" } else { "ANY" },
+            &format!("/{}", path.join("/")),
+            &source.rel,
+            line(call),
+            Handler::At {
+                rel: source.rel.clone(),
+                line: line(call),
+                label: file.to_string(),
+            },
+        );
+    }
+}
+
 /// The `pair`s of an object literal.
 fn pairs<'t>(object: Node<'t>) -> Vec<Node<'t>> {
     let mut cursor = object.walk();
@@ -527,6 +581,7 @@ impl Routes<'_> {
 /// off its text, so the rest are not parsed for them.
 pub(super) fn may_route(src: &str) -> bool {
     src.contains("Bun.serve")
+        || src.contains("injectRoute")
         || (src.contains("handler") && src.contains("method"))
         || src.contains("createFileRoute")
         || client_router(src).is_some()
@@ -884,18 +939,15 @@ pub(super) fn tanstack(routes: &mut Routes, source: &Source, root: Node<'_>) {
     }
 }
 
-/// A route path's segment as a file names it, in the frameworks' common
-/// spellings: `[id]` and `$id` a parameter, `[...rest]`/`[[...rest]]` and
-/// a bare `$` the rest, `(group)` and a `_layout` nothing.
+/// One folder or file name of a file-routed page, as a route's path says
+/// it: `[id]` is `:id`, `[...slug]` and `[[...slug]]` are `*slug`, an
+/// optional `[[lang]]` is `:lang?`, SvelteKit's matched `[id=integer]` is
+/// `:id`, a parameter inside a name (`@[user]`) is one there (`@:user`),
+/// Remix's `$id` is `:id` and its `$` is `*`; a group (`(marketing)`) and
+/// an index name nothing.
 pub(super) fn segment(s: &str) -> Option<String> {
-    if s.starts_with('(') && s.ends_with(')') || s.is_empty() || s == "index" || s == "_index" {
+    if (s.starts_with('(') && s.ends_with(')')) || s.is_empty() || s == "index" || s == "_index" {
         return None;
-    }
-    if let Some(inner) = s.strip_prefix("[[...").or_else(|| s.strip_prefix("[...")) {
-        return Some(format!("*{}", inner.trim_end_matches(']')));
-    }
-    if let Some(inner) = s.strip_prefix('[').and_then(|r| r.strip_suffix(']')) {
-        return Some(format!(":{inner}"));
     }
     if s == "$" {
         return Some("*".to_string());
@@ -903,7 +955,84 @@ pub(super) fn segment(s: &str) -> Option<String> {
     if let Some(param) = s.strip_prefix('$') {
         return Some(format!(":{param}"));
     }
-    Some(s.to_string())
+    let mut out = String::new();
+    let mut rest = s;
+    while let Some(open) = rest.find('[') {
+        out.push_str(&rest[..open]);
+        let optional = rest[open..].starts_with("[[");
+        let (start, close) = match optional {
+            true => (open + 2, "]]"),
+            false => (open + 1, "]"),
+        };
+        let Some(len) = rest[start..].find(close) else {
+            // An unclosed bracket is the name's own.
+            out.push_str(&rest[open..]);
+            rest = "";
+            break;
+        };
+        let inner = &rest[start..start + len];
+        let name = inner.split('=').next().unwrap_or(inner);
+        match name.strip_prefix("...") {
+            Some(name) => {
+                out.push('*');
+                out.push_str(name);
+            }
+            None => {
+                out.push(':');
+                out.push_str(name);
+                if optional {
+                    out.push('?');
+                }
+            }
+        }
+        rest = &rest[start + len + close.len()..];
+    }
+    out.push_str(rest);
+    Some(out)
+}
+
+/// A Remix flat route's file name as its path: each `.` a `/`, `$id` a
+/// parameter and a bare `$` the rest, `($lang)` an optional parameter and
+/// `(about)` an optional segment, `[.]` (or any bracketed text) the
+/// characters themselves, a `_layout` part nothing and a trailing `_` (out
+/// of its parent's layout) dropped.
+fn remix_path(name: &str) -> String {
+    // Each part's characters, each with whether brackets escaped it.
+    let mut parts: Vec<Vec<(char, bool)>> = vec![Vec::new()];
+    let mut escaped = false;
+    for c in name.chars() {
+        match c {
+            '[' if !escaped => escaped = true,
+            ']' if escaped => escaped = false,
+            '.' if !escaped => parts.push(Vec::new()),
+            c => parts.last_mut().expect("one part").push((c, escaped)),
+        }
+    }
+    let mut path = Vec::new();
+    for mut part in parts {
+        let plain = |part: &[(char, bool)], at: usize, c: char| part.get(at) == Some(&(c, false));
+        if plain(&part, 0, '_') || part.is_empty() {
+            continue;
+        }
+        if part.len() > 1 && plain(&part, part.len() - 1, '_') {
+            part.pop();
+        }
+        let optional = part.len() > 2 && plain(&part, 0, '(') && plain(&part, part.len() - 1, ')');
+        if optional {
+            part = part[1..part.len() - 1].to_vec();
+        }
+        let text: String = part.iter().map(|(c, _)| c).collect();
+        let mut out = match plain(&part, 0, '$') {
+            true if text == "$" => "*".to_string(),
+            true => format!(":{}", &text[1..]),
+            false => text,
+        };
+        if optional {
+            out.push('?');
+        }
+        path.push(out);
+    }
+    format!("/{}", path.join("/"))
 }
 
 /// The pages of the file-routed frameworks, by their files: Nuxt's
@@ -924,6 +1053,11 @@ pub(super) fn file_routes(routes: &mut Routes, corpus: &Corpus) {
     let rels: Vec<&Source> = corpus.files.iter().collect();
     for source in rels {
         let rel = source.rel.as_str();
+        // A test's fixture app (`__e2e__/fixtures/basics/src/pages/`) is
+        // no page of this one.
+        if crate::maps::is_js_test(rel) {
+            continue;
+        }
         let (dir, file) = rel.rsplit_once('/').unwrap_or(("", rel));
         let (stem, ext) = file.rsplit_once('.').unwrap_or((file, ""));
         let dirs: Vec<&str> = dir.split('/').filter(|s| !s.is_empty()).collect();
@@ -971,6 +1105,7 @@ pub(super) fn file_routes(routes: &mut Routes, corpus: &Corpus) {
                 ("+server", "ts" | "js") => {
                     server_exports(routes, source, "SvelteKit", &page(inside))
                 }
+                ("+page.server", "ts" | "js") => form_actions(routes, source, &page(inside)),
                 _ => {}
             }
             continue;
@@ -989,14 +1124,32 @@ pub(super) fn file_routes(routes: &mut Routes, corpus: &Corpus) {
             if !inside.is_empty() && stem != "route" {
                 continue;
             }
-            let parts: Vec<&str> = name
-                .split('.')
-                .filter(|s| !s.starts_with('_') || *s == "_index")
-                .collect();
-            let path = page(parts.into_iter().map(|p| p.trim_end_matches('_')).collect());
-            let resource = !source.text.contains("export default");
-            let method = if resource { "ANY" } else { "PAGE" };
-            routes.add("Remix", method, &path, rel, 1, at(file));
+            let path = remix_path(&name);
+            // A page is its default export; its `loader` serves its GETs
+            // and its `action` its form posts. A resource route (no
+            // default export) is its loader and action alone.
+            let page_too = source.text.contains("export default");
+            if page_too {
+                routes.add("Remix", "PAGE", &path, rel, 1, at(file));
+            }
+            let mut served = false;
+            for (name, at_line) in exports(source) {
+                let method = match name {
+                    "action" => "POST",
+                    "loader" if !page_too => "GET",
+                    _ => continue,
+                };
+                served = true;
+                let handler = Handler::At {
+                    rel: rel.to_string(),
+                    line: at_line,
+                    label: name.to_string(),
+                };
+                routes.add("Remix", method, &path, rel, at_line, handler);
+            }
+            if !page_too && !served {
+                routes.add("Remix", "ANY", &path, rel, 1, at(file));
+            }
             continue;
         }
         if astro && let Some(mut inside) = under(&["src", "pages"]) {
@@ -1015,9 +1168,10 @@ pub(super) fn file_routes(routes: &mut Routes, corpus: &Corpus) {
     }
 }
 
-/// A route file's handlers by method: `export function GET()`,
-/// `export const POST = …`.
-fn server_exports(routes: &mut Routes, source: &Source, framework: &str, path: &str) {
+/// A module's named exports, each visited with its name, its line and,
+/// for a `const`, its value (`export function GET()`, `export const
+/// actions = { … }`).
+fn each_export<'s>(source: &'s Source, mut visit: impl FnMut(&'s str, usize, Option<Node<'_>>)) {
     let Some(tree) = source.tree() else {
         return;
     };
@@ -1026,16 +1180,34 @@ fn server_exports(routes: &mut Routes, source: &Source, framework: &str, path: &
         let Some(declaration) = export.child_by_field_name("declaration") else {
             continue;
         };
-        let name = match declaration.kind() {
-            "function_declaration" => declaration.child_by_field_name("name"),
-            "lexical_declaration" => all_of(declaration, "variable_declarator")
-                .first()
-                .and_then(|d| d.child_by_field_name("name")),
-            _ => None,
+        let (name, value) = match declaration.kind() {
+            "function_declaration" => (declaration.child_by_field_name("name"), None),
+            "lexical_declaration" => {
+                let first = all_of(declaration, "variable_declarator").first().copied();
+                (
+                    first.and_then(|d| d.child_by_field_name("name")),
+                    first.and_then(|d| d.child_by_field_name("value")),
+                )
+            }
+            _ => (None, None),
         };
-        let Some(name) = name.map(|n| text(n, src)) else {
-            continue;
-        };
+        if let Some(name) = name {
+            visit(text(name, src), line(export), value);
+        }
+    }
+}
+
+/// A module's named exports and their lines.
+fn exports(source: &Source) -> Vec<(&str, usize)> {
+    let mut out = Vec::new();
+    each_export(source, |name, at, _| out.push((name, at)));
+    out
+}
+
+/// A route file's handlers by method: `export function GET()`,
+/// `export const POST = …`.
+fn server_exports(routes: &mut Routes, source: &Source, framework: &str, path: &str) {
+    for (name, at_line) in exports(source) {
         let method = match name {
             "ALL" => "ANY",
             name if VERBS.contains(&name.to_ascii_lowercase().as_str()) => name,
@@ -1046,12 +1218,62 @@ fn server_exports(routes: &mut Routes, source: &Source, framework: &str, path: &
             method,
             path,
             &source.rel,
-            line(export),
+            at_line,
             Handler::At {
                 rel: source.rel.clone(),
-                line: line(export),
+                line: at_line,
                 label: name.to_string(),
             },
         );
     }
+}
+
+/// A SvelteKit page's form actions (`export const actions = { default,
+/// login }`), each a POST to the page: the default one at its path, a
+/// named one at `?/name`, as a form's `action` attribute says it.
+fn form_actions(routes: &mut Routes, source: &Source, path: &str) {
+    let src = source.text.as_str();
+    each_export(source, |name, _, value| {
+        let Some(mut value) = value.filter(|_| name == "actions") else {
+            return;
+        };
+        // `{ … } satisfies Actions`
+        while matches!(value.kind(), "satisfies_expression" | "as_expression")
+            && let Some(inner) = value.named_child(0)
+        {
+            value = inner;
+        }
+        if value.kind() != "object" {
+            return;
+        }
+        let mut cursor = value.walk();
+        for member in value.named_children(&mut cursor) {
+            let key = match member.kind() {
+                "pair" | "method_definition" => member
+                    .child_by_field_name("key")
+                    .or_else(|| member.child_by_field_name("name")),
+                "shorthand_property_identifier" => Some(member),
+                _ => None,
+            };
+            let Some(key) = key.map(|k| text(k, src).trim_matches(['"', '\''])) else {
+                continue;
+            };
+            let route = match key {
+                "default" => path.to_string(),
+                key => format!("{path}?/{key}"),
+            };
+            routes.add(
+                "SvelteKit",
+                "POST",
+                &route,
+                &source.rel,
+                line(member),
+                Handler::At {
+                    rel: source.rel.clone(),
+                    line: line(member),
+                    label: format!("actions.{key}"),
+                },
+            );
+        }
+    });
 }

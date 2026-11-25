@@ -1020,10 +1020,8 @@ fn component_file(source: &Source, lang: Lang, found: &mut Vec<Component>) -> Op
         if !capitalised(last) {
             continue;
         }
-        let head = tag[raw.len()..].split('>').next().unwrap_or("");
-        let props: Vec<String> = head
-            .split_whitespace()
-            .filter_map(|a| a.split('=').next())
+        let props: Vec<String> = attribute_names(&tag[raw.len()..])
+            .into_iter()
             .map(|a| {
                 a.trim_start_matches("v-bind:")
                     .trim_start_matches("v-on:")
@@ -1071,6 +1069,98 @@ fn component_file(source: &Source, lang: Lang, found: &mut Vec<Component>) -> Op
         components: HashMap::from([(name.clone(), found.len() - 1)]),
         default: Some(name),
     })
+}
+
+/// The attribute names of an element's start tag (`head` is what follows
+/// its name, up to its `>`): each value skipped whole, quoted
+/// (`title="Some drops of PHP"`) or braced (`onClick={() => a > b}`), and
+/// Svelte's `{shorthand}` its name; a `{...spread}` none.
+fn attribute_names(head: &str) -> Vec<String> {
+    let chars: Vec<char> = head.chars().collect();
+    let len = chars.len();
+    // The index of the `}` closing the `{` at `open` (or the end), past
+    // the strings inside.
+    let closing = |open: usize| -> usize {
+        let mut depth = 0;
+        let mut i = open;
+        while i < len {
+            match chars[i] {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return i;
+                    }
+                }
+                q @ ('"' | '\'' | '`') => {
+                    i += 1;
+                    while i < len && chars[i] != q {
+                        i += 1;
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        len
+    };
+    let mut names = Vec::new();
+    let mut i = 0;
+    while i < len {
+        let c = chars[i];
+        if c == '>' {
+            break;
+        }
+        if c.is_whitespace() || c == '/' {
+            i += 1;
+            continue;
+        }
+        if c == '{' {
+            let end = closing(i);
+            let inner: String = chars[i + 1..end.min(len)].iter().collect();
+            if !inner.trim().starts_with("...") {
+                names.push(inner.trim().to_string());
+            }
+            i = end + 1;
+            continue;
+        }
+        let start = i;
+        while i < len && !chars[i].is_whitespace() && !matches!(chars[i], '=' | '>' | '/') {
+            i += 1;
+        }
+        if i == start {
+            i += 1;
+            continue;
+        }
+        names.push(chars[start..i].iter().collect());
+        let mut j = i;
+        while j < len && chars[j].is_whitespace() {
+            j += 1;
+        }
+        if j < len && chars[j] == '=' {
+            j += 1;
+            while j < len && chars[j].is_whitespace() {
+                j += 1;
+            }
+            match chars.get(j) {
+                Some(&q @ ('"' | '\'' | '`')) => {
+                    j += 1;
+                    while j < len && chars[j] != q {
+                        j += 1;
+                    }
+                    j += 1;
+                }
+                Some('{') => j = closing(j) + 1,
+                _ => {
+                    while j < len && !chars[j].is_whitespace() && chars[j] != '>' {
+                        j += 1;
+                    }
+                }
+            }
+            i = j;
+        }
+    }
+    names
 }
 
 /// A component file's markup: a Vue file's `<template>`, a Svelte file
@@ -1437,7 +1527,7 @@ mod tests {
             ),
             (
                 "site/src/pages/index.astro",
-                "---\nimport Hero from '../components/Hero.astro';\nimport Counter from '../components/Counter.tsx';\n---\n<Hero title=\"Hi\" /><Counter client:load />\n",
+                "---\nimport Hero from '../components/Hero.astro';\nimport Counter from '../components/Counter.tsx';\n---\n<Hero\n  title=\"Some drops of PHP\"\n  tagline={a > b ? 'x y' : \"z w\"} {...rest} {count}\n/><Counter client:load />\n",
             ),
             (
                 "site/src/components/Hero.astro",
@@ -1461,7 +1551,8 @@ mod tests {
         let got = edges(&tree);
         for want in [
             e("Page", "Counter · src", "start, value, change"),
-            e("Index · site", "Hero", "title"),
+            // Quoted and braced values whole, not their words.
+            e("Index · site", "Hero", "title, tagline, count"),
             e("Index · site", "Counter · site", ""),
             e("Index · nuxt", "Button", "size"),
             e("Index · nuxt", "TheFooter", ""),

@@ -70,6 +70,7 @@ pub fn maps(corpus: &Corpus) -> Vec<ProjectMap> {
                     js::route_objects(&mut routes, source, root);
                     js::route_elements(&mut routes, source, root);
                     js::tanstack(&mut routes, source, root);
+                    js::inject_route(&mut routes, source, root);
                 }
             }
             Some(Lang::Java) => java(&mut routes, source),
@@ -2161,19 +2162,43 @@ mod tests {
             ),
             ("src/routes/+page.svelte", "<h1/>\n"),
             ("src/routes/blog/[slug]/+page.svelte", "<h1/>\n"),
+            ("src/routes/profile/@[user]/+page.svelte", "<h1/>\n"),
+            ("src/routes/[[lang]]/about/+page.svelte", "<h1/>\n"),
+            ("src/routes/items/[id=integer]/+page.svelte", "<h1/>\n"),
+            ("src/routes/files/[...path]/+page.svelte", "<h1/>\n"),
             (
                 "src/routes/api/(v1)/items/+server.ts",
                 "export async function GET() {}\nexport const POST = async () => {}\n",
+            ),
+            (
+                "src/routes/login/+page.server.ts",
+                "export const load = async () => ({})\nexport const actions = {\n  default: async () => {},\n  'reset': async () => {},\n  logout() {},\n} satisfies Actions\n",
+            ),
+            (
+                "tests/__e2e__/fixtures/app/src/routes/+page.svelte",
+                "<h1/>\n",
             ),
         ]);
         for page in [
             "PAGE /",
             "PAGE /blog/:slug",
+            "PAGE /profile/@:user",
+            "PAGE /:lang?/about",
+            "PAGE /items/:id",
+            "PAGE /files/*path",
             "GET /api/items",
             "POST /api/items",
+            "POST /login",
+            "POST /login?/reset",
+            "POST /login?/logout",
         ] {
             assert!(kit.contains(&page.to_string()), "{page} in {kit:?}");
         }
+        assert_eq!(
+            kit.iter().filter(|r| *r == "PAGE /").count(),
+            1,
+            "a test fixture's app is none of this one's pages: {kit:?}"
+        );
         let remix = route_labels(&[
             (
                 "package.json",
@@ -2195,12 +2220,46 @@ mod tests {
                 "app/routes/api.health.ts",
                 "export const loader = () => 1\n",
             ),
+            (
+                "app/routes/logout.tsx",
+                "export const action = async () => 1\nexport const loader = async () => 2\n",
+            ),
+            (
+                "app/routes/join.tsx",
+                "export const loader = async () => 1\nexport const action = async () => 2\nexport default function Join() {}\n",
+            ),
+            ("app/routes/webhook.ts", "export const config = {}\n"),
+            (
+                "app/routes/sitemap[.]xml.ts",
+                "export const loader = () => 1\n",
+            ),
+            (
+                "app/routes/($lang).about.tsx",
+                "export default function About() {}\n",
+            ),
+            (
+                "app/routes/posts_.$id.edit.tsx",
+                "export default function Edit() {}\n",
+            ),
+            (
+                "app/routes/files.$.tsx",
+                "export default function Files() {}\n",
+            ),
         ]);
         for page in [
             "PAGE /",
             "PAGE /posts/:id",
             "PAGE /login",
-            "ANY /api/health",
+            "GET /api/health",
+            "GET /sitemap.xml",
+            "GET /logout",
+            "POST /logout",
+            "PAGE /join",
+            "POST /join",
+            "ANY /webhook",
+            "PAGE /:lang?/about",
+            "PAGE /posts/:id/edit",
+            "PAGE /files/*",
         ] {
             assert!(remix.contains(&page.to_string()), "{page} in {remix:?}");
         }
@@ -2216,6 +2275,15 @@ mod tests {
         for page in ["PAGE /", "PAGE /blog/:slug", "GET /api/search"] {
             assert!(astro.contains(&page.to_string()), "{page} in {astro:?}");
         }
+        let integration = route_labels(&[(
+            "packages/docs/src/index.ts",
+            "export default function docs() {\n  return { hooks: { 'astro:config:setup': ({ injectRoute }) => {\n    injectRoute({ pattern: '404', entrypoint: prerender ? '@x/docs/static/404.astro' : '@x/docs/ssr/404.astro' })\n    injectRoute({ pattern: '/[...slug]', entrypoint: '@x/docs/index.astro' })\n    injectRoute({ pattern: 'feed.xml', entrypoint: './feed.ts' })\n  } } }\n}\n",
+        )]);
+        assert_eq!(
+            integration,
+            ["ANY /feed.xml", "PAGE /*slug", "PAGE /404"],
+            "{integration:?}"
+        );
     }
 
     /// A route's path by a constant the project declares

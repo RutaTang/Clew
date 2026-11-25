@@ -212,7 +212,13 @@ pub fn is_js_test(rel: &str) -> bool {
         || rel.split('/').any(|d| {
             matches!(
                 d,
-                "__tests__" | "__mocks__" | "__fixtures__" | "e2e" | "cypress"
+                "__tests__"
+                    | "__mocks__"
+                    | "__fixtures__"
+                    | "__e2e__"
+                    | "fixtures"
+                    | "e2e"
+                    | "cypress"
             )
         })
 }
