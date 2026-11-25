@@ -178,6 +178,11 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("cannot make {arg1}: {e}"),
     tr_noop!("cannot write {arg1}: {e}"),
     tr_noop!("no free port for the debugger: {e}"),
+    tr_noop!("dotnet could not build {arg1}:\n{arg2}"),
+    tr_noop!(
+        "{name} has no main function to run: run its tests with Run Test, or open the program's own file."
+    ),
+    tr_noop!("{name} is a library or a test project, so it has no program to run."),
     tr_noop!("{expression} is not bound here"),
     tr_noop!("cannot open {rel}: {e}"),
     tr_noop!("cannot reach Node's inspector: {e}"),

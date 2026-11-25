@@ -971,6 +971,15 @@ pub fn main_debugger(root: &Path, file: &Path, lang: &str) -> Option<&'static st
             None => Some("java"),
         },
         "elixir" => Some("elixir"),
+        // A .NET program, built and run under netcoredbg; a Zig file on
+        // its own, built for the session under lldb (a build.zig's
+        // program is the build's to make: it runs).
+        "csharp" => dotnet_project(root, file)
+            .filter(|(_, program)| *program)
+            .map(|_| "csharp"),
+        "zig" => {
+            (above(root, file, &["build.zig"]).is_none() && has_zig_main(file)).then_some("native")
+        }
         _ => None,
     }
 }
@@ -1043,6 +1052,59 @@ pub fn debug_main(
             let mut debug = jvm(run.program, args, run.cwd);
             debug.launch.insert("port".into(), port.into());
             Ok(debug)
+        }
+        "csharp" => {
+            // Built for debugging, then its assembly — the build's `Name
+            // -> …/Name.dll` — run under netcoredbg.
+            let (project, _) =
+                dotnet_project(root, file).ok_or_else(|| no_program(".csproj", file))?;
+            let dir = project.parent().unwrap_or(root).to_path_buf();
+            let mut build = crate::spawn::command(&run.program);
+            build
+                .args(["build", "--nologo", "-c", "Debug"])
+                .arg(&project)
+                .env("DOTNET_CLI_TELEMETRY_OPTOUT", "1")
+                .env("DOTNET_NOLOGO", "1")
+                .current_dir(&dir);
+            let built = crate::lsp::store::run_bounded(build, std::time::Duration::from_secs(900))?;
+            let said = String::from_utf8_lossy(&built.stdout).into_owned();
+            if !built.status.success() {
+                let tail: Vec<&str> = said.lines().rev().take(30).collect();
+                let tail: Vec<&str> = tail.into_iter().rev().collect();
+                return Err(format!(
+                    "dotnet could not build {}:\n{}",
+                    project
+                        .file_name()
+                        .map(|n| n.to_string_lossy())
+                        .unwrap_or_default(),
+                    tail.join("\n")
+                ));
+            }
+            let assembly = said
+                .lines()
+                .filter_map(|l| l.split_once(" -> ").map(|(_, p)| p.trim()))
+                .find(|p| p.ends_with(".dll"))
+                .map(PathBuf::from)
+                .ok_or_else(|| not_a_program(&project))?;
+            Ok(DebugTest {
+                adapter: "csharp",
+                program: assembly,
+                args: Vec::new(),
+                cwd: dir,
+                launch: serde_json::Map::new(),
+                start: DebugStart::Program,
+            })
+        }
+        "zig" => {
+            let dir = file.parent().unwrap_or(root).to_path_buf();
+            Ok(DebugTest {
+                adapter: "native",
+                program: file.to_path_buf(),
+                args: Vec::new(),
+                cwd: dir,
+                launch: serde_json::Map::new(),
+                start: DebugStart::Program,
+            })
         }
         "elixir" => {
             let project = above(root, file, &["mix.exs"]);
@@ -1512,7 +1574,22 @@ pub fn test_end(lang: &str, said: &str) -> Option<i64> {
 /// The languages whose programs [`main_command`] runs: Kotlin's, Scala's
 /// and Elixir's, which no debugger of Clew's runs.
 pub fn handles_main(lang: &str) -> bool {
-    matches!(lang, "kotlin" | "scala" | "elixir")
+    matches!(lang, "kotlin" | "scala" | "elixir" | "csharp" | "zig")
+}
+
+/// The .NET project `file` is in, and whether it makes a program — not a
+/// library, nor a test project (`Microsoft.NET.Test.Sdk`).
+fn dotnet_project(root: &Path, file: &Path) -> Option<(PathBuf, bool)> {
+    let project = above_matching(root, file, |n| {
+        n.ends_with(".csproj") || n.ends_with(".fsproj") || n.ends_with(".vbproj")
+    })?;
+    let text = crate::statefile::read_capped(&project, 1 << 20).unwrap_or_default();
+    let tests = text.contains("Microsoft.NET.Test.Sdk") || text.contains("<IsTestProject>true");
+    let program = text.contains("<OutputType>Exe")
+        || text.contains("<OutputType>WinExe")
+        || text.contains("Microsoft.NET.Sdk.Web")
+        || text.contains("Microsoft.NET.Sdk.Worker");
+    Some((project, program && !tests))
 }
 
 /// The command that runs `file`, a program in `lang` under `root`, as its
@@ -1587,8 +1664,66 @@ pub fn main_command(
                 Ok(command(tool("elixir")?, vec![name], dir))
             }
         },
+        // The project's program, as `dotnet run` runs it.
+        "csharp" => {
+            let (project, program) =
+                dotnet_project(root, file).ok_or_else(|| no_program(".csproj", file))?;
+            if !program {
+                return Err(not_a_program(&project));
+            }
+            let dir = project.parent().unwrap_or(root).to_path_buf();
+            Ok(command(
+                tool("dotnet")?,
+                vec![
+                    "run".into(),
+                    "--project".into(),
+                    project.to_string_lossy().into_owned(),
+                ],
+                &dir,
+            ))
+        }
+        // A build.zig's program (`zig build run`), else the file alone —
+        // when it has a `main` to run.
+        "zig" => match above(root, file, &["build.zig"]) {
+            Some(dir) => Ok(command(
+                tool("zig")?,
+                vec!["build".into(), "run".into()],
+                &dir,
+            )),
+            None if !has_zig_main(file) => Err(no_main(file)),
+            None => {
+                let dir = file.parent().unwrap_or(root);
+                Ok(command(tool("zig")?, vec!["run".into(), name], dir))
+            }
+        },
         _ => Err(format!("{rel} has no program to run", rel = lang)),
     }
+}
+
+/// Whether a Zig file has a `main` to run.
+fn has_zig_main(file: &Path) -> bool {
+    crate::statefile::read_capped(file, 4 << 20)
+        .is_some_and(|text| text.lines().any(|l| l.contains("fn main(")))
+}
+
+/// A file with no `main`: its tests are what runs.
+fn no_main(file: &Path) -> String {
+    let name = file
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    format!(
+        "{name} has no main function to run: run its tests with Run Test, or open the program's own file."
+    )
+}
+
+/// A .NET project that makes no program: a library, or tests.
+fn not_a_program(project: &Path) -> String {
+    let name = project
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    format!("{name} is a library or a test project, so it has no program to run.")
 }
 
 /// "No `manifest` was found above `file`": the build that runs it.
@@ -2433,7 +2568,16 @@ mod tests {
             path
         };
         let bin = root.join("bin");
-        for name in ["gradle", "kotlinc", "sbt", "scala-cli", "mix", "elixir"] {
+        for name in [
+            "gradle",
+            "kotlinc",
+            "sbt",
+            "scala-cli",
+            "mix",
+            "elixir",
+            "dotnet",
+            "zig",
+        ] {
             let path = write(&format!("bin/{name}"), "#!/bin/sh\n");
             #[cfg(unix)]
             {
@@ -2516,6 +2660,40 @@ mod tests {
         assert!(
             run.contains("Process.sleep(:infinity)"),
             "an application runs on: {run}"
+        );
+        // A .NET program, not its library nor its tests; a Zig file alone.
+        write(
+            "cs/App/App.csproj",
+            "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><OutputType>Exe</OutputType></PropertyGroup></Project>\n",
+        );
+        let program = write("cs/App/Program.cs", "Console.WriteLine(1);\n");
+        assert_eq!(main_debugger(&root, &program, "csharp"), Some("csharp"));
+        let run = main_command(&root, &program, "csharp", search).unwrap();
+        assert_eq!(run.args[..2], ["run".to_string(), "--project".into()]);
+        write(
+            "cs/Tests/Tests.csproj",
+            "<Project><ItemGroup><PackageReference Include=\"Microsoft.NET.Test.Sdk\" /></ItemGroup></Project>\n",
+        );
+        let tests = write("cs/Tests/CartTests.cs", "public class CartTests {}\n");
+        assert_eq!(main_debugger(&root, &tests, "csharp"), None);
+        assert!(main_command(&root, &tests, "csharp", search).is_err());
+        let zig = write("z/hello.zig", "pub fn main() void {}\n");
+        assert_eq!(main_debugger(&root, &zig, "zig"), Some("native"));
+        let d = debug("zig", &zig);
+        assert_eq!((d.adapter, &d.program), ("native", &zig));
+        assert_eq!(
+            main_command(&root, &zig, "zig", search).unwrap().args[0],
+            "run"
+        );
+        let only_tests = write("z/cart.zig", "test \"adds\" {}\n");
+        assert_eq!(main_debugger(&root, &only_tests, "zig"), None);
+        assert!(main_command(&root, &only_tests, "zig", search).is_err());
+        write("zb/build.zig", "");
+        let built = write("zb/src/main.zig", "pub fn main() void {}\n");
+        assert_eq!(main_debugger(&root, &built, "zig"), None);
+        assert_eq!(
+            main_command(&root, &built, "zig", search).unwrap().args,
+            ["build", "run"]
         );
         let lone = write("lone/hi.exs", "IO.puts(1)\n");
         let d = debug("elixir", &lone);

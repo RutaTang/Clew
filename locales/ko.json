@@ -4113,5 +4113,8 @@
  "{expression} is not bound here": "{expression}은(는) 여기서 바인딩되어 있지 않습니다",
  "This program was built without debug information, so breakpoints won't bind and variables can't be read. Build it for debugging (CMake: -DCMAKE_BUILD_TYPE=Debug; a compiler: -g), then debug it again.": "이 프로그램은 디버그 정보 없이 빌드되어 중단점이 연결되지 않고 변수를 읽을 수 없습니다. 디버그용으로 빌드한 뒤(CMake: -DCMAKE_BUILD_TYPE=Debug, 컴파일러: -g) 다시 디버그하세요.",
  "The tests ended before their host waited for the debugger. See their output.": "테스트 호스트가 디버거를 기다리기 전에 테스트가 끝났습니다. 출력을 확인하세요.",
- "no free port for the debugger: {e}": "디버거에 사용할 빈 포트가 없음: {e}"
+ "no free port for the debugger: {e}": "디버거에 사용할 빈 포트가 없음: {e}",
+ "dotnet could not build {arg1}:\n{arg2}": "dotnet이 {arg1}을(를) 빌드하지 못했습니다:\n{arg2}",
+ "{name} has no main function to run: run its tests with Run Test, or open the program's own file.": "{name}에는 실행할 main 함수가 없습니다. 테스트 실행으로 테스트를 실행하거나 프로그램 자체의 파일을 여세요.",
+ "{name} is a library or a test project, so it has no program to run.": "{name}은(는) 라이브러리 또는 테스트 프로젝트이므로 실행할 프로그램이 없습니다."
 }

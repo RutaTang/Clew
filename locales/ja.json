@@ -4113,5 +4113,8 @@
  "{expression} is not bound here": "{expression} はここでは束縛されていません",
  "This program was built without debug information, so breakpoints won't bind and variables can't be read. Build it for debugging (CMake: -DCMAKE_BUILD_TYPE=Debug; a compiler: -g), then debug it again.": "このプログラムはデバッグ情報なしでビルドされているため、ブレークポイントは設定されず、変数も読み取れません。デバッグ用にビルドし（CMake: -DCMAKE_BUILD_TYPE=Debug、コンパイラー: -g）、もう一度デバッグしてください。",
  "The tests ended before their host waited for the debugger. See their output.": "テストホストがデバッガーを待つ前にテストが終了しました。出力を確認してください。",
- "no free port for the debugger: {e}": "デバッガー用の空きポートがありません: {e}"
+ "no free port for the debugger: {e}": "デバッガー用の空きポートがありません: {e}",
+ "dotnet could not build {arg1}:\n{arg2}": "dotnet で {arg1} をビルドできませんでした:\n{arg2}",
+ "{name} has no main function to run: run its tests with Run Test, or open the program's own file.": "{name} には実行する main 関数がありません。「テストを実行」でテストを実行するか、プログラム本体のファイルを開いてください。",
+ "{name} is a library or a test project, so it has no program to run.": "{name} はライブラリまたはテストプロジェクトのため、実行するプログラムがありません。"
 }
