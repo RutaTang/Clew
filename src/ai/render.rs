@@ -284,14 +284,17 @@ mod tests {
     #[test]
     fn guarded_renders_contain_panics_hangs_and_deep_recursion() {
         isolated();
+        // What returns and what panics are not timed here — the hang below
+        // is — so their deadline is one no scheduling decides. A panic's
+        // report waits on its hook, which with RUST_BACKTRACE set resolves a
+        // backtrace against the whole test binary, under the lock every
+        // other test's backtrace takes too. With a 5 s deadline this failed
+        // once under the full suite, which only a time-out can do: the
+        // closure panics with a `&str`, and its thread reports by sending.
+        let ample = Duration::from_secs(120);
+        assert_eq!(run_guarded(1 << 20, ample, || 7), Guarded::Done(7));
         assert_eq!(
-            run_guarded(1 << 20, Duration::from_secs(5), || 7),
-            Guarded::Done(7)
-        );
-        assert_eq!(
-            run_guarded(1 << 20, Duration::from_secs(5), || -> u8 {
-                panic!("bad diagram")
-            }),
+            run_guarded(1 << 20, ample, || -> u8 { panic!("bad diagram") }),
             Guarded::Crashed("bad diagram".into())
         );
         let started = std::time::Instant::now();
