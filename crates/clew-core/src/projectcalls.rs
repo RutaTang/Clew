@@ -1035,7 +1035,18 @@ fn lang_spec(lang: Lang) -> Option<LangSpec> {
         // tactics (`rw [h]`, `simp [f]`) far more often than it applies them,
         // so a call graph of applications alone would say a proof uses
         // nothing.
-        Lang::Json | Lang::Bash | Lang::Yaml | Lang::Toml | Lang::Html | Lang::Css | Lang::Sql => {
+        Lang::Json
+        | Lang::Bash
+        | Lang::Yaml
+        | Lang::Toml
+        | Lang::Html
+        | Lang::Css
+        | Lang::Scss
+        | Lang::Less
+        | Lang::Vue
+        | Lang::Svelte
+        | Lang::Astro
+        | Lang::Sql => {
             return None;
         }
         // Read from the text (see `crate::lean::calls`): no tree's kinds.
@@ -2834,6 +2845,11 @@ fn is_builtin(lang: Lang, name: &str) -> bool {
         | Lang::Toml
         | Lang::Html
         | Lang::Css
+        | Lang::Scss
+        | Lang::Less
+        | Lang::Vue
+        | Lang::Svelte
+        | Lang::Astro
         | Lang::Zig
         | Lang::Sql
         | Lang::Lean

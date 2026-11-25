@@ -217,6 +217,26 @@ pub const NOISE_DIRS: &[&str] = &[
     // files — under `.lake`, and `lake-packages` before Lake 4.3.
     ".lake",
     "lake-packages",
+    // The JavaScript tools' builds and caches, made by them and never
+    // written by hand: Next.js's, Nuxt's and Nitro's, SvelteKit's, Astro's
+    // generated types, Angular's, Docusaurus's, Turborepo's and Parcel's
+    // caches, Vercel's and Netlify's deploy output, and Yarn's and pnpm's
+    // stores (Yarn's minified release and its zipped cache). Plain `dist`,
+    // `build` and `out` are not among them: a project may keep its build's
+    // own scripts in `build/` (Bootstrap does).
+    ".next",
+    ".nuxt",
+    ".output",
+    ".svelte-kit",
+    ".astro",
+    ".angular",
+    ".docusaurus",
+    ".turbo",
+    ".parcel-cache",
+    ".vercel",
+    ".netlify",
+    ".yarn",
+    ".pnpm-store",
 ];
 
 /// Whether a directory with this name is one of [`NOISE_DIRS`].

@@ -1392,9 +1392,17 @@ fn shape_of(def: Node, lang: Lang) -> (usize, Option<(usize, usize)>) {
         },
         Lang::Python | Lang::JavaScript | Lang::Sql | Lang::Lean => (first(def), whole),
         Lang::Ruby | Lang::Erlang | Lang::Haskell | Lang::Zig => (first(def), whole),
-        Lang::Json | Lang::Bash | Lang::Yaml | Lang::Toml | Lang::Html | Lang::Css => {
-            (first(def), whole)
-        }
+        Lang::Json
+        | Lang::Bash
+        | Lang::Yaml
+        | Lang::Toml
+        | Lang::Html
+        | Lang::Css
+        | Lang::Scss
+        | Lang::Less
+        | Lang::Vue
+        | Lang::Svelte
+        | Lang::Astro => (first(def), whole),
     }
 }
 
@@ -1548,6 +1556,11 @@ fn container_of(def: Node, lang: Lang) -> Option<Container> {
         | Lang::Toml
         | Lang::Html
         | Lang::Css
+        | Lang::Scss
+        | Lang::Less
+        | Lang::Vue
+        | Lang::Svelte
+        | Lang::Astro
         | Lang::Zig
         | Lang::Sql
         | Lang::Lean
@@ -2127,6 +2140,11 @@ impl<'a> EntryPoints<'a> {
             | Lang::Toml
             | Lang::Html
             | Lang::Css
+            | Lang::Scss
+            | Lang::Less
+            | Lang::Vue
+            | Lang::Svelte
+            | Lang::Astro
             | Lang::Sql
             | Lang::Lean
             | Lang::Haskell => Marks::default(),
@@ -2590,6 +2608,11 @@ impl<'a> EntryPoints<'a> {
             | Lang::Toml
             | Lang::Html
             | Lang::Css
+            | Lang::Scss
+            | Lang::Less
+            | Lang::Vue
+            | Lang::Svelte
+            | Lang::Astro
             | Lang::Sql
             | Lang::Lean => {}
         }

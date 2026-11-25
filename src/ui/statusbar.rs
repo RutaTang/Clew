@@ -29,6 +29,11 @@ pub(crate) fn short_kind(kind: &str) -> &'static str {
         "instance" => "inst",
         "inductive" => "ind",
         "axiom" => "axiom",
+        // A stylesheet's rule (`.card > h2`), and a test file's suites and
+        // tests (`describe`, `it`).
+        "rule" => "rule",
+        "suite" => "suite",
+        "test" => "test",
         // Notebook outline entries: code cells and markdown headings.
         "cell" => "cell",
         "section" => "§",

@@ -345,6 +345,11 @@ fn has_overloading(lang: Lang) -> bool {
         | Lang::Toml
         | Lang::Html
         | Lang::Css
+        | Lang::Scss
+        | Lang::Less
+        | Lang::Vue
+        | Lang::Svelte
+        | Lang::Astro
         | Lang::Zig
         | Lang::Sql
         | Lang::Lean => false,
@@ -418,9 +423,17 @@ impl DocStyle {
             Lang::Lean => DocStyle::Block(&LEAN_BLOCK),
             Lang::Python => DocStyle::PyDocstring,
             Lang::Sql => DocStyle::DashDash,
-            Lang::Json | Lang::Bash | Lang::Yaml | Lang::Toml | Lang::Html | Lang::Css => {
-                DocStyle::None
-            }
+            Lang::Json
+            | Lang::Bash
+            | Lang::Yaml
+            | Lang::Toml
+            | Lang::Html
+            | Lang::Css
+            | Lang::Scss
+            | Lang::Less
+            | Lang::Vue
+            | Lang::Svelte
+            | Lang::Astro => DocStyle::None,
         }
     }
 
@@ -1080,6 +1093,11 @@ fn clean_doc_text(s: &str, lang: Lang) -> String {
         | Lang::Toml
         | Lang::Html
         | Lang::Css
+        | Lang::Scss
+        | Lang::Less
+        | Lang::Vue
+        | Lang::Svelte
+        | Lang::Astro
         | Lang::Zig
         | Lang::Sql
         | Lang::Lean => s.to_string(),

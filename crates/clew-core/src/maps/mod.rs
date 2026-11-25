@@ -597,7 +597,7 @@ mod tests {
         let rels: Vec<&str> = corpus.files.iter().map(|s| s.rel.as_str()).collect();
         assert_eq!(rels, ["App.vue", "a.sql"]);
         assert_eq!(corpus.get("a.sql").unwrap().lang, Some(Lang::Sql));
-        assert_eq!(corpus.get("App.vue").unwrap().lang, None);
+        assert_eq!(corpus.get("App.vue").unwrap().lang, Some(Lang::Vue));
     }
 
     #[test]

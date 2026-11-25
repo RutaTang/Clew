@@ -1623,7 +1623,17 @@ fn is_public(decl: &str, name: &str, lang: Lang, is_member: bool) -> bool {
         Lang::Erlang | Lang::Haskell => true,
         // No outline, so no items to judge; the benefit of the doubt keeps a
         // Docs view from coming up empty if one ever appears.
-        Lang::Json | Lang::Bash | Lang::Yaml | Lang::Toml | Lang::Html | Lang::Css => true,
+        Lang::Json
+        | Lang::Bash
+        | Lang::Yaml
+        | Lang::Toml
+        | Lang::Html
+        | Lang::Css
+        | Lang::Scss
+        | Lang::Less
+        | Lang::Vue
+        | Lang::Svelte
+        | Lang::Astro => true,
     }
 }
 

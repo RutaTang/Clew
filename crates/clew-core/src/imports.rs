@@ -92,6 +92,11 @@ pub fn imports_in(tree: &Tree, source: &str, lang: Lang) -> Vec<RawImport> {
         | Lang::Toml
         | Lang::Html
         | Lang::Css
+        | Lang::Scss
+        | Lang::Less
+        | Lang::Vue
+        | Lang::Svelte
+        | Lang::Astro
         | Lang::Sql => Vec::new(),
     }
 }
@@ -123,6 +128,11 @@ pub fn import_query(lang: Lang) -> Result<&'static Query, QueryError> {
         | Lang::Toml
         | Lang::Html
         | Lang::Css
+        | Lang::Scss
+        | Lang::Less
+        | Lang::Vue
+        | Lang::Svelte
+        | Lang::Astro
         | Lang::Sql => None,
     })
 }
@@ -1583,6 +1593,11 @@ mod extraction_tests {
                             | Lang::Toml
                             | Lang::Html
                             | Lang::Css
+                            | Lang::Scss
+                            | Lang::Less
+                            | Lang::Vue
+                            | Lang::Svelte
+                            | Lang::Astro
                             | Lang::Sql
                     ),
                     "{lang:?} lost its import model"

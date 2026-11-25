@@ -1533,10 +1533,11 @@ pub fn kind_color(kind: &str) -> Color {
 /// The syntax ink a symbol kind echoes, or `None` for kinds shown neutrally.
 fn kind_ink(t: &TokenColors, kind: &str) -> Option<u32> {
     match kind {
-        "function" | "method" | "macro" => Some(t.function),
+        "function" | "method" | "macro" | "test" => Some(t.function),
         "class" | "struct" | "enum" | "union" | "trait" | "interface" | "type" | "table"
         | "view" | "inductive" => Some(t.type_),
-        "module" | "implementation" => Some(t.keyword),
+        "module" | "implementation" | "suite" => Some(t.keyword),
+        "rule" => Some(t.type_),
         "field" => Some(t.property),
         "constant" | "static" | "variant" | "theorem" | "example" | "axiom" => Some(t.number),
         _ => None,

@@ -128,6 +128,11 @@ languages! {
     CSharp => "csharp",
     Erlang => "erlang",
     Haskell => "haskell",
+    Vue => "vue",
+    Svelte => "svelte",
+    Astro => "astro",
+    Scss => "scss",
+    Less => "less",
 }
 
 /// How many languages there are; sizes the per-language caches below.
@@ -162,12 +167,15 @@ impl Lang {
     /// real C does not write (see [`looks_like_cpp`] for the contrived
     /// exceptions), so C that uses `class`, `namespace`, `template` or
     /// `public` as ordinary identifiers or labels stays C.
+    ///
+    /// Likewise a `"json"` source written as YAML — a tool's configuration
+    /// file that takes either (`.eslintrc`, `.prettierrc`) — is YAML.
     pub fn for_source(key: &str, source: &str) -> Option<Lang> {
         let lang = Lang::from_key(key)?;
-        Some(if lang == Lang::C && looks_like_cpp(source) {
-            Lang::Cpp
-        } else {
-            lang
+        Some(match lang {
+            Lang::C if looks_like_cpp(source) => Lang::Cpp,
+            Lang::Json if looks_like_yaml(source) => Lang::Yaml,
+            lang => lang,
         })
     }
 
@@ -198,6 +206,11 @@ impl Lang {
             Lang::CSharp => "C#",
             Lang::Erlang => "Erlang",
             Lang::Haskell => "Haskell",
+            Lang::Vue => "Vue",
+            Lang::Svelte => "Svelte",
+            Lang::Astro => "Astro",
+            Lang::Scss => "SCSS",
+            Lang::Less => "Less",
         }
     }
 
@@ -215,7 +228,7 @@ impl Lang {
             Lang::C => &["c", "h"],
             Lang::Cpp => &["cc", "cpp", "cxx", "hpp", "hh", "hxx", "ipp"],
             Lang::Java => &["java"],
-            Lang::Json => &["json", "jsonc"],
+            Lang::Json => &["json", "jsonc", "json5"],
             Lang::Bash => &["sh", "bash", "zsh"],
             Lang::Yaml => &["yml", "yaml"],
             Lang::Toml => &["toml"],
@@ -229,6 +242,11 @@ impl Lang {
             Lang::CSharp => &["cs", "csx"],
             Lang::Erlang => &["erl", "hrl", "escript", "app.src"],
             Lang::Haskell => &["hs", "hs-boot"],
+            Lang::Vue => &["vue"],
+            Lang::Svelte => &["svelte"],
+            Lang::Astro => &["astro"],
+            Lang::Scss => &["scss"],
+            Lang::Less => &["less"],
         }
     }
 
@@ -247,6 +265,21 @@ impl Lang {
                 "Dangerfile",
             ],
             Lang::Erlang => &["rebar.config", "sys.config"],
+            // The JavaScript tools' configuration files without an
+            // extension: JSON, or YAML for some (`.eslintrc`, `.prettierrc`,
+            // `.stylelintrc`), which [`Lang::for_source`] tells by reading.
+            Lang::Json => &[
+                ".babelrc",
+                ".swcrc",
+                ".jshintrc",
+                ".eslintrc",
+                ".prettierrc",
+                ".stylelintrc",
+                ".postcssrc",
+                ".lintstagedrc",
+                ".nycrc",
+                ".mocharc",
+            ],
             _ => &[],
         }
     }
@@ -257,9 +290,9 @@ impl Lang {
         match self {
             Lang::Rust => &["rs"],
             Lang::Python => &["py"],
-            Lang::JavaScript => &["js", "jsx"],
-            Lang::TypeScript => &["ts"],
-            Lang::Tsx => &[],
+            Lang::JavaScript => &["js", "jsx", "mjs", "cjs", "javascriptreact", "node"],
+            Lang::TypeScript => &["ts", "mts", "cts"],
+            Lang::Tsx => &["typescriptreact"],
             Lang::Go => &["golang"],
             Lang::Dart => &[],
             Lang::C => &["h"],
@@ -269,8 +302,8 @@ impl Lang {
             Lang::Bash => &["sh", "shell", "zsh", "console"],
             Lang::Yaml => &["yml"],
             Lang::Toml => &[],
-            Lang::Html => &[],
-            Lang::Css => &[],
+            Lang::Html => &["htm", "xhtml"],
+            Lang::Css => &["postcss"],
             Lang::Zig => &[],
             Lang::Sql => &[
                 "postgresql",
@@ -288,6 +321,11 @@ impl Lang {
             Lang::CSharp => &["cs", "c#", "c-sharp"],
             Lang::Erlang => &["erl"],
             Lang::Haskell => &["hs"],
+            Lang::Vue => &[],
+            Lang::Svelte => &[],
+            Lang::Astro => &[],
+            Lang::Scss => &[],
+            Lang::Less => &[],
         }
     }
 
@@ -319,6 +357,13 @@ impl Lang {
             Lang::CSharp => tree_sitter_c_sharp::LANGUAGE.into(),
             Lang::Erlang => tree_sitter_erlang::LANGUAGE.into(),
             Lang::Haskell => tree_sitter_haskell::LANGUAGE.into(),
+            Lang::Vue => tree_sitter_vue_next::LANGUAGE.into(),
+            Lang::Svelte => tree_sitter_svelte_ng::LANGUAGE.into(),
+            // Astro's markup is HTML's; its frontmatter is highlighted as the
+            // TypeScript it is (see `highlight_lines`).
+            Lang::Astro => tree_sitter_html::LANGUAGE.into(),
+            Lang::Scss => tree_sitter_scss::language(),
+            Lang::Less => tree_sitter_less::language(),
         }
     }
 
@@ -373,6 +418,19 @@ impl Lang {
             Lang::CSharp => &[tree_sitter_c_sharp::HIGHLIGHTS_QUERY],
             Lang::Erlang => &[tree_sitter_erlang::HIGHLIGHTS_QUERY],
             Lang::Haskell => &[tree_sitter_haskell::HIGHLIGHTS_QUERY],
+            Lang::Vue => &[MARKUP_HIGHLIGHTS, VUE_HIGHLIGHTS],
+            Lang::Svelte => &[MARKUP_HIGHLIGHTS, SVELTE_HIGHLIGHTS],
+            Lang::Astro => &[tree_sitter_html::HIGHLIGHTS_QUERY],
+            Lang::Scss => &[
+                tree_sitter_css::HIGHLIGHTS_QUERY,
+                tree_sitter_scss::HIGHLIGHTS_QUERY,
+                SCSS_REFINEMENTS,
+            ],
+            Lang::Less => &[
+                tree_sitter_css::HIGHLIGHTS_QUERY,
+                tree_sitter_less::HIGHLIGHTS_QUERY,
+                LESS_REFINEMENTS,
+            ],
         }
     }
 
@@ -400,7 +458,49 @@ impl Lang {
             | Lang::Html
             | Lang::Css
             | Lang::Zig
-            | Lang::Lean => &[],
+            | Lang::Lean
+            | Lang::Vue
+            | Lang::Svelte
+            | Lang::Astro
+            | Lang::Scss
+            | Lang::Less => &[],
+        }
+    }
+
+    /// The injection query, as the parts it is assembled from: where code of
+    /// another language sits in this one's — a `<script>` or `<style>` in a
+    /// page, a component file's blocks, a template's expressions, CSS or HTML
+    /// in a tagged template — each highlighted as that language
+    /// ([`injected`] names it).
+    fn injection_parts(self) -> &'static [&'static str] {
+        match self {
+            Lang::Html => &[HTML_SCRIPT, HTML_BLOCKS],
+            Lang::Astro => &[ASTRO_SCRIPT, HTML_BLOCKS],
+            Lang::Vue => &[HTML_SCRIPT, HTML_BLOCKS, VUE_INJECTIONS],
+            Lang::Svelte => &[HTML_SCRIPT, HTML_BLOCKS, SVELTE_INJECTIONS],
+            Lang::JavaScript | Lang::TypeScript | Lang::Tsx => &[ECMA_INJECTIONS],
+            Lang::Rust
+            | Lang::Python
+            | Lang::Go
+            | Lang::Dart
+            | Lang::C
+            | Lang::Cpp
+            | Lang::Java
+            | Lang::Json
+            | Lang::Bash
+            | Lang::Yaml
+            | Lang::Toml
+            | Lang::Css
+            | Lang::Zig
+            | Lang::Sql
+            | Lang::Lean
+            | Lang::Php
+            | Lang::Ruby
+            | Lang::CSharp
+            | Lang::Erlang
+            | Lang::Haskell
+            | Lang::Scss
+            | Lang::Less => &[],
         }
     }
 
@@ -429,13 +529,28 @@ impl Lang {
             Lang::Erlang => &[ERLANG_TAGS],
             Lang::Haskell => &[HASKELL_TAGS],
             Lang::Zig => &[ZIG_TAGS],
-            Lang::Json | Lang::Bash | Lang::Yaml | Lang::Toml | Lang::Html | Lang::Css => &[],
+            Lang::Json
+            | Lang::Bash
+            | Lang::Yaml
+            | Lang::Toml
+            | Lang::Html
+            | Lang::Css
+            | Lang::Scss
+            | Lang::Less
+            | Lang::Vue
+            | Lang::Svelte
+            | Lang::Astro => &[],
         }
     }
 
     fn family(self) -> Family {
         match self {
-            Lang::JavaScript | Lang::TypeScript | Lang::Tsx => Family::Ecma,
+            Lang::JavaScript
+            | Lang::TypeScript
+            | Lang::Tsx
+            | Lang::Vue
+            | Lang::Svelte
+            | Lang::Astro => Family::Ecma,
             Lang::C | Lang::Cpp => Family::CLike,
             Lang::Rust
             | Lang::Python
@@ -455,7 +570,9 @@ impl Lang {
             | Lang::Ruby
             | Lang::CSharp
             | Lang::Erlang
-            | Lang::Haskell => Family::Alone(self),
+            | Lang::Haskell
+            | Lang::Scss
+            | Lang::Less => Family::Alone(self),
         }
     }
 
@@ -760,6 +877,169 @@ const TS_TAGS: &str = r#"
 /// Added to tree-sitter-javascript's own tags query: a class field holding a
 /// function (`handler = () => {…}`), which that query leaves out entirely, so
 /// the calls in its body had no function to belong to.
+/// SCSS over CSS's and its own query: a variable declared (`$gap: 4px`) is
+/// a variable, as it is where it is used, and a `//` comment a comment.
+const SCSS_REFINEMENTS: &str = r#"
+((property_name) @variable (#match? @variable "^\\$"))
+(js_comment) @comment
+"#;
+
+/// Less over CSS's and its own query: a variable declared (`@gap: 4px`) is
+/// a variable, as it is where it is used, and a `//` comment a comment
+/// (Less's query also captures it `@spell`, which drew it as text).
+const LESS_REFINEMENTS: &str = r#"
+((property_name) @variable (#match? @variable "^@"))
+(js_comment) @comment
+"#;
+
+/// A component file's markup, as HTML's query reads a page's — except that
+/// only a plain attribute's value is a string: a directive's (Vue's
+/// `@click="save(item)"`) is code, highlighted as the expression it is, and
+/// a string over it would be drawn over the expression's first word.
+const MARKUP_HIGHLIGHTS: &str = r#"
+(tag_name) @tag
+(erroneous_end_tag_name) @tag.error
+(doctype) @constant
+(attribute_name) @attribute
+(attribute (attribute_value) @string)
+(attribute (quoted_attribute_value) @string)
+(comment) @comment
+["<" ">" "</" "/>"] @punctuation.bracket
+"#;
+
+/// A Vue component's template over HTML's: a directive's name (`v-if`,
+/// `v-model`) as a keyword, the attribute or event it binds (`:title`,
+/// `@click`) and its modifiers (`.prevent`), and the `{{ }}` around an
+/// interpolation. The expressions themselves are TypeScript
+/// ([`VUE_INJECTIONS`]).
+const VUE_HIGHLIGHTS: &str = r##"
+(directive_name) @keyword
+(directive_value) @attribute
+(dynamic_directive_inner_value) @variable
+(directive_modifier) @attribute
+["{{" "}}"] @punctuation.special
+[":" "@" "#" "."] @punctuation.delimiter
+["[" "]"] @punctuation.bracket
+"##;
+
+/// A Svelte component's template over HTML's: the words of its blocks and
+/// tags (`{#if}`, `{:else}`, `{#each … as …}`, `{@html}`) as keywords, their
+/// braces and sigils, and a snippet's name. The expressions are TypeScript
+/// ([`SVELTE_INJECTIONS`]).
+const SVELTE_HIGHLIGHTS: &str = r##"
+["if" "else" "else if" "each" "await" "then" "catch" "as" "key" "html" "snippet" "render" "const" "debug"] @keyword
+["{" "}"] @punctuation.special
+["#" ":" "/" "@"] @punctuation.delimiter
+["(" ")"] @punctuation.bracket
+(snippet_name) @function
+"##;
+
+/// A page's `<script>` that names no language (no `lang`, no `type`): the
+/// JavaScript a browser runs.
+const HTML_SCRIPT: &str = r#"
+((script_element (start_tag) @_tag (raw_text) @injection.content)
+ (#not-match? @_tag "\\s(lang|type)\\s*=")
+ (#set! injection.language "javascript"))
+"#;
+
+/// An Astro component's `<script>` that names no language: TypeScript,
+/// which Astro compiles its scripts as.
+const ASTRO_SCRIPT: &str = r#"
+((script_element (start_tag) @_tag (raw_text) @injection.content)
+ (#not-match? @_tag "\\s(lang|type)\\s*=")
+ (#set! injection.language "typescript"))
+"#;
+
+/// A page's (and a component file's) other `<script>`s and its `<style>`s:
+/// JavaScript for a JavaScript `type`, JSON for a data block
+/// (`application/json`, an import map, JSON-LD), and the language a `lang`
+/// names (`<script lang="ts">`, `<style lang="scss">`); a `<style>` with no
+/// `lang` is CSS. A script of another `type` (a template) is left as text.
+const HTML_BLOCKS: &str = r#"
+((script_element (start_tag) @_tag (raw_text) @injection.content)
+ (#not-match? @_tag "\\slang\\s*=")
+ (#match? @_tag "\\stype\\s*=\\s*[\"']?(module|text/javascript|application/javascript|text/ecmascript|application/ecmascript|text/babel|text/jsx)[\"'\\s>]")
+ (#set! injection.language "javascript"))
+((script_element (start_tag) @_tag (raw_text) @injection.content)
+ (#not-match? @_tag "\\slang\\s*=")
+ (#match? @_tag "\\stype\\s*=\\s*[\"']?(application/json|importmap|application/ld\\+json|speculationrules)[\"'\\s>]")
+ (#set! injection.language "json"))
+(script_element
+  (start_tag
+    (attribute
+      (attribute_name) @_attr
+      [(attribute_value) @injection.language
+       (quoted_attribute_value (attribute_value) @injection.language)]))
+  (raw_text) @injection.content
+  (#eq? @_attr "lang"))
+((style_element (start_tag) @_tag (raw_text) @injection.content)
+ (#not-match? @_tag "\\slang\\s*=")
+ (#set! injection.language "css"))
+(style_element
+  (start_tag
+    (attribute
+      (attribute_name) @_attr
+      [(attribute_value) @injection.language
+       (quoted_attribute_value (attribute_value) @injection.language)]))
+  (raw_text) @injection.content
+  (#eq? @_attr "lang"))
+"#;
+
+/// A Vue template's expressions — an interpolation's (`{{ user.name }}`)
+/// and a directive's value (`v-if="open"`, `:title="t('x')"`,
+/// `@click="save"`) — read as the TypeScript they are.
+const VUE_INJECTIONS: &str = r#"
+((interpolation (raw_text) @injection.content)
+ (#set! injection.language "typescript"))
+(directive_attribute
+  (quoted_attribute_value (attribute_value) @injection.content)
+  (#set! injection.language "typescript"))
+"#;
+
+/// A Svelte template's expressions — `{count}`, a block's condition, an
+/// attribute's `{value}` — read as the TypeScript they are.
+const SVELTE_INJECTIONS: &str = r#"
+((svelte_raw_text) @injection.content
+ (#set! injection.language "typescript"))
+"#;
+
+/// CSS, HTML and SQL written in a tagged template: CSS-in-JS (`css`,
+/// `keyframes`, `createGlobalStyle`, styled-components' `styled.div`,
+/// `styled(Button)` and `.attrs(…)`), lit's `html` and `svg`, and `sql`.
+///
+/// A file's CSS templates are read together as one stylesheet, so that a
+/// declaration a `${…}` splits (`color: ${c};`) still reads as one. That is
+/// the only combined pattern: tree-sitter-highlight orders the layers of
+/// several combined patterns by pattern rather than by place, and the
+/// highlighting of all but one went missing. HTML and SQL are read a piece
+/// at a time, between their `${…}`.
+const ECMA_INJECTIONS: &str = r#"
+(call_expression
+  function: [
+    (identifier) @_tag
+    (member_expression object: (identifier) @_tag)
+    (call_expression function: (identifier) @_tag)
+    (call_expression function: (member_expression object: (identifier) @_tag))
+    (call_expression function: (member_expression object: (member_expression object: (identifier) @_tag)))
+    (call_expression function: (member_expression object: (call_expression function: (identifier) @_tag)))
+  ]
+  arguments: (template_string (string_fragment) @injection.content)
+  (#any-of? @_tag "css" "keyframes" "createGlobalStyle" "injectGlobal" "styled")
+  (#set! injection.language "css")
+  (#set! injection.combined)
+  (#set! injection.include-children))
+(call_expression
+  function: (identifier) @_tag
+  arguments: (template_string (string_fragment) @injection.content)
+  (#any-of? @_tag "html" "svg")
+  (#set! injection.language "html"))
+(call_expression
+  function: (identifier) @_tag
+  arguments: (template_string (string_fragment) @injection.content)
+  (#eq? @_tag "sql")
+  (#set! injection.language "sql"))
+"#;
+
 const JS_EXTRA_TAGS: &str = r#"
 (field_definition
   property: (property_identifier) @name
@@ -846,6 +1126,31 @@ const RUST_TAGS: &str = r#"
 /// (`template < n;`). `extern "C"` is NOT a marker — C headers carry it inside
 /// `#ifdef __cplusplus` for C++ callers. Only the first 256 KiB are read, so a
 /// huge generated header costs O(1).
+/// Whether a source named as JSON is YAML: its first line that holds
+/// anything (a `#` comment aside) is a mapping's `key: value`, a list's
+/// `- item`, or the `---` that opens a document — which JSON (a `{`, `[`,
+/// `"`, number, `true`/`false`/`null`, or JSONC's `//` comment) never is.
+fn looks_like_yaml(source: &str) -> bool {
+    let Some(first) = source
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && !l.starts_with('#'))
+    else {
+        return false;
+    };
+    if first == "---" || first.starts_with("- ") {
+        return true;
+    }
+    let key: String = first
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | '@'))
+        .collect();
+    !key.is_empty()
+        && !matches!(key.as_str(), "true" | "false" | "null")
+        && !key.starts_with(|c: char| c.is_ascii_digit() || c == '-')
+        && first[key.len()..].trim_start().starts_with(':')
+}
+
 fn looks_like_cpp(source: &str) -> bool {
     const SCAN: usize = 256 * 1024;
     let mut end = source.len().min(SCAN);
@@ -1231,7 +1536,8 @@ fn config_for(lang: Lang) -> Option<&'static HighlightConfiguration> {
     CONFIGS[lang as usize]
         .get_or_init(|| {
             let query = rename_captures(&lang.highlight_parts().concat(), lang.capture_names());
-            HighlightConfiguration::new(lang.grammar(), lang.name(), &query, "", "")
+            let injections = lang.injection_parts().concat();
+            HighlightConfiguration::new(lang.grammar(), lang.name(), &query, &injections, "")
                 .map(|mut config| {
                     config.configure(HIGHLIGHT_NAMES);
                     config
@@ -1374,8 +1680,80 @@ pub fn highlight_lines(source: &str, lang_key: Option<&'static str>) -> Vec<HlLi
                     .unwrap_or_else(|| plain_lines(command))
             })
             .collect(),
+        Lang::Astro => highlight_astro(source, config),
         _ => highlight_with(source, config).unwrap_or_else(|| plain_lines(source)),
     }
+}
+
+/// The highlighting of code another language's carries ([`Lang::injection_parts`]),
+/// by the name the carrier gives it: a key or fence tag (`ts`, `scss`,
+/// `javascript`), or a CSS-in-JS tag. `None` — the code left as the
+/// carrier's text — for a language Clew does not highlight (`stylus`, `pug`).
+fn injected<'a>(name: &str) -> Option<&'a HighlightConfiguration> {
+    let lang = match name.to_ascii_lowercase().as_str() {
+        "keyframes" | "createglobalstyle" | "injectglobal" | "styled" => Lang::Css,
+        "svg" => Lang::Html,
+        name => Lang::from_key(lang_for_fence(name)?)?,
+    };
+    config_for(lang)
+}
+
+/// Where an Astro component's frontmatter ends: the byte after the line
+/// that closes it, when the file opens with one (`---` on its first line,
+/// blank lines aside, and again on a later one).
+fn astro_frontmatter(source: &str) -> Option<(usize, usize, usize)> {
+    let mut at = 0;
+    let mut open = None;
+    for line in source.split_inclusive('\n') {
+        let start = at;
+        at += line.len();
+        let bare = line.trim_end_matches(['\n', '\r']).trim_end();
+        match open {
+            None if bare.trim().is_empty() => continue,
+            None if bare == "---" => open = Some(at),
+            None => return None,
+            Some(inner) if bare == "---" => return Some((inner, start, at)),
+            Some(_) => {}
+        }
+    }
+    None
+}
+
+/// An Astro component highlighted: its frontmatter (between the `---`
+/// lines) as TypeScript, and its markup as HTML, with its scripts and
+/// styles each in their own language.
+fn highlight_astro(source: &str, config: &HighlightConfiguration) -> Vec<HlLine> {
+    let Some((inner, close, end)) = astro_frontmatter(source) else {
+        return highlight_with(source, config).unwrap_or_else(|| plain_lines(source));
+    };
+    let delimiter = HIGHLIGHT_NAMES
+        .iter()
+        .position(|n| *n == "punctuation.delimiter")
+        .map(|i| i as u8);
+    let fence = |text: &str| HlLine {
+        spans: vec![(clean(text.trim_end_matches(['\n', '\r'])), delimiter)],
+    };
+    let head = &source[..inner];
+    let mut lines: Vec<HlLine> = plain_lines(&head[..head.trim_end_matches(['\n', '\r']).len()]);
+    if let Some(last) = lines.pop() {
+        // The blank lines before the opening `---`, then the `---` itself.
+        lines.push(HlLine {
+            spans: last
+                .spans
+                .into_iter()
+                .map(|(text, _)| (text, delimiter))
+                .collect(),
+        });
+    }
+    let front = &source[inner..close];
+    match config_for(Lang::TypeScript) {
+        Some(ts) => lines.extend(highlight_with(front, ts).unwrap_or_else(|| plain_lines(front))),
+        None => lines.extend(plain_lines(front)),
+    }
+    lines.push(fence(&source[close..end]));
+    let rest = &source[end..];
+    lines.extend(highlight_with(rest, config).unwrap_or_else(|| plain_lines(rest)));
+    lines
 }
 
 fn highlight_with(source: &str, config: &HighlightConfiguration) -> Option<Vec<HlLine>> {
@@ -1394,7 +1772,7 @@ fn highlight_read_as(
     }
     let mut highlighter = Highlighter::new();
     let events = highlighter
-        .highlight(config, read.as_bytes(), None, |_| None)
+        .highlight(config, read.as_bytes(), None, injected)
         .ok()?;
 
     let mut lines: Vec<HlLine> = Vec::new();
@@ -1751,6 +2129,38 @@ mod tests {
             ),
             ("erlang", "s() -> \"s{\". % c{\n", Some("s{"), Some("% c{")),
             ("haskell", "s = \"s{\" -- c{\n", Some("s{"), Some("-- c{")),
+            (
+                "vue",
+                "<template><p title=\"s{\">{{ 'i{' }}</p><!-- c{ --></template>\n<script>const t = \"j{\" // d{\n</script>\n",
+                Some("s{"),
+                Some("<!-- c{ -->"),
+            ),
+            // A `{` in a Svelte attribute's value opens an expression
+            // (`title="a {b}"`), so a `(` is the bracket this checks there.
+            (
+                "svelte",
+                "<p title=\"s(\">{'i{'}</p><!-- c{ -->\n<script>const t = \"j{\" // d{\n</script>\n",
+                Some("s("),
+                Some("<!-- c{ -->"),
+            ),
+            (
+                "astro",
+                "---\nconst t = \"j{\" // d{\n---\n<p title=\"s{\"></p><!-- c{ -->\n",
+                Some("s{"),
+                Some("<!-- c{ -->"),
+            ),
+            (
+                "scss",
+                "a { content: \"s{\"; } // c{\n",
+                Some("s{"),
+                Some("// c{"),
+            ),
+            (
+                "less",
+                "a { content: \"s{\"; } // c{\n",
+                Some("s{"),
+                Some("// c{"),
+            ),
         ];
         assert_eq!(cases.len(), Lang::ALL.len(), "a language is missing here");
         for (key, src, string, comment) in cases {
@@ -2142,5 +2552,240 @@ public:
         assert!(Lang::Go.shares_namespace_with(Lang::Go));
         assert!(!Lang::Go.shares_namespace_with(Lang::JavaScript));
         assert!(!Lang::Rust.shares_namespace_with(Lang::C));
+    }
+}
+
+#[cfg(test)]
+mod frontend_tests {
+    use super::*;
+
+    /// Each word of `src` read as `key` is, with the style it is drawn in.
+    fn words(src: &str, key: &'static str) -> Vec<(String, &'static str)> {
+        highlight_lines(src, Some(key))
+            .into_iter()
+            .flat_map(|l| l.spans)
+            .filter(|(t, _)| !t.trim().is_empty())
+            .map(|(t, s)| {
+                (
+                    t.trim().to_string(),
+                    s.map_or("-", |i| HIGHLIGHT_NAMES[i as usize]),
+                )
+            })
+            .collect()
+    }
+
+    /// The style of the first span reading exactly `word`.
+    fn style(words: &[(String, &'static str)], word: &str) -> &'static str {
+        words
+            .iter()
+            .find(|(t, _)| t == word)
+            .unwrap_or_else(|| panic!("no span {word:?} in {words:?}"))
+            .1
+    }
+
+    /// The styles of every span reading exactly `word`, in order.
+    fn styles(words: &[(String, &'static str)], word: &str) -> Vec<&'static str> {
+        words
+            .iter()
+            .filter(|(t, _)| t == word)
+            .map(|(_, s)| *s)
+            .collect()
+    }
+
+    #[test]
+    fn a_tools_configuration_file_is_read_as_json_or_yaml_as_it_is_written() {
+        assert_eq!(detect(Path::new("web/.babelrc")), Some("json"));
+        assert_eq!(detect(Path::new(".eslintrc")), Some("json"));
+        assert_eq!(detect(Path::new("settings.json5")), Some("json"));
+        let json = "{\n  \"extends\": \"eslint:recommended\"\n}\n";
+        let jsonc = "// the base\n{ \"semi\": false }\n";
+        let yaml = "# shared\nextends: eslint:recommended\nrules:\n  semi: off\n";
+        let list = "- a\n- b\n";
+        assert_eq!(Lang::for_source("json", json), Some(Lang::Json));
+        assert_eq!(Lang::for_source("json", jsonc), Some(Lang::Json));
+        assert_eq!(Lang::for_source("json", "true\n"), Some(Lang::Json));
+        assert_eq!(Lang::for_source("json", yaml), Some(Lang::Yaml));
+        assert_eq!(Lang::for_source("json", list), Some(Lang::Yaml));
+        assert_eq!(Lang::for_source("json", "---\na: 1\n"), Some(Lang::Yaml));
+        let w = words(yaml, "json");
+        assert_eq!(style(&w, "extends"), "property", "read as the YAML it is");
+    }
+
+    #[test]
+    fn component_and_style_files_are_known_by_their_extensions() {
+        for (file, key) in [
+            ("App.vue", "vue"),
+            ("Counter.svelte", "svelte"),
+            ("index.astro", "astro"),
+            ("theme.scss", "scss"),
+            ("theme.less", "less"),
+            ("vite.config.mts", "typescript"),
+            ("server.cjs", "javascript"),
+        ] {
+            assert_eq!(detect(Path::new(file)), Some(key), "{file}");
+        }
+        for (fence, key) in [
+            ("vue", "vue"),
+            ("svelte", "svelte"),
+            ("scss", "scss"),
+            ("less", "less"),
+            ("typescriptreact", "tsx"),
+            ("javascriptreact", "javascript"),
+            ("mjs", "javascript"),
+            ("postcss", "css"),
+        ] {
+            assert_eq!(lang_for_fence(fence), Some(key), "{fence}");
+        }
+        for key in [
+            "vue",
+            "svelte",
+            "astro",
+            "scss",
+            "less",
+            "html",
+            "javascript",
+            "typescript",
+            "tsx",
+        ] {
+            assert_eq!(highlight_error(key), None, "{key}");
+        }
+    }
+
+    /// A Vue component reads as the three languages it is written in: its
+    /// template's directives and expressions, its `<script setup lang="ts">`
+    /// as TypeScript, and its `<style lang="scss">` as SCSS.
+    #[test]
+    fn a_vue_component_reads_as_its_template_script_and_style() {
+        let w = words(
+            "<template>\n  <button :title=\"label\" @click.prevent=\"save(item)\" v-if=\"open\">{{ count + 1 }}</button>\n</template>\n<script setup lang=\"ts\">\nlet count: number = 1\n</script>\n<style scoped lang=\"scss\">\n$c: red;\n.a { color: $c; }\n</style>\n",
+            "vue",
+        );
+        assert_eq!(style(&w, "button"), "tag");
+        assert_eq!(style(&w, "v-if"), "keyword", "a directive's name");
+        assert_eq!(style(&w, "click"), "attribute", "the event it binds");
+        assert_eq!(style(&w, "prevent"), "attribute", "its modifier");
+        assert_eq!(
+            style(&w, "save"),
+            "function",
+            "a directive's value is code, its call a call"
+        );
+        assert_eq!(style(&w, "label"), "variable");
+        assert_eq!(style(&w, "{{"), "punctuation.special");
+        assert_eq!(
+            styles(&w, "count"),
+            ["variable", "variable"],
+            "an interpolation's name, and the script's"
+        );
+        assert_eq!(
+            style(&w, "number"),
+            "type.builtin",
+            "lang=\"ts\" is TypeScript"
+        );
+        assert_eq!(
+            styles(&w, "$c"),
+            ["variable", "variable"],
+            "lang=\"scss\" is SCSS"
+        );
+        assert_eq!(style(&w, "color"), "property");
+    }
+
+    #[test]
+    fn a_svelte_component_reads_as_its_blocks_expressions_script_and_style() {
+        let w = words(
+            "<script lang=\"ts\">\nlet count: number = 0\n</script>\n{#if open}<p class={cls}>{count * 2}</p>{:else}<p>no</p>{/if}\n{#each items as item}{item.name}{/each}\n<style>p { color: red }</style>\n",
+            "svelte",
+        );
+        assert_eq!(style(&w, "number"), "type.builtin");
+        assert_eq!(styles(&w, "if"), ["keyword", "keyword"]);
+        assert_eq!(style(&w, "each"), "keyword");
+        assert_eq!(style(&w, "else"), "keyword");
+        assert_eq!(style(&w, "cls"), "variable", "an attribute's {{value}}");
+        assert_eq!(style(&w, "*"), "operator", "an expression tag's expression");
+        assert_eq!(style(&w, "name"), "property");
+        assert_eq!(style(&w, "color"), "property", "its <style> is CSS");
+    }
+
+    #[test]
+    fn an_astro_components_frontmatter_is_typescript_and_its_script_too() {
+        let src = "---\nimport Card from '../components/Card.astro'\nconst title: string = 'Hi'\n---\n<h1>{title}</h1>\n<script>\nlet n: number = 1\n</script>\n";
+        let lines = highlight_lines(src, Some("astro"));
+        assert_eq!(
+            lines.len(),
+            src.lines().count(),
+            "one highlighted line per line"
+        );
+        let w = words(src, "astro");
+        assert_eq!(
+            styles(&w, "---"),
+            ["punctuation.delimiter", "punctuation.delimiter"]
+        );
+        assert_eq!(style(&w, "import"), "keyword");
+        assert_eq!(style(&w, "string"), "type.builtin");
+        assert_eq!(style(&w, "h1"), "tag");
+        assert_eq!(
+            style(&w, "number"),
+            "type.builtin",
+            "an Astro <script> is TypeScript"
+        );
+        // No frontmatter: the whole file is markup.
+        let w = words("<p>hi</p>\n", "astro");
+        assert_eq!(style(&w, "p"), "tag");
+    }
+
+    /// A page's scripts and styles are each read as theirs: JavaScript, CSS,
+    /// JSON for a data block; a template's text is left alone.
+    #[test]
+    fn a_pages_scripts_and_styles_are_read_as_their_languages() {
+        let w = words(
+            "<script>let x = 1</script>\n<style>a { color: red }</style>\n<script type=\"application/json\">{\"a\": 1}</script>\n<script type=\"text/template\"><b>x</b></script>\n<script type=\"module\">import a from 'b'</script>\n",
+            "html",
+        );
+        assert_eq!(style(&w, "let"), "keyword");
+        assert_eq!(style(&w, "color"), "property");
+        assert_eq!(style(&w, "\"a\""), "string");
+        assert_eq!(style(&w, "<b>x</b>"), "-", "a template's text stays text");
+        assert_eq!(style(&w, "import"), "keyword", "a module is JavaScript");
+    }
+
+    /// CSS-in-JS, lit's html and sql templates are read as their languages,
+    /// in any order in a file, a `${…}` in a declaration leaving it whole.
+    #[test]
+    fn tagged_templates_are_read_as_the_language_their_tag_names() {
+        let w = words(
+            "const t = html`<p class=\"a\">hi</p>`;\nconst B = styled.div`\n  color: red;\n  margin: ${(p) => p.m}px;\n`;\nconst q = sql`SELECT * FROM users WHERE id = ${id}`;\nconst g = css`display: flex;`;\nconst L = styled(Link).attrs({})`gap: 1px;`;\n",
+            "tsx",
+        );
+        assert_eq!(style(&w, "p"), "tag", "html`…`");
+        assert_eq!(style(&w, "color"), "property", "styled.div`…`");
+        assert_eq!(
+            style(&w, "margin"),
+            "property",
+            "a declaration a ${{…}} splits"
+        );
+        assert_eq!(style(&w, "SELECT"), "keyword", "sql`…`");
+        assert_eq!(style(&w, "display"), "property", "css`…`");
+        assert_eq!(style(&w, "gap"), "property", "styled(X).attrs(…)`…`");
+        assert_eq!(style(&w, "m"), "property", "the ${{…}} stays code");
+    }
+
+    #[test]
+    fn scss_and_less_read_their_own_syntax() {
+        let w = words(
+            "@use 'sass:math';\n$gap: 4px;\n@mixin pad($n) { padding: $n * $gap; }\n.card { @include pad(2); &__title { color: darken($c, 10%); } }\n// note\n",
+            "scss",
+        );
+        assert_eq!(style(&w, "@use"), "keyword");
+        assert_eq!(style(&w, "$gap"), "variable", "a variable declared");
+        assert_eq!(style(&w, "@mixin"), "keyword");
+        assert_eq!(style(&w, "@include"), "keyword");
+        assert_eq!(style(&w, "darken"), "function");
+        assert_eq!(style(&w, "// note"), "comment");
+        let w = words(
+            "@gap: 4px;\n.card { padding: @gap; &:hover { color: blue; } }\n// note\n",
+            "less",
+        );
+        assert_eq!(styles(&w, "@gap"), ["variable", "variable"]);
+        assert_eq!(style(&w, "padding"), "property");
+        assert_eq!(style(&w, "// note"), "comment");
     }
 }
