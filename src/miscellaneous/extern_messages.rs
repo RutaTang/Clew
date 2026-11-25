@@ -826,6 +826,8 @@ pub(crate) const PARTS: &[&str] = &[
     tr_noop!("accepted no data"),
     tr_noop!("install the Dart or Flutter SDK"),
     tr_noop!("install Lean with elan"),
+    tr_noop!("install Node.js, which brings npm"),
+    tr_noop!("install Deno"),
     tr_noop!("install Eclipse JDT LS, for example with “brew install jdtls”"),
     tr_noop!("install it with “gem install ruby-lsp”"),
     tr_noop!("install it with “dotnet tool install --global csharp-ls”"),

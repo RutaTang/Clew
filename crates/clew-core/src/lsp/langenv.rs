@@ -54,6 +54,8 @@ pub fn detect(language: &str, _server: &str, root: &Path) -> Option<Value> {
     match language {
         "python" => Some(python_settings(&find_python_env(root)?)),
         "rust" => rust_projects(root),
+        // Deno's server reads a project only where it is told to.
+        "typescript" if _server == "deno" => Some(json!({ "enable": true, "lint": true })),
         _ => None,
     }
 }
@@ -574,7 +576,28 @@ fn layer(base: Option<Value>, over: Option<Value>) -> Option<Value> {
 /// program of the user's in its place runs without: one is not offered in
 /// place of clew's install for it.
 pub fn pins(server_name: &str) -> bool {
-    server_name == "typescript-language-server"
+    matches!(
+        server_name,
+        "typescript-language-server" | "vue-typescript-language-server" | "astro-language-server"
+    )
+}
+
+/// What TypeScript's server shows inline as a file is read: the type a
+/// variable, a return or a property is inferred to have, the parameter a
+/// literal argument fills (`connect(/* retries: */ 3)`), an enum member's
+/// value — and not where the code already says it (a name that matches).
+/// typescript-language-server answers no inlay hint without them.
+fn typescript_preferences() -> Value {
+    json!({
+        "includeInlayParameterNameHints": "literals",
+        "includeInlayParameterNameHintsWhenArgumentMatchesName": false,
+        "includeInlayFunctionParameterTypeHints": false,
+        "includeInlayVariableTypeHints": true,
+        "includeInlayVariableTypeHintsWhenTypeMatchesName": false,
+        "includeInlayPropertyDeclarationTypeHints": true,
+        "includeInlayFunctionLikeReturnTypeHints": true,
+        "includeInlayEnumMemberValueHints": true,
+    })
 }
 
 /// The settings clew sends its own store binary `exe` for `server` in every
@@ -601,23 +624,50 @@ pub fn pinned(
     if server.command.is_some() || server.chosen.is_some() || !pins(&server.server_name) {
         return Ok(None);
     }
+    // `<install>/node_modules/.bin/<server>`: what was installed with it is
+    // in `<install>/node_modules`.
+    let modules = exe.parent().and_then(Path::parent);
+    let installed = |what: &str, parts: &[&str]| -> Result<std::path::PathBuf, String> {
+        modules
+            .map(|m| parts.iter().fold(m.to_path_buf(), |p, part| p.join(part)))
+            .filter(|p| p.exists())
+            .ok_or_else(|| {
+                format!(
+                    "clew's own {what} is missing from the {} install — without it the \
+                     server would run the project's copy; remove the server and install it again",
+                    server.server_name
+                )
+            })
+    };
     match server.server_name.as_str() {
         "typescript-language-server" => {
-            // `<install>/node_modules/.bin/typescript-language-server`; the
-            // `typescript@5` installed with it is `<install>/node_modules/typescript`.
-            let tsserver = exe
-                .parent()
-                .and_then(Path::parent)
-                .map(|modules| modules.join("typescript").join("lib").join("tsserver.js"))
-                .filter(|p| p.is_file())
-                .ok_or_else(|| {
-                    "clew's own TypeScript is missing from the typescript-language-server \
-                     install — without it the server would run the project's copy; remove \
-                     the server and install it again"
-                        .to_string()
-                })?;
+            let tsserver = installed("TypeScript", &["typescript", "lib", "tsserver.js"])?;
             Ok(Some(json!({
-                "tsserver": { "path": tsserver.to_string_lossy() }
+                "tsserver": { "path": tsserver.to_string_lossy() },
+                "preferences": typescript_preferences(),
+            })))
+        }
+        // TypeScript's server for Vue components: clew's TypeScript, and
+        // Vue's plugin from the same install (`location`, where tsserver
+        // resolves it from), which it hands the components' documents.
+        "vue-typescript-language-server" => {
+            let tsserver = installed("TypeScript", &["typescript", "lib", "tsserver.js"])?;
+            let plugin = installed("Vue plugin", &["@vue", "typescript-plugin"])?;
+            let root = modules.and_then(Path::parent).unwrap_or(&plugin);
+            Ok(Some(json!({
+                "tsserver": { "path": tsserver.to_string_lossy() },
+                "preferences": typescript_preferences(),
+                "plugins": [{
+                    "name": "@vue/typescript-plugin",
+                    "location": root.to_string_lossy(),
+                    "languages": ["vue"],
+                }],
+            })))
+        }
+        "astro-language-server" => {
+            let tsdk = installed("TypeScript", &["typescript", "lib"])?;
+            Ok(Some(json!({
+                "typescript": { "tsdk": tsdk.to_string_lossy() }
             })))
         }
         _ => Ok(None),
@@ -2735,6 +2785,51 @@ mod tests {
     /// finds one, so clew points it at the copy installed beside it — and
     /// refuses to start it when that copy is missing, since a path that does
     /// not exist sends the server back to the project's.
+    #[test]
+    fn vue_and_astro_run_clews_own_typescript() {
+        let config = crate::lsp::config::ProjectLspConfig::default();
+        let vue = config.resolve("vue").unwrap();
+        let install = scratch("vueinstall");
+        let exe = install.join("node_modules/.bin/typescript-language-server");
+        std::fs::create_dir_all(install.join("node_modules/typescript/lib")).unwrap();
+        std::fs::write(install.join("node_modules/typescript/lib/tsserver.js"), "").unwrap();
+        let err = pinned(&vue, &exe).unwrap_err();
+        assert!(err.contains("Vue plugin is missing"), "{err}");
+        std::fs::create_dir_all(install.join("node_modules/@vue/typescript-plugin")).unwrap();
+        let opts = pinned(&vue, &exe).unwrap().unwrap();
+        assert_eq!(
+            Path::new(opts["tsserver"]["path"].as_str().unwrap()),
+            install.join("node_modules/typescript/lib/tsserver.js")
+        );
+        assert_eq!(opts["plugins"][0]["name"], "@vue/typescript-plugin");
+        assert_eq!(
+            Path::new(opts["plugins"][0]["location"].as_str().unwrap()),
+            install,
+            "where tsserver resolves the plugin from"
+        );
+        assert_eq!(opts["plugins"][0]["languages"], json!(["vue"]));
+        assert_eq!(opts["preferences"]["includeInlayVariableTypeHints"], true);
+
+        let astro = config.resolve("astro").unwrap();
+        let install = scratch("astroinstall");
+        let exe = install.join("node_modules/.bin/astro-ls");
+        assert!(pinned(&astro, &exe).is_err(), "no TypeScript of clew's");
+        std::fs::create_dir_all(install.join("node_modules/typescript/lib")).unwrap();
+        let opts = pinned(&astro, &exe).unwrap().unwrap();
+        assert_eq!(
+            Path::new(opts["typescript"]["tsdk"].as_str().unwrap()),
+            install.join("node_modules/typescript/lib")
+        );
+        assert_eq!(
+            detect("typescript", "deno", &install),
+            Some(json!({ "enable": true, "lint": true }))
+        );
+        assert_eq!(
+            detect("typescript", "typescript-language-server", &install),
+            None
+        );
+    }
+
     #[test]
     fn typescript_runs_clews_own_tsserver() {
         let server = crate::lsp::config::ProjectLspConfig::default()

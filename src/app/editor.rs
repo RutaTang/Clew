@@ -612,7 +612,7 @@ impl App {
         let scroll = operation::scroll_to(ui::code_scroll_id(pane), AbsoluteOffset { x: 0.0, y });
         // Start (or reuse) a language server for this file and open the doc.
         let lsp_task = match lang_key {
-            Some(lang) => self.ensure_lsp(lang),
+            Some(lang) => self.ensure_lsp(clew_core::lsp::registry::slot_language(lang)),
             None => Task::none(),
         };
         // What the tour's step waits to show of this file, if it does.
@@ -932,7 +932,7 @@ impl App {
 
         let scroll = operation::scroll_to(ui::code_scroll_id(pane), AbsoluteOffset { x: 0.0, y });
         let lsp_task = match lang_key {
-            Some(lang) => self.ensure_lsp(lang),
+            Some(lang) => self.ensure_lsp(clew_core::lsp::registry::slot_language(lang)),
             None => Task::none(),
         };
         self.request_git_info(git_rel, abs.clone());

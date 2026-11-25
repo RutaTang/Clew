@@ -327,6 +327,18 @@ impl App {
             lsp::store::Located::NeedsDownload { download, dest_dir } => {
                 (LspProvision::Download(download), dest_dir)
             }
+            // An install that could only fail — npm is not here — is not
+            // offered: what to get instead is said where the server would be.
+            lsp::store::Located::NeedsInstall { install, .. }
+                if let Some(how) = lsp::store::missing_installer(install.tool, None) =>
+            {
+                let said = tr!("not installed: {how}", how = crate::i18n::message(how));
+                self.proj
+                    .link
+                    .lsp
+                    .insert(language.to_string(), LspSlot::Unsupported(said));
+                return Task::none();
+            }
             lsp::store::Located::NeedsInstall {
                 install, dest_dir, ..
             } => (LspProvision::Install(install), dest_dir),
@@ -993,29 +1005,35 @@ impl App {
         let beside = is_beside(language);
         // A notebook is sent as its script, by the script's own path (see
         // `Viewer::lsp_path`), with what is no code commented out.
-        let docs: Vec<(PathBuf, Arc<String>, bool)> = self
+        // Each as the language it is in (`Viewer::lsp_language_id`): one
+        // server reads a project's `.ts`, `.tsx` and `.js` files.
+        let docs: Vec<(PathBuf, Arc<String>, bool, &'static str)> = self
             .proj
             .panes
             .iter()
             .flatten()
             .filter(|v| v.lsp_lang() == Some(base))
-            .map(|v| match v.notebook {
-                Some(_) => (
-                    v.lsp_path(),
-                    Arc::new(clew_core::notebook::script_for_server(&v.source)),
-                    true,
-                ),
-                None => (v.abs.clone(), v.source.clone(), false),
+            .map(|v| {
+                let id = v.lsp_language_id().unwrap_or("plaintext");
+                match v.notebook {
+                    Some(_) => (
+                        v.lsp_path(),
+                        Arc::new(clew_core::notebook::script_for_server(&v.source)),
+                        true,
+                        id,
+                    ),
+                    None => (v.abs.clone(), v.source.clone(), false, id),
+                }
             })
             .collect();
         let mut tasks = Vec::new();
-        for (path, source, notebook) in docs {
+        for (path, source, notebook, id) in docs {
             let opened = match beside {
                 true => &mut self.proj.link.lsp_opened_also,
                 false => &mut self.proj.link.lsp_opened,
             };
             if opened.insert(path.clone()) {
-                client.did_open(&path, base, 1, &source);
+                client.did_open(&path, id, 1, &source);
             }
             // Inlay hints are the main server's to give, in a file's code
             // view; a notebook's script shows none.

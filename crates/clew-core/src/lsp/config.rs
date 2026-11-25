@@ -105,6 +105,27 @@ impl ProjectLspConfig {
     /// file outright (a config is a few hundred bytes; a link to `/dev/zero`
     /// must not hang the load).
     pub fn load(root: &Path) -> Result<Self, String> {
+        Self::load_file(root).map(|config| config.for_project(root))
+    }
+
+    /// The servers the project's own files call for, beneath what its
+    /// lsp.toml names: a Deno project (a `deno.json` or `deno.jsonc` at its
+    /// root) is read by Deno's server, whose imports, `Deno` and
+    /// configuration TypeScript's server read as errors.
+    fn for_project(mut self, root: &Path) -> Self {
+        let deno = ["deno.json", "deno.jsonc"]
+            .iter()
+            .any(|name| root.join(name).is_file());
+        if deno {
+            let over = self.languages.entry("typescript".to_string()).or_default();
+            if over.server.is_none() && over.command.is_none() {
+                over.server = Some("deno".to_string());
+            }
+        }
+        self
+    }
+
+    fn load_file(root: &Path) -> Result<Self, String> {
         let path = root.join(".clew").join("lsp.toml");
         // The `.clew` directory chain must be real directories: with a
         // repo-shipped `.clew -> /outside`, this config — whose `command`
@@ -333,6 +354,44 @@ fn toml_to_json_at(value: toml::Value, depth: usize) -> serde_json::Value {
                 .map(|(k, v)| (k, toml_to_json_at(v, depth + 1)))
                 .collect(),
         ),
+    }
+}
+
+#[cfg(test)]
+mod deno_tests {
+    use super::*;
+
+    /// A Deno project is read by Deno's server, unless its lsp.toml names
+    /// another; a project without a deno.json keeps TypeScript's.
+    #[test]
+    fn a_deno_project_is_read_by_denos_server() {
+        let dir = crate::testutil::TempDir::new("lsp-deno");
+        let server = |dir: &Path| {
+            ProjectLspConfig::load(dir)
+                .unwrap()
+                .resolve("typescript")
+                .map(|s| (s.server_name, s.args))
+        };
+        assert_eq!(
+            server(&dir).map(|s| s.0),
+            Some("typescript-language-server".to_string())
+        );
+        std::fs::write(dir.join("deno.jsonc"), "{ // tasks\n}\n").unwrap();
+        assert_eq!(
+            server(&dir),
+            Some(("deno".to_string(), vec!["lsp".to_string()]))
+        );
+        std::fs::create_dir_all(dir.join(".clew")).unwrap();
+        std::fs::write(
+            dir.join(".clew/lsp.toml"),
+            "[typescript]\nserver = \"typescript-language-server\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            server(&dir).map(|s| s.0),
+            Some("typescript-language-server".to_string()),
+            "the project's own choice wins"
+        );
     }
 }
 

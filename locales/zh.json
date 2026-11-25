@@ -2807,6 +2807,8 @@
  "inherits": "继承",
  "install Eclipse JDT LS, for example with “brew install jdtls”": "请安装 Eclipse JDT LS，例如用“brew install jdtls”",
  "install Lean with elan": "请用 elan 安装 Lean",
+ "install Node.js, which brings npm": "请安装 Node.js（自带 npm）",
+ "install Deno": "请安装 Deno",
  "install completed but '{arg1}' is missing": "安装已完成，但缺少 '{arg1}'",
  "install failed: {e}": "安装失败：{e}",
  "install it with “dotnet tool install --global csharp-ls”": "请用“dotnet tool install --global csharp-ls”安装",

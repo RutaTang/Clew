@@ -630,8 +630,11 @@ pub fn spawn_path() -> Option<OsString> {
 /// an app opened from the Finder found no `cargo` to install a server with
 /// while the shell that `cargo` was installed from had it.
 pub fn search_path() -> Option<OsString> {
-    let tools = user_tool_dirs(crate::home_dir().as_deref(), &|name| std::env::var_os(name))
+    let home = crate::home_dir();
+    let var = |name: &str| std::env::var_os(name);
+    let tools = user_tool_dirs(home.as_deref(), &var)
         .into_iter()
+        .chain(nvm_newest(home.as_deref(), &var))
         .filter(|dir| dir.is_dir());
     merge_paths(
         merge_paths(login_path(), std::env::var_os("PATH")),
@@ -657,7 +660,12 @@ fn login_path() -> Option<OsString> {
 /// Where the usual installers put a user's own toolchains, in `home` or
 /// where their variable (`var`) moves them: rustup's (`~/.cargo/bin`),
 /// elan's for Lean (`~/.elan/bin`), pipx's, uv's and pip's `--user`
-/// (`~/.local/bin`), Go's (`~/go/bin`) and GHCup's (`~/.ghcup/bin`).
+/// (`~/.local/bin`), Go's (`~/go/bin`) and GHCup's (`~/.ghcup/bin`); and
+/// Node's, which a version manager installs — Volta's, asdf's, mise's and
+/// nodenv's shims (each runs the Node a project pins), fnm's default — with
+/// Bun's and Deno's. nvm's is the newest it installed ([`nvm_newest`]).
+/// (Homebrew's is on the login shell's `PATH`, which an app opened from
+/// the Finder is given: [`login_path`].)
 fn user_tool_dirs(home: Option<&Path>, var: &dyn Fn(&str) -> Option<OsString>) -> Vec<PathBuf> {
     let at = |name: &str, default: &str| -> Option<PathBuf> {
         var(name)
@@ -671,11 +679,46 @@ fn user_tool_dirs(home: Option<&Path>, var: &dyn Fn(&str) -> Option<OsString>) -
         home.map(|h| h.join(".local/bin")),
         at("GOPATH", "go").map(|d| d.join("bin")),
         at("GHCUP_INSTALL_BASE_PREFIX", "").map(|d| d.join(".ghcup/bin")),
+        at("VOLTA_HOME", ".volta").map(|d| d.join("bin")),
+        at("ASDF_DATA_DIR", ".asdf").map(|d| d.join("shims")),
+        at("MISE_DATA_DIR", ".local/share/mise").map(|d| d.join("shims")),
+        at("NODENV_ROOT", ".nodenv").map(|d| d.join("shims")),
+        at("FNM_DIR", ".local/share/fnm").map(|d| d.join("aliases/default/bin")),
+        home.map(|h| h.join("Library/Application Support/fnm/aliases/default/bin")),
+        home.map(|h| h.join(".fnm/aliases/default/bin")),
+        at("BUN_INSTALL", ".bun").map(|d| d.join("bin")),
+        at("DENO_INSTALL", ".deno").map(|d| d.join("bin")),
     ]
     .into_iter()
     .flatten()
     .filter(|d| d.is_absolute())
     .collect()
+}
+
+/// The `bin` of the newest Node nvm installed (`~/.nvm/versions/node/v22.11.0`,
+/// or under `NVM_DIR`): nvm puts the one a shell chose on that shell's
+/// `PATH` and nowhere else, so an app started from a desktop menu has none.
+fn nvm_newest(home: Option<&Path>, var: &dyn Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
+    let root = var("NVM_DIR")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| home.map(|h| h.join(".nvm")))?;
+    let versions = root.join("versions").join("node");
+    let version = |name: &str| -> Option<Vec<u64>> {
+        name.strip_prefix('v')?
+            .split('.')
+            .map(|part| part.parse().ok())
+            .collect()
+    };
+    std::fs::read_dir(&versions)
+        .ok()?
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            Some((version(&name)?, name))
+        })
+        .max()
+        .map(|(_, name)| versions.join(name).join("bin"))
 }
 
 /// The `PATH` a child is given, and a bare program name is looked up on:
@@ -949,6 +992,15 @@ mod tests {
                 "/home/me/.local/bin",
                 "/home/me/go/bin",
                 "/home/me/.ghcup/bin",
+                "/home/me/.volta/bin",
+                "/home/me/.asdf/shims",
+                "/home/me/.local/share/mise/shims",
+                "/home/me/.nodenv/shims",
+                "/home/me/.local/share/fnm/aliases/default/bin",
+                "/home/me/Library/Application Support/fnm/aliases/default/bin",
+                "/home/me/.fnm/aliases/default/bin",
+                "/home/me/.bun/bin",
+                "/home/me/.deno/bin",
             ]
             .map(PathBuf::from)
         );
@@ -968,6 +1020,16 @@ mod tests {
             super::user_tool_dirs(None, &moved),
             [PathBuf::from("/opt/cargo/bin")]
         );
+        // nvm's newest Node, by version, not by name.
+        let nvm = crate::testutil::TempDir::new("nvm-home");
+        for v in ["v9.11.2", "v20.11.0", "v18.19.1", "system"] {
+            std::fs::create_dir_all(nvm.join(".nvm/versions/node").join(v).join("bin")).unwrap();
+        }
+        assert_eq!(
+            super::nvm_newest(Some(&nvm), &none),
+            Some(nvm.join(".nvm/versions/node/v20.11.0/bin"))
+        );
+        assert_eq!(super::nvm_newest(Some(home), &none), None, "no nvm");
         // After the user's own path, never before it.
         let merged = super::merge_paths(
             super::merge_paths(None, Some("/usr/bin".into())),

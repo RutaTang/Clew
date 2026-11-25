@@ -290,7 +290,17 @@ impl Viewer {
     /// The language its language server reads it in: its own, or for a
     /// notebook, its script's.
     pub fn lsp_lang(&self) -> Option<&'static str> {
-        self.lang_key.or(self.script_lang)
+        self.lang_key
+            .or(self.script_lang)
+            .map(clew_core::lsp::registry::slot_language)
+    }
+
+    /// The identifier its language server knows it by (LSP's
+    /// `languageId`): `typescriptreact` for a `.tsx`, `jsonc` for a
+    /// `tsconfig.json` (see [`clew_core::lsp::registry::language_id`]).
+    pub fn lsp_language_id(&self) -> Option<&'static str> {
+        let key = self.lang_key.or(self.script_lang)?;
+        Some(clew_core::lsp::registry::language_id(key, &self.lsp_path()))
     }
 
     /// A notebook's cells, while they are what is on screen — not when it

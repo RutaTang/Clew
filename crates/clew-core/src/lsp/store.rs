@@ -459,12 +459,28 @@ pub fn already_installed_on(server: &str, path: &OsStr) -> Option<PathBuf> {
     names.iter().find_map(|name| find_in(path, name, false))
 }
 
+/// How to get the program an install of a server runs (`npm`), when this
+/// computer has none: what is said in place of offering an install that
+/// could only fail. `None` when it is there, and for a tool without a hint.
+pub fn missing_installer(tool: &str, path: Option<&OsStr>) -> Option<&'static str> {
+    let how = match tool {
+        "npm" => "install Node.js, which brings npm",
+        _ => return None,
+    };
+    let found = match path {
+        Some(path) => find_in_unresolved(path, tool),
+        None => find_on_path_unresolved(tool),
+    };
+    found.is_none().then_some(how)
+}
+
 /// How to get the toolchain program `binary`, for the message saying it is
 /// missing.
 fn install_hint(binary: &str) -> &'static str {
     match binary {
         "dart" => "install the Dart or Flutter SDK",
         "lake" => "install Lean with elan",
+        "deno" => "install Deno",
         "jdtls" => "install Eclipse JDT LS, for example with “brew install jdtls”",
         "ruby-lsp" => "install it with “gem install ruby-lsp”",
         "csharp-ls" => "install it with “dotnet tool install --global csharp-ls”",
@@ -1132,6 +1148,34 @@ pub(crate) mod testing {
 }
 
 #[cfg(test)]
+mod installer_tests {
+    /// An install whose tool is not here says how to get the tool.
+    #[test]
+    fn a_missing_npm_says_to_install_node() {
+        let empty = crate::testutil::TempDir::new("no-npm");
+        assert_eq!(
+            super::missing_installer("npm", Some(empty.as_os_str())),
+            Some("install Node.js, which brings npm")
+        );
+        let bin = crate::testutil::TempDir::new("has-npm");
+        let npm = bin.join("npm");
+        std::fs::write(&npm, "#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&npm, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        #[cfg(unix)]
+        assert_eq!(super::missing_installer("npm", Some(bin.as_os_str())), None);
+        assert_eq!(
+            super::missing_installer("go", Some(empty.as_os_str())),
+            None,
+            "no hint"
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::testing::with_store;
     use super::*;
@@ -1441,8 +1485,12 @@ mod tests {
                     );
                     passed.push(arg.to_string());
                 }
+                // A scoped package's own `@` (`@vue/typescript-plugin@3`)
+                // is not a pin.
                 assert!(
-                    !passed.iter().any(|a| a.matches('@').count() > 1),
+                    !passed
+                        .iter()
+                        .any(|a| a.trim_start_matches('@').matches('@').count() > 1),
                     "double pin in {passed:?}"
                 );
                 checked += 1;

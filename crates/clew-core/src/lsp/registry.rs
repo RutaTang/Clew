@@ -650,6 +650,85 @@ pub static SERVERS: &[ServerSpec] = &[
             binary: "node_modules/.bin/typescript-language-server",
         },
     },
+    // A Vue component's TypeScript — its script's and its template's
+    // expressions — is read by TypeScript's own server with Vue's plugin,
+    // `@vue/typescript-plugin`, which is how Vue's tools read it: hover, go
+    // to definition and references reach across `.vue` and `.ts` files
+    // alike. An install of its own, apart from TypeScript's: the plugin
+    // loads the Vue language plugins a project's tsconfig.json names
+    // (`vueCompilerOptions.plugins`) from its node_modules, so this server
+    // runs the project's code and starts only once the project is trusted,
+    // where TypeScript's runs none. Both TypeScripts are clew's
+    // (`langenv::pinned`).
+    ServerSpec {
+        name: "vue-typescript-language-server",
+        version: "6.1.0",
+        languages: &["vue"],
+        args: &["--stdio"],
+        runs_project_code: Some("the Vue language plugins its tsconfig.json names"),
+        source: Source::Install {
+            tool: "npm",
+            kind: Installer::Npm {
+                packages: &[
+                    "typescript-language-server",
+                    "typescript@5",
+                    "@vue/typescript-plugin@3.3.14",
+                ],
+            },
+            binary: "node_modules/.bin/typescript-language-server",
+        },
+    },
+    // Svelte's own server, which reads a component's markup, script and
+    // styles — and the project's svelte.config.js, which it loads to learn
+    // how the components are preprocessed.
+    ServerSpec {
+        name: "svelte-language-server",
+        version: "0.18.6",
+        languages: &["svelte"],
+        args: &["--stdio"],
+        runs_project_code: Some(
+            "its svelte.config.js, which it loads to read how components are preprocessed",
+        ),
+        source: Source::Install {
+            tool: "npm",
+            kind: Installer::Npm {
+                packages: &["svelte-language-server"],
+            },
+            binary: "node_modules/.bin/svelteserver",
+        },
+    },
+    // Astro's server, run with clew's own TypeScript (`langenv::pinned`):
+    // it loads the project's Astro, its Svelte and Vue integrations and its
+    // Prettier from the project's node_modules.
+    ServerSpec {
+        name: "astro-language-server",
+        version: "2.17.3",
+        languages: &["astro"],
+        args: &["--stdio"],
+        runs_project_code: Some(
+            "the Astro, Svelte, Vue and Prettier packages it loads from the project's node_modules",
+        ),
+        source: Source::Install {
+            tool: "npm",
+            kind: Installer::Npm {
+                packages: &["@astrojs/language-server@2.17.3", "typescript@5"],
+            },
+            binary: "node_modules/.bin/astro-ls",
+        },
+    },
+    // Deno's own server, `deno lsp`, from the Deno on this computer: what
+    // reads a project with a deno.json (`config::ProjectLspConfig::load`) —
+    // its URL and `npm:` imports, `Deno` and its config — where TypeScript's
+    // server read them as errors. No language takes it by default: the
+    // first row for a language is its default, and TypeScript's is above.
+    ServerSpec {
+        name: "deno",
+        version: "toolchain",
+        languages: &["typescript", "tsx", "javascript"],
+        args: &["lsp"],
+        runs_project_code: None,
+        source: Source::Toolchain { binary: "deno" },
+    },
     // json / html / css all come from one npm package, launched via their own
     // binaries.
     ServerSpec {
@@ -683,7 +762,9 @@ pub static SERVERS: &[ServerSpec] = &[
     ServerSpec {
         name: "vscode-css-language-server",
         version: "latest",
-        languages: &["css"],
+        // One server for a project's stylesheets, as SCSS and Less files
+        // `@use` and `@import` one another and plain CSS.
+        languages: &["css", "scss", "less"],
         args: &["--stdio"],
         runs_project_code: None,
         source: Source::Install {
@@ -766,6 +847,53 @@ pub fn all() -> &'static [ServerSpec] {
 }
 
 /// The default server for a language, if clew ships one.
+/// The language whose server reads files of `key`: the key their server
+/// runs under. TypeScript's server reads a project's JavaScript and TSX
+/// too — one server for files that import one another, where each key had
+/// a server, an install prompt and an install of its own — and CSS's reads
+/// SCSS and Less.
+pub fn slot_language(key: &str) -> &str {
+    match key {
+        "tsx" | "javascript" => "typescript",
+        "scss" | "less" => "css",
+        key => key,
+    }
+}
+
+/// The identifier a language server knows a file of `key` at `path` by
+/// (LSP's `languageId`): TSX is `typescriptreact` and a `.jsx` file
+/// `javascriptreact`, as TypeScript's server reads them (it read a `.tsx`
+/// sent as `tsx` as plain TypeScript, and its JSX as errors); a JSON file
+/// written with comments — a `.jsonc`, a `tsconfig.json`, a tool's
+/// configuration file — is `jsonc`, whose comments JSON's server allows.
+pub fn language_id<'a>(key: &'a str, path: &std::path::Path) -> &'a str {
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match key {
+        "tsx" => "typescriptreact",
+        "javascript" if name.ends_with(".jsx") => "javascriptreact",
+        "json" => {
+            let commented = name.ends_with(".jsonc")
+                || ((name.starts_with("tsconfig") || name.starts_with("jsconfig"))
+                    && name.ends_with(".json"))
+                || !name.contains('.')
+                || name.starts_with('.') && !name[1..].contains('.')
+                || path
+                    .parent()
+                    .and_then(|p| p.file_name())
+                    .is_some_and(|d| d == ".vscode" || d == ".devcontainer");
+            match commented {
+                true => "jsonc",
+                false => "json",
+            }
+        }
+        key => key,
+    }
+}
+
 pub fn default_for_language(language: &str) -> Option<&'static ServerSpec> {
     SERVERS.iter().find(|s| s.languages.contains(&language))
 }
@@ -778,6 +906,53 @@ pub fn by_name(name: &str) -> Option<&'static ServerSpec> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A project's `.ts`, `.tsx` and `.js` files are read by one server, as
+    /// are its CSS, SCSS and Less — each file sent as the language it is.
+    #[test]
+    fn one_server_reads_files_that_import_one_another_each_as_its_own() {
+        use std::path::Path;
+        for key in ["typescript", "tsx", "javascript"] {
+            assert_eq!(slot_language(key), "typescript", "{key}");
+        }
+        for key in ["css", "scss", "less"] {
+            assert_eq!(slot_language(key), "css", "{key}");
+        }
+        assert_eq!(slot_language("vue"), "vue");
+        assert_eq!(slot_language("python"), "python");
+        assert_eq!(
+            default_for_language("scss").map(|s| s.name),
+            Some("vscode-css-language-server")
+        );
+        assert_eq!(
+            default_for_language("vue").map(|s| s.name),
+            Some("vue-typescript-language-server")
+        );
+        assert_eq!(
+            default_for_language("svelte").map(|s| s.name),
+            Some("svelte-language-server")
+        );
+        assert_eq!(
+            default_for_language("astro").map(|s| s.name),
+            Some("astro-language-server")
+        );
+        for (key, path, id) in [
+            ("tsx", "src/App.tsx", "typescriptreact"),
+            ("javascript", "src/App.jsx", "javascriptreact"),
+            ("javascript", "src/index.mjs", "javascript"),
+            ("typescript", "src/a.ts", "typescript"),
+            ("json", "tsconfig.json", "jsonc"),
+            ("json", "tsconfig.app.json", "jsonc"),
+            ("json", "settings.jsonc", "jsonc"),
+            ("json", ".eslintrc", "jsonc"),
+            ("json", ".vscode/settings.json", "jsonc"),
+            ("json", "package.json", "json"),
+            ("scss", "theme.scss", "scss"),
+            ("vue", "App.vue", "vue"),
+        ] {
+            assert_eq!(language_id(key, Path::new(path)), id, "{path}");
+        }
+    }
 
     fn download(spec: &ServerSpec, platform: Platform) -> Option<Download> {
         match spec.provision(spec.version, platform)? {

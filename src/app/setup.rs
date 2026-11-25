@@ -243,9 +243,21 @@ impl ServerLook {
                     lsp::store::Located::NeedsDownload { download, .. } => self
                         .on_path(&server.server_name, download.binary, root)
                         .map_or(Fetch::Download, Fetch::OnPath),
-                    lsp::store::Located::NeedsInstall { install, .. } => self
-                        .on_path(&server.server_name, install.binary, root)
-                        .map_or_else(|| Fetch::Install(install.tool.to_string()), Fetch::OnPath),
+                    // Its own program on this computer; else an install —
+                    // or, where what installs it is not here (no npm), how
+                    // to get that.
+                    lsp::store::Located::NeedsInstall { install, .. } => {
+                        match self.on_path(&server.server_name, install.binary, root) {
+                            Some(found) => Fetch::OnPath(found),
+                            None => match lsp::store::missing_installer(
+                                install.tool,
+                                self.path.as_deref(),
+                            ) {
+                                Some(how) => Fetch::Missing(how),
+                                None => Fetch::Install(install.tool.to_string()),
+                            },
+                        }
+                    }
                     // A toolchain not installed: said, with how to get it.
                     lsp::store::Located::Unsupported(_) => Fetch::Missing(
                         lsp::store::missing_toolchain(&server, self.path.as_deref())?,
@@ -351,7 +363,9 @@ pub(crate) fn setup_languages(files: &[fs_scan::FileEntry]) -> Vec<String> {
         if theirs {
             continue;
         }
-        let Some(language) = highlight::detect(&f.abs) else {
+        // Counted by the server that reads it: a project's `.ts`, `.tsx`
+        // and `.js` files are one row, TypeScript's.
+        let Some(language) = highlight::detect(&f.abs).map(lsp::registry::slot_language) else {
             continue;
         };
         if DATA_LANGUAGES.contains(&language)
@@ -976,6 +990,24 @@ mod tests {
         assert_eq!(setup_languages(&more), ["python", "rust"]);
         let small = [entry(root, "build.zig"), entry(root, "src/main.rs")];
         assert_eq!(setup_languages(&small), ["rust", "zig"]);
+        // A web project's TypeScript, TSX and JavaScript are one server's,
+        // offered once; its SCSS is CSS's server's; its components each
+        // their own.
+        let web: Vec<fs_scan::FileEntry> = [
+            "src/main.ts",
+            "src/App.tsx",
+            "src/legacy.js",
+            "src/theme.scss",
+            "src/Card.vue",
+            "src/Nav.svelte",
+        ]
+        .map(|rel| entry(root, rel))
+        .into_iter()
+        .collect();
+        assert_eq!(
+            setup_languages(&web),
+            ["css", "svelte", "typescript", "vue"]
+        );
         // Each rule on its own, where the share would not decide: a small
         // project's fixture, vendored code and manifest are not languages
         // it is written in.

@@ -171,7 +171,11 @@ struct ClientSink<'a> {
 
 impl DocSink for ClientSink<'_> {
     fn open(&mut self, path: &Path, version: i64, text: &str) {
-        self.client.did_open(path, self.language, version, text);
+        // Each document as the language it is in (`typescriptreact` for a
+        // `.tsx`), whichever of the slot's languages that is.
+        let key = highlight::detect(path).unwrap_or(self.language);
+        let id = clew_core::lsp::registry::language_id(key, path);
+        self.client.did_open(path, id, version, text);
     }
     fn change(&mut self, path: &Path, version: i64, text: &str) {
         self.client.did_change(path, version, text);
@@ -396,7 +400,10 @@ impl LspPool {
         // Canonical from here on: the URI we open must be the path the
         // server's own project model (e.g. cargo metadata) uses.
         let abs = abs.canonicalize().unwrap_or_else(|_| abs.to_path_buf());
-        let Some(language) = highlight::detect(&abs) else {
+        // The server that reads it: one for a project's `.ts`, `.tsx` and
+        // `.js` files (`registry::slot_language`).
+        let Some(language) = highlight::detect(&abs).map(clew_core::lsp::registry::slot_language)
+        else {
             return Err(format!("no language server support for {rel}"));
         };
         // Bounded and plain-file-only at the read: `rel` is whatever path the

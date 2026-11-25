@@ -2807,6 +2807,8 @@
  "inherits": "상속",
  "install Eclipse JDT LS, for example with “brew install jdtls”": "“brew install jdtls” 등으로 Eclipse JDT LS 설치",
  "install Lean with elan": "elan으로 Lean 설치",
+ "install Node.js, which brings npm": "npm이 포함된 Node.js 설치",
+ "install Deno": "Deno 설치",
  "install completed but '{arg1}' is missing": "설치는 완료되었지만 '{arg1}' 파일이 없음",
  "install failed: {e}": "설치 실패: {e}",
  "install it with “dotnet tool install --global csharp-ls”": "“dotnet tool install --global csharp-ls” 명령으로 설치",
