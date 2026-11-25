@@ -358,6 +358,36 @@ impl App {
         col: usize,
         kind: GotoKind,
     ) -> Task<Message> {
+        // A table or a column of the project's schema: where it is made.
+        // In SQL, which has no server of its own here, that is the answer;
+        // elsewhere (a name in a string of SQL) when the server has none.
+        let schema = matches!(kind, GotoKind::Definition)
+            .then(|| self.schema_hit(pane, line, col))
+            .flatten()
+            .and_then(|hit| self.schema_place(hit));
+        let in_sql = self
+            .proj
+            .panes
+            .get(pane)
+            .and_then(Option::as_ref)
+            .is_some_and(|v| crate::app::schemainfo::is_schema_file(v.lang_key, &v.abs));
+        self.proj.goto_schema = None;
+        if let Some((abs, at)) = schema.clone() {
+            let ready = self
+                .proj
+                .panes
+                .get(pane)
+                .and_then(Option::as_ref)
+                .and_then(|v| v.lsp_lang())
+                .is_some_and(|lang| {
+                    matches!(self.proj.link.lsp.get(lang), Some(LspSlot::Ready(_)))
+                });
+            if in_sql || !ready {
+                self.status.clear();
+                return self.open_file(abs, Some(at), true);
+            }
+            self.proj.goto_schema = Some((abs, at));
+        }
         // Pull everything we need from the viewer before mutating self.
         let Some((lang, path, source_line)) = self
             .proj
@@ -483,10 +513,17 @@ impl App {
                 ));
                 self.open_file(abs, Some(target_line), true)
             }
-            Ok(_) => {
-                self.status = tr!("No definition found").into();
-                Task::none()
-            }
+            Ok(_) => match self.proj.goto_schema.take() {
+                // A table the schema knows, named in a string of SQL.
+                Some((abs, at)) => {
+                    self.status.clear();
+                    self.open_file(abs, Some(at), true)
+                }
+                None => {
+                    self.status = tr!("No definition found").into();
+                    Task::none()
+                }
+            },
             Err(e) => {
                 self.status = tr!("Definition failed: {error}", error = e);
                 Task::none()

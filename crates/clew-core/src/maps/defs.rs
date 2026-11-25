@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 
 use super::Corpus;
+use crate::highlight::Lang;
 
 /// One definition.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,6 +46,15 @@ impl Defs {
     pub fn of(corpus: &Corpus) -> Defs {
         let mut by_name: HashMap<String, Vec<Def>> = HashMap::new();
         for source in &corpus.files {
+            // Code's definitions only: a schema dump's thousands of tables
+            // and columns (GitLab's: 1,500 and 30,000) are no class a map
+            // looks for, and took most of a minute to index.
+            if matches!(
+                source.lang,
+                Some(Lang::Sql | Lang::Json | Lang::Yaml | Lang::Toml | Lang::Html | Lang::Css)
+            ) {
+                continue;
+            }
             let (Some(lang), Some(tree)) = (source.lang, source.tree()) else {
                 continue;
             };

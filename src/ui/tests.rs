@@ -10522,6 +10522,7 @@ fn the_maps_header_says_its_views_in_words() {
         super::graph::graph_modal_frame(
             "Call Graph",
             true,
+            false,
             app.graph_3d,
             false,
             false,
@@ -11411,6 +11412,7 @@ fn the_maps_overlay_lists_a_maps_nodes_by_kind() {
             file: file.into(),
             line,
             detail: detail.into(),
+            fields: Vec::new(),
         };
     app.proj.maps = Arc::new(vec![
         clew_protocol::ProjectMap {
@@ -11431,6 +11433,7 @@ fn the_maps_overlay_lists_a_maps_nodes_by_kind() {
                 from: 0,
                 to: 1,
                 label: "user_id".into(),
+                fields: Vec::new(),
             }],
         },
         clew_protocol::ProjectMap {
@@ -11495,6 +11498,7 @@ fn the_maps_overlay_lists_a_maps_nodes_by_kind() {
         from: 0,
         to: 1,
         label: "handled by".into(),
+        fields: Vec::new(),
     });
     assert_eq!(super::MapChoice::of(&routes).to_string(), "Routes");
     // From the graph: a node opens where it is defined; one defined nowhere,
@@ -17566,6 +17570,7 @@ fn the_heat_toggle_keeps_its_width() {
         let frame = super::graph_modal_frame(
             "Import Graph",
             true,
+            false,
             false,
             false,
             on,

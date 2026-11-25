@@ -28,6 +28,30 @@ pub(crate) fn reason_words(reason: &Reason) -> String {
             Risk::RawHtml => trn!("writes raw HTML once", "writes raw HTML {n} times", n),
             Risk::CatchAll => trn!("1 catch-all", "{n} catch-alls", n),
             Risk::Sorry => trn!("1 unfinished proof", "{n} unfinished proofs", n),
+            Risk::NoPrimaryKey => tr!("no primary key").to_string(),
+            Risk::UnindexedKey => trn!(
+                "1 foreign key no index leads with",
+                "{n} foreign keys no index leads with",
+                n
+            ),
+            Risk::RlsOff => {
+                tr!("row level security off, on in the schema's other tables").to_string()
+            }
+            Risk::DropsData => trn!(
+                "drops data an earlier migration made",
+                "drops data an earlier migration made, {n} times",
+                n
+            ),
+            Risk::NotNullNoDefault => trn!(
+                "adds a NOT NULL column with no default to a table with rows",
+                "adds {n} NOT NULL columns with no default to a table with rows",
+                n
+            ),
+            Risk::LocksTable => trn!(
+                "holds writes to a table while it works",
+                "holds writes to a table while it works, {n} times",
+                n
+            ),
         },
         Reason::Swallowed(n) => trn!("swallows 1 error", "swallows {n} errors", n),
         Reason::Marked(n) => trn!("1 TODO or FIXME", "{n} TODOs or FIXMEs", n),

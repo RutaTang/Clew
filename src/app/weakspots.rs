@@ -40,8 +40,12 @@ pub struct WeakSpots {
     pub(crate) rev: u64,
 }
 
+/// The largest SQL file read: a large application's schema dump.
+const MAX_SQL_BYTES: u64 = 16 << 20;
+
 /// The files of `files` worth measuring: code, not tests, not data — each
-/// with its language — the first [`MAX_FILES`] of them.
+/// with its language — the first [`MAX_FILES`] of them; and the project's
+/// SQL, whose schema and migrations have weak spots of their own.
 fn code_files(
     files: &[clew_core::fs_scan::FileEntry],
 ) -> Vec<(String, std::path::PathBuf, &'static str)> {
@@ -52,7 +56,7 @@ fn code_files(
             let lang = highlight::detect(Path::new(&f.rel))?;
             (!matches!(
                 lang,
-                "markdown" | "json" | "toml" | "yaml" | "css" | "html" | "text" | "xml" | "sql"
+                "markdown" | "json" | "toml" | "yaml" | "css" | "html" | "text" | "xml"
             ))
             .then(|| (f.rel.clone(), f.abs.clone(), lang))
         })
@@ -60,8 +64,32 @@ fn code_files(
         .collect()
 }
 
-/// Measure each `(rel, text, lang)` on a few threads.
+/// Whether a file feeds the schema's weak spots: SQL, and Rails' `db/`.
+fn schema_file(rel: &str, lang: &str) -> bool {
+    lang == "sql" || rel.ends_with("db/schema.rb") || rel.contains("db/migrate/")
+}
+
+/// Measure each `(rel, text, lang)` on a few threads: code by its
+/// functions, the project's databases by their schemas and migrations.
 fn measure_all(files: Vec<(String, String, &'static str)>) -> Vec<Spot> {
+    let schema: Vec<(String, String)> = files
+        .iter()
+        .filter(|(rel, _, lang)| schema_file(rel, lang))
+        .map(|(rel, text, _)| (rel.clone(), text.clone()))
+        .collect();
+    let code: Vec<(String, String, &'static str)> = files
+        .into_iter()
+        .filter(|(_, _, lang)| *lang != "sql")
+        .collect();
+    let mut spots = measure_code(code);
+    if !schema.is_empty() {
+        spots.extend(weakspots::schema_spots(&schema));
+    }
+    spots
+}
+
+/// Measure each file of code's functions on a few threads.
+fn measure_code(files: Vec<(String, String, &'static str)>) -> Vec<Spot> {
     let threads = std::thread::available_parallelism()
         .map_or(2, |n| n.get())
         .clamp(1, 8);
@@ -191,11 +219,12 @@ impl App {
                     let texts: Vec<(String, String, &'static str)> = files
                         .into_iter()
                         .filter_map(|(rel, abs, lang)| {
-                            let bytes = clew_core::fs_scan::read_confined_bytes_capped(
-                                &root,
-                                &abs,
-                                MAX_FILE_BYTES,
-                            )?;
+                            let cap = match lang {
+                                "sql" => MAX_SQL_BYTES,
+                                _ => MAX_FILE_BYTES,
+                            };
+                            let bytes =
+                                clew_core::fs_scan::read_confined_bytes_capped(&root, &abs, cap)?;
                             Some((rel, String::from_utf8(bytes).ok()?, lang))
                         })
                         .collect();
@@ -301,5 +330,54 @@ impl App {
                 Task::none()
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod schema_tests {
+    use super::*;
+
+    /// A project's SQL is measured beside its code: the schema's and the
+    /// migrations' weak spots among the functions'.
+    #[test]
+    fn a_projects_sql_has_weak_spots_beside_its_code() {
+        let files = vec![
+            (
+                "db/migrations/0001.sql".to_string(),
+                "CREATE TABLE users (id uuid PRIMARY KEY, email text, at timestamptz);\nCREATE TABLE events (name text);\n".to_string(),
+                "sql",
+            ),
+            (
+                "db/migrations/0002.sql".to_string(),
+                "ALTER TABLE users DROP COLUMN email;\n".to_string(),
+                "sql",
+            ),
+            (
+                "src/lib.rs".to_string(),
+                "fn load() -> u32 {\n    let x: Option<u32> = None;\n    x.unwrap()\n}\n".to_string(),
+                "rust",
+            ),
+        ];
+        let spots = measure_all(files);
+        let named: Vec<(&str, &str)> = spots
+            .iter()
+            .map(|s| (s.rel.as_str(), s.name.as_str()))
+            .collect();
+        assert!(
+            named.contains(&("db/migrations/0001.sql", "events")),
+            "no primary key: {named:?}"
+        );
+        assert!(
+            named.contains(&("db/migrations/0002.sql", "users")),
+            "drops data: {named:?}"
+        );
+        assert!(
+            named.contains(&("src/lib.rs", "load")),
+            "the code's own: {named:?}"
+        );
+        assert!(
+            schema_file("db/migrate/20240101_x.rb", "ruby")
+                && !schema_file("app/models/user.rb", "ruby")
+        );
     }
 }

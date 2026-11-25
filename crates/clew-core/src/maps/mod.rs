@@ -17,7 +17,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use clew_protocol::{MapEdge, MapNode, ProjectMap};
+use clew_protocol::{MapEdge, MapField, MapNode, ProjectMap};
 use tree_sitter::{Node, Tree};
 
 use crate::fs_scan::FileEntry;
@@ -41,6 +41,10 @@ use crate::highlight::{self, Lang};
 
 /// The largest file read for a map.
 const MAX_FILE_BYTES: u64 = 2 << 20;
+
+/// The largest SQL file read: a large application's schema dump (GitLab's
+/// `structure.sql` is 3 MB) is read whole; a dump of data past this is not.
+const MAX_SQL_BYTES: u64 = 16 << 20;
 
 /// The most nodes one map keeps: past it, the map says how many it left out.
 pub const MAX_NODES: usize = 4000;
@@ -101,7 +105,11 @@ impl Corpus {
             let Ok(meta) = std::fs::metadata(&entry.abs) else {
                 continue;
             };
-            if !meta.is_file() || meta.len() > MAX_FILE_BYTES {
+            let cap = match lang {
+                Some(Lang::Sql) => MAX_SQL_BYTES,
+                _ => MAX_FILE_BYTES,
+            };
+            if !meta.is_file() || meta.len() > cap {
                 continue;
             }
             let Ok(bytes) = std::fs::read(&entry.abs) else {
@@ -168,6 +176,7 @@ fn wanted_without_language(rel: &str) -> bool {
         || name == "pnpm-workspace.yaml"
         || name == "go.mod"
         || name.ends_with(".lean")
+        || name.ends_with(".prisma")
 }
 
 /// Every map of `files` (under `root`), none empty.
@@ -277,6 +286,18 @@ impl MapBuilder {
         }
     }
 
+    /// The map named for whose it is: `Database schema · db/tenant`.
+    pub fn title_for(&mut self, whose: &str) {
+        self.map.title = format!("{} · {whose}", self.map.title);
+    }
+
+    /// The node `at`'s fields, replaced.
+    pub fn fields(&mut self, at: Option<usize>, fields: Vec<MapField>) {
+        if let Some(node) = at.and_then(|at| self.map.nodes.get_mut(at)) {
+            node.fields = fields;
+        }
+    }
+
     /// The node `at`, as it is now.
     pub fn get(&self, at: usize) -> Option<&MapNode> {
         self.map.nodes.get(at)
@@ -284,14 +305,36 @@ impl MapBuilder {
 
     /// An arrow `from` → `to`, once.
     pub fn edge(&mut self, from: Option<usize>, to: Option<usize>, label: &str) {
+        self.edge_joining(from, to, label, Vec::new());
+    }
+
+    /// An arrow `from` → `to` joining `fields` (each `(from's, to's)`, by
+    /// index), once; a pair naming a field its node does not have is left
+    /// out.
+    pub fn edge_joining(
+        &mut self,
+        from: Option<usize>,
+        to: Option<usize>,
+        label: &str,
+        fields: Vec<(usize, usize)>,
+    ) {
         let (Some(from), Some(to)) = (from, to) else {
             return;
         };
+        let (n_from, n_to) = (
+            self.map.nodes[from].fields.len(),
+            self.map.nodes[to].fields.len(),
+        );
+        let fields = fields
+            .into_iter()
+            .filter(|&(a, b)| a < n_from && b < n_to)
+            .collect();
         if self.edges.insert((from, to, label.to_string())) {
             self.map.edges.push(MapEdge {
                 from,
                 to,
                 label: label.into(),
+                fields,
             });
         }
     }

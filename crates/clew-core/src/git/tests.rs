@@ -1893,7 +1893,7 @@ fn a_kill_while_the_child_forks_stops_everything_it_started() {
         cmd.args([
             "-c",
             &format!(
-                "echo $$ > '{}'; for i in $(seq 300); do sleep 30 & \
+                "PATH=/usr/bin:/bin; echo $$ > '{}'; for i in $(seq 300); do sleep 30 & \
                  if [ $i = {} ]; then head -c 5000 /dev/zero & fi; done; wait",
                 group.display(),
                 10 + 20 * attempt

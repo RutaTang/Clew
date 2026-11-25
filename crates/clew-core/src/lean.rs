@@ -1665,12 +1665,18 @@ mod tests {
             "/- A program. -/\nimport Lean\npublic import Proj.Basic Proj.More -- two\n\ndef main : IO Unit := pure ()\nimport Not.This\n",
         )
         .unwrap();
+        // Its output only: what it writes to stderr ("oops") comes on a pipe
+        // of its own, read alongside, and may come first.
         let mut said = Vec::new();
         let end = run_main(
             &lake,
             &project,
             &file,
-            |line, _| said.push(line.to_string()),
+            |line, stderr| {
+                if !stderr {
+                    said.push(line.to_string())
+                }
+            },
             &AtomicBool::new(false),
         )
         .unwrap();

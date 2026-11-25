@@ -17722,6 +17722,68 @@ fn settle_maps(app: &mut App, task: Task<Message>) -> usize {
     reads.get()
 }
 
+/// A table or a column named in SQL — in a SQL file, or in a string of SQL
+/// in code — peeks as the schema has it, and goes to where it is made.
+#[test]
+fn a_name_in_sql_peeks_and_goes_to_where_the_schema_makes_it() {
+    let root = clew_core::testutil::TempDir::new("app-schema-peek");
+    std::fs::create_dir_all(root.join("db/migrations")).unwrap();
+    std::fs::create_dir_all(root.join("app")).unwrap();
+    std::fs::write(
+        root.join("db/migrations/0001_init.sql"),
+        "CREATE TABLE users (\n  id int PRIMARY KEY,\n  email text NOT NULL UNIQUE\n);\nCREATE TABLE posts (\n  id int PRIMARY KEY,\n  user_id int REFERENCES users(id)\n);\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("db/migrations/0002_more.sql"),
+        "ALTER TABLE posts ADD COLUMN title text;\nSELECT p.title FROM posts p JOIN public.users u ON u.id = p.user_id;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("app/repo.py"),
+        "def load(db):\n    return db.query(\"SELECT email FROM users\")\n",
+    )
+    .unwrap();
+    let root = root.canonicalize().unwrap();
+    let mut app = blank_app();
+    scan_synchronously(&mut app, root.clone());
+    let read = app.ensure_maps();
+    settle_maps(&mut app, read);
+    open_synchronously(&mut app, "db/migrations/0002_more.sql", None);
+    let pane = app.proj.active;
+    let init = root.join("db/migrations/0001_init.sql");
+    let more = root.join("db/migrations/0002_more.sql");
+    // `posts` after ALTER TABLE: the table, made in the first migration.
+    let posts = app.schema_hit(pane, 0, 13).expect("posts");
+    assert_eq!(posts.field, None);
+    assert_eq!(app.schema_place(posts), Some((init.clone(), 5)));
+    let peek = app.schema_peek(posts).unwrap();
+    for want in ["**posts**", "user_id", "→ users.id", "title"] {
+        assert!(peek.contains(want), "{want} in {peek}");
+    }
+    // `title`: the column, added by the second.
+    let title = app.schema_hit(pane, 0, 33).expect("title");
+    assert_eq!(app.schema_place(title), Some((more, 1)));
+    // `public.users`: the default schema's `users`; `user_id` after an
+    // alias: a column of a table the statement names.
+    let users = app.schema_hit(pane, 1, 41).expect("users");
+    assert_eq!(app.schema_place(users), Some((init.clone(), 1)));
+    let user_id = app.schema_hit(pane, 1, 63).expect("user_id");
+    let peek = app.schema_peek(user_id).unwrap();
+    assert!(peek.contains("**posts.user_id** `int`"), "{peek}");
+    assert!(peek.contains("References users.id"), "{peek}");
+    // Not a name: a keyword.
+    assert_eq!(app.schema_hit(pane, 1, 2), None);
+    // In code, a name in a string of SQL.
+    open_synchronously(&mut app, "app/repo.py", None);
+    let pane = app.proj.active;
+    let email = app.schema_hit(pane, 1, 29).expect("email");
+    assert_eq!(app.schema_place(email), Some((init.clone(), 3)));
+    let table = app.schema_hit(pane, 1, 40).expect("users");
+    assert_eq!(app.schema_place(table), Some((init, 1)));
+    assert_eq!(app.schema_hit(pane, 0, 5), None, "no SQL on the line");
+}
+
 /// The Maps overlay reads a local project's maps when it opens, lays out
 /// the first, keeps the one chosen across a rebuild, and reads them again
 /// only once a file changed.
@@ -17776,15 +17838,13 @@ fn the_maps_overlay_reads_a_local_projects_maps_when_they_are_stale() {
         "sql.lineage"
     );
     let schema = &app.proj.maps[0];
-    assert_eq!(
-        schema
-            .nodes
-            .iter()
-            .find(|n| n.label == "users")
-            .unwrap()
-            .detail,
-        "id int (primary key)\nemail text"
-    );
+    let users = schema.nodes.iter().find(|n| n.label == "users").unwrap();
+    let columns: Vec<(&str, &str, bool)> = users
+        .fields
+        .iter()
+        .map(|f| (f.name.as_str(), f.ty.as_str(), f.key))
+        .collect();
+    assert_eq!(columns, [("id", "int", true), ("email", "text", false)]);
 }
 
 /// A remote project's maps are read on its host; a map whose arrows name
@@ -17808,12 +17868,14 @@ fn a_remote_projects_maps_are_read_on_its_host_and_checked() {
                 file: "app.py".into(),
                 line: 3,
                 detail: String::new(),
+                fields: Vec::new(),
             },
         ],
         edges: vec![clew_protocol::MapEdge {
             from: 0,
             to: 1,
             label: "handled by".into(),
+            fields: Vec::new(),
         }],
     };
     let mut bad = good.clone();

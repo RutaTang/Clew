@@ -2505,7 +2505,7 @@ mod tests {
             // becomes of the reap.
             let (child, pgid) = group_with_helper(
                 &dir,
-                "echo $$ > \"$1\"; for _ in $(seq 300); do sleep 30 & done; wait",
+                "PATH=/usr/bin:/bin; echo $$ > \"$1\"; for _ in $(seq 300); do sleep 30 & done; wait",
             )
             .await;
             tokio::time::sleep(Duration::from_millis(2 + 3 * attempt)).await;

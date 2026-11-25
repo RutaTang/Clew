@@ -2639,6 +2639,10 @@ pub struct ProjectSession {
     /// The same for the last definition or implementation request; `None`
     /// for a type's definition, whose places spell the type, not the word.
     pub goto_term: Option<String>,
+    /// Where the schema says the word of the last definition request is
+    /// made (a table named in a line of SQL): gone to when the language
+    /// server finds no definition of it.
+    pub goto_schema: Option<(PathBuf, usize)>,
     /// Where the jump being made lands on its line: the file, its 0-based
     /// line, and the place there — the caret goes on the name, not the
     /// line's first column. Set for each jump from [`Self::landing_next`]:
@@ -3049,6 +3053,7 @@ impl Default for ProjectSession {
             nav_term: None,
             refs_term: None,
             goto_term: None,
+            goto_schema: None,
             landing: None,
             landing_next: None,
             call_graph: Default::default(),

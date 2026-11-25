@@ -508,6 +508,11 @@ impl App {
             self.local_structure(pane, line, col)
                 .map(|structure| format!("```text\n{structure}\n```")),
         );
+        // A table or a column of the project's schema.
+        parts.extend(
+            self.schema_hit(pane, line, col)
+                .and_then(|hit| self.schema_peek(hit)),
+        );
         (!parts.is_empty()).then(|| parts.join("\n\n"))
     }
 
