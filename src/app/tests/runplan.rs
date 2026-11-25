@@ -1046,6 +1046,14 @@ fn a_javascript_test_offers_the_projects_dependencies_first() {
         no_debug: true,
     }));
     assert_eq!(offered(&app), Some(root.clone()), "{}", app.status);
+    // The dialog names the package manager it runs.
+    assert!(
+        app.proj
+            .pending_lsp_consent
+            .iter()
+            .any(|c| c.server_name == "npm"),
+        "the package manager is named"
+    );
     assert!(app.status.contains("dependencies"), "{}", app.status);
     assert!(app.debug.session.is_none(), "nothing ran yet");
     app.proj.pending_lsp_consent.withdraw(|_| true);

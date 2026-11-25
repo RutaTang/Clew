@@ -1845,8 +1845,14 @@ impl App {
                 // place, as its host's clew-server runs a remote project's.
                 if let (false, Some(RunPlan::Remote { task, .. })) = (remote, &plan) {
                     let (task, root, choices) = (task.clone(), root.clone(), choices.clone());
+                    // A test runner reports on stderr (Bun's and Jest's
+                    // results alike): its output, not its errors — drawn
+                    // red, "1 pass, 0 fail" read as a failure. How the run
+                    // went is its status's, as a remote run's is.
+                    let report = matches!(task, clew_protocol::ProjectTask::JsTest { .. });
                     run_plain(&mut output, &stamp, run, &live, move |said, cancel| {
-                        clew_core::tasks::run(&root, &task, &choices, said, cancel)
+                        let mut said = |line: &str, stderr: bool| said(line, stderr && !report);
+                        clew_core::tasks::run(&root, &task, &choices, &mut said, cancel)
                     })
                     .await;
                     return;
@@ -2551,10 +2557,19 @@ impl App {
                 adapter = install.name()
             )
         };
+        // What runs, named: the project's package manager for its
+        // dependencies (`bun`), else what is installed (`debugpy`).
+        let server_name = match &install {
+            dap::AdapterInstall::JsDependencies { pm, .. } => pm.file_stem().map_or_else(
+                || install.name().to_string(),
+                |s| s.to_string_lossy().into_owned(),
+            ),
+            _ => install.name().to_string(),
+        };
         self.proj.pending_lsp_consent.offer(LspConsent {
             on_path: None,
             language: String::new(),
-            server_name: install.name().to_string(),
+            server_name,
             version: install.version().to_string(),
             provision: LspProvision::DebugAdapter {
                 install,
