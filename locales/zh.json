@@ -4087,5 +4087,17 @@
  "The page is served at {url} while it runs.": "运行期间，页面在 {url} 提供。",
  "Node.js cannot run JSX by itself: add tsx to the project ({add}), then debug again.": "Node.js 本身无法运行 JSX：请将 tsx 添加到项目中（{add}），然后重新调试。",
  "Node.js loads an import only by its file's full name, so it cannot load {import}: add tsx to the project ({add}), then run again.": "Node.js 只能按文件的完整名称加载 import，因此无法加载 {import}：请将 tsx 添加到项目中（{add}），然后重新运行。",
- "Node.js loads an import only by its file's full name, so it cannot load {import}: add tsx to the project ({add}), then debug again.": "Node.js 只能按文件的完整名称加载 import，因此无法加载 {import}：请将 tsx 添加到项目中（{add}），然后重新调试。"
+ "Node.js loads an import only by its file's full name, so it cannot load {import}: add tsx to the project ({add}), then debug again.": "Node.js 只能按文件的完整名称加载 import，因此无法加载 {import}：请将 tsx 添加到项目中（{add}），然后重新调试。",
+ "install JetBrains’ Kotlin LSP, for example with “brew install JetBrains/utils/kotlin-lsp”": "请安装 JetBrains 的 Kotlin LSP，例如用“brew install JetBrains/utils/kotlin-lsp”",
+ "install it with “brew install kotlin-language-server”": "请用“brew install kotlin-language-server”安装",
+ "install it with Coursier: “cs install metals”": "请用 Coursier 安装：“cs install metals”",
+ "install Expert, the Elixir language server, from its releases": "请从发布页安装 Elixir 语言服务器 Expert",
+ "install it with “brew install elixir-ls”": "请用“brew install elixir-ls”安装",
+ "The Kotlin language server to run.": "要运行的 Kotlin 语言服务器。",
+ "The Metals build to run.": "要运行的 Metals 版本。",
+ "The Elixir language server to run.": "要运行的 Elixir 语言服务器。",
+ "{rel} has no tests to run": "{rel} 中没有可运行的测试",
+ "No {manifest} was found above {name}, so its tests have no project to run in.": "在 {name} 之上没有找到 {manifest}，因此它的测试没有可运行的项目。",
+ "This project's tests run by CTest from a CMake build: build it, then run the test again.": "这个项目的测试由 CTest 从 CMake 构建中运行：请先构建，然后重新运行测试。",
+ "These tests run without the debugger: {status}": "这些测试在没有调试器的情况下运行：{status}"
 }

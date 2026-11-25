@@ -54,6 +54,17 @@ pub struct Runnable {
 /// one nests a test in more).
 const MAX_SCOPES: usize = 32;
 
+/// The runnables of `source`, a file at `rel` in language `lang` (a key):
+/// [`runnables`]', and the tests of the languages whose test files are
+/// told by their names too ([`crate::langtests`]: Go's `_test.go`,
+/// RSpec's `_spec.rb`, Common Test's `_SUITE.erl`).
+pub fn runnables_in(lang: &str, rel: &str, source: &str) -> Vec<Runnable> {
+    match crate::langtests::handles(lang) {
+        true => crate::langtests::tests(lang, rel, source),
+        false => runnables(lang, source),
+    }
+}
+
 /// The runnables of `source`, in language `lang` (a key), in order.
 /// Rust and Python have them, JavaScript and TypeScript their tests, and
 /// Lean its `main`; other languages none yet.

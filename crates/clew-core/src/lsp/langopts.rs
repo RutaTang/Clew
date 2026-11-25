@@ -60,7 +60,9 @@ pub fn language_options(
     };
     let host = ToolHost::current();
     let mut toolchains = BTreeMap::new();
-    for language in ["lean", "dart", "zig", "java", "ruby", "erlang", "haskell"] {
+    for language in [
+        "lean", "dart", "zig", "java", "ruby", "erlang", "haskell", "kotlin", "scala", "elixir",
+    ] {
         if has(language) {
             toolchains.insert(
                 language.to_string(),
@@ -631,6 +633,29 @@ pub fn toolchain_candidates(
             "haskell-language-server-wrapper",
             &["/opt/homebrew/bin", "/usr/local/bin"],
             &[".ghcup/bin", ".local/bin", ".cabal/bin"],
+        ),
+        "kotlin" => programs(
+            host,
+            "kotlin-lsp",
+            &["/opt/homebrew/bin", "/usr/local/bin"],
+            &[".local/bin"],
+        ),
+        // Where Coursier installs on Linux and on macOS.
+        "scala" => programs(
+            host,
+            "metals",
+            &["/opt/homebrew/bin", "/usr/local/bin"],
+            &[
+                ".local/share/coursier/bin",
+                "Library/Application Support/Coursier/bin",
+                ".local/bin",
+            ],
+        ),
+        "elixir" => programs(
+            host,
+            "expert",
+            &["/opt/homebrew/bin", "/usr/local/bin"],
+            &[".local/bin", ".mix/escripts"],
         ),
         _ => Vec::new(),
     };

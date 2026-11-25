@@ -4087,5 +4087,17 @@
  "The page is served at {url} while it runs.": "実行中、ページは {url} で配信されます。",
  "Node.js cannot run JSX by itself: add tsx to the project ({add}), then debug again.": "Node.js は単体では JSX を実行できません。プロジェクトに tsx を追加してから（{add}）、もう一度デバッグしてください。",
  "Node.js loads an import only by its file's full name, so it cannot load {import}: add tsx to the project ({add}), then run again.": "Node.js はファイルの完全な名前でしか import を読み込めないため、{import} を読み込めません。プロジェクトに tsx を追加してから（{add}）、もう一度実行してください。",
- "Node.js loads an import only by its file's full name, so it cannot load {import}: add tsx to the project ({add}), then debug again.": "Node.js はファイルの完全な名前でしか import を読み込めないため、{import} を読み込めません。プロジェクトに tsx を追加してから（{add}）、もう一度デバッグしてください。"
+ "Node.js loads an import only by its file's full name, so it cannot load {import}: add tsx to the project ({add}), then debug again.": "Node.js はファイルの完全な名前でしか import を読み込めないため、{import} を読み込めません。プロジェクトに tsx を追加してから（{add}）、もう一度デバッグしてください。",
+ "install JetBrains’ Kotlin LSP, for example with “brew install JetBrains/utils/kotlin-lsp”": "JetBrains の Kotlin LSP をインストールしてください（例:「brew install JetBrains/utils/kotlin-lsp」）",
+ "install it with “brew install kotlin-language-server”": "「brew install kotlin-language-server」でインストールしてください",
+ "install it with Coursier: “cs install metals”": "Coursier でインストールしてください:「cs install metals」",
+ "install Expert, the Elixir language server, from its releases": "Elixir の言語サーバー Expert をリリースページからインストールしてください",
+ "install it with “brew install elixir-ls”": "「brew install elixir-ls」でインストールしてください",
+ "The Kotlin language server to run.": "実行する Kotlin 言語サーバー。",
+ "The Metals build to run.": "実行する Metals のビルド。",
+ "The Elixir language server to run.": "実行する Elixir 言語サーバー。",
+ "{rel} has no tests to run": "{rel} に実行するテストはありません",
+ "No {manifest} was found above {name}, so its tests have no project to run in.": "{name} より上に {manifest} が見つからないため、そのテストを実行するプロジェクトがありません。",
+ "This project's tests run by CTest from a CMake build: build it, then run the test again.": "このプロジェクトのテストは CMake のビルドから CTest で実行されます。ビルドしてから、もう一度テストを実行してください。",
+ "These tests run without the debugger: {status}": "これらのテストはデバッガーなしで実行されます: {status}"
 }

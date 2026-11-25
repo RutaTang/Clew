@@ -744,6 +744,9 @@ pub(crate) fn languages_section(app: &App) -> Element<'_, Message> {
             "ruby",
             "erlang",
             "haskell",
+            "kotlin",
+            "scala",
+            "elixir",
         ]
         .iter()
         .any(|l| has(l));
@@ -788,7 +791,9 @@ pub(crate) fn languages_section(app: &App) -> Element<'_, Message> {
     if has("c") || has("cpp") {
         parts.push(c_block(app, options.and_then(|o| o.c.as_ref())));
     }
-    for language in ["lean", "dart", "ruby", "erlang", "haskell"] {
+    for language in [
+        "lean", "dart", "ruby", "erlang", "haskell", "kotlin", "scala", "elixir",
+    ] {
         if has(language) {
             let found = options
                 .and_then(|o| o.toolchains.get(language))
@@ -1506,6 +1511,17 @@ fn toolchain_block<'a>(
             "Haskell",
             tr!("The Haskell language server to run."),
             "haskell-language-server-wrapper",
+        ),
+        "kotlin" => (
+            "Kotlin",
+            tr!("The Kotlin language server to run."),
+            "kotlin-lsp",
+        ),
+        "scala" => ("Scala", tr!("The Metals build to run."), "metals"),
+        "elixir" => (
+            "Elixir",
+            tr!("The Elixir language server to run."),
+            "expert",
         ),
         _ => (
             "Dart",

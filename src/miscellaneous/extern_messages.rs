@@ -25,6 +25,11 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("{other} wasn't found here."),
     tr_noop!("{pm} wasn't found here. Install Node.js, then run again."),
     tr_noop!("{rel} could not be read"),
+    tr_noop!("{rel} has no tests to run"),
+    tr_noop!("No {manifest} was found above {name}, so its tests have no project to run in."),
+    tr_noop!(
+        "This project's tests run by CTest from a CMake build: build it, then run the test again."
+    ),
     tr_noop!("{rel} is not JavaScript or TypeScript"),
     tr_noop!(
         "clew's own {what} is missing from the {arg1} install — without it the server would run the project's copy; remove the server and install it again"
@@ -848,6 +853,13 @@ pub(crate) const PARTS: &[&str] = &[
     tr_noop!("install it with “dotnet tool install --global csharp-ls”"),
     tr_noop!("install the Erlang Language Platform (elp) from its releases"),
     tr_noop!("install it with “ghcup install hls”"),
+    tr_noop!(
+        "install JetBrains’ Kotlin LSP, for example with “brew install JetBrains/utils/kotlin-lsp”"
+    ),
+    tr_noop!("install it with “brew install kotlin-language-server”"),
+    tr_noop!("install it with Coursier: “cs install metals”"),
+    tr_noop!("install Expert, the Elixir language server, from its releases"),
+    tr_noop!("install it with “brew install elixir-ls”"),
     tr_noop!("install its toolchain"),
     tr_noop!("percent-encoding any character in them that is not a letter or a digit"),
     tr_noop!(

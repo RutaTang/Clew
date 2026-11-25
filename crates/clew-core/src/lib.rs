@@ -97,6 +97,7 @@ pub mod imports;
 pub mod inactive;
 pub mod incremental;
 pub mod jsrun;
+pub mod langtests;
 pub(crate) mod lean;
 pub use lean::{
     RunEnd as LeanRunEnd, blocks as lean_blocks, has_main as lean_has_main,

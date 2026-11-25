@@ -4087,5 +4087,17 @@
  "The page is served at {url} while it runs.": "실행되는 동안 페이지는 {url}에서 제공됩니다.",
  "Node.js cannot run JSX by itself: add tsx to the project ({add}), then debug again.": "Node.js는 JSX를 직접 실행할 수 없습니다. 프로젝트에 tsx를 추가한 뒤({add}) 다시 디버그하세요.",
  "Node.js loads an import only by its file's full name, so it cannot load {import}: add tsx to the project ({add}), then run again.": "Node.js는 파일의 전체 이름으로만 import를 불러오므로 {import}을(를) 불러올 수 없습니다. 프로젝트에 tsx를 추가한 뒤({add}) 다시 실행하세요.",
- "Node.js loads an import only by its file's full name, so it cannot load {import}: add tsx to the project ({add}), then debug again.": "Node.js는 파일의 전체 이름으로만 import를 불러오므로 {import}을(를) 불러올 수 없습니다. 프로젝트에 tsx를 추가한 뒤({add}) 다시 디버그하세요."
+ "Node.js loads an import only by its file's full name, so it cannot load {import}: add tsx to the project ({add}), then debug again.": "Node.js는 파일의 전체 이름으로만 import를 불러오므로 {import}을(를) 불러올 수 없습니다. 프로젝트에 tsx를 추가한 뒤({add}) 다시 디버그하세요.",
+ "install JetBrains’ Kotlin LSP, for example with “brew install JetBrains/utils/kotlin-lsp”": "JetBrains의 Kotlin LSP를 설치하세요(예: “brew install JetBrains/utils/kotlin-lsp”)",
+ "install it with “brew install kotlin-language-server”": "“brew install kotlin-language-server”로 설치하세요",
+ "install it with Coursier: “cs install metals”": "Coursier로 설치하세요: “cs install metals”",
+ "install Expert, the Elixir language server, from its releases": "Elixir 언어 서버 Expert를 릴리스에서 설치하세요",
+ "install it with “brew install elixir-ls”": "“brew install elixir-ls”로 설치하세요",
+ "The Kotlin language server to run.": "실행할 Kotlin 언어 서버입니다.",
+ "The Metals build to run.": "실행할 Metals 빌드입니다.",
+ "The Elixir language server to run.": "실행할 Elixir 언어 서버입니다.",
+ "{rel} has no tests to run": "{rel}에는 실행할 테스트가 없습니다",
+ "No {manifest} was found above {name}, so its tests have no project to run in.": "{name} 위에서 {manifest}을(를) 찾지 못해 테스트를 실행할 프로젝트가 없습니다.",
+ "This project's tests run by CTest from a CMake build: build it, then run the test again.": "이 프로젝트의 테스트는 CMake 빌드에서 CTest로 실행됩니다. 빌드한 뒤 테스트를 다시 실행하세요.",
+ "These tests run without the debugger: {status}": "이 테스트는 디버거 없이 실행됩니다: {status}"
 }

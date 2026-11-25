@@ -410,6 +410,12 @@ impl Viewer {
             {
                 clew_core::runnables::runnables(lang, &self.source).into()
             }
+            // Go's, the JVM's, C#'s, Dart's, Ruby's, Zig's, the BEAM's,
+            // Haskell's, C's and C++'s tests, some told by the file's name.
+            Some(lang) if clew_core::langtests::handles(lang) => {
+                clew_core::runnables::runnables_in(lang, &self.abs.to_string_lossy(), &self.source)
+                    .into()
+            }
             _ => Arc::from(Vec::new()),
         };
         *self.runnables_cache.borrow_mut() = Some((key, found.clone()));

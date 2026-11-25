@@ -1080,11 +1080,16 @@ impl App {
     pub(crate) fn test_at(&self, pane: usize, line: usize) -> Option<crate::TestAt> {
         use clew_core::runnables::RunnableKind;
         let viewer = self.proj.panes.get(pane).and_then(Option::as_ref)?;
-        let lang = viewer
-            .lang_key
-            .filter(|l| matches!(*l, "rust" | "python" | "javascript" | "typescript" | "tsx"))?;
+        let lang = viewer.lang_key.filter(|l| {
+            matches!(*l, "rust" | "python" | "javascript" | "typescript" | "tsx")
+                || clew_core::langtests::handles(l)
+        })?;
         let remote = self.connection.is_remote();
-        let found = clew_core::runnables::runnables(lang, &viewer.source);
+        let found = clew_core::runnables::runnables_in(
+            lang,
+            &viewer.abs.to_string_lossy(),
+            &viewer.source,
+        );
         let test = clew_core::runnables::runnable_at(&found, line)?;
         Some(match test.kind {
             RunnableKind::Main => return None,
@@ -1334,6 +1339,50 @@ impl App {
             if !no_debug {
                 self.status = tr!(
                     "JavaScript and TypeScript tests run without the debugger: {status}",
+                    status = self.status
+                );
+            }
+            return task;
+        }
+        // Go's, the JVM's, C#'s, Dart's, Ruby's, Zig's, Erlang's,
+        // Elixir's, Haskell's, C's and C++'s: run by the project's own test
+        // command, where the project is (`ProjectTask::Test`).
+        if let Some(lang) = lang.filter(|l| clew_core::langtests::handles(l)) {
+            use clew_core::runnables::{RunnableKind, runnable_at, runnables_in};
+            let found = runnables_in(lang, &viewer.abs.to_string_lossy(), &viewer.source);
+            let Some(test) = runnable_at(&found, line)
+                .filter(|r| matches!(r.kind, RunnableKind::Test | RunnableKind::Tests))
+            else {
+                self.status =
+                    tr!("No test here. Put the cursor in a test function to run it.").into();
+                return Task::none();
+            };
+            let (name, tests) = match test.kind {
+                RunnableKind::Tests if test.name.is_empty() => (
+                    viewer
+                        .abs
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                    Some(true),
+                ),
+                RunnableKind::Tests => (test.name.clone(), Some(true)),
+                _ => (test.name.clone(), Some(false)),
+            };
+            let Some(rel) = self.project_rel(&viewer.abs.clone()) else {
+                return Task::none();
+            };
+            let task = self.start_session(
+                true,
+                Some(crate::app::runplan::RunPlan::Remote {
+                    task: clew_protocol::ProjectTask::Test { file: rel, line },
+                    name,
+                    tests,
+                }),
+            );
+            if !no_debug {
+                self.status = tr!(
+                    "These tests run without the debugger: {status}",
                     status = self.status
                 );
             }

@@ -163,7 +163,11 @@ pub use payload::*;
 /// v34: [`ProjectTask::JsTest`], [`ProjectTask::JsMain`] and
 /// [`ProjectTask::PackageScript`]: JavaScript and TypeScript tests, programs
 /// and a package's scripts, run where the project is.
-pub const PROTOCOL_VERSION: u32 = 34;
+///
+/// v35: [`ProjectTask::Test`]: a test of Go, Java, Kotlin, Scala, C#, Dart,
+/// Ruby, Zig, Erlang, Elixir, Haskell, C or C++, run by its project's own
+/// test command.
+pub const PROTOCOL_VERSION: u32 = 35;
 
 /// A hash of this crate's source as a token stream — comments and whitespace
 /// removed — computed at build time (see `build.rs`). Carried in `Hello` /
@@ -1604,6 +1608,12 @@ pub enum ProjectTask {
     /// The script `script` of the package in `dir` (its `package.json`'s),
     /// run by the package manager the project uses.
     PackageScript { dir: Rel, script: String },
+    /// The test, group or test file at 1-based `line` of `file`, in a
+    /// language whose tests its project runs by a command of its own: `go
+    /// test`, Gradle or Maven, sbt, Mill or scala-cli, `dotnet test`, `dart`
+    /// or `flutter test`, RSpec or Minitest, `zig test`, rebar3, `mix
+    /// test`, Cabal or Stack, CTest.
+    Test { file: Rel, line: usize },
 }
 
 /// What the user chose for one project's languages, in Settings, where clew

@@ -4087,5 +4087,17 @@
  "The page is served at {url} while it runs.": "La page est servie à {url} pendant son exécution.",
  "Node.js cannot run JSX by itself: add tsx to the project ({add}), then debug again.": "Node.js ne sait pas exécuter le JSX tout seul : ajoutez tsx au projet ({add}), puis relancez le débogage.",
  "Node.js loads an import only by its file's full name, so it cannot load {import}: add tsx to the project ({add}), then run again.": "Node.js ne charge un import que par le nom complet de son fichier, il ne peut donc pas charger {import} : ajoutez tsx au projet ({add}), puis relancez.",
- "Node.js loads an import only by its file's full name, so it cannot load {import}: add tsx to the project ({add}), then debug again.": "Node.js ne charge un import que par le nom complet de son fichier, il ne peut donc pas charger {import} : ajoutez tsx au projet ({add}), puis relancez le débogage."
+ "Node.js loads an import only by its file's full name, so it cannot load {import}: add tsx to the project ({add}), then debug again.": "Node.js ne charge un import que par le nom complet de son fichier, il ne peut donc pas charger {import} : ajoutez tsx au projet ({add}), puis relancez le débogage.",
+ "install JetBrains’ Kotlin LSP, for example with “brew install JetBrains/utils/kotlin-lsp”": "installez le Kotlin LSP de JetBrains, par exemple avec « brew install JetBrains/utils/kotlin-lsp »",
+ "install it with “brew install kotlin-language-server”": "installez-le avec « brew install kotlin-language-server »",
+ "install it with Coursier: “cs install metals”": "installez-le avec Coursier : « cs install metals »",
+ "install Expert, the Elixir language server, from its releases": "installez Expert, le serveur de langage d’Elixir, depuis ses publications",
+ "install it with “brew install elixir-ls”": "installez-le avec « brew install elixir-ls »",
+ "The Kotlin language server to run.": "Le serveur de langage Kotlin à exécuter.",
+ "The Metals build to run.": "La version de Metals à exécuter.",
+ "The Elixir language server to run.": "Le serveur de langage Elixir à exécuter.",
+ "{rel} has no tests to run": "{rel} n’a aucun test à exécuter",
+ "No {manifest} was found above {name}, so its tests have no project to run in.": "Aucun {manifest} n’a été trouvé au-dessus de {name} : ses tests n’ont pas de projet où s’exécuter.",
+ "This project's tests run by CTest from a CMake build: build it, then run the test again.": "Les tests de ce projet s’exécutent avec CTest depuis une build CMake : compilez-le, puis relancez le test.",
+ "These tests run without the debugger: {status}": "Ces tests s’exécutent sans le débogueur : {status}"
 }

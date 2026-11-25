@@ -486,6 +486,13 @@ fn install_hint(binary: &str) -> &'static str {
         "csharp-ls" => "install it with “dotnet tool install --global csharp-ls”",
         "elp" => "install the Erlang Language Platform (elp) from its releases",
         "haskell-language-server-wrapper" => "install it with “ghcup install hls”",
+        "kotlin-lsp" => {
+            "install JetBrains’ Kotlin LSP, for example with “brew install JetBrains/utils/kotlin-lsp”"
+        }
+        "kotlin-language-server" => "install it with “brew install kotlin-language-server”",
+        "metals" => "install it with Coursier: “cs install metals”",
+        "expert" => "install Expert, the Elixir language server, from its releases",
+        "elixir-ls" => "install it with “brew install elixir-ls”",
         _ => "install its toolchain",
     }
 }
@@ -1672,6 +1679,11 @@ mod tests {
             "csharp-ls",
             "elp",
             "haskell-language-server-wrapper",
+            "kotlin-lsp",
+            "kotlin-language-server",
+            "metals",
+            "expert",
+            "elixir-ls",
             "something-else",
         ]
         .into_iter()

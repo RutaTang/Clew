@@ -615,6 +615,62 @@ pub static SERVERS: &[ServerSpec] = &[
         },
     },
     ServerSpec {
+        name: "kotlin-lsp",
+        version: "toolchain",
+        languages: &["kotlin"],
+        args: &["--stdio"],
+        runs_project_code: Some(
+            "its Gradle or Maven build — the build scripts it runs to import the project",
+        ),
+        // JetBrains' own Kotlin server, from its distribution's launcher.
+        source: Source::Toolchain {
+            binary: "kotlin-lsp",
+        },
+    },
+    ServerSpec {
+        name: "kotlin-language-server",
+        version: "toolchain",
+        languages: &["kotlin"],
+        args: &[],
+        runs_project_code: Some(
+            "its Gradle or Maven build — the build scripts it runs to import the project",
+        ),
+        // The community server, for those who keep it.
+        source: Source::Toolchain {
+            binary: "kotlin-language-server",
+        },
+    },
+    ServerSpec {
+        name: "metals",
+        version: "toolchain",
+        languages: &["scala"],
+        args: &[],
+        runs_project_code: Some(
+            "its sbt, Mill, Gradle or Maven build — the build definition it imports",
+        ),
+        // Scala's server, as Coursier installs it (`cs install metals`).
+        source: Source::Toolchain { binary: "metals" },
+    },
+    ServerSpec {
+        name: "expert",
+        version: "toolchain",
+        languages: &["elixir"],
+        args: &["--stdio"],
+        runs_project_code: Some("its Mix project — mix.exs and the dependencies it compiles"),
+        // Expert, the Elixir team's own server.
+        source: Source::Toolchain { binary: "expert" },
+    },
+    ServerSpec {
+        name: "elixir-ls",
+        version: "toolchain",
+        languages: &["elixir"],
+        args: &[],
+        runs_project_code: Some("its Mix project — mix.exs and the dependencies it compiles"),
+        source: Source::Toolchain {
+            binary: "elixir-ls",
+        },
+    },
+    ServerSpec {
         name: "pyright",
         version: "latest",
         languages: &["python"],
