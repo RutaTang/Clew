@@ -1896,7 +1896,13 @@ fn link(inputs: &Inputs<'_>, arch: &mut Architecture, packages: &BTreeMap<String
     let mut holder_of: HashMap<&str, Option<usize>> = HashMap::new();
     let held = |rel: &'_ str| -> Option<usize> { holder(comps, rel, &root_files_of) };
     let mut counts: BTreeMap<(usize, usize), usize> = BTreeMap::new();
-    for (from, to) in &inputs.imports {
+    // What a tool's configuration imports (`eslint.config.ts` its shared
+    // rules) is the tool's, not the part's: no link.
+    for (from, to) in inputs
+        .imports
+        .iter()
+        .filter(|(from, _)| !is_tool_config(base(from)))
+    {
         let a = *holder_of.entry(from.as_str()).or_insert_with(|| held(from));
         let b = held(to);
         if let (Some(a), Some(b)) = (a, b)

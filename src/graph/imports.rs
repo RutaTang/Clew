@@ -189,7 +189,15 @@ pub struct Resolver {
     /// Each Erlang application the project holds by its `src/<app>.app.src`,
     /// with the application's directory — whatever that directory is called.
     erlang_apps: HashMap<String, PathBuf>,
+    /// Each JavaScript package of the project's, by its name, with its
+    /// folder and what it exports ([`clew_protocol::JsPackage`]): a
+    /// workspace's packages import one another by name, not by path.
+    js_packages: HashMap<String, JsPackageAt>,
 }
+
+/// One of the project's JavaScript packages: its folder, and each subpath
+/// it exports with the files that may be it.
+type JsPackageAt = (PathBuf, Vec<(String, Vec<String>)>);
 
 impl Resolver {
     /// Whether `path` is a file one of this resolver's tsconfig/jsconfig
@@ -844,6 +852,20 @@ impl Resolver {
             }
         }
         self.lean_roots = (!lean_roots.is_empty()).then_some(lean_roots);
+        let mut js_packages = HashMap::new();
+        for (rel, package) in &manifests.js {
+            let Some(dir) = self.root.join(rel).parent().map(normalize) else {
+                continue;
+            };
+            if dir.starts_with(&self.root) {
+                // The shallowest of two of one name: a fixture's copy of
+                // a package is not the package.
+                js_packages
+                    .entry(package.name.clone())
+                    .or_insert((dir, package.exports.clone()));
+            }
+        }
+        self.js_packages = js_packages;
         self
     }
 
@@ -981,6 +1003,7 @@ impl Resolver {
             erlang_modules,
             erlang_headers,
             erlang_apps,
+            js_packages: HashMap::new(),
         }
     }
 
@@ -1028,7 +1051,9 @@ impl Resolver {
         match lang {
             "rust" => self.resolve_rust(raw, from, &Consulted::new(ctx)),
             "python" => self.resolve_python(raw, from),
-            "javascript" | "typescript" | "tsx" => self.resolve_js(raw, from),
+            "javascript" | "typescript" | "tsx" | "vue" | "svelte" | "astro" => {
+                self.resolve_js(raw, from)
+            }
             "go" => self.resolve_go(raw),
             "dart" => self.resolve_dart(raw, from),
             "lean" => self.resolve_lean(raw, from),
@@ -2049,16 +2074,82 @@ impl Resolver {
                 return Target::Internal(p);
             }
         }
-        // `@/x` can never be a package (a scope needs a name), so it is an
-        // alias; unconfigured, it means what the common bundler templates
-        // (Vite, Vue CLI, Nuxt, Next) point it at: the project's `src/`.
-        if let Some(rest) = spec.strip_prefix("@/") {
-            return self
-                .js_file(&normalize(&self.root.join("src").join(rest)))
+        // One of the project's own packages, by its name.
+        if let Some(found) = self.resolve_js_package(spec) {
+            return found;
+        }
+        // `@/x` and `~/x` can never be packages (a scope needs a name; npm
+        // names have no `~`), so they are aliases; unconfigured, they mean
+        // what the common templates point them at (Vite, Vue CLI, Next and
+        // Nuxt `@/`, Nuxt and Remix `~/`): the project's `src/` (or Remix's
+        // `app/`), else its root.
+        if let Some(rest) = spec.strip_prefix("@/").or_else(|| spec.strip_prefix("~/")) {
+            return ["src", "app", ""]
+                .iter()
+                .find_map(|dir| self.js_file(&normalize(&self.root.join(dir).join(rest))))
                 .map(Target::Internal)
                 .unwrap_or_else(|| Target::Unresolved(spec.to_string()));
         }
         Target::External(js_package(spec))
+    }
+
+    /// `spec` (`@acme/api`, `@acme/ui/button`) as one of the project's own
+    /// packages exports it: the file its `exports` (or `main`, `module`,
+    /// `types`) names for that subpath — a source file before a built one,
+    /// and a built `dist/x.js` read as the `src/x.ts` it was built from —
+    /// else, unexported, the file of that path in its `src/`, or in its
+    /// folder. A package of the project's that has none is still the
+    /// package: an external one, as before. `None` for a specifier that
+    /// names none of the project's packages.
+    fn resolve_js_package(&self, spec: &str) -> Option<Target> {
+        let name = js_package(spec);
+        let (dir, exports) = self.js_packages.get(&name)?;
+        let rest = spec[name.len()..].trim_start_matches('/');
+        let subpath = if rest.is_empty() {
+            ".".to_string()
+        } else {
+            format!("./{rest}")
+        };
+        // The exported subpath: as written, or by a `*` pattern.
+        let mut wanted: Vec<String> = Vec::new();
+        for (pattern, files) in exports {
+            if *pattern == subpath {
+                wanted.extend(files.iter().cloned());
+            } else if let Some((pre, post)) = pattern.split_once('*')
+                && subpath.len() >= pre.len() + post.len()
+                && subpath.starts_with(pre)
+                && subpath.ends_with(post)
+            {
+                let captured = &subpath[pre.len()..subpath.len() - post.len()];
+                wanted.extend(files.iter().map(|f| f.replacen('*', captured, 1)));
+            }
+        }
+        let file = |f: &str| self.js_file(&normalize(&dir.join(f)));
+        let found = wanted
+            .iter()
+            .find_map(|f| {
+                file(f).or_else(|| {
+                    // What a build made, read as what it was made from.
+                    let f = f.trim_start_matches("./");
+                    ["dist/", "build/", "out/", "lib/"]
+                        .iter()
+                        .find_map(|d| f.strip_prefix(d))
+                        .and_then(|rest| {
+                            let rest = rest.trim_end_matches(".d.ts");
+                            file(&format!("src/{rest}"))
+                        })
+                })
+            })
+            .or_else(|| match rest {
+                "" => ["src/index", "index", "src/main", "src/lib"]
+                    .iter()
+                    .find_map(|f| file(f)),
+                rest => file(&format!("src/{rest}")).or_else(|| file(rest)),
+            });
+        Some(match found {
+            Some(path) => Target::Internal(path),
+            None => Target::External(name),
+        })
     }
 
     /// The nearest tsconfig/jsconfig whose directory contains `from`.
@@ -2422,7 +2513,12 @@ pub fn is_resolution_metadata(path: &Path) -> bool {
     };
     matches!(
         name,
-        "go.mod" | "pubspec.yaml" | "composer.json" | "Cargo.toml" | "pyproject.toml"
+        "go.mod"
+            | "pubspec.yaml"
+            | "composer.json"
+            | "Cargo.toml"
+            | "pyproject.toml"
+            | "package.json"
     ) || clew_core::imports::is_haskell_manifest(name)
         || ((name.starts_with("tsconfig") || name.starts_with("jsconfig"))
             && name.ends_with(".json"))
@@ -2618,6 +2714,10 @@ struct TsFile {
     base_url: Option<PathBuf>,
     /// `compilerOptions.paths` in file order, with this file's directory.
     paths: Option<Rc<(TsPaths, PathBuf)>>,
+    /// The project configs its `references` name (`./tsconfig.app.json`),
+    /// inside the project: a "solution" config — Vite's — sets no paths of
+    /// its own, and its app's config does.
+    references: Vec<PathBuf>,
 }
 
 /// A config merged with the chain it extends, its `paths` not yet anchored:
@@ -2679,6 +2779,25 @@ impl<'a, R: Fn(&Path) -> Option<String>> TsLoader<'a, R> {
     fn config(&mut self, path: &Path, depth: usize) -> Option<TsConfig> {
         let dir = path.parent()?.to_path_buf();
         let layer = self.layer(path, depth)?;
+        // A solution config, of no aliases of its own: those of the first
+        // config it references that has some — the app's, whose files are
+        // the ones that use them.
+        if layer.paths.is_none() && layer.base_url.is_none() && depth < MAX_TS_EXTENDS_DEPTH {
+            let references = self
+                .file(path)
+                .map(|f| f.references.clone())
+                .unwrap_or_default();
+            for reference in references {
+                if !self.admit(&reference) {
+                    continue;
+                }
+                if let Some(found) = self.config(&reference, depth + 1)
+                    && (!found.paths.is_empty() || found.base_url.is_some())
+                {
+                    return Some(TsConfig { dir, ..found });
+                }
+            }
+        }
         let (paths, declared_in) = match &layer.paths {
             Some(paths) => paths.as_ref().clone(),
             None => (Vec::new(), dir.clone()),
@@ -2755,11 +2874,28 @@ impl<'a, R: Fn(&Path) -> Option<String>> TsLoader<'a, R> {
                     .collect();
                 Rc::new((paths, dir.to_path_buf()))
             });
+        let references = json
+            .get("references")
+            .and_then(|r| r.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|r| r.get("path")?.as_str())
+            .filter(|r| r.starts_with("./") || r.starts_with("../"))
+            .take(MAX_TS_EXTENDS_ENTRIES)
+            .filter_map(|r| {
+                let mut p = normalize(&dir.join(r));
+                if p.extension().is_none_or(|e| e != "json") {
+                    p = p.join("tsconfig.json");
+                }
+                p.starts_with(self.root).then_some(p)
+            })
+            .collect();
         Some(TsFile {
             bases,
             extends_ignored,
             base_url,
             paths,
+            references,
         })
     }
 
@@ -5513,11 +5649,12 @@ mod tests {
             "go.mod",
             "Cargo.toml",
             "pyproject.toml",
+            "package.json",
         ] {
             assert!(is_resolution_metadata(Path::new(name)), "{name}");
         }
         assert!(!is_resolution_metadata(Path::new(".cabal")));
-        assert!(!is_resolution_metadata(Path::new("package.json")));
+        assert!(!is_resolution_metadata(Path::new("package-lock.json")));
     }
 
     #[test]
@@ -7164,6 +7301,102 @@ mod resolution_tests {
 
     // --- JS / TS ---
 
+    /// A workspace's packages import one another by name: `@acme/api` is
+    /// the file its `package.json` exports — its source, before what a
+    /// build makes of it, and a `dist/` file read as the `src/` one it was
+    /// built from — a subpath by its own export or a `*` pattern, an
+    /// unexported one by its path in `src/`; a package of the project's
+    /// with none of those files is still the package; any other name, a
+    /// package from npm. A Vue or Svelte file's imports resolve as a
+    /// TypeScript file's.
+    #[test]
+    fn workspace_packages_resolve_by_name() {
+        let root = Path::new("/p");
+        let package = |name: &str, exports: &[(&str, &[&str])]| clew_protocol::JsPackage {
+            name: name.into(),
+            exports: exports
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.iter().map(|f| f.to_string()).collect()))
+                .collect(),
+        };
+        let r = resolver(
+            root,
+            &[
+                "apps/web/src/page.tsx",
+                "apps/web/src/Card.vue",
+                "packages/api/src/index.ts",
+                "packages/api/src/client.ts",
+                "packages/api/src/routers/post.ts",
+                "packages/ui/src/index.ts",
+                "packages/ui/src/button.tsx",
+                "packages/db/index.ts",
+            ],
+        )
+        .with_manifests(&clew_protocol::SourceManifests {
+            js: vec![
+                (
+                    "packages/api/package.json".into(),
+                    package(
+                        "@acme/api",
+                        &[
+                            (".", &["./dist/index.d.ts"]),
+                            ("./client", &["./src/client.ts"]),
+                            ("./routers/*", &["./src/routers/*.ts"]),
+                        ],
+                    ),
+                ),
+                ("packages/ui/package.json".into(), package("@acme/ui", &[])),
+                ("packages/db/package.json".into(), package("db", &[])),
+                (
+                    "packages/gone/package.json".into(),
+                    package("@acme/gone", &[]),
+                ),
+            ],
+            ..Default::default()
+        });
+        let from = root.join("apps/web/src/page.tsx");
+        let res = |s: &str| r.resolve(&ri(s), &from, "tsx");
+        let at = |rel: &str| Target::Internal(root.join(rel));
+        assert_eq!(
+            res("@acme/api"),
+            at("packages/api/src/index.ts"),
+            "dist read as src"
+        );
+        assert_eq!(res("@acme/api/client"), at("packages/api/src/client.ts"));
+        assert_eq!(
+            res("@acme/api/routers/post"),
+            at("packages/api/src/routers/post.ts")
+        );
+        assert_eq!(
+            res("@acme/ui"),
+            at("packages/ui/src/index.ts"),
+            "no exports: src/index"
+        );
+        assert_eq!(res("@acme/ui/button"), at("packages/ui/src/button.tsx"));
+        assert_eq!(res("db"), at("packages/db/index.ts"), "its folder's index");
+        assert_eq!(res("@acme/gone"), Target::External("@acme/gone".into()));
+        assert_eq!(res("react"), Target::External("react".into()));
+        assert_eq!(
+            res("@tanstack/react-query/devtools"),
+            Target::External("@tanstack/react-query".into())
+        );
+        // A Vue file's script imports as TypeScript's do.
+        let vue = root.join("apps/web/src/Card.vue");
+        assert_eq!(
+            r.resolve(&ri("@acme/ui"), &vue, "vue"),
+            at("packages/ui/src/index.ts")
+        );
+        assert_eq!(
+            r.resolve(&ri("./page"), &vue, "vue"),
+            at("apps/web/src/page.tsx")
+        );
+        assert_eq!(
+            r.resolve(&ri("./Card.vue"), &from, "tsx"),
+            at("apps/web/src/Card.vue"),
+            "a component file by its own name"
+        );
+    }
+
     #[test]
     fn js_emitted_extensions_map_to_their_typescript_sources() {
         let root = Path::new("/p");
@@ -7475,6 +7708,38 @@ mod resolution_tests {
             .collect();
         let files: Vec<PathBuf> = texts.keys().cloned().collect();
         ts_configs_from(root, &files, &|p: &Path| texts.get(p).cloned())
+    }
+
+    /// A solution config — Vite's `tsconfig.json`, of `references` and no
+    /// aliases — takes those of the config it references that has them:
+    /// `@/x` is the app's `src/x`.
+    #[test]
+    fn a_solution_config_takes_its_apps_aliases() {
+        let root = Path::new("/p");
+        let configs = configs_of(
+            root,
+            &[
+                (
+                    "tsconfig.json",
+                    r#"{ "files": [], "references": [{ "path": "./tsconfig.node.json" }, { "path": "./tsconfig.app.json" }] }"#,
+                ),
+                ("tsconfig.node.json", r#"{ "include": ["vite.config.ts"] }"#),
+                (
+                    "tsconfig.app.json",
+                    r#"{ "compilerOptions": { "paths": { "~/*": ["./src/*"] } } }"#,
+                ),
+            ],
+        );
+        let r =
+            resolver(root, &["src/main.ts", "src/lib/utils.ts"]).with_ts_configs(configs.clone());
+        assert_eq!(
+            r.resolve(&ri("~/lib/utils"), &root.join("src/main.ts"), "typescript"),
+            Target::Internal(root.join("src/lib/utils.ts"))
+        );
+        assert!(
+            configs.reads(&root.join("tsconfig.app.json")),
+            "an edit to it re-resolves"
+        );
     }
 
     /// TypeScript's merge: `paths` resolve against the FINAL `baseUrl`,

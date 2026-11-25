@@ -262,6 +262,10 @@ pub struct SourceManifests {
     /// relative to its own: a Lean module is found under one of them, or
     /// under the package's own folder.
     pub lean: Vec<(Rel, Vec<String>)>,
+    /// Each JavaScript or TypeScript package's `package.json` (by rel) with
+    /// its name and what it exports: a workspace's packages import one
+    /// another by their names (`@acme/api`, `@acme/ui/button`).
+    pub js: Vec<(Rel, JsPackage)>,
 }
 
 impl SourceManifests {
@@ -271,7 +275,18 @@ impl SourceManifests {
             && self.cargo.is_empty()
             && self.python.is_empty()
             && self.lean.is_empty()
+            && self.js.is_empty()
     }
+}
+
+/// What a `package.json` says of the package: its name, and each subpath it
+/// exports (`.`, `./client`, `./*`) with the files that may be it, relative
+/// to the manifest's folder, in the order to try them — its sources before
+/// what a build makes of them.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JsPackage {
+    pub name: String,
+    pub exports: Vec<(String, Vec<String>)>,
 }
 
 /// What a Cargo package's manifest says of its targets, paths relative to

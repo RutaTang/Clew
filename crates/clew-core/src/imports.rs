@@ -240,6 +240,7 @@ pub fn is_haskell_manifest(name: &str) -> bool {
 pub fn bears_on_manifests(rel: &str) -> bool {
     let name = rel.rsplit(['/', '\\']).next().unwrap_or(rel);
     name == "composer.json"
+        || name == "package.json"
         || name == "Cargo.toml"
         || name == "pyproject.toml"
         || is_lakefile(name)
@@ -307,7 +308,91 @@ pub fn source_manifests<S: AsRef<str>>(root: &Path, rels: &[S]) -> clew_protocol
                 .push((rel.to_string(), read_lake_src_dirs(&root.join(rel))));
         }
     }
+    // Read whatever the project's languages: only a JavaScript project has
+    // them, and a project's first script is no reason to read them all
+    // again at every save of one.
+    for rel in picked_up_to(&|name| name == "package.json", MAX_CARGO_MANIFESTS) {
+        if let Some(package) = read_js_package(&root.join(rel)) {
+            out.js.push((rel.to_string(), package));
+        }
+    }
     out
+}
+
+/// What the `package.json` at `path` says of the package
+/// ([`clew_protocol::JsPackage`]); `None` for one with no name, which no
+/// import can name.
+pub fn read_js_package(path: &Path) -> Option<clew_protocol::JsPackage> {
+    let text = crate::statefile::read_capped(path, MAX_METADATA_BYTES)?;
+    js_package(&text)
+}
+
+fn js_package(text: &str) -> Option<clew_protocol::JsPackage> {
+    use serde_json::Value;
+    let json: Value = serde_json::from_str(text).ok()?;
+    let name = json.get("name")?.as_str()?.trim().to_string();
+    if name.is_empty() {
+        return None;
+    }
+    // Every file a condition object (`{"types": …, "import": …}`) or an
+    // array of fallbacks names, in its order.
+    fn targets(value: &Value, out: &mut Vec<String>) {
+        match value {
+            Value::String(s) if plain_relative(s.trim_start_matches("./")) => {
+                out.push(s.clone());
+            }
+            Value::Array(items) => items.iter().for_each(|v| targets(v, out)),
+            Value::Object(map) => map.values().for_each(|v| targets(v, out)),
+            _ => {}
+        }
+    }
+    let mut exports: Vec<(String, Vec<String>)> = Vec::new();
+    match json.get("exports") {
+        Some(Value::Object(map)) if map.keys().any(|k| k.starts_with('.')) => {
+            for (subpath, value) in map {
+                let mut files = Vec::new();
+                targets(value, &mut files);
+                exports.push((subpath.clone(), files));
+            }
+        }
+        Some(value @ (Value::String(_) | Value::Array(_) | Value::Object(_))) => {
+            let mut files = Vec::new();
+            targets(value, &mut files);
+            exports.push((".".to_string(), files));
+        }
+        _ => {}
+    }
+    // The fields older tools read, after what `exports` says of `.`.
+    let fields: Vec<String> = ["source", "module", "main", "types", "typings", "svelte"]
+        .iter()
+        .filter_map(|f| json.get(*f)?.as_str())
+        .filter(|s| plain_relative(s.trim_start_matches("./")))
+        .map(str::to_string)
+        .collect();
+    match exports.iter_mut().find(|(subpath, _)| subpath == ".") {
+        Some((_, files)) => files.extend(fields),
+        None if !fields.is_empty() => exports.insert(0, (".".to_string(), fields)),
+        None => {}
+    }
+    // Its sources before what a build makes of them: a `.ts` file before a
+    // `.js`, and anything before `dist/`.
+    let built = |f: &str| {
+        let f = f.trim_start_matches("./");
+        ["dist/", "build/", "out/", "lib/", "esm/", "cjs/"]
+            .iter()
+            .any(|d| f.starts_with(d))
+    };
+    let source = |f: &str| {
+        [".ts", ".tsx", ".mts", ".cts", ".vue", ".svelte"]
+            .iter()
+            .any(|e| f.ends_with(e))
+            && !f.ends_with(".d.ts")
+    };
+    for (_, files) in &mut exports {
+        files.dedup();
+        files.sort_by_key(|f| (built(f), !source(f)));
+    }
+    Some(clew_protocol::JsPackage { name, exports })
 }
 
 /// Whether a file name is a Lake package's lakefile.
@@ -2091,9 +2176,68 @@ mod metadata_tests {
         ] {
             assert!(bears_on_manifests(rel), "{rel}");
         }
-        for rel in ["src/lib.rs", ".cabal", "package.json"] {
+        assert!(bears_on_manifests("packages/api/package.json"));
+        for rel in ["src/lib.rs", ".cabal", "src/app.ts"] {
             assert!(!bears_on_manifests(rel), "{rel}");
         }
+    }
+
+    /// A `package.json`'s name and exports — a subpath map, conditions,
+    /// one file — its sources tried before its build, and `main` and
+    /// `types` where `exports` says nothing of the package itself.
+    #[test]
+    fn a_js_package_says_its_name_and_exports() {
+        let p = js_package(
+            r#"{"name":"@acme/api","exports":{".":{"types":"./dist/index.d.ts","default":"./src/index.ts"},"./client":"./src/client.ts","./*":"./src/*.ts"}}"#,
+        )
+        .unwrap();
+        assert_eq!(p.name, "@acme/api");
+        assert_eq!(
+            p.exports,
+            [
+                (
+                    ".".to_string(),
+                    vec![
+                        "./src/index.ts".to_string(),
+                        "./dist/index.d.ts".to_string()
+                    ]
+                ),
+                ("./*".to_string(), vec!["./src/*.ts".to_string()]),
+                ("./client".to_string(), vec!["./src/client.ts".to_string()]),
+            ]
+        );
+        let p = js_package(r#"{"name":"ui","main":"dist/index.js","types":"dist/index.d.ts","source":"src/index.tsx"}"#)
+            .unwrap();
+        assert_eq!(
+            p.exports,
+            [(
+                ".".to_string(),
+                vec![
+                    "src/index.tsx".to_string(),
+                    "dist/index.js".to_string(),
+                    "dist/index.d.ts".to_string()
+                ]
+            )]
+        );
+        assert_eq!(
+            js_package(r#"{"name":"x","exports":"./index.js"}"#)
+                .unwrap()
+                .exports[0]
+                .1,
+            ["./index.js"]
+        );
+        assert!(
+            js_package(r#"{"private":true}"#).is_none(),
+            "no name: none can import it"
+        );
+        assert!(js_package("not json").is_none());
+        assert!(
+            js_package(r#"{"name":"x","main":"../../etc/passwd"}"#)
+                .unwrap()
+                .exports
+                .is_empty(),
+            "nothing outside its folder"
+        );
     }
 
     fn dir(name: &str) -> crate::testutil::TempDir {

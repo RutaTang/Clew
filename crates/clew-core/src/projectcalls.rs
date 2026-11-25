@@ -575,6 +575,11 @@ impl ProjectCallGraph {
                     (Some(Receiver::Type(ty)), Lang::Lean) => {
                         !(0..nodes.len()).any(|c| owner[c].is_some() && owned_by(c, ty))
                     }
+                    // A JavaScript runtime's object, as no project class of
+                    // that name is.
+                    (Some(Receiver::Type(ty)), Lang::JavaScript | Lang::TypeScript | Lang::Tsx) => {
+                        JS_GLOBALS.contains(&ty.as_str()) && !project_types.contains(ty.as_str())
+                    }
                     _ => false,
                 };
                 let targets: &[usize] = if foreign {
@@ -973,7 +978,14 @@ fn lang_spec(lang: Lang) -> Option<LangSpec> {
                 // does not list — its calls belong to the enclosing function.
                 "arrow_function",
             ],
-            &["call_expression", "new_expression"],
+            // A component rendered (`<Button …/>`) is a call of it, as
+            // React calls it.
+            &[
+                "call_expression",
+                "new_expression",
+                "jsx_opening_element",
+                "jsx_self_closing_element",
+            ],
         ),
         Lang::Go => spec(
             &["function_declaration", "method_declaration"],
@@ -1526,6 +1538,28 @@ fn callee_name(call: Node, parent: Option<Node>, src: &str, lang: Lang) -> Optio
             let method = call.child_by_field_name("object").is_some();
             return Some((node_text(name, src).to_string(), method));
         }
+        // `<Button …>` renders the component `Button`; `<Select.Item>` the
+        // `Item` of `Select`, as a method is called on its object. A
+        // lower-case element (`<div>`) is the page's own, no project
+        // code.
+        (
+            Lang::JavaScript | Lang::TypeScript | Lang::Tsx,
+            "jsx_opening_element" | "jsx_self_closing_element",
+        ) => {
+            let name = call.child_by_field_name("name")?;
+            return match name.kind() {
+                "identifier" => {
+                    let text = node_text(name, src);
+                    text.starts_with(|c: char| c.is_ascii_uppercase())
+                        .then(|| (text.to_string(), false))
+                }
+                "member_expression" => {
+                    let property = name.child_by_field_name("property")?;
+                    Some((node_text(property, src).to_string(), true))
+                }
+                _ => None,
+            };
+        }
         // `new Foo<Bar>(…)`: the constructor is the type's base name.
         (Lang::Java, "object_creation_expression") | (Lang::Cpp, "new_expression") => {
             let mut ty = call.child_by_field_name("type")?;
@@ -1713,11 +1747,76 @@ fn receiver_of(
         Said::Unknown => return None,
         Said::Nothing => {}
     }
+    // A JavaScript runtime's own object, not bound here (`console`,
+    // `document`, `localStorage`): its methods are the runtime's.
+    if matches!(lang, Lang::JavaScript | Lang::TypeScript | Lang::Tsx)
+        && JS_GLOBALS.contains(&receiver)
+    {
+        return Some(Receiver::Type(receiver.to_string()));
+    }
     // A type as the receiver: its own (static) method. Not in Go, where an
     // exported name is as likely a variable.
     (lang != Lang::Go && receiver.starts_with(|c: char| c.is_uppercase()))
         .then(|| Receiver::Type(receiver.to_string()))
 }
+
+/// The objects a JavaScript runtime gives every script — the language's,
+/// the browser's, Node's and Bun's: `console.log`, `JSON.parse`,
+/// `document.querySelector` are theirs, never a project's `log`, `parse`
+/// or `querySelector`.
+const JS_GLOBALS: &[&str] = &[
+    "console",
+    "Math",
+    "JSON",
+    "Object",
+    "Array",
+    "Promise",
+    "Number",
+    "String",
+    "Boolean",
+    "Date",
+    "Reflect",
+    "Intl",
+    "Symbol",
+    "Atomics",
+    "BigInt",
+    "Error",
+    "RegExp",
+    "Map",
+    "Set",
+    "WeakMap",
+    "WeakSet",
+    "ArrayBuffer",
+    "Proxy",
+    "globalThis",
+    "window",
+    "document",
+    "navigator",
+    "location",
+    "history",
+    "localStorage",
+    "sessionStorage",
+    "indexedDB",
+    "crypto",
+    "performance",
+    "screen",
+    "customElements",
+    "process",
+    "Buffer",
+    "require",
+    "module",
+    "exports",
+    "Bun",
+    "Deno",
+    "URL",
+    "URLSearchParams",
+    "Response",
+    "Request",
+    "Headers",
+    "Notification",
+    "Worker",
+    "self",
+];
 
 /// The receiver expression of a call written `receiver<sep>name(…)`: what
 /// precedes the first `.name`, `->name`, `?.name` or `::name` standing as a
@@ -2907,6 +3006,87 @@ const MAX_CALLER_SCAN: usize = 64;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A component rendered is a call of it: `<Layout>` and `<Button/>`
+    /// from `App`, `<Select.Item>` the `Item` of `Select`; a page's own
+    /// element (`<div>`) is none, and `new Store()` calls `Store`.
+    #[test]
+    fn jsx_renders_are_calls() {
+        let src = "function App() {\n  const store = new Store();\n  return (\n    <Layout title=\"x\">\n      <div>\n        <Button onClick={() => go()} />\n        <Select.Item value=\"a\" />\n      </div>\n    </Layout>\n  );\n}\n";
+        let calls = calls_of(src, "tsx");
+        let got: Vec<(&str, &str, bool)> = calls
+            .iter()
+            .map(|c| {
+                (
+                    c.caller.as_deref().unwrap_or(""),
+                    c.callee.as_str(),
+                    c.method,
+                )
+            })
+            .collect();
+        for want in [
+            ("App", "Store", false),
+            ("App", "Layout", false),
+            ("App", "Button", false),
+            ("App", "Item", true),
+            ("App", "go", false),
+        ] {
+            assert!(got.contains(&want), "{want:?} in {got:?}");
+        }
+        assert!(
+            !got.iter().any(|(_, callee, _)| *callee == "div"),
+            "{got:?}"
+        );
+        assert_eq!(
+            got.iter().filter(|(_, c, _)| *c == "Layout").count(),
+            1,
+            "its opening tag once"
+        );
+    }
+
+    /// A JavaScript runtime's objects call none of the project's functions:
+    /// `console.log`, `JSON.parse` and `document.querySelector` reach no
+    /// project `log`, `parse` or `querySelector`, though the project has
+    /// them; a call on the project's own `logger` reaches its `log`.
+    #[test]
+    fn js_globals_call_none_of_the_projects_functions() {
+        let util = "export function log(m) {}\nexport function parse(s) {}\n";
+        let app = "import { log } from './util';\nconst logger = { log };\nfunction run() {\n  console.log('a');\n  JSON.parse('{}');\n  document.querySelector('#x');\n  logger.log('b');\n}\n";
+        let util_path = PathBuf::from("/p/util.js");
+        let app_path = PathBuf::from("/p/app.js");
+        let sources: Vec<(PathBuf, String)> = vec![
+            (util_path.clone(), util.into()),
+            (app_path.clone(), app.into()),
+        ];
+        let mut defs = Vec::new();
+        for (file, src) in &sources {
+            for l in crate::outline::extract_located(src, "javascript") {
+                defs.push(Def {
+                    name: l.symbol.name,
+                    kind: l.symbol.kind,
+                    file: file.clone(),
+                    line: l.symbol.line,
+                });
+            }
+        }
+        let scope: HashMap<PathBuf, HashSet<PathBuf>> =
+            HashMap::from([(app_path.clone(), HashSet::from([util_path.clone()]))]);
+        let graph = ProjectCallGraph::build(defs, &sources, &scope);
+        let callers_of = |name: &str| -> Vec<String> {
+            let id = graph.id_of(&util_path, name).expect(name);
+            graph
+                .node(id)
+                .callers
+                .iter()
+                .map(|&c| graph.node(c).name.clone())
+                .collect()
+        };
+        assert!(
+            callers_of("parse").is_empty(),
+            "JSON.parse is no project parse"
+        );
+        assert_eq!(callers_of("log"), ["run"], "logger.log is");
+    }
 
     #[test]
     fn extracts_rust_call_sites_with_enclosing_fn() {

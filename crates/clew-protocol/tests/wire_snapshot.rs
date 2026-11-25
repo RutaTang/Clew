@@ -1011,6 +1011,13 @@ fn project_symbols(
                 )],
                 python: vec![("pyproject.toml".into(), vec!["src".into()])],
                 lean: vec![("proofs/lakefile.lean".into(), vec!["lib".into()])],
+                js: vec![(
+                    "packages/api/package.json".into(),
+                    JsPackage {
+                        name: "@acme/api".into(),
+                        exports: vec![(".".into(), vec!["./src/index.ts".into()])],
+                    },
+                )],
             })),
             _ => Patch::Unchanged,
         },
