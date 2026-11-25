@@ -411,16 +411,21 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
                 Some(crate::LspSlot::Ready(_) | crate::LspSlot::Starting)
             );
             Some((
-                crate::lsp::registry::default_for_language(k)
+                // The server that runs (a Deno project's `deno`), not the
+                // language's default.
+                app.effective_server(k)
+                    .map(|server| server.server_name)
+                    .or_else(|| {
+                        crate::lsp::registry::default_for_language(k).map(|s| s.name.to_string())
+                    })
                     .filter(|_| at_work)
-                    .map(|server| server.name)
                     // Named as its language ("lean"): said once, not
                     // "Lean: lean ready".
                     .filter(|name| !name.eq_ignore_ascii_case(lang)),
                 status,
             ))
         });
-        let named = |status: &str| match server {
+        let named = |status: &str| match &server {
             Some((Some(name), _)) => format!("{lang}: {name} {status}"),
             Some((None, _)) => format!("{lang}: {status}"),
             None => lang.to_string(),

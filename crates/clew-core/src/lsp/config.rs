@@ -108,6 +108,13 @@ impl ProjectLspConfig {
         Self::load_file(root).map(|config| config.for_project(root))
     }
 
+    /// The configuration of the project at `root` before its `lsp.toml` is
+    /// read: Clew's defaults, with the servers its own files call for (a
+    /// Deno project's) — what the setup sheet offers before it is opened.
+    pub fn defaults_for(root: &Path) -> Self {
+        Self::default().for_project(root)
+    }
+
     /// The servers the project's own files call for, beneath what its
     /// lsp.toml names: a Deno project (a `deno.json` or `deno.jsonc` at its
     /// root) is read by Deno's server, whose imports, `Deno` and
@@ -380,6 +387,13 @@ mod deno_tests {
         assert_eq!(
             server(&dir),
             Some(("deno".to_string(), vec!["lsp".to_string()]))
+        );
+        // Before the project is opened (its setup sheet): Deno's too.
+        assert_eq!(
+            ProjectLspConfig::defaults_for(&dir)
+                .resolve("typescript")
+                .map(|s| s.server_name),
+            Some("deno".to_string())
         );
         std::fs::create_dir_all(dir.join(".clew")).unwrap();
         std::fs::write(

@@ -76,6 +76,17 @@ fn take_notice(mut launch: serde_json::Value) -> (serde_json::Value, Option<Stri
     (launch, notice)
 }
 
+/// Whether a stop's scope is shown, its variables fetched: not one with
+/// none, nor an expensive one (lldb's Registers, JavaScript's Global) —
+/// except a JavaScript module's or script's own top level, which js-debug
+/// marks expensive too: an ES module's `const` and `let` (a Deno program's,
+/// a page's module, Node's ESM) live in its Module scope, a classic script's
+/// in its Script scope, and skipped, a program's own variables were nowhere
+/// in the panel.
+fn shows_scope(name: &str, expensive: bool, variables_reference: i64) -> bool {
+    variables_reference != 0 && (!expensive || matches!(name, "Module" | "Script"))
+}
+
 /// A `launch` body without the exception filters Clew asks for in it (see
 /// `clew_core::debugadapter::EXCEPTIONS`), and those filters.
 fn take_exceptions(mut launch: serde_json::Value) -> (serde_json::Value, Vec<String>) {
@@ -3149,7 +3160,7 @@ impl App {
                     && let Ok(scs) = client.scopes(shown.id).await
                 {
                     for sc in scs {
-                        if sc.expensive || sc.variables_reference == 0 {
+                        if !shows_scope(&sc.name, sc.expensive, sc.variables_reference) {
                             continue; // skip Registers etc. by default
                         }
                         let vars = client
@@ -4876,6 +4887,19 @@ fn is_program_start_file(rel: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    /// A JavaScript module's and script's own scopes are shown though
+    /// js-debug marks them expensive; Registers and Global are not.
+    #[test]
+    fn a_scripts_own_scopes_are_shown_and_expensive_ones_are_not() {
+        assert!(super::shows_scope("Block", false, 1));
+        assert!(super::shows_scope("Module", true, 2));
+        assert!(super::shows_scope("Script", true, 3));
+        assert!(!super::shows_scope("Global", true, 4));
+        assert!(!super::shows_scope("Registers", true, 5));
+        assert!(!super::shows_scope("Locals", false, 0));
+    }
+
     use super::*;
 
     /// A call that is a statement does something when the file runs; one

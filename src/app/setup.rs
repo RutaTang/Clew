@@ -664,7 +664,7 @@ impl App {
             config: if open {
                 self.proj.lsp_config.clone()
             } else {
-                Default::default()
+                lsp::config::ProjectLspConfig::defaults_for(root)
             },
             choices: if open {
                 self.proj.lang_choices.clone()
