@@ -1075,7 +1075,8 @@ impl Resolver {
     /// What a page or a stylesheet loads, as the browser, Vite and Sass
     /// read it. A URL of the web (`https://`, `//cdn…`) is that host's, and
     /// a Sass built-in (`sass:math`) is Sass's. `/src/main.ts` is from the
-    /// page's folder — Vite's root — or a folder above it in the project.
+    /// page's folder — Vite's root — or a folder above it in the project,
+    /// or their `public/` (`/main.css`).
     /// Anything else is beside the importer first (`@import "variables"`
     /// is), with Sass's and Less's extensions, partials (`_variables.scss`)
     /// and index files (`_index.scss`); then, unprefixed, an alias the
@@ -1098,10 +1099,14 @@ impl Resolver {
         }
         let dir = from.parent().unwrap_or(&self.root);
         if let Some(rest) = spec.strip_prefix('/') {
+            // From the page's folder up — and its `public/`, which Vite,
+            // Create React App, Next.js and Nuxt serve at `/`.
             let mut at = Some(dir);
             while let Some(d) = at.filter(|d| d.starts_with(&self.root)) {
-                if let Some(found) = self.web_file(&normalize(&d.join(rest)), lang) {
-                    return Target::Internal(found);
+                for base in [d.to_path_buf(), d.join("public")] {
+                    if let Some(found) = self.web_file(&normalize(&base.join(rest)), lang) {
+                        return Target::Internal(found);
+                    }
                 }
                 at = d.parent();
             }
@@ -8668,6 +8673,7 @@ mod web_resolution_tests {
             "web/index.html",
             "web/src/main.ts",
             "web/style.css",
+            "web/public/main.css",
             "web/src/styles/main.scss",
             "web/src/styles/_variables.scss",
             "web/src/styles/mixins/_index.scss",
@@ -8696,6 +8702,10 @@ mod web_resolution_tests {
         assert_eq!(
             at(page, "./style.css?v=2", "html"),
             internal("web/style.css")
+        );
+        assert_eq!(
+            at(page, "/main.css", "html"),
+            internal("web/public/main.css")
         );
         assert_eq!(
             at(page, "https://cdn.example.com/x.js", "html"),
