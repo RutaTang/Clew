@@ -196,13 +196,14 @@ fn is_debugger_chatter(category: &str, text: &str) -> bool {
                 .any(|v| r.starts_with(v))
         })
     };
-    // sbt relays a forked JVM's words under its own label (`[error] `).
+    // A build relays a forked JVM's words under its own label: sbt's
+    // `[error] `, Mill's task number (`[120] `).
     let unlabelled = |l: &str| {
         let l = l.trim_start();
-        ["[error] ", "[warn] ", "[info] "]
-            .iter()
-            .find_map(|label| l.strip_prefix(label))
-            .unwrap_or(l)
+        l.strip_prefix('[')
+            .and_then(|rest| rest.split_once("] "))
+            .filter(|(label, _)| label.len() <= 12 && !label.contains(' '))
+            .map_or(l, |(_, said)| said)
             .to_string()
     };
     if !text.is_empty()
@@ -580,9 +581,12 @@ async fn run_plain<F>(
             all_threads: true,
         }))
         .await;
-    let said = |(stderr, line): (bool, String)| {
+    // A tool's stderr is its progress as often as its errors (stack's
+    // `cart> Test suite spec passed`, Jest's results): in the run's own
+    // colour, as a remote task's is, the run's end saying how it went.
+    let said = |(_stderr, line): (bool, String)| {
         event(dap::DapEvent::Output(dap::proto::Output {
-            category: if stderr { "stderr" } else { "stdout" }.into(),
+            category: "stdout".into(),
             text: format!("{line}\n"),
         }))
     };
@@ -1212,17 +1216,45 @@ impl App {
         if let Some(plan) = self.lang_debug_main() {
             return self.start_session(false, Some(plan));
         }
-        // One out of the debugger's reach (an sbt build that forks it, a
-        // remote project's): Debug runs it, and says so.
+        // One out of the debugger's reach (a Mill build's, a remote
+        // project's): Debug runs it, and says why.
         if let Some(plan) = self.lang_file_run() {
             let task = self.start_session(true, Some(plan));
-            self.status = tr!(
-                "This language's programs run without the debugger: {status}",
-                status = self.status
-            );
+            self.status = self.run_without_debugger_said();
             return task;
         }
         self.start_session(false, None)
+    }
+
+    /// What the status line says of a program Debug runs without the
+    /// debugger, by why: a remote project's, a Mill build's (it forks the
+    /// program where the agent can't be put) — the run's own words after.
+    fn run_without_debugger_said(&self) -> String {
+        let running = self.status.clone();
+        if self.connection.is_remote() {
+            return tr!(
+                "A remote project's programs run without the debugger: {status}",
+                status = running
+            );
+        }
+        let mill = self.proj.project.as_ref().is_some_and(|p| {
+            self.active_viewer().is_some_and(|v| {
+                v.abs
+                    .ancestors()
+                    .take_while(|d| d.starts_with(&p.root))
+                    .any(|d| d.join("build.mill").is_file() || d.join("build.sc").is_file())
+            })
+        });
+        match mill {
+            true => tr!(
+                "Mill runs this program where the debugger can't reach it, so it runs without it: {status}",
+                status = running
+            ),
+            false => tr!(
+                "This program runs without the debugger: {status}",
+                status = running
+            ),
+        }
     }
 
     /// Run the program as Debug would, without the debugger: the same
@@ -1564,14 +1596,11 @@ impl App {
             (true, _, Some(plan)) | (false, Some(plan), _) => {
                 self.start_session(no_debug, Some(plan))
             }
-            // Out of the debugger's reach (an sbt build that forks it, a
-            // remote project's): run, and said so.
+            // Out of the debugger's reach (a Mill build's, a remote
+            // project's): run, and said why.
             (false, None, Some(plan)) => {
                 let task = self.start_session(true, Some(plan));
-                self.status = tr!(
-                    "This language's programs run without the debugger: {status}",
-                    status = self.status
-                );
+                self.status = self.run_without_debugger_said();
                 task
             }
             _ => match self.active_viewer().map(|v| v.abs.clone()) {
@@ -5801,6 +5830,11 @@ mod tests {
             "Picked up JAVA_TOOL_OPTIONS: -Dx=y\nPicked up _JAVA_OPTIONS: -Xmx1g\n"
         ));
         assert!(!is_debugger_chatter("stdout", "Picked up the parcel\n"));
+        assert!(is_debugger_chatter(
+            "stdout",
+            "[120] Picked up _JAVA_OPTIONS: -Xmx1g\n"
+        ));
+        assert!(!is_debugger_chatter("stdout", "[120] shop.CartSuite:\n"));
         assert_eq!(
             delve_exit("console", "Process 18891 has exited with status 0\n"),
             Some(0)

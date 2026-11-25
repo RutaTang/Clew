@@ -1180,9 +1180,12 @@ impl Adapter {
             ));
         }
         if let Some(stderr) = child.stderr.take() {
+            // A build tool's stderr is its progress as often as its errors
+            // (scala-cli's downloads, Gradle's warnings): in the run's own
+            // colour, as a task's is — the run's end says how it went.
             tokio::spawn(watch_lines(
                 Box::new(stderr),
-                "stderr",
+                "stdout",
                 self.out.clone(),
                 port_tx,
             ));
@@ -1454,7 +1457,7 @@ impl Adapter {
                 .unwrap_or(0);
             let mut frame = json!({
                 "id": id,
-                "name": format!("{}.{}", readable(&class), decode_operators(&method)),
+                "name": frame_name(&class, &method),
                 "line": line,
                 "column": 1,
             });
@@ -2027,6 +2030,17 @@ fn readable(class: &str) -> String {
     match decoded.strip_suffix('$') {
         Some(object) if !object.is_empty() => object.to_string(),
         _ => decoded,
+    }
+}
+
+/// A frame's name as its source writes the method: `Cart.total`; a Scala
+/// 3 file's top-level definition (in its `Cart$package` class) by its own
+/// name, `shop`.
+fn frame_name(class: &str, method: &str) -> String {
+    let method = decode_operators(method);
+    match readable(class).ends_with("$package") {
+        true => method,
+        false => format!("{}.{method}", readable(class)),
     }
 }
 
@@ -3260,10 +3274,11 @@ impl SbtSetEcho {
 fn is_jvm_options_notice(line: &str) -> bool {
     // sbt relays a forked JVM's words under its own label (`[error] `).
     let line = line.trim_start();
-    let line = ["[error] ", "[warn] ", "[info] "]
-        .iter()
-        .find_map(|label| line.strip_prefix(label))
-        .unwrap_or(line);
+    let line = line
+        .strip_prefix('[')
+        .and_then(|rest| rest.split_once("] "))
+        .filter(|(label, _)| label.len() <= 12 && !label.contains(' '))
+        .map_or(line, |(_, said)| said);
     ["JAVA_TOOL_OPTIONS:", "_JAVA_OPTIONS:", "JDK_JAVA_OPTIONS:"]
         .iter()
         .any(|v| {
@@ -3374,6 +3389,8 @@ mod tests {
             ]
         );
         assert_eq!(decode_operators("$plus$colon"), "+:");
+        assert_eq!(frame_name("Cart$package$", "shop"), "shop");
+        assert_eq!(frame_name("shop.Cart$", "total"), "Cart.total");
         assert_eq!(decode_operators("$anonfun$total$1"), "$anonfun$total$1");
         assert_eq!(decode_operators("$update"), "$update");
         assert_eq!(line_at(&[(0, 10), (4, 11), (9, 12)], 6), Some(11));
@@ -3807,7 +3824,11 @@ mod tests {
                 .unwrap_or_else(|| panic!("{name} in {fields}"))
         };
         assert_eq!(field("owner")["value"], "\"ann\"");
-        assert_eq!(field("items")["value"], "int[2] [2, 3]", "a short array, with what it holds");
+        assert_eq!(
+            field("items")["value"],
+            "int[2] [2, 3]",
+            "a short array, with what it holds"
+        );
         let items = client
             .request(
                 "variables",
@@ -3865,7 +3886,11 @@ mod tests {
             .await;
         assert_eq!(hovered["result"], "\"ann\"");
         for (expression, context, why) in [
-            ("cart.owner.length()", "hover", "hovering does not run methods"),
+            (
+                "cart.owner.length()",
+                "hover",
+                "hovering does not run methods",
+            ),
             ("cart.items[0] / 0", "repl", "ArithmeticException"),
             ("cart.missing", "repl", "no field missing"),
             ("nothing(1)", "repl", "no method nothing"),

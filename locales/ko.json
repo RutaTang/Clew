@@ -4102,7 +4102,6 @@
  "These tests run without the debugger: {status}": "이 테스트는 디버거 없이 실행됩니다: {status}",
  "{rel} has no program to run": "{rel}에는 실행할 프로그램이 없습니다",
  "No {manifest} was found above {name}, so it has no build to run it.": "{name} 위에서 {manifest}을(를) 찾지 못해 이를 실행할 빌드가 없습니다.",
- "This language's programs run without the debugger: {status}": "이 언어의 프로그램은 디버거 없이 실행됩니다: {status}",
  "CTest lists no test of {name}: build the project again, then debug it.": "CTest 목록에 {name}의 테스트가 없습니다. 프로젝트를 다시 빌드한 다음 디버그하세요.",
  "CTest's list of tests could not be read.": "CTest의 테스트 목록을 읽을 수 없습니다.",
  "These tests are in more than one program: debug them one at a time.": "이 테스트들은 여러 프로그램에 나뉘어 있습니다. 하나씩 디버그하세요.",
@@ -4121,5 +4120,8 @@
  "CMake could not build {target} (its output is above).": "CMake가 {target}을(를) 빌드하지 못했습니다(출력은 위에 있습니다).",
  "{target} was built, but its program wasn't found in {folder}.": "{target}이(가) 빌드되었지만 {folder}에서 프로그램을 찾을 수 없습니다.",
  "{file} did not compile (the compiler's output is above).": "{file}을(를) 컴파일하지 못했습니다(컴파일러 출력은 위에 있습니다).",
- "The build was stopped.": "빌드가 중지되었습니다."
+ "The build was stopped.": "빌드가 중지되었습니다.",
+ "A remote project's programs run without the debugger: {status}": "원격 프로젝트의 프로그램은 디버거 없이 실행됩니다: {status}",
+ "Mill runs this program where the debugger can't reach it, so it runs without it: {status}": "Mill은 디버거가 닿지 않는 곳에서 이 프로그램을 실행하므로 디버거 없이 실행됩니다: {status}",
+ "This program runs without the debugger: {status}": "이 프로그램은 디버거 없이 실행됩니다: {status}"
 }

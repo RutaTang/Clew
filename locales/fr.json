@@ -4102,7 +4102,6 @@
  "These tests run without the debugger: {status}": "Ces tests s’exécutent sans le débogueur : {status}",
  "{rel} has no program to run": "{rel} n’a aucun programme à exécuter",
  "No {manifest} was found above {name}, so it has no build to run it.": "Aucun {manifest} n’a été trouvé au-dessus de {name} : aucune build ne peut l’exécuter.",
- "This language's programs run without the debugger: {status}": "Les programmes de ce langage s’exécutent sans le débogueur : {status}",
  "CTest lists no test of {name}: build the project again, then debug it.": "CTest ne liste aucun test de {name} : recompilez le projet, puis déboguez-le.",
  "CTest's list of tests could not be read.": "La liste des tests de CTest n’a pas pu être lue.",
  "These tests are in more than one program: debug them one at a time.": "Ces tests se trouvent dans plusieurs programmes : déboguez-les un par un.",
@@ -4121,5 +4120,8 @@
  "CMake could not build {target} (its output is above).": "CMake n’a pas pu compiler {target} (sa sortie est ci-dessus).",
  "{target} was built, but its program wasn't found in {folder}.": "{target} a été compilé, mais son programme est introuvable dans {folder}.",
  "{file} did not compile (the compiler's output is above).": "{file} n’a pas compilé (la sortie du compilateur est ci-dessus).",
- "The build was stopped.": "La compilation a été arrêtée."
+ "The build was stopped.": "La compilation a été arrêtée.",
+ "A remote project's programs run without the debugger: {status}": "Les programmes d’un projet distant s’exécutent sans le débogueur : {status}",
+ "Mill runs this program where the debugger can't reach it, so it runs without it: {status}": "Mill exécute ce programme hors de portée du débogueur ; il s’exécute donc sans lui : {status}",
+ "This program runs without the debugger: {status}": "Ce programme s’exécute sans le débogueur : {status}"
 }

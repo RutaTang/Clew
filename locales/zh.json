@@ -4102,7 +4102,6 @@
  "These tests run without the debugger: {status}": "这些测试在没有调试器的情况下运行：{status}",
  "{rel} has no program to run": "{rel} 中没有可运行的程序",
  "No {manifest} was found above {name}, so it has no build to run it.": "在 {name} 之上没有找到 {manifest}，因此没有可以运行它的构建。",
- "This language's programs run without the debugger: {status}": "这种语言的程序在没有调试器的情况下运行：{status}",
  "CTest lists no test of {name}: build the project again, then debug it.": "CTest 中没有 {name} 的测试：请重新构建项目，然后再调试。",
  "CTest's list of tests could not be read.": "无法读取 CTest 的测试列表。",
  "These tests are in more than one program: debug them one at a time.": "这些测试分布在多个程序中：请逐个调试。",
@@ -4121,5 +4120,8 @@
  "CMake could not build {target} (its output is above).": "CMake 无法构建 {target}（输出见上方）。",
  "{target} was built, but its program wasn't found in {folder}.": "{target} 已构建，但在 {folder} 中找不到它的程序。",
  "{file} did not compile (the compiler's output is above).": "{file} 编译失败（编译器的输出见上方）。",
- "The build was stopped.": "构建已停止。"
+ "The build was stopped.": "构建已停止。",
+ "A remote project's programs run without the debugger: {status}": "远程项目的程序在不使用调试器的情况下运行：{status}",
+ "Mill runs this program where the debugger can't reach it, so it runs without it: {status}": "Mill 在调试器无法触及的地方运行此程序，因此它将不使用调试器运行：{status}",
+ "This program runs without the debugger: {status}": "此程序在不使用调试器的情况下运行：{status}"
 }

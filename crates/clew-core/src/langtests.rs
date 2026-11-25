@@ -765,36 +765,37 @@ pub fn test_command(
                 None => file_test_classes(lang, source),
             };
             if let Some(dir) = above(root, file, &["build.sbt"]) {
-                // ScalaTest picks a test by its name's text (`-z`), MUnit by
-                // its full name (`"acme.CartSuite.adds"`, spaces and all),
-                // JUnit's interface by its method (`--tests=`); a group,
-                // its class.
-                let scalatest = source.contains("org.scalatest");
-                let munit = source.contains("munit.");
+                // One test by its framework's filter ([`jvm_test_filter`]),
+                // a group by its class, a file by its classes.
                 let quoted = |text: &str| format!("\"{}\"", text.replace('"', "\\\""));
-                let filter = match (runnable.kind, &class) {
-                    (RunnableKind::Test, Some((class, _))) if scalatest => {
-                        format!("testOnly {class} -- -z {}", quoted(&runnable.name))
+                let filter = match (&class, jvm_test_filter(source, runnable, class.as_ref())) {
+                    (Some((class, _)), Some(words)) => {
+                        let words: Vec<String> = words
+                            .iter()
+                            .map(|w| match w.starts_with('-') {
+                                true => w.clone(),
+                                false => quoted(w),
+                            })
+                            .collect();
+                        format!("testOnly {class} -- {}", words.join(" "))
                     }
-                    (RunnableKind::Test, Some((class, Some(name)))) if munit => {
-                        format!("testOnly {class} -- {}", quoted(&format!("{class}.{name}")))
-                    }
-                    (RunnableKind::Test, Some((class, Some(method))))
-                        if source.contains("org.junit") =>
-                    {
-                        format!("testOnly {class} -- --tests={method}")
-                    }
-                    (_, Some((class, _))) => format!("testOnly {class}"),
-                    (_, None) if !classes.is_empty() => format!("testOnly {}", classes.join(" ")),
-                    (_, None) => "test".into(),
+                    (Some((class, _)), None) => format!("testOnly {class}"),
+                    (None, _) if !classes.is_empty() => format!("testOnly {}", classes.join(" ")),
+                    (None, _) => "test".into(),
                 };
                 return Ok(command(tool("sbt")?, vec![filter], &dir));
             }
             if let Some(dir) = above(root, file, &["build.mill", "build.sc"]) {
                 let mut args = vec!["__.test.testOnly".to_string()];
+                let words = jvm_test_filter(source, runnable, class.as_ref());
                 match class {
                     Some((class, _)) => args.push(class),
                     None => args.extend(classes),
+                }
+                // One test by its framework's words, after `--`.
+                if let Some(words) = words {
+                    args.push("--".into());
+                    args.extend(words);
                 }
                 return Ok(command(tool("mill")?, args, &dir));
             }
@@ -855,11 +856,18 @@ pub fn test_command(
                 // A scala-cli project: its folder, or the file alone.
                 let dir = file.parent().unwrap_or(root);
                 let mut args = vec!["test".to_string(), dir.to_string_lossy().into_owned()];
+                let words = jvm_test_filter(source, runnable, class.as_ref());
                 if let Some((class, _)) = class {
                     args.extend(["--test-only".into(), class]);
                 }
                 for class in classes {
                     args.extend(["--test-only".into(), class]);
+                }
+                // The framework's own words after `--` (one test of the
+                // suite).
+                if let Some(words) = words {
+                    args.push("--".into());
+                    args.extend(words);
                 }
                 return Ok(command(tool("scala-cli")?, args, dir));
             }
@@ -1077,7 +1085,9 @@ pub fn test_debugger(root: &Path, file: &Path, lang: &str) -> Option<&'static st
         "csharp" => Some("csharp"),
         "zig" => Some("native"),
         "c" | "cpp" => ctest_dir(root).map(|_| "native"),
-        "java" | "kotlin" | "scala" => jvm_debug_build(root, file).map(|_| "java"),
+        "java" | "kotlin" | "scala" => jvm_debug_build(root, file)
+            .or_else(|| scala_cli_tests(root, file, lang))
+            .map(|_| "java"),
         // EUnit's, not a Common Test suite's: CT runs its cases its own way.
         "erlang" => {
             let suite = file
@@ -1156,6 +1166,8 @@ enum JvmBuild {
     Gradle,
     Maven,
     Sbt,
+    /// A Scala file with no build of its own, its tests by scala-cli.
+    ScalaCli,
 }
 
 /// The build that runs `file`'s tests where the JVM debugger reaches them,
@@ -1185,6 +1197,39 @@ fn jvm_debug_build(root: &Path, file: &Path) -> Option<JvmBuild> {
     above(root, file, &["pom.xml"]).map(|_| JvmBuild::Maven)
 }
 
+/// The Mill module a source file is in, by its place under the build's
+/// folder: the folders before its `src` (`foo/src/Main.scala` is `foo`,
+/// `foo/test/src/…` `foo.test`, Maven's `foo/src/main/scala/…` `foo`).
+fn mill_module(build: &Path, file: &Path) -> Option<String> {
+    let rel = file.strip_prefix(build).ok()?;
+    let parts: Vec<String> = rel
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .take_while(|p| p != "src")
+        .collect();
+    (!parts.is_empty() && parts.len() < rel.components().count()).then(|| parts.join("."))
+}
+
+/// A Scala file's tests run by scala-cli: no build of its own around it
+/// (Mill's runs its tests where the debugger is not).
+fn scala_cli_tests(root: &Path, file: &Path, lang: &str) -> Option<JvmBuild> {
+    let built = above(
+        root,
+        file,
+        &[
+            "build.sbt",
+            "build.mill",
+            "build.sc",
+            "build.gradle",
+            "build.gradle.kts",
+            "settings.gradle",
+            "settings.gradle.kts",
+            "pom.xml",
+        ],
+    );
+    (lang == "scala" && built.is_none()).then_some(JvmBuild::ScalaCli)
+}
+
 /// sbt's commands that run `task`'s JVM (`Test`, `run`) forked, with the
 /// debugger's agent on it alone — every project's (`ThisBuild`): sbt's
 /// own JVM, and the one its launcher starts first to ask Java for its
@@ -1194,7 +1239,14 @@ fn sbt_forked_under(task: &str, agent: &str) -> [String; 2] {
     // Commands to sbt, not words to the reader: built, not formatted.
     [
         ["set ThisBuild / ", task, " / fork := true"].concat(),
-        ["set ThisBuild / ", task, " / javaOptions += \"", agent, "\""].concat(),
+        [
+            "set ThisBuild / ",
+            task,
+            " / javaOptions += \"",
+            agent,
+            "\"",
+        ]
+        .concat(),
     ]
 }
 
@@ -1219,7 +1271,11 @@ pub fn main_debugger(root: &Path, file: &Path, lang: &str) -> Option<&'static st
             ],
         )
         .map(|_| "java"),
-        "scala" => Some("java"),
+        // Mill forks its program where the agent can't be put from its
+        // command line: run, out of the debugger's reach, and said so.
+        "scala" => above(root, file, &["build.mill", "build.sc"])
+            .is_none()
+            .then_some("java"),
         "elixir" => Some("elixir"),
         // A .NET program, built and run under netcoredbg; a Zig file on
         // its own, built for the session under lldb (a build.zig's
@@ -1619,7 +1675,8 @@ pub fn debug_test(
             Ok(debug)
         }
         "java" | "kotlin" | "scala" => {
-            let Some(build) = jvm_debug_build(root, file) else {
+            let build = jvm_debug_build(root, file).or_else(|| scala_cli_tests(root, file, lang));
+            let Some(build) = build else {
                 return Err("This build runs its tests where the debugger can't reach them, so they run without it.".to_string());
             };
             let mut args = run.args;
@@ -1646,6 +1703,15 @@ pub fn debug_test(
                     for (i, set) in sbt_forked_under("Test", &agent).into_iter().enumerate() {
                         args.insert(i, set);
                     }
+                    agent_port = Some(port);
+                }
+                // scala-cli's test JVM given the agent (`--java-opt`), on a
+                // port of Clew's, before the framework's own words.
+                JvmBuild::ScalaCli => {
+                    let port = free_port()?;
+                    let agent = JDWP_AGENT.replace("127.0.0.1:0", &format!("127.0.0.1:{port}"));
+                    let at = args.iter().position(|a| a == "--").unwrap_or(args.len());
+                    args.splice(at..at, ["--java-opt".to_string(), agent]);
                     agent_port = Some(port);
                 }
             }
@@ -2212,6 +2278,18 @@ pub fn main_command(
                 };
                 return Ok(command(tool("sbt")?, vec![run], &dir));
             }
+            // A Mill module's program: `mill foo.runMain shop.Main`, the
+            // module read off the file's place (`foo/src/…`).
+            if let Some(dir) = above(root, file, &["build.mill", "build.sc"]) {
+                let source = crate::statefile::read_capped(file, 4 << 20).unwrap_or_default();
+                let module = mill_module(&dir, file).ok_or_else(|| no_main(file))?;
+                let mut args = vec![format!("{module}.runMain")];
+                args.extend(scala_main_class(&source));
+                if args.len() == 1 {
+                    args = vec![format!("{module}.run")];
+                }
+                return Ok(command(tool("mill")?, args, &dir));
+            }
             let dir = file.parent().unwrap_or(root);
             let cli = tool("scala-cli").or_else(|_| tool("scala"))?;
             Ok(command(cli, vec!["run".into(), name], dir))
@@ -2436,6 +2514,32 @@ fn scala_main_class(source: &str) -> Option<String> {
         true => name,
         false => format!("{package}.{name}"),
     })
+}
+
+/// The words a JVM test framework picks one test of a class by, after
+/// sbt's or scala-cli's `--`: ScalaTest's `-z name` (its name's text),
+/// MUnit's full name (`acme.CartSuite.adds`, spaces and all), JUnit's
+/// interface's `--tests=method`. None for a group, or a framework that
+/// has none.
+fn jvm_test_filter(
+    source: &str,
+    runnable: &Runnable,
+    class: Option<&(String, Option<String>)>,
+) -> Option<Vec<String>> {
+    if runnable.kind != RunnableKind::Test {
+        return None;
+    }
+    let (class, name) = class?;
+    if source.contains("org.scalatest") {
+        return Some(vec!["-z".into(), runnable.name.clone()]);
+    }
+    let name = name.as_ref()?;
+    if source.contains("munit.") {
+        return Some(vec![format!("{class}.{name}")]);
+    }
+    source
+        .contains("org.junit")
+        .then(|| vec![format!("--tests={name}")])
 }
 
 /// The test classes of a JVM file, by their full names: what running the
@@ -3274,6 +3378,54 @@ mod tests {
         write("fk/build.sbt", "Test / fork := true\n");
         let forked = write("fk/src/test/scala/acme/CartSuite.scala", "");
         assert_eq!(test_debugger(&root, &forked, "scala"), Some("java"));
+        // Mill's tests are out of its reach; scala-cli's, a file with no
+        // build, its test JVM under the agent before MUnit's words.
+        write("ml/build.mill", "");
+        let mill = write(
+            "ml/foo/test/src/CartSuite.scala",
+            "class CartSuite extends munit.FunSuite {\n  test(\"adds\") {\n  }\n}\n",
+        );
+        assert_eq!(test_debugger(&root, &mill, "scala"), None);
+        assert_eq!(
+            mill_module(&root.join("ml"), &mill).as_deref(),
+            Some("foo.test")
+        );
+        assert_eq!(
+            mill_module(
+                &root.join("ml"),
+                &root.join("ml/foo/src/main/scala/Main.scala")
+            )
+            .as_deref(),
+            Some("foo")
+        );
+        assert_eq!(
+            mill_module(&root.join("ml"), &root.join("ml/build.mill")),
+            None
+        );
+        let mill_main = write(
+            "ml/foo/src/Main.scala",
+            "object Main:\n  def main(args: Array[String]): Unit = ()\n",
+        );
+        assert_eq!(main_debugger(&root, &mill_main, "scala"), None);
+        let cli = write(
+            "cli2/Cart.test.scala",
+            "class CartSuite extends munit.FunSuite {\n  test(\"adds\") {\n  }\n}\n",
+        );
+        assert_eq!(test_debugger(&root, &cli, "scala"), Some("java"));
+        let d = debug("scala", &cli, 2);
+        let port = d.launch["port"].as_u64().unwrap();
+        let agent = JDWP_AGENT.replace("127.0.0.1:0", &format!("127.0.0.1:{port}"));
+        assert_eq!(
+            d.args[2..],
+            [
+                "--test-only".to_string(),
+                "CartSuite".into(),
+                "--java-opt".into(),
+                agent,
+                "--".into(),
+                "CartSuite.adds".into()
+            ]
+        );
 
         assert_eq!(test_debugger(&root, &go, "haskell"), None);
 

@@ -829,8 +829,7 @@ pub(crate) fn run_bounded_cancellable(
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
     }
-    let mut child = cmd
-        .spawn()
+    let mut child = crate::spawn::spawn_as_a_shell_would(&mut cmd)
         .map_err(|e| format!("could not run {name}: {e}"))?;
     // Windows' process group: a job object, ended — with whatever the
     // installer left in it — when this returns.

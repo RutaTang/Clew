@@ -4102,7 +4102,6 @@
  "These tests run without the debugger: {status}": "これらのテストはデバッガーなしで実行されます: {status}",
  "{rel} has no program to run": "{rel} に実行するプログラムはありません",
  "No {manifest} was found above {name}, so it has no build to run it.": "{name} より上に {manifest} が見つからないため、それを実行するビルドがありません。",
- "This language's programs run without the debugger: {status}": "この言語のプログラムはデバッガーなしで実行されます: {status}",
  "CTest lists no test of {name}: build the project again, then debug it.": "CTest の一覧に {name} のテストがありません。プロジェクトをもう一度ビルドしてから、デバッグしてください。",
  "CTest's list of tests could not be read.": "CTest のテスト一覧を読み取れませんでした。",
  "These tests are in more than one program: debug them one at a time.": "これらのテストは複数のプログラムに分かれています。1 つずつデバッグしてください。",
@@ -4121,5 +4120,8 @@
  "CMake could not build {target} (its output is above).": "CMake が {target} をビルドできませんでした（出力は上にあります）。",
  "{target} was built, but its program wasn't found in {folder}.": "{target} はビルドされましたが、そのプログラムが {folder} に見つかりません。",
  "{file} did not compile (the compiler's output is above).": "{file} をコンパイルできませんでした（コンパイラの出力は上にあります）。",
- "The build was stopped.": "ビルドは停止されました。"
+ "The build was stopped.": "ビルドは停止されました。",
+ "A remote project's programs run without the debugger: {status}": "リモートプロジェクトのプログラムはデバッガーなしで実行されます: {status}",
+ "Mill runs this program where the debugger can't reach it, so it runs without it: {status}": "Mill はデバッガーが届かない場所でこのプログラムを実行するため、デバッガーなしで実行されます: {status}",
+ "This program runs without the debugger: {status}": "このプログラムはデバッガーなしで実行されます: {status}"
 }

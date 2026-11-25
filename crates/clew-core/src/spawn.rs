@@ -65,7 +65,7 @@ pub fn run_streaming(
         use std::os::unix::process::CommandExt;
         command.process_group(0);
     }
-    let mut child = command.spawn().map_err(|e| e.to_string())?;
+    let mut child = spawn_as_a_shell_would(&mut command).map_err(|e| e.to_string())?;
     #[cfg(windows)]
     let _job = crate::procgroup::adopt_scoped(&child);
     let (lines_tx, lines) = std::sync::mpsc::channel::<(bool, String)>();
@@ -122,6 +122,47 @@ pub fn run_streaming(
     Ok(RunEnd::Exited(status.code().map_or(-1, i64::from)))
 }
 
+/// Spawn `command` as a shell would run it: a file with no `#!` line of
+/// its own (Mill's launcher, a script written without one) is not a
+/// program the system starts (`ENOEXEC`), and a shell runs it with `sh`
+/// instead — a project's `./mill` ran in a terminal and failed in Clew
+/// with "Exec format error".
+pub fn spawn_as_a_shell_would(
+    command: &mut std::process::Command,
+) -> std::io::Result<std::process::Child> {
+    match command.spawn() {
+        #[cfg(unix)]
+        Err(e) if e.raw_os_error() == Some(libc_enoexec()) => {
+            let mut sh = std::process::Command::new("sh");
+            sh.arg(command.get_program()).args(command.get_args());
+            if let Some(dir) = command.get_current_dir() {
+                sh.current_dir(dir);
+            }
+            for (name, value) in command.get_envs() {
+                match value {
+                    Some(value) => sh.env(name, value),
+                    None => sh.env_remove(name),
+                };
+            }
+            sh.stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped());
+            {
+                use std::os::unix::process::CommandExt;
+                sh.process_group(0);
+            }
+            sh.spawn()
+        }
+        other => other,
+    }
+}
+
+/// `ENOEXEC`: the file is not one the system knows how to start.
+#[cfg(unix)]
+const fn libc_enoexec() -> i32 {
+    8
+}
+
 #[cfg(test)]
 mod tests {
     /// The commands run what they name, with what they are given — on
@@ -135,6 +176,28 @@ mod tests {
         let out = super::command(program).args(args).output().unwrap();
         assert!(out.status.success());
         assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "here");
+    }
+
+    /// A script with no `#!` line runs through `sh`, as a shell runs it.
+    #[cfg(unix)]
+    #[test]
+    fn a_script_without_its_interpreter_runs_as_a_shell_runs_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = crate::testutil::TempDir::new("spawn-no-shebang");
+        let script = dir.join("tool");
+        std::fs::write(&script, "echo ran \"$1\"\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut said = Vec::new();
+        let mut command = super::command(&script);
+        command.arg("there");
+        let end = super::run_streaming(
+            command,
+            |line, _| said.push(line.to_string()),
+            &std::sync::atomic::AtomicBool::new(false),
+        )
+        .unwrap();
+        assert_eq!(end, super::RunEnd::Exited(0));
+        assert_eq!(said, ["ran there"]);
     }
 
     #[tokio::test]
