@@ -133,6 +133,9 @@ languages! {
     Astro => "astro",
     Scss => "scss",
     Less => "less",
+    Kotlin => "kotlin",
+    Scala => "scala",
+    Elixir => "elixir",
 }
 
 /// How many languages there are; sizes the per-language caches below.
@@ -146,6 +149,9 @@ enum Family {
     Ecma,
     /// C and C++ link together (and `.h` headers are read as either).
     CLike,
+    /// Java, Kotlin and Scala compile to one JVM program, each calling the
+    /// others' classes and methods.
+    Jvm,
     /// Everything else only reaches its own language.
     Alone(Lang),
 }
@@ -211,6 +217,9 @@ impl Lang {
             Lang::Astro => "Astro",
             Lang::Scss => "SCSS",
             Lang::Less => "Less",
+            Lang::Kotlin => "Kotlin",
+            Lang::Scala => "Scala",
+            Lang::Elixir => "Elixir",
         }
     }
 
@@ -247,6 +256,10 @@ impl Lang {
             Lang::Astro => &["astro"],
             Lang::Scss => &["scss"],
             Lang::Less => &["less"],
+            Lang::Kotlin => &["kt", "kts"],
+            // sbt's build definitions are Scala, and Mill's.
+            Lang::Scala => &["scala", "sc", "sbt", "mill"],
+            Lang::Elixir => &["ex", "exs"],
         }
     }
 
@@ -326,6 +339,9 @@ impl Lang {
             Lang::Astro => &[],
             Lang::Scss => &[],
             Lang::Less => &[],
+            Lang::Kotlin => &["kt", "kts"],
+            Lang::Scala => &["sc"],
+            Lang::Elixir => &["ex", "exs", "iex"],
         }
     }
 
@@ -364,6 +380,9 @@ impl Lang {
             Lang::Astro => tree_sitter_html::LANGUAGE.into(),
             Lang::Scss => tree_sitter_scss::language(),
             Lang::Less => tree_sitter_less::language(),
+            Lang::Kotlin => tree_sitter_kotlin_ng::LANGUAGE.into(),
+            Lang::Scala => tree_sitter_scala::LANGUAGE.into(),
+            Lang::Elixir => tree_sitter_elixir::LANGUAGE.into(),
         }
     }
 
@@ -431,6 +450,10 @@ impl Lang {
                 tree_sitter_less::HIGHLIGHTS_QUERY,
                 LESS_REFINEMENTS,
             ],
+            // The grammar's crate ships no query of its own.
+            Lang::Kotlin => &[KOTLIN_HIGHLIGHTS],
+            Lang::Scala => &[tree_sitter_scala::HIGHLIGHTS_QUERY],
+            Lang::Elixir => &[tree_sitter_elixir::HIGHLIGHTS_QUERY],
         }
     }
 
@@ -440,7 +463,10 @@ impl Lang {
         match self {
             Lang::Sql => SQL_CAPTURE_NAMES,
             Lang::Haskell => HASKELL_CAPTURE_NAMES,
-            Lang::Php | Lang::Ruby | Lang::CSharp | Lang::Erlang => &[],
+            Lang::Scala => SCALA_CAPTURE_NAMES,
+            Lang::Php | Lang::Ruby | Lang::CSharp | Lang::Erlang | Lang::Kotlin | Lang::Elixir => {
+                &[]
+            }
             Lang::Rust
             | Lang::Python
             | Lang::JavaScript
@@ -500,7 +526,10 @@ impl Lang {
             | Lang::Erlang
             | Lang::Haskell
             | Lang::Scss
-            | Lang::Less => &[],
+            | Lang::Less
+            | Lang::Kotlin
+            | Lang::Scala
+            | Lang::Elixir => &[],
         }
     }
 
@@ -534,6 +563,9 @@ impl Lang {
             Lang::Less => &[CSS_TAGS, LESS_TAGS],
             Lang::Html => &[HTML_TAGS],
             Lang::Json => &[JSON_TAGS],
+            Lang::Kotlin => &[KOTLIN_TAGS],
+            Lang::Scala => &[SCALA_TAGS],
+            Lang::Elixir => &[ELIXIR_TAGS],
             // A component file's outline is its script's ([`script_view`]).
             Lang::Bash | Lang::Yaml | Lang::Toml | Lang::Vue | Lang::Svelte | Lang::Astro => &[],
         }
@@ -548,11 +580,11 @@ impl Lang {
             | Lang::Svelte
             | Lang::Astro => Family::Ecma,
             Lang::C | Lang::Cpp => Family::CLike,
+            Lang::Java | Lang::Kotlin | Lang::Scala => Family::Jvm,
             Lang::Rust
             | Lang::Python
             | Lang::Go
             | Lang::Dart
-            | Lang::Java
             | Lang::Json
             | Lang::Bash
             | Lang::Yaml
@@ -568,7 +600,8 @@ impl Lang {
             | Lang::Erlang
             | Lang::Haskell
             | Lang::Scss
-            | Lang::Less => Family::Alone(self),
+            | Lang::Less
+            | Lang::Elixir => Family::Alone(self),
         }
     }
 
@@ -659,6 +692,167 @@ const SQL_CAPTURE_NAMES: &[(&str, &str)] = &[
     ("storageclass", "keyword"),
     ("type.qualifier", "keyword"),
 ];
+
+/// The capture names of tree-sitter-scala's highlight query that are not
+/// clew's: it is written in Neovim's older names (`@parameter`,
+/// `@namespace`, `@conditional`, `@method`), none of which matches a style.
+const SCALA_CAPTURE_NAMES: &[(&str, &str)] = &[
+    ("boolean", "constant.builtin"),
+    ("conditional", "keyword"),
+    ("exception", "keyword"),
+    ("float", "number"),
+    ("include", "keyword"),
+    ("method", "function.method"),
+    ("method.call", "function.method"),
+    ("namespace", "module"),
+    ("none", ""),
+    ("parameter", "variable.parameter"),
+    ("repeat", "keyword"),
+    ("spell", ""),
+    ("storageclass", "keyword"),
+    ("type.qualifier", "keyword"),
+];
+
+/// Kotlin's highlights, for tree-sitter-kotlin-ng, whose crate ships none:
+/// its keywords and literals; declarations, calls, types, annotations and
+/// string templates. `true`, `false` and `null` are identifiers to the
+/// grammar. Later patterns win (see [`Lang::highlight_parts`]).
+const KOTLIN_HIGHLIGHTS: &str = r#"
+(identifier) @variable
+
+[
+  "abstract" "actual" "annotation" "as" "as?" "by" "catch" "class" "companion"
+  "const" "constructor" "crossinline" "data" "delegate" "do" "dynamic" "else"
+  "enum" "expect" "external" "field" "file" "final" "finally" "for" "fun" "get"
+  "if" "import" "in" "!in" "infix" "init" "inline" "inner" "interface"
+  "internal" "is" "!is" "lateinit" "noinline" "object" "open" "operator" "out"
+  "override" "package" "param" "private" "property" "protected" "public"
+  "receiver" "return" "return@" "sealed" "set" "setparam" "super@" "suspend"
+  "tailrec" "this@" "throw" "try" "typealias" "val" "value" "var" "vararg"
+  "when" "where" "while"
+] @keyword
+
+[
+  "!" "!!" "!=" "!==" "%" "%=" "&&" "*" "*=" "+" "++" "+=" "-" "--" "-=" "->"
+  ".." "..<" "/" "/=" "<" "<=" "=" "==" "===" ">" ">=" "?:" "||" "::" "?."
+] @operator
+
+["(" ")" "[" "]" "{" "}"] @punctuation.bracket
+["," "." ";" ":"] @punctuation.delimiter
+
+((identifier) @constant.builtin
+  (#any-of? @constant.builtin "true" "false" "null"))
+(this_expression) @variable.builtin
+(super_expression) @variable.builtin
+
+(package_header (qualified_identifier) @module)
+(import (qualified_identifier) @module)
+
+(user_type (identifier) @type)
+(class_declaration name: (identifier) @type)
+(object_declaration name: (identifier) @type)
+(companion_object name: (identifier) @type)
+(type_alias type: (identifier) @type)
+(enum_entry (identifier) @constant)
+
+(function_declaration name: (identifier) @function.definition)
+(call_expression . (identifier) @function)
+(call_expression . (navigation_expression (identifier) @function.method .))
+(navigation_expression . (_) (identifier) @property .)
+
+(annotation) @attribute
+(annotation (user_type (identifier) @attribute))
+(annotation (constructor_invocation (user_type (identifier) @attribute)))
+(label) @label
+
+[(number_literal) (float_literal)] @number
+[(string_literal) (multiline_string_literal) (character_literal)] @string
+(string_content) @string
+(escape_sequence) @string.escape
+(interpolation) @embedded
+(interpolation ["$" "${" "}"] @punctuation.special)
+
+[(line_comment) (block_comment) (shebang)] @comment
+"#;
+
+/// The Kotlin outline: the package, classes (an interface, an enum by its
+/// keyword), objects, functions, a class's or a file's properties (not a
+/// function's local `val`s), type aliases and enum entries.
+const KOTLIN_TAGS: &str = r#"
+(package_header (qualified_identifier) @name) @definition.module
+(class_declaration "interface" name: (identifier) @name) @definition.interface
+(class_declaration
+  (modifiers (class_modifier) @_modifier)
+  name: (identifier) @name
+  (#eq? @_modifier "enum")) @definition.enum
+(class_declaration name: (identifier) @name) @definition.class
+(object_declaration name: (identifier) @name) @definition.class
+(companion_object name: (identifier) @name) @definition.class
+(function_declaration name: (identifier) @name) @definition.function
+(class_body (property_declaration (variable_declaration (identifier) @name)) @definition.property)
+(source_file (property_declaration (variable_declaration (identifier) @name)) @definition.property)
+(type_alias type: (identifier) @name) @definition.type
+(enum_class_body (enum_entry (identifier) @name) @definition.constant)
+"#;
+
+/// The Scala outline (2 and 3): packages, traits, enums and their cases,
+/// classes, objects, functions (an abstract one too), a template's or a
+/// file's `val`s and `var`s, givens and type definitions.
+const SCALA_TAGS: &str = r#"
+(package_clause name: (package_identifier) @name) @definition.module
+(trait_definition name: (identifier) @name) @definition.interface
+(enum_definition name: (identifier) @name) @definition.enum
+(simple_enum_case name: (identifier) @name) @definition.constant
+(full_enum_case name: (identifier) @name) @definition.constant
+(class_definition name: (identifier) @name) @definition.class
+(object_definition name: (identifier) @name) @definition.class
+(function_definition name: (identifier) @name) @definition.function
+(function_declaration name: (identifier) @name) @definition.function
+(template_body (val_definition pattern: (identifier) @name) @definition.property)
+(template_body (var_definition pattern: (identifier) @name) @definition.property)
+(compilation_unit (val_definition pattern: (identifier) @name) @definition.property)
+(template_body (val_declaration name: (identifier) @name) @definition.property)
+(given_definition name: (identifier) @name) @definition.property
+(type_definition name: (type_identifier) @name) @definition.type
+"#;
+
+/// The Elixir outline: modules and protocols, functions (each clause —
+/// merged, see `outline::merge_clauses` — a guarded one and a zero-arity
+/// one without parentheses too), macros and `@type`s. Every definition is a
+/// call to the grammar: `def` names the function its first argument calls.
+const ELIXIR_TAGS: &str = r#"
+(call
+  target: (identifier) @_kw
+  (arguments (alias) @name)
+  (#any-of? @_kw "defmodule" "defprotocol")) @definition.module
+(call
+  target: (identifier) @_kw
+  (arguments
+    [
+      (identifier) @name
+      (call target: (identifier) @name)
+      (binary_operator left: (call target: (identifier) @name) operator: "when")
+    ])
+  (#any-of? @_kw "def" "defp" "defdelegate" "defguard" "defguardp" "defn" "defnp")) @definition.function
+(call
+  target: (identifier) @_kw
+  (arguments
+    [
+      (identifier) @name
+      (call target: (identifier) @name)
+      (binary_operator left: (call target: (identifier) @name) operator: "when")
+    ])
+  (#any-of? @_kw "defmacro" "defmacrop")) @definition.macro
+(unary_operator
+  operator: "@"
+  operand: (call
+    target: (identifier) @_attr
+    (arguments
+      (binary_operator
+        left: [(call target: (identifier) @name) (identifier) @name]
+        operator: "::")))
+  (#any-of? @_attr "type" "typep" "opaque")) @definition.type
+"#;
 
 /// The capture names of tree-sitter-haskell's highlight query that are not
 /// clew's (see [`SQL_CAPTURE_NAMES`]): its `@spell` follows `@comment` on
@@ -2414,6 +2608,14 @@ mod tests {
                 Some("s{"),
                 Some("// c{"),
             ),
+            (
+                "kotlin",
+                "val s = \"s{\" // c{\n",
+                Some("s{"),
+                Some("// c{"),
+            ),
+            ("scala", "val s = \"s{\" // c{\n", Some("s{"), Some("// c{")),
+            ("elixir", "s = \"s{\" # c{\n", Some("s{"), Some("# c{")),
         ];
         assert_eq!(cases.len(), Lang::ALL.len(), "a language is missing here");
         for (key, src, string, comment) in cases {

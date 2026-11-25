@@ -120,7 +120,7 @@ fn extract_with(
         | DocStyle::Hash
         | DocStyle::Percent
         | DocStyle::Haddock => doc_ends(&lines, lang),
-        DocStyle::PyDocstring | DocStyle::None => Vec::new(),
+        DocStyle::PyDocstring | DocStyle::ElixirAttr | DocStyle::None => Vec::new(),
     };
     let mut out = HashMap::new();
     for t in &targets {
@@ -333,8 +333,16 @@ fn share_overload_docs(
 /// `@overload` stubs and property getter/setter pairs.
 fn has_overloading(lang: Lang) -> bool {
     match lang {
-        Lang::TypeScript | Lang::Tsx | Lang::Java | Lang::Cpp | Lang::Python | Lang::CSharp => true,
-        Lang::Php | Lang::Ruby | Lang::Erlang | Lang::Haskell => false,
+        Lang::TypeScript
+        | Lang::Tsx
+        | Lang::Java
+        | Lang::Cpp
+        | Lang::Python
+        | Lang::CSharp
+        | Lang::Kotlin
+        | Lang::Scala => true,
+        // An Elixir function is its name and arity: `f/1` and `f/2` are two.
+        Lang::Php | Lang::Ruby | Lang::Erlang | Lang::Haskell | Lang::Elixir => false,
         Lang::Rust
         | Lang::JavaScript
         | Lang::Go
@@ -403,6 +411,9 @@ enum DocStyle {
     Block(&'static BlockSyntax),
     /// Python: the first string literal inside a def/class body.
     PyDocstring,
+    /// Elixir: the `@doc` above a `def` (a heredoc or a string), past the
+    /// `@spec` and `@impl` between them.
+    ElixirAttr,
     None,
 }
 
@@ -418,9 +429,16 @@ impl DocStyle {
             Lang::Erlang => DocStyle::Percent,
             Lang::Haskell => DocStyle::Haddock,
             Lang::Go => DocStyle::SlashSlash,
-            Lang::JavaScript | Lang::TypeScript | Lang::Tsx | Lang::Java | Lang::C | Lang::Cpp => {
-                DocStyle::Block(&C_BLOCK)
-            }
+            // KDoc and Scaladoc are Javadoc's shape.
+            Lang::JavaScript
+            | Lang::TypeScript
+            | Lang::Tsx
+            | Lang::Java
+            | Lang::C
+            | Lang::Cpp
+            | Lang::Kotlin
+            | Lang::Scala => DocStyle::Block(&C_BLOCK),
+            Lang::Elixir => DocStyle::ElixirAttr,
             Lang::Lean => DocStyle::Block(&LEAN_BLOCK),
             Lang::Python => DocStyle::PyDocstring,
             Lang::Sql => DocStyle::DashDash,
@@ -476,6 +494,9 @@ impl DocStyle {
         let end = ends.get(sig_line - 2).copied().flatten();
         if matches!(self, DocStyle::RustLike) {
             return rust_item_doc(lines, end, sig_line - 2);
+        }
+        if matches!(self, DocStyle::ElixirAttr) {
+            return elixir_doc(lines, sig_line - 2);
         }
         let end = end?;
         match self {
@@ -1063,6 +1084,89 @@ fn collect_block(
     (!doc.is_empty()).then_some(doc)
 }
 
+/// An Elixir function's `@doc`, from the line above its `def` (`last`)
+/// up: past the other attributes between them (`@spec`, `@impl`, a spec's
+/// continued lines), the `@doc """` heredoc — dedented as Elixir does, by
+/// its closing quotes — or a one-line `@doc "…"`. `@doc false` hides it.
+fn elixir_doc(lines: &[&str], last: usize) -> Option<String> {
+    let mut i = last;
+    loop {
+        let t = lines.get(i)?.trim();
+        if t.ends_with("\"\"\"") && !t.starts_with("@doc") {
+            // A heredoc's closing quotes: its opening `@doc """` above.
+            let indent = lines[i].len() - lines[i].trim_start().len();
+            let open = (0..i).rev().find(|&k| {
+                let o = lines[k].trim();
+                o.starts_with('@') && o.ends_with("\"\"\"")
+            })?;
+            if !lines[open].trim().starts_with("@doc") {
+                // A `@moduledoc` or another attribute's heredoc: no doc of
+                // this function's.
+                return None;
+            }
+            let body: Vec<&str> = lines[open + 1..i]
+                .iter()
+                .map(|l| {
+                    let lead = l.len() - l.trim_start().len();
+                    l.get(indent.min(lead)..).unwrap_or("")
+                })
+                .collect();
+            return non_empty(&body.join("\n"));
+        }
+        if let Some(rest) = t.strip_prefix("@doc") {
+            let rest = rest.trim();
+            if rest.starts_with("false") {
+                return None;
+            }
+            let rest = rest
+                .trim_start_matches("~S")
+                .trim_start_matches("~s")
+                .trim();
+            return rest
+                .strip_prefix('"')
+                .and_then(|r| r.strip_suffix('"'))
+                .and_then(non_empty);
+        }
+        // Another attribute, or a spec's continued line: skipped over.
+        let attribute = t.starts_with('@') && !t.starts_with("@moduledoc");
+        let continued = t.starts_with('|') || t.starts_with("::") || t.ends_with(',');
+        if !(attribute || continued) || i == 0 {
+            return None;
+        }
+        i -= 1;
+    }
+}
+
+/// Scaladoc's own markup as Markdown: `{{{ … }}}` code blocks fenced, a
+/// `[[link]]` its label or its target's last part in code, `'''bold'''`
+/// and `''italic''` as such.
+fn scaladoc_markdown(s: &str) -> String {
+    // A `{{{` or `}}}` on a line of its own fences a block; inline, a span.
+    let mut out = s
+        .lines()
+        .map(|line| match line.trim() {
+            "{{{" => "```scala".to_string(),
+            "}}}" => "```".to_string(),
+            _ => line.replace("{{{", "`").replace("}}}", "`"),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        .replace("'''", "**")
+        .replace("''", "*");
+    while let Some(open) = out.find("[[") {
+        let Some(len) = out[open..].find("]]") else {
+            break;
+        };
+        let inner = out[open + 2..open + len].to_string();
+        let shown = match inner.split_once(' ') {
+            Some((_, label)) => label.trim().to_string(),
+            None => format!("`{}`", inner.rsplit('.').next().unwrap_or(&inner)),
+        };
+        out.replace_range(open..open + len + 2, &shown);
+    }
+    out.trim().to_string()
+}
+
 /// Clean documentation markup that isn't Markdown so it renders as prose rather
 /// than literal noise — each language's own markup only:
 ///   Dart    `{@template}` / `{@endtemplate}` / `{@macro}` directive markers
@@ -1085,7 +1189,9 @@ fn clean_doc_text(s: &str, lang: Lang) -> String {
         Lang::Php => render_inline_tags(s),
         Lang::CSharp => render_xml_doc(s),
         Lang::Erlang => render_edoc(s),
-        Lang::Ruby | Lang::Haskell => s.to_string(),
+        Lang::Scala => scaladoc_markdown(s),
+        // KDoc and Elixir's docs are Markdown.
+        Lang::Ruby | Lang::Haskell | Lang::Kotlin | Lang::Elixir => s.to_string(),
         Lang::Rust
         | Lang::Go
         | Lang::Json
@@ -3700,5 +3806,48 @@ mod language_tests {
         );
         // A plain Haskell comment above a function is no Haddock.
         assert!(docs_of("-- just a note\nf :: Int\nf = 1\n", "haskell").is_empty());
+    }
+
+    /// KDoc and Scaladoc as Javadoc's blocks — Scaladoc's `{{{ }}}` a code
+    /// block, its `[[link]]` the name — and Elixir's `@doc`, a heredoc
+    /// (dedented, its example kept) or a string, past the `@spec` between
+    /// it and its `def`; a `defp` with none has none.
+    #[test]
+    fn kdoc_scaladoc_and_elixir_docs() {
+        let kt: std::collections::HashMap<usize, String> =
+            docs_of(include_str!("../tests/fixtures/langs/a.kt"), "kotlin")
+                .into_iter()
+                .collect();
+        assert_eq!(
+            kt.get(&8).map(String::as_str),
+            Some("An order's total, with [tax] applied.")
+        );
+        let scala: std::collections::HashMap<usize, String> =
+            docs_of(include_str!("../tests/fixtures/langs/a.scala"), "scala")
+                .into_iter()
+                .collect();
+        let order = scala.get(&15).map(String::as_str).unwrap_or_default();
+        assert!(order.starts_with("An order's total."), "{order}");
+        assert!(order.contains("```scala\nOrder(1, 10.0)\n```"), "{order}");
+        assert!(order.ends_with("See `Checkout`."), "{order}");
+        let ex: std::collections::HashMap<usize, String> =
+            docs_of(include_str!("../tests/fixtures/langs/a.ex"), "elixir")
+                .into_iter()
+                .collect();
+        assert_eq!(
+            ex.get(&20).map(String::as_str),
+            Some(
+                "The order's total, with tax.\n\n    iex> Shop.Checkout.price(%Order{total: 10.0})\n    12.0"
+            )
+        );
+        assert_eq!(ex.get(&25).map(String::as_str), Some("Rounds a price."));
+        assert_eq!(ex.get(&27), None, "{ex:?}");
+        assert!(
+            docs_of(
+                "defmodule M do\n  @doc false\n  def hidden, do: 1\nend\n",
+                "elixir"
+            )
+            .is_empty()
+        );
     }
 }

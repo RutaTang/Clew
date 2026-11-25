@@ -655,7 +655,7 @@ pub struct Declared<'a> {
 /// file is part of (a Java package, a C# namespace) rather than an import:
 /// no edge of its own. A Rust `mod x;` is an edge — the module tree's.
 fn is_declaration(lang: &str, raw: &RawImport) -> bool {
-    raw.is_mod_decl && matches!(lang, "java" | "csharp")
+    raw.is_mod_decl && matches!(lang, "java" | "kotlin" | "scala" | "csharp" | "elixir")
 }
 
 /// The C# namespaces the graph's files declare (`namespace A.B { … }`,
@@ -922,7 +922,13 @@ impl Resolver {
         }
         let mut java_roots: Vec<PathBuf> = dirs
             .iter()
-            .filter(|d| d.ends_with("src/main/java") || d.ends_with("src/test/java"))
+            .filter(|d| {
+                ["main", "test"].iter().any(|set| {
+                    ["java", "kotlin", "scala"]
+                        .iter()
+                        .any(|lang| d.ends_with(Path::new("src").join(set).join(lang)))
+                })
+            })
             .cloned()
             .collect();
         java_roots.sort();
@@ -1058,7 +1064,9 @@ impl Resolver {
             "go" => self.resolve_go(raw),
             "dart" => self.resolve_dart(raw, from),
             "lean" => self.resolve_lean(raw, from),
-            "java" => self.resolve_java(raw, from, declared.package),
+            // Kotlin's and Scala's packages and classes are Java's.
+            "java" | "kotlin" | "scala" => self.resolve_java(raw, from, declared.package),
+            "elixir" => self.resolve_elixir(raw),
             "csharp" => self.resolve_csharp(raw, from, declared.namespaces),
             "php" => self.resolve_php(raw, from),
             "ruby" => self.resolve_ruby(raw, from),
@@ -1206,20 +1214,40 @@ impl Resolver {
                 }
             }
             // The importer's own class (a static import of its own members)
-            // is found too: the graph drops it as no dependency.
+            // is found too: the graph drops it as no dependency. A Kotlin
+            // or Scala class is its file's, as a Java one is.
             for end in (1..=segs.len()).rev() {
                 let (class, dirs) = segs[..end].split_last().expect("one segment at least");
-                let file = join_all(root, dirs).join(format!("{class}.java"));
-                if self.has_file(&file) {
-                    return Target::Internal(file);
+                for ext in ["java", "kt", "scala"] {
+                    let file = join_all(root, dirs).join(format!("{class}.{ext}"));
+                    if self.has_file(&file) {
+                        return Target::Internal(file);
+                    }
+                }
+            }
+            // A Kotlin top-level function or property (`import a.b.format`),
+            // or a Scala package object's member: its package's.
+            if !star
+                && segs.len() > 1
+                && segs
+                    .last()
+                    .is_some_and(|s| s.starts_with(char::is_lowercase))
+            {
+                let dir = join_all(root, &segs[..segs.len() - 1]);
+                if self.packages.contains_key(&dir) {
+                    return Target::Internal(dir);
                 }
             }
         }
-        // The package is the name up to its first capitalised part, a class.
+        // The package is the name up to its first capitalised part, a class
+        // — or, with none, up to a Kotlin top-level function's own name.
         let package_len = segs
             .iter()
             .position(|s| s.starts_with(char::is_uppercase))
-            .unwrap_or(segs.len())
+            .unwrap_or(match star {
+                true => segs.len(),
+                false => segs.len().saturating_sub(1),
+            })
             .max(1);
         let package = &segs[..package_len];
         if roots
@@ -1427,6 +1455,31 @@ impl Resolver {
     /// `src/app.app.src`, or any directory named `app` (`apps/app`,
     /// `deps/app`, `_build/default/lib/app`) — else, as Erlang does, where an
     /// `-include` would find it, else in that application outside the project.
+    /// An Elixir module by Mix's convention: `Shop.Pricing.Tax` is
+    /// `shop/pricing/tax.ex` under a `lib/` — the project's, or an umbrella
+    /// app's — or `test/support/`; a module found in none is its library's
+    /// (`Ecto.Query` is Ecto's, `GenServer` Elixir's own).
+    fn resolve_elixir(&self, raw: &RawImport) -> Target {
+        let spec = raw.module.as_str();
+        let parts: Vec<String> = spec.split('.').map(snake_case).collect();
+        if parts.iter().any(|p| p.is_empty()) {
+            return Target::Unresolved(spec.to_string());
+        }
+        let rel: PathBuf = parts.iter().collect::<PathBuf>().with_extension("ex");
+        let mut roots: Vec<&PathBuf> = self
+            .dirs
+            .iter()
+            .filter(|d| d.ends_with("lib") || d.ends_with("test/support"))
+            .collect();
+        roots.sort();
+        roots
+            .into_iter()
+            .map(|root| root.join(&rel))
+            .find(|file| self.has_file(file))
+            .map(Target::Internal)
+            .unwrap_or_else(|| Target::External(spec.split('.').next().unwrap_or(spec).to_string()))
+    }
+
     fn resolve_erlang(&self, raw: &RawImport, from: &Path) -> Target {
         let spec = raw.module.as_str();
         if let Some(path) = spec.strip_prefix(ERLANG_LIB) {
@@ -2408,6 +2461,27 @@ fn with_added_ext(p: &Path, ext: &str) -> PathBuf {
 }
 
 /// `base` joined with each of `parts` in turn (`a.b.C`'s parts: `a/b/C`).
+/// An Elixir alias as Mix names its file: `OrderItem` is `order_item`,
+/// `HTTPClient` `http_client` (Macro.underscore's rule).
+fn snake_case(part: &str) -> String {
+    let chars: Vec<char> = part.chars().collect();
+    let mut out = String::new();
+    for (i, &c) in chars.iter().enumerate() {
+        if c.is_uppercase() {
+            let after_lower =
+                i > 0 && (chars[i - 1].is_lowercase() || chars[i - 1].is_ascii_digit());
+            let before_lower = chars.get(i + 1).is_some_and(|n| n.is_lowercase());
+            if i > 0 && (after_lower || (before_lower && chars[i - 1].is_uppercase())) {
+                out.push('_');
+            }
+            out.extend(c.to_lowercase());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 fn join_all(base: &Path, parts: &[&str]) -> PathBuf {
     parts
         .iter()
@@ -3657,7 +3731,7 @@ impl ImportGraph {
         let consulted = Consulted::new(&self.ctx);
         let raws = self.raw.get(file).map(|r| r.as_slice()).unwrap_or(&[]);
         // A Java file's own `package` line says where its source root is.
-        let package = (lang == "java")
+        let package = matches!(lang, "java" | "kotlin" | "scala")
             .then(|| raws.iter().find(|r| r.is_mod_decl))
             .flatten()
             .map(|r| r.module.as_str());
@@ -3694,7 +3768,7 @@ impl ImportGraph {
             // Java static import of the file's own class, is not a
             // dependency.
             .filter(|e| {
-                !(matches!(lang, "rust" | "java")
+                !(matches!(lang, "rust" | "java" | "kotlin" | "scala" | "elixir")
                     && e.target == Target::Internal(file.to_path_buf()))
             })
             .collect();
@@ -4132,7 +4206,7 @@ fn is_package_source(file: &Path) -> bool {
         Some("go") => !file
             .file_name()
             .is_some_and(|n| n.to_string_lossy().ends_with("_test.go")),
-        Some("java") => true,
+        Some("java" | "kt" | "scala") => true,
         _ => false,
     }
 }
@@ -8570,6 +8644,94 @@ mod resolution_tests {
         assert_eq!(targets(&g, &at(test)), [Target::Internal(at(strings))]);
         assert_eq!(targets(&g, &at(thing)), [Target::Internal(at(other))]);
         assert_eq!(targets(&g, &at(app_it)), [Target::Internal(at(fixtures))]);
+    }
+
+    /// Kotlin and Scala resolve as Java does, across the three: a class is
+    /// its file under its source root (`src/main/kotlin`, `src/main/scala`,
+    /// or `src/main/java` beside Java), a star its package, and a Kotlin
+    /// top-level function its package. An Elixir module is its file by
+    /// Mix's convention under a `lib/` (an umbrella app's too); a library's
+    /// module is its library's.
+    #[test]
+    fn kotlin_scala_and_elixir_imports_resolve() {
+        let root = Path::new("/k");
+        let app = "app/src/main/kotlin/com/acme/app/App.kt";
+        let util = "app/src/main/kotlin/com/acme/util/Strings.kt";
+        let format = "app/src/main/kotlin/com/acme/util/format.kt";
+        let model = "app/src/main/java/com/acme/model/User.java";
+        let order = "app/src/main/scala/com/acme/model/Order.scala";
+        let shop = "shop/src/main/scala/com/acme/shop/Shop.scala";
+        let g = graph_with(
+            root,
+            &[
+                (
+                    app,
+                    "package com.acme.app\n\nimport com.acme.util.Strings\nimport com.acme.util.formatPrice\n\
+                     import com.acme.model.User\nimport com.acme.model.*\nimport kotlinx.coroutines.launch\n",
+                ),
+                (util, "package com.acme.util\nobject Strings\n"),
+                (format, "package com.acme.util\nfun formatPrice() = 1\n"),
+                (model, "package com.acme.model;\npublic class User {}\n"),
+                (
+                    order,
+                    "package com.acme.model\ncase class Order(id: Long)\n",
+                ),
+                (
+                    shop,
+                    "package com.acme\npackage shop\n\nimport com.acme.model.{Order, User}\nimport scala.util.Try\n",
+                ),
+            ],
+            false,
+        );
+        let at = |f: &str| root.join(f);
+        assert_eq!(
+            targets(&g, &at(app)),
+            [
+                Target::Internal(at(util)),
+                Target::Internal(at("app/src/main/kotlin/com/acme/util")),
+                Target::Internal(at(model)),
+                Target::Internal(at("app/src/main/java/com/acme/model")),
+                Target::External("kotlinx.coroutines".into()),
+            ]
+        );
+        assert_eq!(
+            targets(&g, &at(shop)),
+            [
+                Target::Internal(at(order)),
+                Target::Internal(at(model)),
+                Target::External("scala.util".into()),
+            ]
+        );
+
+        let root = Path::new("/ex");
+        let checkout = "lib/shop/checkout.ex";
+        let tax = "lib/shop/pricing/tax.ex";
+        let item = "apps/store/lib/store/order_item.ex";
+        let client = "lib/shop/http_client.ex";
+        let g = graph_with(
+            root,
+            &[
+                (
+                    checkout,
+                    "defmodule Shop.Checkout do\n  alias Shop.Pricing.Tax\n  alias Store.{OrderItem}\n\
+                     alias Shop.HTTPClient\n  use GenServer\n  import Ecto.Query\nend\n",
+                ),
+                (tax, "defmodule Shop.Pricing.Tax do\nend\n"),
+                (item, "defmodule Store.OrderItem do\nend\n"),
+                (client, "defmodule Shop.HTTPClient do\nend\n"),
+            ],
+            false,
+        );
+        assert_eq!(
+            targets(&g, &root.join(checkout)),
+            [
+                Target::Internal(root.join(tax)),
+                Target::Internal(root.join(item)),
+                Target::Internal(root.join(client)),
+                Target::External("GenServer".into()),
+                Target::External("Ecto".into()),
+            ]
+        );
     }
 
     /// A C# `using` of a namespace points at the namespace's node, which

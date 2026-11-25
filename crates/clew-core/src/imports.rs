@@ -90,6 +90,9 @@ pub fn imports_in(tree: &Tree, source: &str, lang: Lang) -> Vec<RawImport> {
         Lang::Erlang => erlang_imports(root, source, query),
         Lang::Haskell => haskell_imports(root, source, query),
         Lang::Zig => zig_imports(root, source, query),
+        Lang::Kotlin => kotlin_imports(root, source, query),
+        Lang::Scala => scala_imports(root, source, query),
+        Lang::Elixir => elixir_imports(root, source, query),
         Lang::C
         | Lang::Cpp
         | Lang::Json
@@ -126,6 +129,9 @@ pub fn import_query(lang: Lang) -> Result<&'static Query, QueryError> {
         Lang::Erlang => Some(ERLANG_QUERY),
         Lang::Haskell => Some(HASKELL_QUERY),
         Lang::Zig => Some(ZIG_QUERY),
+        Lang::Kotlin => Some(KOTLIN_QUERY),
+        Lang::Scala => Some(SCALA_QUERY),
+        Lang::Elixir => Some(ELIXIR_QUERY),
         Lang::C
         | Lang::Cpp
         | Lang::Json
@@ -1225,6 +1231,197 @@ fn java_imports(root: Node, src: &str, query: &Query) -> Vec<RawImport> {
     out
 }
 
+// Kotlin: the file's package, as a declaration, and one specifier per
+// import, as Java's (`a.b.C`, `a.b.*`); an alias (`as D`) is the same
+// import.
+const KOTLIN_QUERY: &str = r#"
+(package_header (qualified_identifier) @package)
+(import (qualified_identifier) @name) @import
+"#;
+
+fn kotlin_imports(root: Node, src: &str, query: &Query) -> Vec<RawImport> {
+    let mut out = Vec::new();
+    for_each_match(root, query, src, |caps| {
+        if out.len() >= MAX_RUST_IMPORTS {
+            return;
+        }
+        if let Some(package) = capture(caps, "package") {
+            let name = path_text(package, src);
+            if name.len() <= MAX_RUST_IMPORT_LEN {
+                push_declaration(&mut out, &name, line_of(package));
+            }
+            return;
+        }
+        let (Some(import), Some(name)) = (capture(caps, "import"), capture(caps, "name")) else {
+            return;
+        };
+        let mut spec = path_text(name, src);
+        if spec.len() > MAX_RUST_IMPORT_LEN {
+            return;
+        }
+        // `import a.b.*`: the star is no node of its own.
+        let after = src.get(name.end_byte()..import.end_byte()).unwrap_or("");
+        if after.trim_start().starts_with(".*") {
+            spec.push_str(".*");
+        }
+        push_module(&mut out, &spec, line_of(name));
+    });
+    out
+}
+
+// Scala: the package its `package` lines chain to (`package a.b` then
+// `package c` is `a.b.c`), as a declaration, and one specifier per name an
+// import brings in, as Java's: `a.b.C`, `a.b.*` for a wildcard (`_` or
+// `*`), each of `a.b.{C, D => E}`'s.
+const SCALA_QUERY: &str = r#"
+(compilation_unit (package_clause name: (package_identifier) @package))
+(import_declaration) @import
+"#;
+
+fn scala_imports(root: Node, src: &str, query: &Query) -> Vec<RawImport> {
+    let mut out = Vec::new();
+    let mut package: Option<(String, usize)> = None;
+    for_each_match(root, query, src, |caps| {
+        if out.len() >= MAX_RUST_IMPORTS {
+            return;
+        }
+        if let Some(clause) = capture(caps, "package") {
+            let name = path_text(clause, src);
+            package = Some(match package.take() {
+                Some((before, line)) => (format!("{before}.{name}"), line),
+                None => (name, line_of(clause)),
+            });
+            return;
+        }
+        let Some(import) = capture(caps, "import") else {
+            return;
+        };
+        let mut cursor = import.walk();
+        let base: Vec<&str> = import
+            .children_by_field_name("path", &mut cursor)
+            .filter(|p| p.is_named())
+            .map(|p| node_text(p, src))
+            .collect();
+        let base = base.join(".");
+        if base.is_empty() || base.len() > MAX_RUST_IMPORT_LEN {
+            return;
+        }
+        let line = line_of(import);
+        let mut cursor = import.walk();
+        let mut named = false;
+        for child in import.named_children(&mut cursor) {
+            match child.kind() {
+                "namespace_wildcard" => {
+                    push_module(&mut out, &format!("{base}.*"), line);
+                    named = true;
+                }
+                "namespace_selectors" => {
+                    named = true;
+                    let mut inner = child.walk();
+                    for selector in child.named_children(&mut inner) {
+                        let name = match selector.kind() {
+                            "identifier" => Some(selector),
+                            "arrow_renamed_identifier" | "as_renamed_identifier" => {
+                                selector.child_by_field_name("name")
+                            }
+                            "namespace_wildcard" => {
+                                push_module(&mut out, &format!("{base}.*"), line);
+                                None
+                            }
+                            _ => None,
+                        };
+                        if let Some(name) = name {
+                            push_module(
+                                &mut out,
+                                &format!("{base}.{}", node_text(name, src)),
+                                line,
+                            );
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        if !named {
+            push_module(&mut out, &base, line);
+        }
+    });
+    if let Some((name, line)) = package
+        && name.len() <= MAX_RUST_IMPORT_LEN
+    {
+        push_declaration(&mut out, &name, line);
+    }
+    out
+}
+
+// Elixir: the module each `alias`, `import`, `use` and `require` names
+// (`A.B`, each of `alias A.{B, C}`'s), and each module the file defines,
+// by its full name (`defmodule A do defmodule B` defines `A` and `A.B`), as
+// declarations.
+const ELIXIR_QUERY: &str = r#"
+(call
+  target: (identifier) @kw
+  (arguments . (alias) @module)
+  (#any-of? @kw "alias" "import" "use" "require"))
+(call
+  target: (identifier) @kw
+  (arguments . (dot left: (alias) @base right: (tuple) @group))
+  (#any-of? @kw "alias" "import" "use" "require"))
+(call
+  target: (identifier) @kw
+  (arguments . (alias) @defines)
+  (#any-of? @kw "defmodule" "defprotocol")) @definition
+"#;
+
+fn elixir_imports(root: Node, src: &str, query: &Query) -> Vec<RawImport> {
+    let mut out = Vec::new();
+    for_each_match(root, query, src, |caps| {
+        if out.len() >= MAX_RUST_IMPORTS {
+            return;
+        }
+        if let Some(module) = capture(caps, "module") {
+            push_module(&mut out, node_text(module, src), line_of(module));
+        } else if let (Some(base), Some(group)) = (capture(caps, "base"), capture(caps, "group")) {
+            let base = node_text(base, src);
+            let mut cursor = group.walk();
+            for member in group
+                .named_children(&mut cursor)
+                .filter(|m| m.kind() == "alias")
+            {
+                push_module(
+                    &mut out,
+                    &format!("{base}.{}", node_text(member, src)),
+                    line_of(member),
+                );
+            }
+        } else if let (Some(name), Some(definition)) =
+            (capture(caps, "defines"), capture(caps, "definition"))
+        {
+            // Nested in another `defmodule`: named under it.
+            let mut full = node_text(name, src).to_string();
+            let mut node = definition.parent();
+            while let Some(n) = node {
+                if n.kind() == "call"
+                    && n.child_by_field_name("target")
+                        .is_some_and(|t| matches!(node_text(t, src), "defmodule" | "defprotocol"))
+                    && let Some(outer) = n
+                        .named_children(&mut n.walk())
+                        .find(|c| c.kind() == "arguments")
+                        .and_then(|a| a.named_child(0))
+                        .filter(|a| a.kind() == "alias")
+                {
+                    full = format!("{}.{full}", node_text(outer, src));
+                }
+                node = n.parent();
+            }
+            if full.len() <= MAX_RUST_IMPORT_LEN {
+                push_declaration(&mut out, &full, line_of(name));
+            }
+        }
+    });
+    out
+}
+
 // C# `using` directives (`global`, `static` and aliased ones too) and the
 // namespaces a file declares, block-bodied or file-scoped (declarations: see
 // `RawImport::is_mod_decl`).
@@ -2018,6 +2215,54 @@ mod extraction_tests {
         assert_eq!(entries(src, "java"), want);
         let lines: Vec<usize> = imports_of(src, "java").iter().map(|i| i.line).collect();
         assert_eq!(lines, [2, 4, 5, 6, 7]);
+    }
+
+    /// Kotlin's imports are Java's — a star, an alias the same import —
+    /// and so is its package; Scala's chained packages are one, a selector
+    /// group names each of its members, a wildcard (`_` or `*`) the
+    /// package; Elixir's `alias`, `import`, `use` and `require` each name
+    /// a module (`alias A.{B, C}` two), and a file declares each module it
+    /// defines, a nested one by its full name.
+    #[test]
+    fn kotlin_scala_and_elixir_imports() {
+        let kt = "package com.acme.shop\n\nimport kotlin.math.max\nimport com.acme.model.*\n\
+                  import com.acme.repo.OrderRepository as Repo\n\nclass A\n";
+        let mut want = vec![("com.acme.shop".to_string(), true)];
+        want.extend(uses(&[
+            "kotlin.math.max",
+            "com.acme.model.*",
+            "com.acme.repo.OrderRepository",
+        ]));
+        assert_eq!(entries(kt, "kotlin"), want);
+        let scala = "package com.acme\npackage shop\n\nimport scala.util.{Try, Success => Ok}\n\
+                     import com.acme.model._\nimport com.acme.repo.OrderRepository\n\
+                     import cats.implicits.*\n\nclass A\n";
+        let mut want = uses(&[
+            "scala.util.Try",
+            "scala.util.Success",
+            "com.acme.model.*",
+            "com.acme.repo.OrderRepository",
+            "cats.implicits.*",
+        ]);
+        want.push(("com.acme.shop".to_string(), true));
+        assert_eq!(entries(scala, "scala"), want);
+        let ex = "defmodule Shop.Checkout do\n  alias Shop.{Order, Repo}\n  alias Shop.Pricing.Tax\n\
+                  import Ecto.Query, only: [from: 2]\n  use GenServer\n  require Logger\n\n\
+                  defmodule Error do\n    defexception [:message]\n  end\nend\n";
+        let mut got = entries(ex, "elixir");
+        got.sort();
+        let mut want = uses(&[
+            "Shop.Order",
+            "Shop.Repo",
+            "Shop.Pricing.Tax",
+            "Ecto.Query",
+            "GenServer",
+            "Logger",
+        ]);
+        want.push(("Shop.Checkout".to_string(), true));
+        want.push(("Shop.Checkout.Error".to_string(), true));
+        want.sort();
+        assert_eq!(got, want);
     }
 
     /// A C# `using` names a namespace or a type, however it is written —

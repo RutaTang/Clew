@@ -1630,6 +1630,16 @@ fn is_public(decl: &str, name: &str, lang: Lang, is_member: bool) -> bool {
         // The export list says (a module without one exports everything):
         // not seen from one declaration, so every one counts.
         Lang::Erlang | Lang::Haskell => true,
+        // Public unless it says otherwise; `internal` is its module's own.
+        Lang::Kotlin => !modifiers(d).any(|w| matches!(w, "private" | "protected" | "internal")),
+        // Public unless it says otherwise (`private[pkg]` too).
+        Lang::Scala => {
+            !modifiers(d).any(|w| w.starts_with("private") || w.starts_with("protected"))
+        }
+        // `def` is public, its `p` forms private.
+        Lang::Elixir => !["defp ", "defmacrop ", "defguardp ", "defnp "]
+            .iter()
+            .any(|p| d.starts_with(p)),
         // No outline, so no items to judge; the benefit of the doubt keeps a
         // Docs view from coming up empty if one ever appears.
         Lang::Json

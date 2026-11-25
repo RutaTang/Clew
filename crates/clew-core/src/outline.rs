@@ -399,7 +399,7 @@ pub fn try_extract_located(source: &str, lang_key: &str) -> Result<Vec<Located>,
 pub fn located_in(tree: &Tree, source: &str, lang: Lang) -> Vec<Located> {
     match lang {
         Lang::Lean => lean_located(source),
-        Lang::Erlang | Lang::Haskell => {
+        Lang::Erlang | Lang::Haskell | Lang::Elixir => {
             merge_clauses(located_in_tree(tree, source, lang), source, lang)
         }
         _ => located_in_tree(tree, source, lang),
@@ -413,13 +413,14 @@ pub fn located_in(tree: &Tree, source: &str, lang: Lang) -> Vec<Located> {
 fn merge_clauses(items: Vec<Located>, source: &str, lang: Lang) -> Vec<Located> {
     let arity = |item: &Located| match lang {
         Lang::Erlang => clause_arity(source, item),
+        Lang::Elixir => elixir_arity(source, item),
         _ => None,
     };
     let mut out: Vec<Located> = Vec::with_capacity(items.len());
     for item in items {
         if let Some(prev) = out.last_mut()
-            && prev.symbol.kind == "function"
-            && item.symbol.kind == "function"
+            && matches!(prev.symbol.kind.as_str(), "function" | "macro")
+            && item.symbol.kind == prev.symbol.kind
             && prev.symbol.name == item.symbol.name
             && arity(prev) == arity(&item)
         {
@@ -438,6 +439,35 @@ fn merge_clauses(items: Vec<Located>, source: &str, lang: Lang) -> Vec<Located> 
 
 /// How many arguments an Erlang clause's head takes — top-level commas of
 /// its first parenthesized list (`price(A, B)`: 2).
+/// An Elixir clause's arity: its head's arguments (`def f(a, b)` two, a
+/// bare `def f` none), read from the name on — never from its body, whose
+/// calls have parentheses of their own.
+fn elixir_arity(source: &str, item: &Located) -> Option<usize> {
+    let text = source
+        .get(item.declaration.0..item.declaration.1)?
+        .trim_start();
+    let (_, rest) = text.split_once(char::is_whitespace)?;
+    let rest = rest.trim_start();
+    let name_end = rest
+        .find(|c: char| !(c.is_alphanumeric() || matches!(c, '_' | '?' | '!')))
+        .unwrap_or(rest.len());
+    let Some(args) = rest[name_end..].strip_prefix('(') else {
+        return Some(0);
+    };
+    let (mut depth, mut count, mut empty) = (0usize, 0usize, true);
+    for c in args.chars() {
+        match c {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' if depth == 0 => break,
+            ')' | ']' | '}' => depth -= 1,
+            ',' if depth == 0 => count += 1,
+            c if !c.is_whitespace() => empty = false,
+            _ => {}
+        }
+    }
+    Some(if empty { 0 } else { count + 1 })
+}
+
 fn clause_arity(source: &str, item: &Located) -> Option<usize> {
     let text = source.get(item.declaration.0..item.declaration.1)?;
     let head = text.split("->").next()?;
@@ -1398,6 +1428,12 @@ fn lean_name<'a>(def: Node, source: &'a str) -> Option<&'a str> {
     source.get(first.start_byte()..last.end_byte())
 }
 
+/// Whether `node` has a named child of `kind`.
+fn has_child(node: Node, kind: &str) -> bool {
+    let mut cursor = node.walk();
+    node.named_children(&mut cursor).any(|c| c.kind() == kind)
+}
+
 /// `(decl_line, body)` for a definition node (see [`Located`]).
 fn shape_of(def: Node, lang: Lang) -> (usize, Option<(usize, usize)>) {
     let first = |n: Node| n.start_position().row + 1;
@@ -1486,6 +1522,17 @@ fn shape_of(def: Node, lang: Lang) -> (usize, Option<(usize, usize)>) {
         },
         Lang::Python | Lang::JavaScript | Lang::Sql | Lang::Lean => (first(def), whole),
         Lang::Ruby | Lang::Erlang | Lang::Haskell | Lang::Zig => (first(def), whole),
+        // An interface's or an abstract class's function has no body.
+        Lang::Kotlin => match def.kind() {
+            "function_declaration" if !has_child(def, "function_body") => (first(def), None),
+            _ => (first(def), whole),
+        },
+        // A trait's abstract `def area: Double` is a declaration.
+        Lang::Scala => match def.kind() {
+            "function_declaration" => (first(def), None),
+            _ => (first(def), whole),
+        },
+        Lang::Elixir => (first(def), whole),
         Lang::Json
         | Lang::Bash
         | Lang::Yaml
@@ -1662,7 +1709,10 @@ fn container_of(def: Node, lang: Lang) -> Option<Container> {
         | Lang::Ruby
         | Lang::CSharp
         | Lang::Erlang
-        | Lang::Haskell => None,
+        | Lang::Haskell
+        | Lang::Kotlin
+        | Lang::Scala
+        | Lang::Elixir => None,
     }
 }
 
@@ -2222,7 +2272,9 @@ impl<'a> EntryPoints<'a> {
         };
         match lang {
             Lang::Rust => self.rust_marks(line1, name),
-            Lang::Java => self.java_marks(line1, name),
+            // JUnit's `@Test`, Spring's `@GetMapping`: Kotlin's and Scala's
+            // annotations are Java's.
+            Lang::Java | Lang::Kotlin | Lang::Scala => self.java_marks(line1, name),
             Lang::Go => Marks {
                 test: name.starts_with("Test")
                     || name.starts_with("Benchmark")
@@ -2255,7 +2307,8 @@ impl<'a> EntryPoints<'a> {
             | Lang::Astro
             | Lang::Sql
             | Lang::Lean
-            | Lang::Haskell => Marks::default(),
+            | Lang::Haskell
+            | Lang::Elixir => Marks::default(),
             // PHPUnit: `testX` methods (and `@test`-annotated ones, read off
             // the docblock above).
             Lang::Php => Marks {
@@ -2658,7 +2711,7 @@ impl<'a> EntryPoints<'a> {
             mark(EntryKind::Main);
         }
         match lang {
-            Lang::Rust | Lang::Java => {}
+            Lang::Rust | Lang::Java | Lang::Kotlin | Lang::Scala => {}
             Lang::Python => {
                 if let Some(k) = self.decorated(line1, name, lang) {
                     mark(k);
@@ -2722,7 +2775,8 @@ impl<'a> EntryPoints<'a> {
             | Lang::Svelte
             | Lang::Astro
             | Lang::Sql
-            | Lang::Lean => {}
+            | Lang::Lean
+            | Lang::Elixir => {}
         }
         found
     }
@@ -5419,6 +5473,76 @@ mod language_tests {
         let facts: Vec<_> = hs.iter().filter(|(_, n, _, _)| n == "fact").collect();
         assert_eq!(facts.len(), 1, "{hs:?}");
         assert_eq!((facts[0].2, facts[0].3), (26, 27));
+    }
+
+    /// Kotlin's, Scala's and Elixir's outlines: each declaration by its
+    /// kind, a class's or a file's properties but no function's locals,
+    /// Elixir's macros and types; an Elixir function's clauses are one
+    /// item, and the same name at another arity another.
+    #[test]
+    fn kotlin_scala_and_elixir_outlines() {
+        let kt = outline(include_str!("../tests/fixtures/langs/a.kt"), "kotlin");
+        for (kind, name, line) in [
+            ("module", "com.example.shop", 1),
+            ("class", "Order", 8),
+            ("interface", "Pricing", 10),
+            ("function", "price", 11),
+            ("enum", "Status", 14),
+            ("constant", "NEW", 14),
+            ("class", "Registry", 16),
+            ("property", "names", 17),
+            ("class", "Checkout", 20),
+            ("property", "rate", 21),
+            ("class", "Factory", 28),
+            ("type", "Money", 33),
+            ("function", "main", 35),
+        ] {
+            assert!(has(&kt, kind, name, line), "kotlin {kind} {name}: {kt:?}");
+        }
+        assert!(
+            !kt.iter().any(|(_, n, _, _)| n == "base" || n == "c"),
+            "a function's locals: {kt:?}"
+        );
+        let scala = outline(include_str!("../tests/fixtures/langs/a.scala"), "scala");
+        for (kind, name, line) in [
+            ("class", "Order", 15),
+            ("interface", "Pricing", 17),
+            ("function", "price", 18),
+            ("enum", "Status", 21),
+            ("class", "Registry", 24),
+            ("property", "names", 25),
+            ("class", "Checkout", 28),
+            ("property", "rate", 29),
+            ("type", "Money", 36),
+            ("function", "run", 38),
+        ] {
+            assert!(
+                has(&scala, kind, name, line),
+                "scala {kind} {name}: {scala:?}"
+            );
+        }
+        assert!(!scala.iter().any(|(_, n, _, _)| n == "base"), "{scala:?}");
+        let ex = outline(include_str!("../tests/fixtures/langs/a.ex"), "elixir");
+        for (kind, name, line) in [
+            ("module", "Shop.Checkout", 1),
+            ("type", "money", 11),
+            ("function", "price", 20),
+            ("function", "round_to", 25),
+            ("function", "secret", 27),
+            ("macro", "twice", 29),
+        ] {
+            assert!(has(&ex, kind, name, line), "elixir {kind} {name}: {ex:?}");
+        }
+        let clauses = outline(
+            "defmodule M do\n  def f(0), do: 1\n  def f(n), do: n * f(n - 1)\n  def f(a, b), do: a + b\nend\n",
+            "elixir",
+        );
+        let fs: Vec<(usize, usize)> = clauses
+            .iter()
+            .filter(|(_, n, _, _)| n == "f")
+            .map(|(_, _, l, e)| (*l, *e))
+            .collect();
+        assert_eq!(fs, [(2, 3), (4, 4)], "f/1 and f/2: {clauses:?}");
     }
 
     /// Tests by each language's convention: PHPUnit's `test*` and `@test`,

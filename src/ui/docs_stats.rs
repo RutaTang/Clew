@@ -163,13 +163,20 @@ pub(crate) fn module_label(rel: &str) -> String {
         Some("cs") => "csharp",
         Some("hs") => "haskell",
         Some("erl") | Some("hrl") => "erlang",
+        Some("kt") | Some("kts") => "kotlin",
+        Some("scala") | Some("sc") => "scala",
+        Some("ex") | Some("exs") => "elixir",
         _ => "",
     };
     let no_ext = rel.rsplit_once('.').map(|(a, _)| a).unwrap_or(rel);
     let mut segs: Vec<&str> = no_ext.split('/').filter(|s| !s.is_empty()).collect();
     // Drop a conventional source root — Maven's and Gradle's
-    // `src/main/java` whole.
-    if lang == "java" && segs.len() > 3 && segs[..3] == ["src", "main", "java"] {
+    // `src/main/java` whole, and Kotlin's and Scala's beside it.
+    if matches!(lang, "java" | "kotlin" | "scala")
+        && segs.len() > 3
+        && segs[..2] == ["src", "main"]
+        && matches!(segs[2], "java" | "kotlin" | "scala")
+    {
         segs.drain(..3);
     } else if segs.len() > 1 && matches!(segs.first().copied(), Some("src") | Some("lib")) {
         segs.remove(0);

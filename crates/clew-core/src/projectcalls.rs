@@ -1044,6 +1044,18 @@ fn lang_spec(lang: Lang) -> Option<LangSpec> {
         // none.
         Lang::Haskell => spec(&["function", "bind"], &["apply"]),
         Lang::Zig => spec(&["function_declaration"], &["call_expression"]),
+        // `Foo(…)` constructs a class as a function is called; `a.b(…)`
+        // is a `navigation_expression` callee.
+        Lang::Kotlin => spec(&["function_declaration"], &["call_expression"]),
+        // `new Foo(…)` is an `instance_expression`; `Foo(…)` (a case class,
+        // an `apply`) a call.
+        Lang::Scala => spec(
+            &["function_definition"],
+            &["call_expression", "instance_expression"],
+        ),
+        // A `def` is a call to the grammar too: a `call` is a function's
+        // scope when it defines one (see `fn_names`), and a call otherwise.
+        Lang::Elixir => spec(&["call"], &["call"]),
         // A schema has no calls; a Lean proof names the lemmas it uses inside
         // tactics (`rw [h]`, `simp [f]`) far more often than it applies them,
         // so a call graph of applications alone would say a proof uses
@@ -1272,6 +1284,8 @@ fn fn_names(
         // its name comes from the preceding signature (a lambda/arrow body's
         // signature has no name, so those calls fall through to the enclosing
         // named function).
+        // `def name(…) do`: the name is the call its first argument is.
+        Lang::Elixir => return elixir_def_name(node, src).into_iter().collect(),
         Lang::Dart if node.kind() == "function_body" => {
             // The sibling the walk carried: `prev_sibling` finds it through
             // `parent()`, a walk down from the root, and a scan of the
@@ -1287,6 +1301,31 @@ fn fn_names(
         .child_by_field_name("name")
         .map(|n| node_text(n, src).to_string());
     binding_name(parent, src).into_iter().chain(own).collect()
+}
+
+/// The function an Elixir `def` (or `defp`, `defmacro`, …) call defines:
+/// its first argument's name — `f(x)`, `f(x) when …` or a bare `f`.
+fn elixir_def_name(call: Node, src: &str) -> Option<String> {
+    let target = call.child_by_field_name("target")?;
+    if !matches!(
+        node_text(target, src),
+        "def" | "defp" | "defmacro" | "defmacrop" | "defguard" | "defguardp" | "defn" | "defnp"
+    ) {
+        return None;
+    }
+    let args = call
+        .named_children(&mut call.walk())
+        .find(|c| c.kind() == "arguments")?;
+    let mut head = args.named_child(0)?;
+    if head.kind() == "binary_operator" {
+        head = head.child_by_field_name("left")?;
+    }
+    let name = match head.kind() {
+        "call" => head.child_by_field_name("target")?,
+        "identifier" => head,
+        _ => return None,
+    };
+    (name.kind() == "identifier").then(|| node_text(name, src).to_string())
 }
 
 /// The name of the binding a function expression is assigned to, if it is
@@ -1527,6 +1566,49 @@ fn callee_name(call: Node, parent: Option<Node>, src: &str, lang: Lang) -> Optio
                 "field_expression" => {
                     let member = function.child_by_field_name("member")?;
                     Some((node_text(member, src).to_string(), true))
+                }
+                _ => None,
+            };
+        }
+        // Kotlin: the callee is the call's first child — a name, or a
+        // navigation whose last part is the method (`repo.findAll()`).
+        (Lang::Kotlin, "call_expression") => {
+            let callee = call.named_child(0)?;
+            return match callee.kind() {
+                "identifier" => Some((node_text(callee, src).to_string(), false)),
+                "navigation_expression" => {
+                    let last =
+                        callee.named_child(callee.named_child_count().checked_sub(1)? as u32)?;
+                    (last.kind() == "identifier").then(|| (node_text(last, src).to_string(), true))
+                }
+                _ => None,
+            };
+        }
+        // `new Foo[T](…)`: the class it makes.
+        (Lang::Scala, "instance_expression") => {
+            let mut cursor = call.walk();
+            let ty = call
+                .named_children(&mut cursor)
+                .find(|n| matches!(n.kind(), "type_identifier" | "generic_type"))?;
+            let ty = match ty.kind() {
+                "generic_type" => ty.named_child(0)?,
+                _ => ty,
+            };
+            return Some((last_identifier(node_text(ty, src))?, false));
+        }
+        // Elixir: `f(…)`, or another module's `Mod.f(…)` (like Erlang's
+        // `mod:f(…)`). A `def` defines rather than calls (`fn_names`).
+        (Lang::Elixir, "call") => {
+            if elixir_def_name(call, src).is_some() {
+                return None;
+            }
+            let target = call.child_by_field_name("target")?;
+            return match target.kind() {
+                "identifier" => Some((node_text(target, src).to_string(), false)),
+                "dot" => {
+                    let right = target.child_by_field_name("right")?;
+                    (right.kind() == "identifier")
+                        .then(|| (node_text(right, src).to_string(), true))
                 }
                 _ => None,
             };
@@ -2934,6 +3016,79 @@ fn is_builtin(lang: Lang, name: &str) -> bool {
         // free functions — a bare `F()` is a method of the class or a local
         // function — and its `nameof` is dropped where it is read; Zig spells
         // its builtins `@name`, and those are no call expressions.
+        // Kotlin's standard functions a project is as likely to define.
+        Lang::Kotlin => matches!(
+            name,
+            "println"
+                | "print"
+                | "listOf"
+                | "mutableListOf"
+                | "setOf"
+                | "mutableSetOf"
+                | "mapOf"
+                | "mutableMapOf"
+                | "arrayOf"
+                | "require"
+                | "requireNotNull"
+                | "check"
+                | "checkNotNull"
+                | "error"
+                | "repeat"
+                | "lazy"
+                | "run"
+                | "let"
+                | "also"
+                | "apply"
+                | "with"
+                | "TODO"
+        ),
+        Lang::Scala => matches!(
+            name,
+            "println" | "print" | "require" | "assert" | "List" | "Seq" | "Map" | "Set" | "Some"
+        ),
+        // Elixir's special forms and Kernel macros, ExUnit's too: what a
+        // module is written with, never a call of the project's.
+        Lang::Elixir => matches!(
+            name,
+            "alias"
+                | "import"
+                | "use"
+                | "require"
+                | "if"
+                | "unless"
+                | "case"
+                | "cond"
+                | "with"
+                | "for"
+                | "receive"
+                | "try"
+                | "quote"
+                | "unquote"
+                | "raise"
+                | "reraise"
+                | "throw"
+                | "send"
+                | "defmodule"
+                | "defstruct"
+                | "defexception"
+                | "defimpl"
+                | "defprotocol"
+                | "defdelegate"
+                | "defoverridable"
+                | "describe"
+                | "test"
+                | "setup"
+                | "assert"
+                | "refute"
+                | "is_nil"
+                | "to_string"
+                | "inspect"
+                | "length"
+                | "elem"
+                | "hd"
+                | "tl"
+                | "map_size"
+        ),
         Lang::Rust
         | Lang::Dart
         | Lang::C

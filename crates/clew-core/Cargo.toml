@@ -100,6 +100,9 @@ tree-sitter-less = "1.0.0"
 tree-sitter-scss = "1.0.0"
 tree-sitter-svelte-ng = "1.0.2"
 tree-sitter-vue-next = "0.1.0"
+tree-sitter-kotlin-ng = "1.1.0"
+tree-sitter-scala = "0.26.13"
+tree-sitter-elixir = "0.3.5"
 
 # The system proxy settings (net.rs `system_proxies`): what System Settings ›
 # Network › Proxies configures, read with `SCDynamicStoreCopyProxies` when no

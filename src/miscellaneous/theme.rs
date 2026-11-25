@@ -1585,6 +1585,9 @@ pub fn language_hue(lang: Option<&str>) -> Color {
         Some("haskell") => rgb(0xc07cf0),
         Some("erlang") => rgb(0xc65bd6),
         Some("ruby") => rgb(0xe04654),
+        Some("kotlin") => rgb(0xa97bff),
+        Some("scala") => rgb(0xdc3d4b),
+        Some("elixir") => rgb(0x8e6bbf),
         _ => rgb(0x8a93a6),
     }
 }
