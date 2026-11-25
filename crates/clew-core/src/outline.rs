@@ -4336,7 +4336,7 @@ mod tests {
 
     #[test]
     fn language_without_tags_query_yields_empty() {
-        assert!(extract("{\"a\": 1}", "json").is_empty());
+        assert!(extract("a = 1\n", "toml").is_empty());
     }
 }
 
@@ -4970,7 +4970,7 @@ def stub_only(x: str) -> str: ...
     #[test]
     fn a_language_without_an_outline_is_an_error_not_an_empty_file() {
         assert_eq!(
-            try_extract_located("{}", "json"),
+            try_extract_located("a = 1", "toml"),
             Err(QueryError::Unsupported)
         );
         assert_eq!(

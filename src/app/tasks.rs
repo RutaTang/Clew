@@ -1372,6 +1372,11 @@ pub(crate) fn gather_explain_inputs_from(
     let analyzed: Vec<(PathBuf, String, outline::Analysis)> = sources
         .into_iter()
         .filter_map(|(path, text, lang)| {
+            // Code only: a stylesheet's rules, a page's headings and a
+            // config file's keys are not what Explain explains.
+            if !highlight::is_code(lang) {
+                return None;
+            }
             let analysis = outline::analyze(&text, lang)?;
             Some((path, text, analysis))
         })

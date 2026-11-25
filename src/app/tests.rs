@@ -35392,7 +35392,7 @@ fn an_empty_outline_says_why() {
         "No symbols in this file."
     );
     assert_eq!(
-        crate::ui::empty_outline_note(Some("json")),
+        crate::ui::empty_outline_note(Some("toml")),
         "No outline for this language."
     );
     assert_eq!(

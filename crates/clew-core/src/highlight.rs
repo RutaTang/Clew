@@ -1671,6 +1671,14 @@ pub fn has_outline(key: &str) -> bool {
     tags_for(key).is_some() || matches!(key, "vue" | "svelte" | "astro")
 }
 
+/// Whether `key` is a language of code — what the symbol index, the call
+/// graph and Explain read — rather than a stylesheet, a page or data, whose
+/// outline is for reading that file (a stylesheet's rules, a JSON file's
+/// keys), not symbols for the project's.
+pub fn is_code(key: &str) -> bool {
+    has_outline(key) && !matches!(key, "json" | "css" | "scss" | "less" | "html")
+}
+
 /// Bare tree-sitter grammar for a language key, for callers that run their own
 /// queries (e.g. the import extractor).
 pub fn language_for(key: &str) -> Option<Language> {
