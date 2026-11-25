@@ -4112,5 +4112,6 @@
  "Elixir (OTP interpreter)": "Elixir（OTP インタープリター）",
  "{expression} is not bound here": "{expression} はここでは束縛されていません",
  "This program was built without debug information, so breakpoints won't bind and variables can't be read. Build it for debugging (CMake: -DCMAKE_BUILD_TYPE=Debug; a compiler: -g), then debug it again.": "このプログラムはデバッグ情報なしでビルドされているため、ブレークポイントは設定されず、変数も読み取れません。デバッグ用にビルドし（CMake: -DCMAKE_BUILD_TYPE=Debug、コンパイラー: -g）、もう一度デバッグしてください。",
- "The tests ended before their host waited for the debugger. See their output.": "テストホストがデバッガーを待つ前にテストが終了しました。出力を確認してください。"
+ "The tests ended before their host waited for the debugger. See their output.": "テストホストがデバッガーを待つ前にテストが終了しました。出力を確認してください。",
+ "no free port for the debugger: {e}": "デバッガー用の空きポートがありません: {e}"
 }

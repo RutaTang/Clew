@@ -151,6 +151,11 @@ fn is_debugger_chatter(category: &str, text: &str) -> bool {
         "console" => {
             text == "Type 'dlv help' for list of commands."
                 || text.starts_with("Ruby REPL: You can run any Ruby expression here.")
+                // Dart's: how it reached the VM it debugs, and that the
+                // VM is gone — the run's end says how it ended.
+                || text.starts_with("Connecting to VM Service at ")
+                || text == "Connected to the VM Service."
+                || (text.starts_with("Exited") && text.ends_with('.') && text.len() < 24)
         }
         "stderr" => {
             !text.is_empty()
@@ -5455,6 +5460,20 @@ mod tests {
             "Ruby REPL: You can run any Ruby expression here.\nNote that output to the STDOUT/ERR printed on the TERMINAL.\n"
         ));
         assert!(is_debugger_chatter("stderr", "DEBUGGER: Connected.\n"));
+        assert!(is_debugger_chatter(
+            "console",
+            "Connecting to VM Service at ws://127.0.0.1:36369/htrV0IaX9bU=/ws\n"
+        ));
+        assert!(is_debugger_chatter(
+            "console",
+            "Connected to the VM Service.\n"
+        ));
+        assert!(is_debugger_chatter("console", "\nExited.\n"));
+        assert!(is_debugger_chatter("console", "Exited (1).\n"));
+        assert!(
+            !is_debugger_chatter("stdout", "Exited.\n"),
+            "a program's own words"
+        );
         assert!(is_debugger_chatter(
             "stderr",
             "DEBUGGER: wait for debugger connection...\nDEBUGGER: Connected.\n"

@@ -4112,5 +4112,6 @@
  "Elixir (OTP interpreter)": "Elixir（OTP 解释器）",
  "{expression} is not bound here": "{expression} 在此处未绑定",
  "This program was built without debug information, so breakpoints won't bind and variables can't be read. Build it for debugging (CMake: -DCMAKE_BUILD_TYPE=Debug; a compiler: -g), then debug it again.": "这个程序构建时没有调试信息，因此断点无法绑定，变量也无法读取。请以调试方式构建它（CMake：-DCMAKE_BUILD_TYPE=Debug；编译器：-g），然后再次调试。",
- "The tests ended before their host waited for the debugger. See their output.": "测试在其宿主等待调试器之前就结束了，请查看其输出。"
+ "The tests ended before their host waited for the debugger. See their output.": "测试在其宿主等待调试器之前就结束了，请查看其输出。",
+ "no free port for the debugger: {e}": "没有可供调试器使用的空闲端口：{e}"
 }

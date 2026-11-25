@@ -1027,16 +1027,22 @@ pub fn debug_main(
             Ok(jvm(run.program, args, run.cwd))
         }
         "scala" => {
+            // sbt's JVM, or the one scala-cli starts, on a port of Clew's:
+            // what they print of the agent is not counted on.
             let mut args = run.args;
+            let port = free_port()?;
+            let agent = JDWP_AGENT.replace("127.0.0.1:0", &format!("127.0.0.1:{port}"));
             let sbt = run
                 .program
                 .file_stem()
                 .is_some_and(|n| n.to_string_lossy() == "sbt");
             match sbt {
-                true => args.insert(0, format!("-J{JDWP_AGENT}")),
-                false => args.extend(["--java-opt".to_string(), JDWP_AGENT.to_string()]),
+                true => args.insert(0, format!("-J{agent}")),
+                false => args.extend(["--java-opt".to_string(), agent]),
             }
-            Ok(jvm(run.program, args, run.cwd))
+            let mut debug = jvm(run.program, args, run.cwd);
+            debug.launch.insert("port".into(), port.into());
+            Ok(debug)
         }
         "elixir" => {
             let project = above(root, file, &["mix.exs"]);
@@ -1282,13 +1288,29 @@ pub fn debug_test(
                 return Err("This build runs its tests where the debugger can't reach them, so they run without it.".to_string());
             };
             let mut args = run.args;
+            let mut agent_port: Option<u16> = None;
             match build {
                 JvmBuild::Gradle => {
                     args.push("--init-script".into());
                     args.push(gradle_debug_script()?.to_string_lossy().into_owned());
                 }
-                JvmBuild::Maven => args.push(format!("-Dmaven.surefire.debug={JDWP_AGENT}")),
-                JvmBuild::Sbt => args.insert(0, format!("-J{JDWP_AGENT}")),
+                // Surefire keeps its test JVM's word of where the agent
+                // listens to itself: the agent is given a port to listen
+                // on, which the debugger attaches to once it does.
+                JvmBuild::Maven => {
+                    let port = free_port()?;
+                    let agent = JDWP_AGENT.replace("127.0.0.1:0", &format!("127.0.0.1:{port}"));
+                    args.push(format!("-Dmaven.surefire.debug={agent}"));
+                    agent_port = Some(port);
+                }
+                // sbt's own JVM, on a port of Clew's too: what the launcher
+                // prints is not counted on.
+                JvmBuild::Sbt => {
+                    let port = free_port()?;
+                    let agent = JDWP_AGENT.replace("127.0.0.1:0", &format!("127.0.0.1:{port}"));
+                    args.insert(0, format!("-J{agent}"));
+                    agent_port = Some(port);
+                }
             }
             let mut command = vec![serde_json::Value::from(
                 run.program.to_string_lossy().into_owned(),
@@ -1296,6 +1318,9 @@ pub fn debug_test(
             command.extend(args.iter().cloned().map(serde_json::Value::from));
             let mut debug = test("java", run.program, args, run.cwd);
             debug.launch.insert("command".into(), command.into());
+            if let Some(port) = agent_port {
+                debug.launch.insert("port".into(), port.into());
+            }
             Ok(debug)
         }
         _ => Err(format!("{rel} has no tests to run", rel = lang)),
@@ -1323,6 +1348,14 @@ fn elixir_string(text: &str) -> String {
     }
     quoted.push('"');
     quoted
+}
+
+/// A loopback port free now, for an agent to listen on.
+fn free_port() -> Result<u16, String> {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .and_then(|l| l.local_addr())
+        .map(|a| a.port())
+        .map_err(|e| format!("no free port for the debugger: {e}"))
 }
 
 /// Gradle's init script that starts each test JVM, and an application's
@@ -2269,9 +2302,15 @@ mod tests {
             "package acme;\nclass CartTest {\n  @Test\n  void adds() {}\n}\n",
         );
         let d = debug("java", &java, 4);
+        // A port of Clew's, the debugger attaching to it: Surefire says
+        // nothing of where its JVM listens.
+        let port = d.launch["port"].as_u64().unwrap();
         assert_eq!(
             d.args.last().unwrap(),
-            &format!("-Dmaven.surefire.debug={JDWP_AGENT}")
+            &format!(
+                "-Dmaven.surefire.debug={}",
+                JDWP_AGENT.replace("127.0.0.1:0", &format!("127.0.0.1:{port}"))
+            )
         );
 
         write("sb/build.sbt", "");
@@ -2280,7 +2319,14 @@ mod tests {
             "package acme\n\nclass CartSuite extends munit.FunSuite {\n  test(\"adds\") {\n  }\n}\n",
         );
         let d = debug("scala", &scala, 4);
-        assert_eq!(d.args[0], format!("-J{JDWP_AGENT}"));
+        let port = d.launch["port"].as_u64().unwrap();
+        assert_eq!(
+            d.args[0],
+            format!(
+                "-J{}",
+                JDWP_AGENT.replace("127.0.0.1:0", &format!("127.0.0.1:{port}"))
+            )
+        );
         // Forked, its tests run in a JVM the agent is not in.
         write("fk/build.sbt", "Test / fork := true\n");
         let forked = write("fk/src/test/scala/acme/CartSuite.scala", "");
@@ -2432,15 +2478,18 @@ mod tests {
 
         write("sb/build.sbt", "");
         let sc = write("sb/src/main/scala/Main.scala", "object Main\n");
-        assert_eq!(
-            command(&debug("scala", &sc))[1..],
-            [format!("-J{JDWP_AGENT}"), "run".into()]
-        );
+        let agent = |d: &DebugTest| {
+            let port = d.launch["port"].as_u64().unwrap();
+            JDWP_AGENT.replace("127.0.0.1:0", &format!("127.0.0.1:{port}"))
+        };
+        let d = debug("scala", &sc);
+        assert_eq!(command(&d)[1..], [format!("-J{}", agent(&d)), "run".into()]);
         let alone = write("cli/hello.scala", "@main def hi() = ()\n");
-        let words = command(&debug("scala", &alone));
+        let d = debug("scala", &alone);
+        let words = command(&d);
         assert_eq!(
             words[words.len() - 2..],
-            ["--java-opt".to_string(), JDWP_AGENT.into()]
+            ["--java-opt".to_string(), agent(&d)]
         );
         write("fk/build.sbt", "run / fork := true\n");
         let forked = write("fk/src/main/scala/Main.scala", "object Main\n");

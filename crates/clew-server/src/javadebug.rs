@@ -1043,7 +1043,8 @@ impl Adapter {
         // through Gradle, Maven or sbt: run, its output the session's, and
         // the JVM it starts attached to.
         if let Some(command) = args["command"].as_array() {
-            return self.launch_build(command, &args["env"], &cwd).await;
+            let port = args["port"].as_u64().and_then(|p| u16::try_from(p).ok());
+            return self.launch_build(command, &args["env"], port, &cwd).await;
         }
         let mut classpath: Vec<PathBuf> = args["classPaths"]
             .as_array()
@@ -1143,6 +1144,7 @@ impl Adapter {
         &mut self,
         command: &[Value],
         env: &Value,
+        port: Option<u16>,
         cwd: &Path,
     ) -> Result<(), String> {
         let words: Vec<String> = command
@@ -1186,6 +1188,22 @@ impl Adapter {
             ));
         }
         let mut exited = self.watch_exit(child);
+        // Given the port its agent listens on (Maven's Surefire says
+        // nothing of it): attached to as soon as it listens — as long as
+        // the build takes to start it, compiling first.
+        if let Some(port) = port {
+            loop {
+                if self.attach(port).await.is_ok() {
+                    return Ok(());
+                }
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_millis(250)) => {}
+                    _ = exited.wait_for(Option::is_some) => {
+                        return Err("The build ended before its JVM started under the debugger. See its output.".into());
+                    }
+                }
+            }
+        }
         // As long as the build takes to start it: compiling comes first.
         let port = tokio::select! {
             Some(port) = ports.recv() => port,
