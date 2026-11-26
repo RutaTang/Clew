@@ -594,8 +594,23 @@ impl ProjectCallGraph {
                 // `cart:add(…)`), which a call reaches with no import: a
                 // test module's every call of the module it tests had no
                 // callee.
+                // Java's, Kotlin's and Scala's classes in the same package,
+                // C#'s in the same namespace and Ruby's once required are
+                // named with no import either (`Cart.add(…)` from the
+                // test beside it): where nothing in scope is the type's,
+                // its own function is.
                 if narrowed.is_empty()
-                    && matches!(fc.lang, Lang::Rust | Lang::Elixir | Lang::Erlang)
+                    && matches!(
+                        fc.lang,
+                        Lang::Rust
+                            | Lang::Elixir
+                            | Lang::Erlang
+                            | Lang::Java
+                            | Lang::Kotlin
+                            | Lang::Scala
+                            | Lang::CSharp
+                            | Lang::Ruby
+                    )
                     && let Some(ty) = wanted
                 {
                     let last = ty.rsplit('.').next().unwrap_or(ty);
@@ -1308,6 +1323,16 @@ fn walk(
                     let scope = Scope {
                         places: &places,
                         from: inner.unwrap_or(*from),
+                    };
+                    receiver_of(node, &callee, &scope, src, lang, &mut bindings)
+                }
+                // In no function: in a test block (`test("adds") { … }`),
+                // whose calls are its own (`in_test_blocks`), its names
+                // bound from the file's start.
+                None if method && lang != Lang::Rust => {
+                    let scope = Scope {
+                        places: &places,
+                        from: inner.unwrap_or(0),
                     };
                     receiver_of(node, &callee, &scope, src, lang, &mut bindings)
                 }
@@ -2762,6 +2787,9 @@ const CLASS_KINDS: &[&str] = &[
     "struct_declaration",
     "object_declaration",
     "abstract_class_declaration",
+    // Scala's `object Cart` and `trait Pricing`.
+    "object_definition",
+    "trait_definition",
 ];
 
 /// The class (type, impl) each callable of a file belongs to, by its
@@ -2811,6 +2839,13 @@ fn owner_from(node: Node, src: &str, lang: Lang) -> Option<String> {
                 let name = declarator.split('(').next().unwrap_or("");
                 if let Some((scope, _)) = name.rsplit_once("::") {
                     return base_type_name(scope);
+                }
+            }
+            // Ruby's `module Shop` (no other grammar's `module`: Python's
+            // is its file).
+            "module" if lang == Lang::Ruby => {
+                if let Some(name) = n.child_by_field_name("name") {
+                    return base_type_name(node_text(name, src));
                 }
             }
             kind if CLASS_KINDS.contains(&kind) => {
@@ -4315,6 +4350,70 @@ mod edge_tests {
             ["add_test@2"]
         );
         assert!(callers_named(&g, "/p/src/other.erl", "add", 0).is_empty());
+    }
+
+    /// A class's static function is reached by the class's name from the
+    /// test beside it with no import, as the language reaches it: Java's,
+    /// Kotlin's and Scala's in the same package, C#'s in the same
+    /// namespace, Ruby's once required — Scala's from a test block, whose
+    /// calls had no receiver, being in no function. Each had no callee.
+    #[test]
+    fn a_types_function_is_reached_by_the_types_name_from_beside_it() {
+        // The library's file, its source and its function's name; the
+        // test's file and source; who calls the function.
+        type Case<'a> = (&'a str, &'a str, &'a str, &'a str, &'a str, &'a [&'a str]);
+        let cases: &[Case] = &[
+            (
+                "/p/src/main/java/com/acme/Cart.java",
+                "package com.acme;\npublic class Cart {\n    public static int add(int a, int b) { return a + b; }\n}\n",
+                "add",
+                "/p/src/test/java/com/acme/CartTest.java",
+                "package com.acme;\nclass CartTest {\n    @Test\n    void adds() {\n        assertEquals(5, Cart.add(2, 3));\n    }\n}\n",
+                &["adds@3"],
+            ),
+            (
+                "/p/src/main/scala/shop/Cart.scala",
+                "package shop\n\nobject Cart:\n  def total(items: List[Int]): Int =\n    items.sum\n",
+                "total",
+                "/p/src/test/scala/shop/CartSuite.scala",
+                "package shop\n\nclass CartSuite extends munit.FunSuite:\n  test(\"adds\") {\n    assertEquals(Cart.total(List(2, 3)), 5)\n  }\n",
+                &["adds@4"],
+            ),
+            (
+                "/p/src/main/kotlin/shop/Cart.kt",
+                "package shop\nobject Cart {\n    fun add(a: Int, b: Int): Int = a + b\n}\n",
+                "add",
+                "/p/src/test/kotlin/shop/CartTest.kt",
+                "package shop\nclass CartTest {\n    @Test\n    fun adds() {\n        assertEquals(5, Cart.add(2, 3))\n    }\n}\n",
+                &["adds@3"],
+            ),
+            (
+                "/p/Cart.cs",
+                "namespace Shop;\npublic static class Cart {\n  public static int Add(int a, int b) => a + b;\n}\n",
+                "Add",
+                "/p/Tests/CartTests.cs",
+                "namespace Shop.Tests;\npublic class CartTests {\n  [Fact]\n  public void Adds() { Assert.Equal(5, Cart.Add(2, 3)); }\n}\n",
+                &["Adds@3"],
+            ),
+            (
+                "/p/lib/cart.rb",
+                "class Cart\n  def self.add(a, b) = a + b\nend\n",
+                "add",
+                "/p/test/cart_test.rb",
+                "class CartTest < Minitest::Test\n  def test_adds\n    assert_equal 5, Cart.add(2, 3)\n  end\nend\n",
+                &["test_adds@2"],
+            ),
+        ];
+        for &(lib, lib_src, name, test_file, test_src, want) in cases {
+            let other = lib.replace("Cart", "Other").replace("cart", "other");
+            let other_src = lib_src.replace("Cart", "Other");
+            let g = graph(&[(lib, lib_src), (&other, &other_src), (test_file, test_src)]);
+            assert_eq!(callers_named(&g, lib, name, 0), want, "{test_file}");
+            assert!(
+                callers_named(&g, &other, name, 0).is_empty(),
+                "{test_file}: another type's {name}"
+            );
+        }
     }
 
     /// A test titled as a function is named is no call's target, takes no
