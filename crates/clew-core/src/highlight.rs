@@ -1988,7 +1988,75 @@ pub fn parse(source: &str, lang: Lang) -> Option<Tree> {
     PARSES.with(|n| n.set(n.get() + 1));
     let mut parser = Parser::new();
     parser.set_language(&lang.grammar()).ok()?;
-    parser.parse(source, None)
+    // A C++ class's export macro (`class SPDLOG_API logger {`) read as its
+    // name made the class a function and its members no class's: parsed
+    // as blanks, every byte where it was, so the text the tree's ranges
+    // point into is the source's own.
+    match (lang == Lang::Cpp)
+        .then(|| without_export_macros(source))
+        .flatten()
+    {
+        Some(blanked) => parser.parse(&blanked, None),
+        None => parser.parse(source, None),
+    }
+}
+
+/// `source` with each export macro between `class`, `struct` or `union`
+/// and the type's name blanked — an all-capitals word (`SPDLOG_API`,
+/// `Q_CORE_EXPORT`, `FMT_API`) a name, a base list or a body follows —
+/// or `None` where there is none.
+fn without_export_macros(source: &str) -> Option<String> {
+    let bytes = source.as_bytes();
+    let word = |c: u8| c == b'_' || c.is_ascii_alphanumeric();
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    for keyword in ["class ", "struct ", "union "] {
+        for (at, _) in source.match_indices(keyword) {
+            if at > 0 && word(bytes[at - 1]) {
+                continue;
+            }
+            let mut i = at + keyword.len();
+            while i < bytes.len() && bytes[i] == b' ' {
+                i += 1;
+            }
+            let start = i;
+            while i < bytes.len() && word(bytes[i]) {
+                i += 1;
+            }
+            let macro_word = &source[start..i];
+            let capitals = macro_word.len() > 2
+                && macro_word
+                    .bytes()
+                    .all(|c| c == b'_' || c.is_ascii_uppercase() || c.is_ascii_digit())
+                && macro_word.bytes().any(|c| c == b'_');
+            if !capitals {
+                continue;
+            }
+            // A name follows it, then a base list, `final` or a body.
+            let mut j = i;
+            while j < bytes.len() && bytes[j] == b' ' {
+                j += 1;
+            }
+            let name_start = j;
+            while j < bytes.len() && word(bytes[j]) {
+                j += 1;
+            }
+            if j == name_start {
+                continue;
+            }
+            let rest = source[j..].trim_start();
+            if rest.starts_with(['{', ':']) || rest.starts_with("final") || rest.starts_with('<') {
+                spans.push((start, i));
+            }
+        }
+    }
+    if spans.is_empty() {
+        return None;
+    }
+    let mut out = source.as_bytes().to_vec();
+    for (start, end) in spans {
+        out[start..end].fill(b' ');
+    }
+    String::from_utf8(out).ok()
 }
 
 thread_local! {

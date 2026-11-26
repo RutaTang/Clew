@@ -180,6 +180,11 @@ pub const RETURNED: &str = "\u{2192}";
 /// — the type of the last, worked out once every struct's fields are read.
 pub const THROUGH: &str = "\u{21a6}";
 
+/// The receiver's type for a call through `super` (Java, Kotlin, Scala,
+/// Dart) or C#'s `base`: the caller's class's base's method, never its own
+/// override.
+pub const SUPER: &str = "\u{2191}";
+
 /// The kinds of definition that are types another can extend or a value be
 /// declared as.
 fn is_type_kind(kind: &str, lang: Lang) -> bool {
@@ -372,8 +377,17 @@ fn independent_projects(
         id
     };
     let mut project: Vec<Option<usize>> = nodes.iter().map(|n| project_of(&n.file)).collect();
+    // (Not a Java, Kotlin, Scala or C# file's: an import names a package or
+    // namespace, which a sample beside it may declare too — and such builds
+    // meant as one share a build file above them.)
+    let by_package = |file: &Path| {
+        file.extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| matches!(e, "java" | "kt" | "kts" | "scala" | "sc" | "cs"))
+    };
     let pairs: Vec<(usize, usize)> = scope
         .iter()
+        .filter(|(file, _)| !by_package(file))
         .flat_map(|(file, imported)| imported.iter().map(move |other| (file, other)))
         .filter_map(|(file, other)| Some((project_of(file)?, project_of(other)?)))
         .collect();
@@ -828,17 +842,74 @@ fn declared_arity(src: &str, l: &Located, lang: Lang) -> Option<(u8, u8)> {
     if passed_by_dot {
         fewest = fewest.saturating_sub(1);
     }
-    // A C++ definition's defaults may be its prototype's, elsewhere — but a
-    // list that shows one holds them all (C++ gives a parameter its default
-    // once), and its fewest is its own.
-    if matches!(lang, Lang::C | Lang::Cpp) && !any_default {
-        fewest = 0;
-    }
+    // (A C++ definition's defaults may be its prototype's, elsewhere: the
+    // graph gives it the fewest its declarations allow.)
+    let _ = any_default;
     let most = if variadic { u32::from(ANY) } else { most };
     Some((
         u8::try_from(fewest).unwrap_or(ANY),
         u8::try_from(most).unwrap_or(ANY),
     ))
+}
+
+/// A Zig file's container fields with their types ([`FileContext::fields`]):
+/// a struct's `headers: std.StringHashMap([]const u8)` (`Response`,
+/// `headers`, `std.StringHashMap`), and the file's own variables, under no
+/// container's name (`pub var arena = std.heap.ArenaAllocator.init(a);`).
+fn zig_fields(src: &str, symbols: &[Located]) -> Vec<(String, String, String)> {
+    let mut out = Vec::new();
+    let field = |line: &str| -> Option<(String, String)> {
+        let line = line.split("//").next()?.trim();
+        let (name, rest) = line.split_once(':')?;
+        let name = name.trim();
+        if !is_plain_name(name) {
+            return None;
+        }
+        let ty = rest.split(['=', ',']).next()?.trim();
+        Some((name.to_string(), zig_type_name(ty)?))
+    };
+    for l in symbols
+        .iter()
+        .filter(|l| is_type_kind(&l.symbol.kind, Lang::Zig))
+    {
+        let Some(text) = src.get(l.declaration.0..l.declaration.1) else {
+            continue;
+        };
+        let Some(open) = text.find('{') else {
+            continue;
+        };
+        let mut depth = 0i32;
+        for line in text[open..].lines() {
+            let at_top = depth == 1;
+            depth += line.matches('{').count() as i32 - line.matches('}').count() as i32;
+            let t = line.trim_start();
+            if at_top
+                && !t.starts_with("pub ")
+                && !t.starts_with("fn ")
+                && !t.starts_with("const ")
+                && let Some((name, ty)) = field(t)
+            {
+                out.push((l.symbol.name.clone(), name, ty));
+            }
+        }
+    }
+    // The file's own variables: `var x: T`, `var x = T.init(…)`.
+    for line in src.lines() {
+        let t = line.strip_prefix("pub ").unwrap_or(line);
+        let Some(rest) = t.strip_prefix("var ") else {
+            continue;
+        };
+        if let Some((name, ty)) = field(rest) {
+            out.push((String::new(), name, ty));
+        } else if let Some((name, value)) = rest.split_once('=')
+            && let Some((ty, _)) = value.trim().split_once(".init(")
+            && is_plain_name(name.trim())
+            && let Some(ty) = zig_type_name(ty)
+        {
+            out.push((String::new(), name.trim().to_string(), ty));
+        }
+    }
+    out
 }
 
 /// A Go file's struct fields with their types ([`FileContext::fields`]):
@@ -1342,6 +1413,7 @@ pub fn context_in(src: &str, lang: Lang, symbols: &[Located]) -> FileContext {
                 }
                 fields
             }
+            Lang::Zig => zig_fields(src, symbols),
             _ => Vec::new(),
         },
     }
@@ -1793,7 +1865,7 @@ impl ProjectCallGraph {
                     .map(|&(line, fewest, most)| ((f.file.as_path(), line), (fewest, most)))
             })
             .collect();
-        let facts: Vec<NodeFacts> = nodes
+        let mut facts: Vec<NodeFacts> = nodes
             .iter()
             .map(|n| NodeFacts {
                 arity: arities.get(&(n.file.as_path(), n.line)).copied(),
@@ -1853,6 +1925,28 @@ impl ProjectCallGraph {
             .iter()
             .map(|n| owner_at.get(&(n.file.as_path(), n.line)).copied())
             .collect();
+        // A C++ function the project also declares apart (a header's
+        // prototype) may leave out what that declaration defaults, its own
+        // list showing none (C++ gives a parameter its default once).
+        let mut declared_fewest: HashMap<(&str, Option<&str>), u8> = HashMap::new();
+        for (i, n) in nodes.iter().enumerate() {
+            if facts[i].bodyless && matches!(facts[i].lang, Some(Lang::C | Lang::Cpp)) {
+                // (A header read as C says no count: any.)
+                let fewest = facts[i].arity.map_or(0, |(fewest, _)| fewest);
+                declared_fewest
+                    .entry((n.name.as_str(), owner[i]))
+                    .and_modify(|f| *f = (*f).min(fewest))
+                    .or_insert(fewest);
+            }
+        }
+        for (i, n) in nodes.iter().enumerate() {
+            if !facts[i].bodyless
+                && let Some((fewest, most)) = facts[i].arity
+                && let Some(&declared) = declared_fewest.get(&(n.name.as_str(), owner[i]))
+            {
+                facts[i].arity = Some((fewest.min(declared), most));
+            }
+        }
         // The project's own types (and traits): what defines a method here.
         let project_types: HashSet<&str> = owner.iter().flatten().copied().collect();
         // Each owned definition by its owner's last part and its name: a
@@ -2287,21 +2381,47 @@ impl ProjectCallGraph {
                 f.context
                     .fields
                     .iter()
+                    .filter(|(owner, _, _)| !owner.is_empty())
                     .map(|(owner, field, ty)| ((owner.as_str(), field.as_str()), ty.as_str()))
             })
             .collect();
+        // A Zig file's own variables, by the file.
+        let file_fields: HashMap<(&Path, &str), &str> = files
+            .iter()
+            .flat_map(|f| {
+                f.context
+                    .fields
+                    .iter()
+                    .filter(|(owner, _, _)| owner.is_empty())
+                    .map(move |(_, field, ty)| ((f.file.as_path(), field.as_str()), ty.as_str()))
+            })
+            .collect();
+        // A library's type, whose fields and methods are the library's: Go's
+        // of a package not the project's, Zig's standard library's.
+        let library = |ty: &str, lang: Lang| match lang {
+            Lang::Zig => ty == "std" || ty.starts_with("std."),
+            _ => ty
+                .split_once('.')
+                .is_some_and(|(pkg, _)| !go_packages.contains_key(pkg)),
+        };
         // The type a chain of fields ends in ([`THROUGH`]): `None` where a
         // field is none this has read; the field of an embedded struct is
         // its embedder's too.
-        let through = |chain: &str| -> Option<String> {
+        let through = |chain: &str, lang: Lang, from: &Path| -> Option<String> {
             let mut parts = chain.split('|');
-            let mut ty: String = parts.next()?.to_string();
+            let root = parts.next()?;
+            // `@t.zig`: a variable of that file.
+            let mut ty: String = match root.strip_prefix('@') {
+                Some(path) => {
+                    let file = lexical_join(from.parent()?, path);
+                    let field = parts.next()?;
+                    file_fields.get(&(file.as_path(), field))?.to_string()
+                }
+                None => root.to_string(),
+            };
             for field in parts {
-                // Another package's value: its fields are that package's.
-                if ty
-                    .split_once('.')
-                    .is_some_and(|(pkg, _)| !go_packages.contains_key(pkg))
-                {
+                // A library's value: its fields are the library's.
+                if library(&ty, lang) {
                     return Some(ty);
                 }
                 let mut level: Vec<String> = vec![ty.rsplit('.').next().unwrap_or(&ty).to_string()];
@@ -2467,30 +2587,44 @@ impl ProjectCallGraph {
                             Some((function, fallback)) => (function, Some(fallback)),
                             None => (&t[RETURNED.len()..], None),
                         };
-                        let returned = (!function.is_empty())
-                            .then(|| {
-                                returned_types
-                                    .entry(function.to_string())
-                                    .or_insert_with(|| {
-                                        let name = logical_name(function, Some(fc.lang));
-                                        let mut types = defs
-                                            .named
-                                            .get(name)
-                                            .into_iter()
-                                            .flat_map(|named| named.all.iter().copied())
-                                            .map(|i| node_returns[i].as_deref());
-                                        let first = types.next().flatten()?;
-                                        // A type the project declares: a library's
-                                        // (`Future`, `String`) says less than the
-                                        // value of no known type did.
-                                        (types.all(|t| t == Some(first))
-                                            && (declared_types.contains(first)
-                                                || project_types.contains(first)))
-                                        .then(|| first.to_string())
-                                    })
-                                    .clone()
-                            })
-                            .flatten();
+                        // `Type#method`: that type's method (or the one it
+                        // inherits), before every method of the name.
+                        let owned = function.split_once('#').and_then(|(ty, method)| {
+                            let found = family(ty, method, false);
+                            let mut types = found.iter().map(|&i| node_returns[i].as_deref());
+                            let first = types.next().flatten()?;
+                            (types.all(|t| t == Some(first))
+                                && (declared_types.contains(first)
+                                    || project_types.contains(first)))
+                            .then(|| first.to_string())
+                        });
+                        let function = function.split_once('#').map_or(function, |(_, m)| m);
+                        let returned = owned.or_else(|| {
+                            (!function.is_empty())
+                                .then(|| {
+                                    returned_types
+                                        .entry(function.to_string())
+                                        .or_insert_with(|| {
+                                            let name = logical_name(function, Some(fc.lang));
+                                            let mut types = defs
+                                                .named
+                                                .get(name)
+                                                .into_iter()
+                                                .flat_map(|named| named.all.iter().copied())
+                                                .map(|i| node_returns[i].as_deref());
+                                            let first = types.next().flatten()?;
+                                            // A type the project declares: a library's
+                                            // (`Future`, `String`) says less than the
+                                            // value of no known type did.
+                                            (types.all(|t| t == Some(first))
+                                                && (declared_types.contains(first)
+                                                    || project_types.contains(first)))
+                                            .then(|| first.to_string())
+                                        })
+                                        .clone()
+                                })
+                                .flatten()
+                        });
                         guessed = returned.is_none() && fallback.is_some();
                         let returned = returned.or_else(|| fallback.map(str::to_string));
                         let exact = matches!(cs.receiver, Some(Receiver::Type(_)));
@@ -2515,11 +2649,8 @@ impl ProjectCallGraph {
                             }
                             None => chain.to_string(),
                         };
-                        let ty = through(&chain);
-                        if ty.as_deref().is_some_and(|ty| {
-                            ty.split_once('.')
-                                .is_some_and(|(pkg, _)| !go_packages.contains_key(pkg))
-                        }) {
+                        let ty = through(&chain, fc.lang, &fc.file);
+                        if ty.as_deref().is_some_and(|ty| library(ty, fc.lang)) {
                             continue;
                         }
                         typed_call = CallSite {
@@ -2644,6 +2775,28 @@ impl ProjectCallGraph {
                         && edges.len() < MAX_EDGES
                     {
                         edges.insert((caller, template));
+                    }
+                    continue;
+                }
+                // `super.f()`, `base.F()`: the method of the caller's class's
+                // bases (the nearest's), which it overrides — a library's
+                // where no project class above it has one.
+                if matches!(&cs.receiver, Some(Receiver::Declared(t)) if t == SUPER) {
+                    let callee_name = logical_name(&cs.callee, Some(fc.lang));
+                    let found: Vec<usize> = owner[caller]
+                        .map(|own| own.rsplit(['.', ':']).next().unwrap_or(own))
+                        .and_then(|own| bases_of.get(own))
+                        .into_iter()
+                        .flatten()
+                        .flat_map(|base| family(base, callee_name, false))
+                        .collect();
+                    for callee in found {
+                        if edges.len() < MAX_EDGES
+                            && facts[callee].takes(cs.arity)
+                            && fits_arguments(callee, cs, fc.lang)
+                        {
+                            edges.insert((caller, callee));
+                        }
                     }
                     continue;
                 }
@@ -5797,6 +5950,12 @@ fn receiver_of(
     unbound: &mut Option<String>,
 ) -> Option<Receiver> {
     let receiver = receiver_text(node_text(call, src), callee)?.trim();
+    // `super.f()`, C#'s `base.F()`: the base's method.
+    if (receiver == "super" && matches!(lang, Lang::Java | Lang::Kotlin | Lang::Scala | Lang::Dart))
+        || (receiver == "base" && lang == Lang::CSharp)
+    {
+        return Some(Receiver::Declared(SUPER.to_string()));
+    }
     // Zig's `self` is a parameter like any, its type annotated.
     if lang != Lang::Zig
         && matches!(
@@ -5860,6 +6019,42 @@ fn receiver_of(
     {
         *unbound = Some(receiver.to_string());
         return None;
+    }
+    // A Zig chain of fields: from a value of a known type (`res.headers`
+    // with `res: *Response`, `self.pool`), or a file imported by name
+    // (`t.arena` with `t = @import("t.zig")`) — the last field's type.
+    if lang == Lang::Zig
+        && let Some((root, path)) = receiver.split_once('.')
+        && is_plain_name(root)
+        && path.split('.').all(is_plain_name)
+    {
+        let head = format!("const {root} = @import(\"");
+        let file = src.lines().find_map(|line| {
+            let line = line.strip_prefix("pub ").unwrap_or(line);
+            line.strip_prefix(&head)?
+                .strip_suffix("\");")
+                .filter(|p| p.ends_with(".zig"))
+        });
+        if let Some(file) = file {
+            return Some(Receiver::Type(format!(
+                "{THROUGH}@{file}|{}",
+                path.replace('.', "|")
+            )));
+        }
+        let places = scope.places;
+        let said = bindings
+            .entry((scope.from, root.to_string()))
+            .or_insert_with(|| Bindings::from(scope.from, places))
+            .said_before(call.start_byte(), root, scope, src, lang);
+        if let Said::Type(ty, _) = &said
+            && !ty.starts_with(RETURNED)
+            && !ty.starts_with(THROUGH)
+        {
+            return Some(Receiver::Type(format!(
+                "{THROUGH}{ty}|{}",
+                path.replace('.', "|")
+            )));
+        }
     }
     // A Go chain of fields from a value of a known type (`c.Request.Header`
     // with `c *Context`): the last field's type, once the structs are read.
@@ -5957,6 +6152,30 @@ fn receiver_of(
         // Zig's `self: *Self` (`const Self = @This();`): the container
         // the function is in.
         Said::Type(ty, _) if lang == Lang::Zig && ty == "Self" => return Some(Receiver::Own),
+        // A method's result on a value (`val cell = cells.get(k)`): that
+        // value's type's method, where its binding says the type; else the
+        // method by its name alone.
+        Said::Type(ty, _) if ty.starts_with(RETURNED) && ty[RETURNED.len()..].starts_with('@') => {
+            let (value, method) = ty[RETURNED.len() + 1..].split_once('#')?;
+            let places = scope.places;
+            let said = bindings
+                .entry((from, value.to_string()))
+                .or_insert_with(|| Bindings::from(from, places))
+                .said_before(call.start_byte(), value, &Scope { places, from }, src, lang);
+            let marker = match said {
+                Said::Type(owner, _)
+                    if !owner.starts_with(RETURNED) && !owner.starts_with(THROUGH) =>
+                {
+                    format!("{RETURNED}{owner}#{method}")
+                }
+                _ => format!("{RETURNED}{method}"),
+            };
+            return Some(if matches!(lang, Lang::Go | Lang::Rust | Lang::Zig) {
+                Receiver::Type(marker)
+            } else {
+                Receiver::Declared(marker)
+            });
+        }
         Said::Type(ty, exact) => {
             // Go, Rust and Zig have no subtypes: a declared type is exact.
             if exact || matches!(lang, Lang::Go | Lang::Rust | Lang::Zig) {
@@ -7027,7 +7246,18 @@ fn scala_summoned(receiver: &str) -> Option<String> {
             _ => {}
         }
     }
-    (depth == 0 && type_like(name, Lang::Scala)).then(|| name.to_string())
+    if depth != 0 {
+        return None;
+    }
+    // `implicitly[PathConvertible[T]]`, Scala 3's `summon[…]`: the type
+    // class it names inside.
+    if matches!(name, "implicitly" | "summon") {
+        let inner = inner.trim();
+        let class = inner.split(['[', ' ']).next().unwrap_or(inner);
+        let class = class.rsplit('.').next().unwrap_or(class);
+        return type_like(class, Lang::Scala).then(|| class.to_string());
+    }
+    type_like(name, Lang::Scala).then(|| name.to_string())
 }
 
 /// The `T` .NET's dependency injection resolves, the whole expression:
@@ -7112,7 +7342,7 @@ fn cpp_made_type(rhs: &str) -> Option<String> {
 /// (`UserTable.selectAll()` is a `Query`, not a `UserTable`), else the type
 /// it is called on — a guess: `RETURNED`, the function, `|`, the type.
 fn factory_guess(rhs: &str, ty: &str, lang: Lang) -> String {
-    let function = returned_call(rhs, lang).unwrap_or_default();
+    let function = returned_function(rhs, lang).unwrap_or_default();
     format!("{RETURNED}{function}|{ty}")
 }
 
@@ -7157,9 +7387,11 @@ fn factory_type(rhs: &str, lang: Lang) -> Option<String> {
 }
 
 /// The function whose result `rhs` is, when it is a call and no more:
-/// `adapter` for `moshi.adapter<T>()`, `stdout_color_mt` for
+/// `adapter` for `Moshi.adapter<T>()`, `stdout_color_mt` for
 /// `spdlog::stdout_color_mt("x")` — in a statically typed language whose
-/// definitions say what they return.
+/// definitions say what they return — or, a method of a value named
+/// alone, `@value#method` (`@repo#find` for `repo.find(id)`): the method
+/// of the value's type, once the value's binding is read.
 fn returned_call(rhs: &str, lang: Lang) -> Option<String> {
     if !matches!(
         lang,
@@ -7245,8 +7477,33 @@ fn returned_call(rhs: &str, lang: Lang) -> Option<String> {
     // A constructor's type is read where it is built.
     let constructor = matches!(lang, Lang::Java | Lang::Kotlin | Lang::Scala | Lang::Dart)
         && name.starts_with(char::is_uppercase);
-    (!name.is_empty() && !constructor && name.starts_with(|c: char| c == '_' || c.is_alphabetic()))
-        .then(|| name.to_string())
+    if name.is_empty() || constructor || !name.starts_with(|c: char| c == '_' || c.is_alphabetic())
+    {
+        return None;
+    }
+    // A method of a value named by itself (`repo.find(id)`, `l->get()`).
+    let before = callee[..start].trim_end();
+    let receiver = ["?.", "->", "."]
+        .iter()
+        .find_map(|sep| before.strip_suffix(sep))
+        .map(str::trim)
+        .filter(|r| {
+            is_plain_name(r)
+                && r.starts_with(|c: char| c == '_' || c.is_lowercase())
+                && !matches!(*r, "this" | "self" | "super")
+        });
+    Some(match receiver {
+        Some(receiver) => format!("@{receiver}#{name}"),
+        None => name.to_string(),
+    })
+}
+
+/// [`returned_call`]'s function alone, its receiver dropped.
+fn returned_function(rhs: &str, lang: Lang) -> Option<String> {
+    returned_call(rhs, lang).map(|f| match f.split_once('#') {
+        Some((_, name)) => name.to_string(),
+        None => f,
+    })
 }
 
 /// Whether what follows a constructor's name — its generic arguments, its
@@ -11910,8 +12167,10 @@ def main():
     }
 
     /// Projects that only share a folder — samples, each with its own build —
-    /// call none of each other's code; one that imports from another is one
-    /// with it.
+    /// call none of each other's code, a Scala file's package import (which
+    /// every sample's `models` answers) joining none; one that imports a
+    /// file of another by a path or package name of its own (a Dart example
+    /// of the package beside it) is one with it.
     #[test]
     fn independent_projects_do_not_call_each_other() {
         let dir = crate::testutil::TempDir::new("independent-projects");
@@ -11924,17 +12183,24 @@ def main():
         };
         write("anorm/build.sbt", "name := \"anorm\"\n");
         write("slick/build.sbt", "name := \"slick\"\n");
-        write("uses-anorm/build.sbt", "name := \"uses\"\n");
+        write("packages/bloc/pubspec.yaml", "name: bloc\n");
+        write("examples/app/pubspec.yaml", "name: app\n");
         let repo =
             "package models\nclass ComputerRepository {\n  def delete(id: Long): Unit = ()\n}\n";
-        let controller = "package controllers\nclass HomeController(repo: ComputerRepository) {\n  def remove(id: Long): Unit = repo.delete(id)\n}\n";
         let files = [
             write("anorm/app/models/ComputerRepository.scala", repo),
-            write("anorm/app/controllers/HomeController.scala", controller),
+            write(
+                "anorm/app/controllers/HomeController.scala",
+                "package controllers\nimport models._\nclass HomeController(repo: ComputerRepository) {\n  def remove(id: Long): Unit = repo.delete(id)\n}\n",
+            ),
             write("slick/app/models/ComputerRepository.scala", repo),
             write(
-                "uses-anorm/app/Main.scala",
-                "package app\nclass Main(repo: ComputerRepository) {\n  def run(): Unit = repo.delete(1)\n}\n",
+                "packages/bloc/lib/bloc.dart",
+                "class Bloc {\n  void add(int e) {}\n}\n",
+            ),
+            write(
+                "examples/app/lib/main.dart",
+                "import 'package:bloc/bloc.dart';\nvoid go(Bloc b) {\n  b.add(1);\n}\n",
             ),
         ];
         let sources: Vec<(PathBuf, String)> = files
@@ -11949,9 +12215,13 @@ def main():
             .iter()
             .map(|(f, s)| (f.as_str(), s.as_str()))
             .collect();
-        // `uses-anorm` imports anorm's repository: one project with it.
-        let scope: HashMap<PathBuf, HashSet<PathBuf>> =
-            HashMap::from([(files[3].clone(), HashSet::from([files[0].clone()]))]);
+        let scope: HashMap<PathBuf, HashSet<PathBuf>> = HashMap::from([
+            (
+                files[1].clone(),
+                HashSet::from([files[0].clone(), files[2].clone()]),
+            ),
+            (files[4].clone(), HashSet::from([files[3].clone()])),
+        ]);
         let g = ProjectCallGraph::build(defs_of(&pairs), &sources, &scope);
         let reached = |caller: &str| {
             let at = (0..g.node_count())
@@ -11975,10 +12245,7 @@ def main():
             reached("remove"),
             ["anorm/app/models/ComputerRepository.scala"]
         );
-        assert_eq!(
-            reached("run"),
-            ["anorm/app/models/ComputerRepository.scala"]
-        );
+        assert_eq!(reached("go"), ["packages/bloc/lib/bloc.dart"]);
     }
 
     /// A Go package's variables, declared in one file and used in another,
@@ -12048,6 +12315,11 @@ def main():
             Some("MonadCancel")
         );
         assert_eq!(scala_summoned("xs[0]"), None);
+        assert_eq!(
+            scala_summoned("implicitly[PathConvertible[T]]").as_deref(),
+            Some("PathConvertible")
+        );
+        assert_eq!(scala_summoned("summon[Async[F]]").as_deref(), Some("Async"));
         assert_eq!(scala_summoned("Ref[IO](1)"), None);
     }
 
@@ -12105,6 +12377,180 @@ def main():
             reached.sort_unstable();
             assert_eq!(reached, want, "{file} {caller}: {:?}", edges(&g));
         }
+    }
+
+    /// A value assigned from a method of a value of a known type is of the
+    /// type that method returns, though other methods of its name return
+    /// others (`cells.get(k)` a `Cell`, `refs.get(k)` a `Ref`).
+    #[test]
+    fn a_methods_result_is_of_its_owners_return_type() {
+        let cases: &[(&str, &str)] = &[
+            (
+                "/p/src/Cells.kt",
+                "class Cell {\n    fun getAndSet(v: Int): Int = 0\n}\nclass Ref {\n    fun getAndSet(v: Int): Int = 1\n}\nclass Cells {\n    fun get(k: Int): Cell = Cell()\n}\nclass Refs {\n    fun get(k: Int): Ref = Ref()\n}\nfun run(cells: Cells) {\n    val cell = cells.get(1)\n    cell.getAndSet(2)\n}\n",
+            ),
+            (
+                "/p/src/Cells.java",
+                "class Cell {\n  int getAndSet(int v) { return 0; }\n}\nclass Ref {\n  int getAndSet(int v) { return 1; }\n}\nclass Cells {\n  Cell get(int k) { return new Cell(); }\n}\nclass Refs {\n  Ref get(int k) { return new Ref(); }\n}\nclass Use {\n  void run(Cells cells) {\n    var cell = cells.get(1);\n    cell.getAndSet(2);\n  }\n}\n",
+            ),
+            (
+                "/p/cells.go",
+                "package cells\n\ntype Cell struct{}\n\nfunc (c *Cell) getAndSet(v int) int { return 0 }\n\ntype Ref struct{}\n\nfunc (r *Ref) getAndSet(v int) int { return 1 }\n\ntype Cells struct{}\n\nfunc (c *Cells) get(k int) *Cell { return &Cell{} }\n\ntype Refs struct{}\n\nfunc (r *Refs) get(k int) *Ref { return &Ref{} }\n\nfunc run(cells *Cells) {\n\tcell := cells.get(1)\n\tcell.getAndSet(2)\n}\n",
+            ),
+        ];
+        for (file, src) in cases {
+            let g = graph(&[(file, src)]);
+            let at = (0..g.node_count())
+                .find(|&n| g.node(n).name == "run")
+                .unwrap();
+            let reached: Vec<String> = g
+                .callees_of(at)
+                .iter()
+                .filter(|&&c| g.node(c).name == "getAndSet")
+                .map(|&c| g.node(c).line.to_string())
+                .collect();
+            let want = if file.ends_with(".go") { "5" } else { "2" };
+            assert_eq!(reached, [want], "{file}: {:?}", edges(&g));
+        }
+    }
+
+    /// A C++ class declared with its export macro (`class SPDLOG_API logger
+    /// {`) is the class its name says, its members its own: a call on a
+    /// logger reaches the logger's `info`, not a namespace's.
+    #[test]
+    fn a_cpp_export_macro_is_no_class_name() {
+        let src = "namespace spdlog {\nvoid info(int m) {}\nclass SPDLOG_API logger {\npublic:\n    template <typename T>\n    void info(const T &msg) {}\n};\nclass FMT_API sink : public base {\n    void flush() {}\n};\n}\nvoid run(spdlog::logger &l) {\n    l.info(1);\n}\n";
+        let names: Vec<(String, String)> = crate::outline::extract_located(src, "cpp")
+            .into_iter()
+            .map(|l| (l.symbol.name, l.symbol.kind))
+            .collect();
+        assert!(
+            names.contains(&("logger".to_string(), "class".to_string())),
+            "{names:?}"
+        );
+        assert!(
+            names.contains(&("sink".to_string(), "class".to_string())),
+            "{names:?}"
+        );
+        let fc = FileCalls::read(Path::new("/p/logger.h"), src).unwrap();
+        assert_eq!(
+            fc.owners.get(&6).map(String::as_str),
+            Some("logger"),
+            "{:?}",
+            fc.owners
+        );
+        let g = graph(&[("/p/src/logger.cpp", src)]);
+        let at = (0..g.node_count())
+            .find(|&n| g.node(n).name == "run")
+            .unwrap();
+        let reached: Vec<usize> = g.callees_of(at).iter().map(|&c| g.node(c).line).collect();
+        assert_eq!(reached, [6], "{:?}", edges(&g));
+    }
+
+    /// `super.f()` and C#'s `base.F()` call the base class's method, never
+    /// the caller's own override; with no project class above it, a
+    /// library's.
+    #[test]
+    fn a_super_call_is_the_bases_method() {
+        let cases: &[(&str, &str, &str, &[usize])] = &[
+            (
+                "/p/src/Shop.java",
+                "class Base {\n  void save() {}\n}\nclass Cart extends Base {\n  void save() {\n    super.save();\n  }\n}\n",
+                "save",
+                &[2],
+            ),
+            (
+                "/p/src/BlazorComponent.cs",
+                "public class BlazorComponent : ComponentBase\n{\n    protected override void OnInitialized()\n    {\n        base.OnInitialized();\n    }\n}\n",
+                "OnInitialized",
+                &[],
+            ),
+            (
+                "/p/src/Cart.kt",
+                "open class Base {\n    open fun save() {}\n}\nclass Cart : Base() {\n    override fun save() {\n        super.save()\n    }\n}\n",
+                "save",
+                &[2],
+            ),
+        ];
+        for (file, src, name, want) in cases {
+            let g = graph(&[(file, src)]);
+            let mut reached: Vec<usize> = (0..g.node_count())
+                .filter(|&n| g.node(n).name == *name)
+                .flat_map(|n| g.callees_of(n).to_vec())
+                .map(|c| g.node(c).line)
+                .collect();
+            reached.sort_unstable();
+            reached.dedup();
+            assert_eq!(reached, *want, "{file}: {:?}", edges(&g));
+        }
+    }
+
+    /// A C++ function takes as few arguments as its own list says, unless
+    /// the project declares it apart (a header's prototype holding its
+    /// defaults): then as few as that declaration allows.
+    #[test]
+    fn a_cpp_definitions_fewest_is_its_declarations() {
+        let header = "int add(int a, int b = 0);\n";
+        let source = "#include \"add.h\"\nint add(int a, int b) { return a + b; }\nint pair(int a, int b) { return a; }\nvoid run() {\n  add(1);\n  pair(1);\n}\n";
+        let files = [("/p/src/add.h", header), ("/p/src/add.cpp", source)];
+        let sources: Vec<(PathBuf, String)> = files
+            .iter()
+            .map(|(f, s)| (PathBuf::from(f), s.to_string()))
+            .collect();
+        let scope: HashMap<PathBuf, HashSet<PathBuf>> = HashMap::from([(
+            PathBuf::from("/p/src/add.cpp"),
+            HashSet::from([PathBuf::from("/p/src/add.h")]),
+        )]);
+        let g = ProjectCallGraph::build(defs_of(&files), &sources, &scope);
+        let run = (0..g.node_count())
+            .find(|&n| g.node(n).name == "run")
+            .unwrap();
+        let mut reached: Vec<String> = g
+            .callees_of(run)
+            .iter()
+            .map(|&c| g.node(c).name.clone())
+            .collect();
+        reached.sort();
+        reached.dedup();
+        assert_eq!(reached, ["add"], "{:?}", edges(&g));
+    }
+
+    /// A Zig chain of fields is of its last field's type: a standard
+    /// library's (`res.headers.get(…)` with `headers: std.StringHashMap`,
+    /// `t.arena.allocator()` with `t.zig`'s `var arena =
+    /// std.heap.ArenaAllocator.init(…)`) is the library's; a struct's
+    /// (`srv.pool.acquire()`) is that struct's.
+    #[test]
+    fn a_zig_field_chain_has_its_last_fields_type() {
+        let g = graph(&[
+            (
+                "/p/src/t.zig",
+                "const std = @import(\"std\");\npub var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);\n",
+            ),
+            (
+                "/p/src/kv.zig",
+                "pub const KeyValue = struct {\n    pub fn get(self: *KeyValue, k: []const u8) ?u8 {\n        return null;\n    }\n};\npub const Fallback = struct {\n    pub fn allocator(self: *Fallback) u8 {\n        return 0;\n    }\n};\n",
+            ),
+            (
+                "/p/src/main.zig",
+                "const std = @import(\"std\");\nconst t = @import(\"t.zig\");\npub const Pool = struct {\n    pub fn acquire(self: *Pool) void {}\n};\npub const Response = struct {\n    headers: std.StringHashMap([]const u8),\n};\npub const Server = struct {\n    pool: Pool,\n};\nfn run(res: *Response) void {\n    _ = res.headers.get(\"a\");\n}\nfn go() void {\n    _ = t.arena.allocator();\n}\nfn serve(srv: *Server) void {\n    srv.pool.acquire();\n}\n",
+            ),
+        ]);
+        let reached = |caller: &str| {
+            let at = (0..g.node_count())
+                .find(|&n| g.node(n).name == caller)
+                .unwrap();
+            let mut out: Vec<String> = g
+                .callees_of(at)
+                .iter()
+                .map(|&c| format!("{}:{}", g.node(c).name, g.node(c).line))
+                .collect();
+            out.sort();
+            out
+        };
+        assert_eq!(reached("run"), Vec::<String>::new(), "{:?}", edges(&g));
+        assert_eq!(reached("go"), Vec::<String>::new(), "{:?}", edges(&g));
+        assert_eq!(reached("serve"), ["acquire:4"], "{:?}", edges(&g));
     }
 
     /// A class's body is open where its braces say, those in strings,
@@ -12408,19 +12854,22 @@ def main():
             reached.dedup();
             assert_eq!(reached, [line.to_string()], "{file}: {:?}", edges(&g));
         }
-        // Two functions of the name declaring different types: unknown, as
-        // before — every `total` there is.
-        let g = graph(&[(
-            "/p/src/Two.java",
-            "class Cart { int total() { return 0; } }\nclass Order { int total() { return 1; } }\nclass A { Cart make() { return null; } }\nclass B { Order make() { return null; } }\nclass Shop {\n  void run(A a) {\n    var c = a.make();\n    c.total();\n  }\n}\n",
-        )]);
-        let run = g.id_of(Path::new("/p/src/Two.java"), "run").unwrap();
-        let totals = g
-            .callees_of(run)
-            .iter()
-            .filter(|&&c| g.node(c).name == "total")
-            .count();
-        assert_eq!(totals, 2, "{:?}", edges(&g));
+        // Two methods of the name declaring different types: the receiver's
+        // type's says which (`a.make()` with `a: A` is a `Cart`); a receiver
+        // of no known type leaves it unknown — every `total` there is.
+        for (receiver, want) in [("A a", 1), ("Thing a", 2)] {
+            let src = format!(
+                "class Cart {{ int total() {{ return 0; }} }}\nclass Order {{ int total() {{ return 1; }} }}\nclass A {{ Cart make() {{ return null; }} }}\nclass B {{ Order make() {{ return null; }} }}\nclass Shop {{\n  void run({receiver}) {{\n    var c = a.make();\n    c.total();\n  }}\n}}\n"
+            );
+            let g = graph(&[("/p/src/Two.java", &src)]);
+            let run = g.id_of(Path::new("/p/src/Two.java"), "run").unwrap();
+            let totals = g
+                .callees_of(run)
+                .iter()
+                .filter(|&&c| g.node(c).name == "total")
+                .count();
+            assert_eq!(totals, want, "{receiver}: {:?}", edges(&g));
+        }
     }
 
     /// A definition whose name's last part is empty (`Foo.`) has no

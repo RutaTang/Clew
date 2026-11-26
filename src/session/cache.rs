@@ -154,7 +154,11 @@ use crate::incremental::Version;
 /// object's bases among its own.
 /// 40: a Go package's variables among its fields; `Object`/`Any`/`object`
 /// a parameter kind of its own, below a class the argument is.
-pub(crate) const CACHE_VERSION: u32 = 40;
+/// 41: a value assigned from a method of a value is of that value's type's
+/// method's return (`@value#method` receivers).
+/// 42: a C++ class's export macro is no name of it; a C++ function's
+/// fewest arguments its own list's; Zig's fields and file variables.
+pub(crate) const CACHE_VERSION: u32 = 42;
 
 /// A cached symbol (the index entry minus the paths, which are reconstructed
 /// from the project root + relative path on load).
