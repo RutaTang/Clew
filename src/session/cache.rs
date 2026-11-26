@@ -98,7 +98,11 @@ use crate::incremental::Version;
 /// Kotest's, MUnit's, hspec's, package:test's, GoogleTest's and Catch2's)
 /// are symbols, and the calls made in them are theirs; an older entry has
 /// neither, nor a C++ test but as a function `TEST`.
-pub(crate) const CACHE_VERSION: u32 = 22;
+/// 23: a call in no function has its receiver (`Cart.total(…)` in a test
+/// block), and a function passed as a value is a call of it (Haskell's
+/// `foldr add`, Erlang's `fun add/2`, Elixir's `&add/2`); an older entry
+/// has neither.
+pub(crate) const CACHE_VERSION: u32 = 23;
 
 /// A cached symbol (the index entry minus the paths, which are reconstructed
 /// from the project root + relative path on load).
