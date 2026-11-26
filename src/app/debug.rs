@@ -2307,6 +2307,9 @@ impl App {
         self.debug.trace_rev += 1;
         self.debug.trace_program = shown.file_name().map(|n| n.to_string_lossy().into_owned());
         self.debug.pending_reason.clear();
+        // A breakpoint the last run's final step was taken without is the
+        // last run's to give back, not this one's.
+        self.debug.lifted_bp = None;
         // What runs, named — and, when it is not the file being read, that
         // it was picked for it: Run on pricing.py ran main.py, and said
         // only "Starting the program — Python (debugpy)…", naming a
@@ -4186,7 +4189,15 @@ impl App {
             if let Some(said) = self.debug_said(from) {
                 said.paused = Some(s.clone());
             }
-            return self.show_debug_stop(s, true);
+            // A breakpoint taken away for the step that stopped here is
+            // given back.
+            let given_back = self
+                .debug
+                .lifted_bp
+                .take()
+                .map(|path| self.push_breakpoints(&path))
+                .unwrap_or_else(Task::none);
+            return Task::batch([given_back, self.show_debug_stop(s, true)]);
         }
         // What a child's end means is the run's call (`end_debug_child`).
         if from != OWN_SESSION {
@@ -5238,6 +5249,33 @@ impl App {
             DebugCmd::StepOver => crate::app::model::StepFrom::of(&session.frames),
             _ => None,
         };
+        // rdbg (1.9) cancels a step whose first event is on a line with a
+        // breakpoint, leaving that breakpoint to stop it — and the one the
+        // program is stopped at has fired already: from a one-line method
+        // (`def add(a, b) = a + b`), whose return is on its own line, Step
+        // Over, Into and Out all ran the program to its end. That line's
+        // breakpoint is taken away for the step, and given back at the
+        // next stop.
+        let lift: Option<(PathBuf, BpList)> = match cmd {
+            DebugCmd::Continue => None,
+            _ => session
+                .frames
+                .first()
+                .and_then(|top| Some((top.path.clone()?, top.line)))
+                .filter(|(path, _)| clew_core::highlight::detect(path) == Some("ruby"))
+                .and_then(|(path, line)| {
+                    let set = self.debug.breakpoints.get(&path)?;
+                    set.contains_key(&line).then(|| {
+                        let rest: BpList = set
+                            .iter()
+                            .filter(|(l, _)| **l != line)
+                            .map(|(l, bp)| (*l, bp.condition.clone()))
+                            .collect();
+                        (path, rest)
+                    })
+                }),
+        };
+        self.debug.lifted_bp = lift.as_ref().map(|(path, _)| path.clone());
         // The user has left this stop (continue or step). Anything still being
         // fetched for it would otherwise land as a "paused here" that lies.
         self.bump_debug_stop();
@@ -5247,6 +5285,9 @@ impl App {
         let stop = self.debug_stop;
         Task::perform(
             async move {
+                if let Some((path, rest)) = &lift {
+                    let _ = client.set_breakpoints(path, rest).await;
+                }
                 match cmd {
                     DebugCmd::Continue => client.continue_(tid).await,
                     DebugCmd::StepOver => client.next(tid).await,
@@ -5555,7 +5596,11 @@ impl App {
                     session.current = current;
                     self.status = tr!("Debugger control failed: {error}", error = error);
                 }
-                Task::none()
+                // Still stopped where it was: its breakpoint is given back.
+                match self.debug.lifted_bp.take() {
+                    Some(path) => self.push_breakpoints(&path),
+                    None => Task::none(),
+                }
             }
             DebugMsg::DapControlled {
                 run,

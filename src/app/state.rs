@@ -229,6 +229,10 @@ pub struct DebugState {
     /// along the same line of the same frame steps on (see
     /// [`crate::app::model::StepFrom`]).
     pub step_from: Option<crate::app::model::StepFrom>,
+    /// The file whose breakpoint on the stopped line the step in flight
+    /// was taken from, to be given back at the next stop (see
+    /// `App::debug_control`, rdbg's steps).
+    pub lifted_bp: Option<std::path::PathBuf>,
     /// What the debugger last put on the status line about the run —
     /// "Debugger running…", "Paused: breakpoint" — taken down when the run
     /// ends: it went on saying "Debugger running…" over a program that had
@@ -339,6 +343,7 @@ pub struct ParkedDebug {
     pub trace_program: Option<String>,
     pub pending_reason: String,
     pub step_from: Option<crate::app::model::StepFrom>,
+    pub lifted_bp: Option<std::path::PathBuf>,
     pub said: Option<String>,
     pub ran_for: Option<String>,
     pub trail_fns: std::collections::HashSet<(std::path::PathBuf, String)>,

@@ -29430,6 +29430,101 @@ fn breakpoints_changed_during_configuration_are_sent_again() {
     assert_eq!(lines, Some(serde_json::json!(4)));
 }
 
+/// rdbg cancels a step whose first event is on a breakpoint's line, and
+/// the breakpoint stopped at has fired already: from a one-line Ruby
+/// method, every step ran the program to its end. A step from a Ruby stop
+/// on a breakpoint's line goes with that line's breakpoint taken away —
+/// the file's others kept — and the next stop gives it back. Another
+/// language's step, or a Ruby one from a line with none, changes nothing.
+#[test]
+fn a_ruby_step_from_a_breakpoints_line_goes_without_it() {
+    let mut app = scanned_app("debug-rdbg-step");
+    let (_rt, _events, seen) = paused_session_with_fake_adapter(&mut app);
+    let file = PathBuf::from("/p/lib/cart.rb");
+    for line in [2, 5] {
+        app.debug
+            .breakpoints
+            .entry(file.clone())
+            .or_default()
+            .insert(line, crate::app::model::Bp::default());
+    }
+    let stop_at = |app: &mut App, path: &str, line: usize| {
+        let session = app.debug.session.as_mut().unwrap();
+        session.status = DebugStatus::Stopped;
+        // A step clears the frames until the next stop's arrive.
+        session.frames = vec![crate::dap::StackFrame {
+            id: 7,
+            name: "add".into(),
+            path: Some(PathBuf::from(path)),
+            line,
+            column: 1,
+        }];
+    };
+    let sent = |seen: &DapSeen| -> Vec<(String, serde_json::Value)> {
+        let mut seen = seen.lock().unwrap();
+        std::mem::take(&mut *seen)
+            .into_iter()
+            .filter(|(c, _)| c != "stackTrace" && c != "scopes" && c != "variables")
+            .map(|(c, args)| {
+                let lines = args["breakpoints"].clone();
+                (c, lines)
+            })
+            .collect()
+    };
+    let lines = |v: &serde_json::Value| -> Vec<u64> {
+        v.as_array()
+            .map(|a| a.iter().filter_map(|b| b["line"].as_u64()).collect())
+            .unwrap_or_default()
+    };
+
+    stop_at(&mut app, "/p/lib/cart.rb", 2);
+    let _ = run_task(app.debug_control(DebugCmd::StepOver));
+    let asked = sent(&seen);
+    assert_eq!(
+        asked.iter().map(|(c, _)| c.as_str()).collect::<Vec<_>>(),
+        ["setBreakpoints", "next"],
+        "{asked:?}"
+    );
+    assert_eq!(
+        lines(&asked[0].1),
+        [5],
+        "only the stopped line's is taken away"
+    );
+    // Stopped again: given back.
+    let given = app.update(Message::Debug(DebugMsg::DapEvent {
+        stamp: app.transport_stamp(),
+        run: app.debug_run,
+        event: dap::DapEvent::Stopped(dap::proto::Stopped {
+            reason: "step".into(),
+            thread_id: Some(1),
+            description: None,
+            text: None,
+            all_threads: false,
+        }),
+    }));
+    let _ = run_task(given);
+    let asked = sent(&seen);
+    let back: Vec<&(String, serde_json::Value)> = asked
+        .iter()
+        .filter(|(c, _)| c == "setBreakpoints")
+        .collect();
+    assert_eq!(back.len(), 1, "{asked:?}");
+    assert_eq!(lines(&back[0].1), [2, 5]);
+    assert!(app.debug.lifted_bp.is_none());
+
+    // A line with no breakpoint, and another language's: just the step.
+    for (path, line) in [("/p/lib/cart.rb", 3), ("/p/src/cart.py", 2)] {
+        stop_at(&mut app, path, line);
+        let _ = run_task(app.debug_control(DebugCmd::StepOut));
+        let asked = sent(&seen);
+        assert_eq!(
+            asked.iter().map(|(c, _)| c.as_str()).collect::<Vec<_>>(),
+            ["stepOut"],
+            "{path}:{line}: {asked:?}"
+        );
+    }
+}
+
 /// M8: a breakpoint set after the run has ended is kept for the next run,
 /// not sent to the adapter that has gone — whose "Server[pid=…]
 /// disconnected unexpectedly" was said as a breakpoint that failed. A
