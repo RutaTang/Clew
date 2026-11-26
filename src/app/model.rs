@@ -2205,7 +2205,19 @@ impl LspConsent {
                 tool = i.tool
             ),
             LspProvision::Remote { describe, .. } => {
-                tr!("{install} (on the remote host)", install = shown(describe))
+                // The host's server says a download as `download <url>`, in
+                // English: said here as one is said for this computer — its
+                // file, in the window's language — rather than half in one
+                // language, the URL whole.
+                let install = describe
+                    .strip_prefix("download ")
+                    .or_else(|| describe.strip_prefix("Download "))
+                    .filter(|url| url.starts_with("https://") && !url.contains(char::is_whitespace))
+                    .and_then(|url| url.rsplit('/').next())
+                    .filter(|file| !file.is_empty())
+                    .map(|file| tr!("Download {file}", file = file).to_string())
+                    .unwrap_or_else(|| shown(describe).into_owned());
+                tr!("{install} (on the remote host)", install = install)
             }
             LspProvision::DebugAdapter { install, .. } => install.describe(),
             // The question says it runs the project's own code; where is

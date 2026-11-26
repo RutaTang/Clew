@@ -259,7 +259,7 @@ fn install_offer(
 ) -> Option<clew_protocol::LspResolution> {
     use clew_core::lsp::store::Located;
     let describe = match located {
-        Located::NeedsDownload { download, .. } => format!("download {}", download.url),
+        Located::NeedsDownload { download, .. } => format!("Download {}", download.url),
         Located::NeedsInstall { install, .. } => {
             format!("{} (requires {} on PATH)", install.describe, install.tool)
         }

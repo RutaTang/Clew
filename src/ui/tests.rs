@@ -6770,6 +6770,41 @@ fn the_consent_modal_says_how_many_more_wait() {
     ));
 }
 
+/// A remote host's download is said as this computer's is — "Download
+/// clangd-linux-22.1.6.zip (on the remote host)" — not as the host's server
+/// writes it, "download https://github.com/…" in lowercase and the URL
+/// whole. Anything else the host says is shown as it says it.
+#[test]
+fn a_remote_download_is_said_as_a_local_one_is() {
+    let consent = |describe: &str| crate::LspConsent {
+        on_path: None,
+        language: "cpp".into(),
+        server_name: "clangd".into(),
+        version: "22.1.6".into(),
+        provision: crate::LspProvision::Remote {
+            describe: describe.into(),
+            consent: "digest".into(),
+        },
+        dest_dir: PathBuf::new(),
+    };
+    let url = "https://github.com/clangd/clangd/releases/download/22.1.6/clangd-linux-22.1.6.zip";
+    for said in [format!("download {url}"), format!("Download {url}")] {
+        assert_eq!(
+            consent(&said).describe(),
+            "Download clangd-linux-22.1.6.zip (on the remote host)"
+        );
+    }
+    assert_eq!(
+        consent("npm install -g x (requires npm on PATH)").describe(),
+        "npm install -g x (requires npm on PATH) (on the remote host)"
+    );
+    // Not a download of a file: as said.
+    assert_eq!(
+        consent("download http://x/y").describe(),
+        "download http://x/y (on the remote host)"
+    );
+}
+
 /// A first open's setup sheet for `root`, before its look at the project
 /// is in — the question that used to be the `.clew` consent alone.
 fn open_sheet(
