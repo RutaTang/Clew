@@ -17,7 +17,14 @@
 //! - Ruby: Rails' `config/routes.rb` (verbs, `resources`, `resource`,
 //!   `root`, `namespace` and `scope` blocks);
 //! - Go: `net/http` (`HandleFunc`, Go 1.22's `"GET /x"` patterns), gin,
-//!   echo and chi.
+//!   echo and chi;
+//! - Dart: go_router's `GoRoute(path: …, builder: …)` (a Flutter app's
+//!   screens, nested `routes:` under their parent's path), and
+//!   shelf_router's (or Alfred's) `app.get('/x', handler)`;
+//! - Erlang: Cowboy's `cowboy_router:compile([{Host, [{"/x", handler, …}]}])`;
+//! - Haskell: Scotty's `get "/x" $ …` and Yesod's routes
+//!   (`config/routes`, or a `[parseRoutes| … |]` in the code): `/x ItemR GET
+//!   POST`, each method's handler `getItemR`, `postItemR`.
 //!
 //! A handler named rather than written in place is found by name — a member
 //! of the class named, else the definition nearest the route's file. A
@@ -82,7 +89,25 @@ pub fn maps(corpus: &Corpus) -> Vec<ProjectMap> {
             Some(Lang::Go) => go(&mut routes, source),
             Some(Lang::Kotlin) => kotlin(&mut routes, source),
             Some(Lang::Elixir) if source.rel.ends_with("router.ex") => phoenix(&mut routes, source),
+            Some(Lang::Dart) => dart(&mut routes, source),
+            Some(Lang::Erlang) if source.text.contains("cowboy_router") => {
+                cowboy(&mut routes, source)
+            }
+            Some(Lang::Haskell) => {
+                if source.text.contains("Web.Scotty") {
+                    scotty(&mut routes, source);
+                }
+                if let Some(at) = source.text.find("[parseRoutes|") {
+                    let body = &source.text[at + "[parseRoutes|".len()..];
+                    let body = &body[..body.find("|]").unwrap_or(body.len())];
+                    let first = super::line_at(&source.text, at) + 1;
+                    yesod(&mut routes, source, body, first);
+                }
+            }
             None if super::is_play_routes(&source.rel) => play(&mut routes, source),
+            None if super::is_yesod_routes(&source.rel) => {
+                yesod(&mut routes, source, &source.text, 1)
+            }
             _ => {}
         }
     }
@@ -2158,9 +2183,388 @@ fn go(routes: &mut Routes, source: &Source) {
     }
 }
 
+/// Dart: go_router's routes (a Flutter app's screens), and shelf_router's
+/// (or Alfred's) HTTP routes.
+fn dart(routes: &mut Routes, source: &Source) {
+    let src = source.text.as_str();
+    let go_router = src.contains("GoRoute(");
+    let shelf = src.contains("package:shelf_router") || src.contains("package:alfred");
+    if !(go_router || shelf) {
+        return;
+    }
+    let Some(tree) = source.tree() else {
+        return;
+    };
+    /// A named argument of an invocation's argument list.
+    fn named<'t>(args: Node<'t>, name: &str, src: &str) -> Option<Node<'t>> {
+        args.named_children(&mut args.walk())
+            .filter(|a| a.kind() == "named_argument")
+            .find(|a| {
+                a.named_child(0)
+                    .is_some_and(|l| text(l, src).trim_end_matches(':').trim() == name)
+            })
+            .and_then(|a| a.named_child(1))
+    }
+    fn arguments_of(call: Node<'_>) -> Option<Node<'_>> {
+        let part = call.child_by_field_name("arguments")?;
+        part.named_children(&mut part.walk())
+            .find(|c| c.kind() == "arguments")
+    }
+    /// The widget a builder makes: `HomeScreen()`, `const HomeScreen()`.
+    fn widget(builder: Node<'_>, src: &str) -> Option<String> {
+        let body = builder.child_by_field_name("body").unwrap_or(builder);
+        all_of(body, "type_identifier")
+            .into_iter()
+            .chain(
+                all_of(body, "method_invocation")
+                    .into_iter()
+                    .filter_map(|c| c.child_by_field_name("function"))
+                    .filter(|f| f.kind() == "identifier"),
+            )
+            .map(|n| text(n, src))
+            .find(|name| name.starts_with(|c: char| c.is_uppercase()))
+            .map(str::to_string)
+    }
+    for call in all_of(tree.root_node(), "method_invocation") {
+        let Some(function) = call.child_by_field_name("function") else {
+            continue;
+        };
+        let Some(args) = arguments_of(call) else {
+            continue;
+        };
+        if go_router && function.kind() == "identifier" && text(function, src) == "GoRoute" {
+            let Some(path) = named(args, "path", src).and_then(|p| string(p, src)) else {
+                continue;
+            };
+            // Under the paths of the routes it is nested in.
+            let mut full = path;
+            let mut up = call.parent();
+            while let Some(n) = up {
+                if n.kind() == "method_invocation"
+                    && n.child_by_field_name("function")
+                        .is_some_and(|f| text(f, src) == "GoRoute")
+                    && let Some(parent) = arguments_of(n)
+                        .and_then(|a| named(a, "path", src))
+                        .and_then(|p| string(p, src))
+                    && !full.starts_with('/')
+                {
+                    full = join(&parent, &full);
+                }
+                up = n.parent();
+            }
+            let handler = ["builder", "pageBuilder"]
+                .iter()
+                .find_map(|b| named(args, b, src))
+                .and_then(|b| widget(b, src))
+                .map_or(Handler::Inline, |name| Handler::Named { name, class: None });
+            routes.add("go_router", "PAGE", &full, &source.rel, line(call), handler);
+            continue;
+        }
+        if shelf && function.kind() == "unconditional_assignable_selector" {
+            let Some(verb) =
+                function.named_child(function.named_child_count().saturating_sub(1) as u32)
+            else {
+                continue;
+            };
+            let method = match text(verb, src) {
+                "get" => "GET",
+                "post" => "POST",
+                "put" => "PUT",
+                "patch" => "PATCH",
+                "delete" => "DELETE",
+                "head" => "HEAD",
+                "options" => "OPTIONS",
+                "all" => "ANY",
+                _ => continue,
+            };
+            let plain: Vec<Node> = args
+                .named_children(&mut args.walk())
+                .filter(|a| a.kind() == "argument")
+                .filter_map(|a| a.named_child(0))
+                .collect();
+            let Some(path) = plain.first().and_then(|p| string(*p, src)) else {
+                continue;
+            };
+            if !path.starts_with('/') {
+                continue;
+            }
+            let handler = match plain.get(1) {
+                Some(h) if h.kind() == "identifier" => Handler::Named {
+                    name: text(*h, src).to_string(),
+                    class: None,
+                },
+                _ => Handler::Inline,
+            };
+            routes.add(
+                "shelf_router",
+                method,
+                &path,
+                &source.rel,
+                line(call),
+                handler,
+            );
+        }
+    }
+}
+
+/// Erlang: Cowboy's dispatch, `cowboy_router:compile([{Host, Paths}])`, each
+/// `{"/x", Handler, Opts}` a route to its handler module (whose `init/2`
+/// takes every method).
+fn cowboy(routes: &mut Routes, source: &Source) {
+    let Some(tree) = source.tree() else {
+        return;
+    };
+    let src = source.text.as_str();
+    for remote in all_of(tree.root_node(), "remote") {
+        let module = remote
+            .child_by_field_name("module")
+            .map(|m| text(m, src).trim_end_matches(':').trim());
+        let fun = remote
+            .child_by_field_name("fun")
+            .and_then(|f| f.child_by_field_name("expr"))
+            .map(|f| text(f, src));
+        if module != Some("cowboy_router") || fun != Some("compile") {
+            continue;
+        }
+        for tuple in all_of(remote, "tuple") {
+            let (Some(path), Some(handler)) = (tuple.named_child(0), tuple.named_child(1)) else {
+                continue;
+            };
+            if path.kind() != "string" || handler.kind() != "atom" {
+                continue;
+            }
+            let Some(path) = unquote(text(path, src)).filter(|p| p.starts_with('/')) else {
+                continue;
+            };
+            let name = text(handler, src).trim_matches('\'').to_string();
+            routes.add(
+                "Cowboy",
+                "ANY",
+                &path,
+                &source.rel,
+                line(tuple),
+                Handler::Named { name, class: None },
+            );
+        }
+    }
+}
+
+/// Haskell: Scotty's `get "/x" $ do …` and `post "/x" handler`.
+fn scotty(routes: &mut Routes, source: &Source) {
+    let Some(tree) = source.tree() else {
+        return;
+    };
+    let src = source.text.as_str();
+    for apply in all_of(tree.root_node(), "apply") {
+        let (Some(function), Some(argument)) = (
+            apply.child_by_field_name("function"),
+            apply.child_by_field_name("argument"),
+        ) else {
+            continue;
+        };
+        if function.kind() != "variable" {
+            continue;
+        }
+        let method = match text(function, src) {
+            "get" => "GET",
+            "post" => "POST",
+            "put" => "PUT",
+            "patch" => "PATCH",
+            "delete" => "DELETE",
+            "options" => "OPTIONS",
+            _ => continue,
+        };
+        let Some(path) = unquote(text(argument, src)).filter(|p| p.starts_with('/')) else {
+            continue;
+        };
+        // The handler: the next argument (`post "/x" createUser`), or what
+        // `$` applies it to.
+        let next = apply.parent().and_then(|p| match p.kind() {
+            "apply" if p.child_by_field_name("function") == Some(apply) => {
+                p.child_by_field_name("argument")
+            }
+            "infix" if p.child_by_field_name("left_operand") == Some(apply) => {
+                p.child_by_field_name("right_operand")
+            }
+            _ => None,
+        });
+        let handler = match next {
+            Some(h) if h.kind() == "variable" => Handler::Named {
+                name: text(h, src).to_string(),
+                class: None,
+            },
+            _ => Handler::Inline,
+        };
+        routes.add("Scotty", method, &path, &source.rel, line(apply), handler);
+    }
+}
+
+/// Yesod's routes, each line `/path ResourceR GET POST` (from line `first`
+/// of the file): a route per method to its handler, `getResourceR` — or,
+/// with no method named, `handleResourceR` for every method. A subsite
+/// (`/static StaticR Static appStatic`) is served by the subsite.
+fn yesod(routes: &mut Routes, source: &Source, body: &str, first: usize) {
+    for (n, raw) in body.lines().enumerate() {
+        let words: Vec<&str> = raw.split_whitespace().collect();
+        let [path, resource, rest @ ..] = words.as_slice() else {
+            continue;
+        };
+        if !path.starts_with('/') || !resource.ends_with('R') {
+            continue;
+        }
+        let at = first + n;
+        let methods: Vec<&str> = rest
+            .iter()
+            .copied()
+            .take_while(|w| w.chars().all(|c| c.is_ascii_uppercase()))
+            .collect();
+        if methods.is_empty() {
+            let handler = match rest.first() {
+                // A subsite's type: its own routes serve it.
+                Some(t) if t.starts_with(|c: char| c.is_uppercase()) => Handler::Inline,
+                _ => Handler::Named {
+                    name: format!("handle{resource}"),
+                    class: None,
+                },
+            };
+            routes.add("Yesod", "ANY", path, &source.rel, at, handler);
+            continue;
+        }
+        for method in methods {
+            routes.add(
+                "Yesod",
+                method,
+                path,
+                &source.rel,
+                at,
+                Handler::Named {
+                    name: format!("{}{resource}", method.to_ascii_lowercase()),
+                    class: None,
+                },
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Dart's go_router screens (nested under their parent's path) and
+    /// shelf_router's routes; Cowboy's dispatch; Scotty's and Yesod's
+    /// routes, from a `config/routes` file and a `parseRoutes` in the code.
+    #[test]
+    fn dart_erlang_and_haskell_routes_reach_their_handlers() {
+        let got = routes_of(&[
+            (
+                "lib/router.dart",
+                "import 'package:go_router/go_router.dart';\nfinal router = GoRouter(routes: [\n  GoRoute(path: '/', builder: (c, s) => const HomeScreen(), routes: [\n    GoRoute(path: 'details/:id', builder: (c, s) => DetailsScreen(id: s.pathParameters['id']!)),\n  ]),\n]);\n",
+            ),
+            (
+                "lib/home.dart",
+                "class HomeScreen {}\nclass DetailsScreen {}\n",
+            ),
+            (
+                "bin/server.dart",
+                "import 'package:shelf_router/shelf_router.dart';\nvoid main() {\n  final app = Router();\n  app.get('/hello', hello);\n  app.post('/users/<id>', (Request r, String id) => Response.ok('x'));\n}\nResponse hello(Request r) => Response.ok('hi');\n",
+            ),
+            (
+                "src/shop_app.erl",
+                "-module(shop_app).\nstart(_, _) ->\n    Dispatch = cowboy_router:compile([{'_', [{\"/\", hello_handler, []}, {\"/users/:id\", user_handler, #{}}]}]),\n    ok.\n",
+            ),
+            (
+                "src/hello_handler.erl",
+                "-module(hello_handler).\n-export([init/2]).\ninit(Req, State) -> {ok, Req, State}.\n",
+            ),
+            (
+                "app/Main.hs",
+                "import Web.Scotty\nmain = scotty 3000 $ do\n  get \"/\" $ text \"hi\"\n  post \"/users/:id\" createUser\n\ncreateUser = text \"made\"\n",
+            ),
+            (
+                "config/routes",
+                "/static StaticR Static appStatic\n/ HomeR GET\n/items/#ItemId ItemR GET POST\n/admin AdminR\n",
+            ),
+            (
+                "src/Handler/Item.hs",
+                "module Handler.Item where\ngetItemR i = undefined\npostItemR i = undefined\n",
+            ),
+            (
+                "src/App.hs",
+                "mkYesod \"App\" [parseRoutes|\n/about AboutR GET\n|]\n",
+            ),
+        ]);
+        let route = |r: &str| {
+            got.iter()
+                .filter(|(route, _, _)| route == r)
+                .collect::<Vec<_>>()
+        };
+        assert!(
+            route("PAGE /").iter().any(|(_, h, _)| h == "HomeScreen"),
+            "{got:?}"
+        );
+        assert!(
+            route("PAGE /details/:id")
+                .iter()
+                .any(|(_, h, _)| h == "DetailsScreen"),
+            "{got:?}"
+        );
+        assert!(
+            route("GET /hello")
+                .iter()
+                .any(|(_, h, at)| h == "hello" && at == "bin/server.dart:7"),
+            "{got:?}"
+        );
+        assert!(
+            route("ANY /users/:id")
+                .iter()
+                .any(|(_, h, _)| h == "user_handler"),
+            "{got:?}"
+        );
+        assert!(
+            route("ANY /")
+                .iter()
+                .any(|(_, h, at)| h == "hello_handler" && at == "src/hello_handler.erl:1"),
+            "{got:?}"
+        );
+        assert!(
+            route("POST /users/:id")
+                .iter()
+                .any(|(_, h, _)| h == "createUser"),
+            "{got:?}"
+        );
+        assert!(
+            route("GET /items/#ItemId")
+                .iter()
+                .any(|(_, h, at)| h == "getItemR" && at == "src/Handler/Item.hs:2"),
+            "{got:?}"
+        );
+        assert!(
+            route("POST /items/#ItemId")
+                .iter()
+                .any(|(_, h, _)| h == "postItemR"),
+            "{got:?}"
+        );
+        assert!(
+            route("ANY /admin")
+                .iter()
+                .any(|(_, h, _)| h == "handleAdminR"),
+            "{got:?}"
+        );
+        assert!(
+            route("GET /about").iter().any(|(_, h, _)| h == "getAboutR"),
+            "{got:?}"
+        );
+        let labels = route_labels(&[(
+            "config/routes",
+            "/static StaticR Static appStatic\n/x XR GET\n",
+        )]);
+        assert!(labels.contains(&"ANY /static".to_string()), "{labels:?}");
+        let inline = route_labels(&[(
+            "bin/server.dart",
+            "import 'package:shelf_router/shelf_router.dart';\nvoid main() { final app = Router(); app.post('/users/<id>', (Request r, String id) => Response.ok('x')); }\n",
+        )]);
+        assert_eq!(inline, ["POST /users/<id>"]);
+    }
 
     /// `(route, handler label, handler place)` of every arrow.
     fn routes_of(files: &[(&str, &str)]) -> Vec<(String, String, String)> {

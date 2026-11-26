@@ -25,16 +25,19 @@ use crate::fs_scan::FileEntry;
 pub mod cfamily;
 pub mod dart;
 pub mod defs;
+pub mod elixir;
 pub mod erlang;
 pub mod frameworks;
 pub mod go;
 pub mod haskell;
 pub mod js;
 pub mod lean;
+pub mod oop;
 pub mod python;
 pub mod routes;
 pub mod ruby;
 pub mod rust;
+pub mod scala;
 pub mod sql;
 pub mod zig;
 use crate::highlight::{self, Lang};
@@ -251,6 +254,15 @@ fn wanted_without_language(rel: &str) -> bool {
         || name.ends_with(".lean")
         || name.ends_with(".prisma")
         || is_play_routes(rel)
+        || is_yesod_routes(rel)
+        || sql::is_models_file(rel)
+}
+
+/// Whether `rel` is a Yesod application's routes file: `config/routes`, or
+/// one named `*.yesodroutes`.
+pub(crate) fn is_yesod_routes(rel: &str) -> bool {
+    let rel = rel.replace('\\', "/");
+    rel == "config/routes" || rel.ends_with("/config/routes") || rel.ends_with(".yesodroutes")
 }
 
 /// Whether `rel` is a Play application's routes file: `conf/routes`, or a
@@ -278,8 +290,11 @@ pub fn build_from(corpus: &Corpus) -> Vec<ProjectMap> {
         js::maps,
         rust::maps,
         cfamily::maps,
+        oop::maps,
         erlang::maps,
+        elixir::maps,
         haskell::maps,
+        scala::maps,
         zig::maps,
         ruby::maps,
         dart::maps,

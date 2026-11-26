@@ -4125,5 +4125,18 @@
  "{file} did not compile (the compiler's output is above).": "{file} n’a pas compilé (la sortie du compilateur est ci-dessus).",
  "The build was stopped.": "La compilation a été arrêtée.",
  "This program runs without the debugger: {status}": "Ce programme s’exécute sans le débogueur : {status}",
- "Flutter found no device to run this app on.": "Flutter n’a trouvé aucun appareil sur lequel exécuter cette application."
+ "Flutter found no device to run this app on.": "Flutter n’a trouvé aucun appareil sur lequel exécuter cette application.",
+ "GenServer calls": "Appels GenServer",
+ "Protocols and behaviours": "Protocoles et behaviours",
+ "each supervisor and application and an arrow to each child it starts (labelled worker or supervisor), and from each DynamicSupervisor to what is started under it": "chaque superviseur et chaque application, et une flèche vers chaque enfant qu'il lance (étiqueté worker ou supervisor), ainsi que de chaque DynamicSupervisor vers ce qui est lancé sous lui",
+ "each function that calls or casts to a GenServer, an arrow to the handle_call or handle_cast clause that answers its request": "pour chaque fonction qui fait un call ou un cast vers un GenServer, une flèche vers la clause handle_call ou handle_cast qui répond à sa requête",
+ "each protocol and an arrow to each type it is implemented for, and each behaviour and an arrow to each module that adopts it": "chaque protocole et une flèche vers chaque type pour lequel il est implémenté, et chaque behaviour et une flèche vers chaque module qui l'adopte",
+ "protocol": "protocole",
+ "behaviour": "behaviour",
+ "implemented for": "implémenté pour",
+ "adopted by": "adopté par",
+ "Overrides": "Redéfinitions",
+ "each method that overrides one of a base class or implements one of an interface, with an arrow to the nearest one up its type's ancestry (Java, Kotlin, Scala and C#)": "chaque méthode qui redéfinit une méthode d'une classe de base ou implémente une méthode d'une interface, avec une flèche vers la plus proche en remontant l'ascendance de son type (Java, Kotlin, Scala et C#)",
+ "implements": "implémente",
+ "each type and an arrow to each type class it has an instance of, from given and implicit definitions and derives clauses": "chaque type et une flèche vers chaque classe de types dont il a une instance, d'après les définitions given et implicit et les clauses derives"
 }

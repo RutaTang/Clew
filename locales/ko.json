@@ -4125,5 +4125,18 @@
  "{file} did not compile (the compiler's output is above).": "{file}을(를) 컴파일하지 못했습니다(컴파일러 출력은 위에 있습니다).",
  "The build was stopped.": "빌드가 중지되었습니다.",
  "This program runs without the debugger: {status}": "이 프로그램은 디버거 없이 실행됩니다: {status}",
- "Flutter found no device to run this app on.": "Flutter가 이 앱을 실행할 기기를 찾지 못했습니다."
+ "Flutter found no device to run this app on.": "Flutter가 이 앱을 실행할 기기를 찾지 못했습니다.",
+ "GenServer calls": "GenServer 호출",
+ "Protocols and behaviours": "프로토콜과 비헤이비어",
+ "each supervisor and application and an arrow to each child it starts (labelled worker or supervisor), and from each DynamicSupervisor to what is started under it": "각 슈퍼바이저와 애플리케이션, 그리고 그것이 시작하는 각 자식으로 가는 화살표(worker 또는 supervisor 표시). 각 DynamicSupervisor에서는 그 아래에서 시작되는 것으로 이어집니다",
+ "each function that calls or casts to a GenServer, an arrow to the handle_call or handle_cast clause that answers its request": "GenServer에 call 또는 cast하는 각 함수와, 그 요청에 응답하는 handle_call 또는 handle_cast 절로 가는 화살표",
+ "each protocol and an arrow to each type it is implemented for, and each behaviour and an arrow to each module that adopts it": "각 프로토콜과 그것이 구현된 각 타입으로 가는 화살표, 각 비헤이비어와 그것을 채택한 각 모듈로 가는 화살표",
+ "protocol": "프로토콜",
+ "behaviour": "비헤이비어",
+ "implemented for": "구현 대상",
+ "adopted by": "채택한 모듈",
+ "Overrides": "재정의",
+ "each method that overrides one of a base class or implements one of an interface, with an arrow to the nearest one up its type's ancestry (Java, Kotlin, Scala and C#)": "기반 클래스의 메서드를 재정의하거나 인터페이스의 메서드를 구현하는 각 메서드와, 그 타입의 조상을 거슬러 올라가 가장 가까운 메서드로 가는 화살표(Java, Kotlin, Scala, C#)",
+ "implements": "구현",
+ "each type and an arrow to each type class it has an instance of, from given and implicit definitions and derives clauses": "각 타입과, 그 타입이 인스턴스를 가진 각 타입 클래스로 가는 화살표(given과 implicit 정의, derives 절에서)"
 }

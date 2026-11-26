@@ -4125,5 +4125,18 @@
  "{file} did not compile (the compiler's output is above).": "{file} をコンパイルできませんでした（コンパイラの出力は上にあります）。",
  "The build was stopped.": "ビルドは停止されました。",
  "This program runs without the debugger: {status}": "このプログラムはデバッガーなしで実行されます: {status}",
- "Flutter found no device to run this app on.": "Flutter はこのアプリを実行できるデバイスを見つけられませんでした。"
+ "Flutter found no device to run this app on.": "Flutter はこのアプリを実行できるデバイスを見つけられませんでした。",
+ "GenServer calls": "GenServer 呼び出し",
+ "Protocols and behaviours": "プロトコルとビヘイビア",
+ "each supervisor and application and an arrow to each child it starts (labelled worker or supervisor), and from each DynamicSupervisor to what is started under it": "各スーパーバイザーとアプリケーション、およびそれが起動する各子への矢印（worker または supervisor をラベル表示）。各 DynamicSupervisor からは、その下で起動されるものへの矢印",
+ "each function that calls or casts to a GenServer, an arrow to the handle_call or handle_cast clause that answers its request": "GenServer に call または cast する各関数と、その要求に応える handle_call または handle_cast 節への矢印",
+ "each protocol and an arrow to each type it is implemented for, and each behaviour and an arrow to each module that adopts it": "各プロトコルと、それが実装されている各型への矢印。各ビヘイビアと、それを採用する各モジュールへの矢印",
+ "protocol": "プロトコル",
+ "behaviour": "ビヘイビア",
+ "implemented for": "実装対象",
+ "adopted by": "採用元",
+ "Overrides": "オーバーライド",
+ "each method that overrides one of a base class or implements one of an interface, with an arrow to the nearest one up its type's ancestry (Java, Kotlin, Scala and C#)": "基底クラスのメソッドをオーバーライドする、またはインターフェースのメソッドを実装する各メソッドと、その型の祖先をたどって最も近いメソッドへの矢印（Java、Kotlin、Scala、C#）",
+ "implements": "実装",
+ "each type and an arrow to each type class it has an instance of, from given and implicit definitions and derives clauses": "各型と、それがインスタンスを持つ各型クラスへの矢印（given と implicit の定義、derives 節から）"
 }

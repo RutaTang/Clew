@@ -29,12 +29,15 @@ use crate::highlight::Lang;
 
 pub(crate) mod ddl;
 mod django;
+mod drift;
 mod ecto;
 mod efcore;
+mod exposed;
 mod files;
 mod gorm;
 mod jpa;
 mod lex;
+mod persistent;
 mod prisma;
 mod rails;
 mod schema;
@@ -43,6 +46,7 @@ mod sqlalchemy;
 mod tests;
 
 use ddl::{Action, Change, Kind, Op, QName};
+pub(crate) use persistent::is_models_file;
 pub(crate) use rails::pluralize;
 
 /// `name` in snake case, as ORMs name tables and columns from classes and
@@ -214,6 +218,60 @@ pub(crate) fn schemas(corpus: &Corpus) -> Vec<(files::Database, Schema)> {
                 schema,
             ));
         }
+    }
+    // Kotlin's Exposed tables.
+    let exposed: Vec<&Source> = corpus
+        .files
+        .iter()
+        .filter(|s| exposed::is_tables(s) && !crate::weakspots::is_test_path(&s.rel))
+        .collect();
+    if let Some(schema) = exposed::schema(&exposed) {
+        out.push((
+            files::Database {
+                root: match exposed.as_slice() {
+                    [one] => one.rel.clone(),
+                    _ => "Exposed tables".to_string(),
+                },
+                changes: Vec::new(),
+            },
+            schema,
+        ));
+    }
+    // Dart's Drift tables.
+    let drift: Vec<&Source> = corpus
+        .files
+        .iter()
+        .filter(|s| drift::is_tables(s) && !crate::weakspots::is_test_path(&s.rel))
+        .collect();
+    if let Some(schema) = drift::schema(&drift) {
+        out.push((
+            files::Database {
+                root: match drift.as_slice() {
+                    [one] => one.rel.clone(),
+                    _ => "Drift tables".to_string(),
+                },
+                changes: Vec::new(),
+            },
+            schema,
+        ));
+    }
+    // Haskell's Persistent models.
+    let persistent: Vec<&Source> = corpus
+        .files
+        .iter()
+        .filter(|s| persistent::has_models(s) && !crate::weakspots::is_test_path(&s.rel))
+        .collect();
+    if let Some(schema) = persistent::schema(&persistent) {
+        out.push((
+            files::Database {
+                root: match persistent.as_slice() {
+                    [one] => one.rel.clone(),
+                    _ => "Persistent models".to_string(),
+                },
+                changes: Vec::new(),
+            },
+            schema,
+        ));
     }
     // GORM's models.
     let gorm: Vec<&Source> = corpus

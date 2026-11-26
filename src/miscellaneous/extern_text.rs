@@ -81,12 +81,15 @@ pub(crate) const ENTRY_KINDS: &[&str] = &[
 pub(crate) const MAP_TITLES: &[&str] = &[
     tr_noop!("Include cost"),
     tr_noop!("Virtual overrides"),
+    tr_noop!("Overrides"),
     tr_noop!("Template instantiations"),
     tr_noop!("Widget tree"),
     tr_noop!("State management"),
     tr_noop!("Supervision tree"),
     tr_noop!("Messages"),
     tr_noop!("gen_server calls"),
+    tr_noop!("GenServer calls"),
+    tr_noop!("Protocols and behaviours"),
     tr_noop!("Dependency injection"),
     tr_noop!("Entity relations"),
     tr_noop!("WordPress hooks"),
@@ -119,6 +122,21 @@ pub(crate) const MAP_TITLES: &[&str] = &[
 /// What each project map draws (clew-core's `maps`).
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) const MAP_DESCRIPTIONS: &[&str] = &[
+    tr_noop!(
+        "each type and an arrow to each type class it has an instance of, from given and implicit definitions and derives clauses"
+    ),
+    tr_noop!(
+        "each method that overrides one of a base class or implements one of an interface, with an arrow to the nearest one up its type's ancestry (Java, Kotlin, Scala and C#)"
+    ),
+    tr_noop!(
+        "each supervisor and application and an arrow to each child it starts (labelled worker or supervisor), and from each DynamicSupervisor to what is started under it"
+    ),
+    tr_noop!(
+        "each function that calls or casts to a GenServer, an arrow to the handle_call or handle_cast clause that answers its request"
+    ),
+    tr_noop!(
+        "each protocol and an arrow to each type it is implemented for, and each behaviour and an arrow to each module that adopts it"
+    ),
     tr_noop!(
         "each file and an arrow to each file it includes. Its detail counts every file it pulls in, directly or indirectly, and every file that includes it pulls those in too"
     ),
@@ -229,6 +247,7 @@ pub(crate) const MAP_DESCRIPTIONS: &[&str] = &[
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) const MAP_KINDS: &[&str] = &[
     tr_noop!("action"),
+    tr_noop!("behaviour"),
     tr_noop!("callback"),
     tr_noop!("channel"),
     tr_noop!("class"),
@@ -257,6 +276,7 @@ pub(crate) const MAP_KINDS: &[&str] = &[
     tr_noop!("notation"),
     tr_noop!("package"),
     tr_noop!("process"),
+    tr_noop!("protocol"),
     tr_noop!("provider"),
     tr_noop!("registry"),
     tr_noop!("re-export"),
@@ -349,6 +369,7 @@ pub(crate) const MAP_WORDS: &[&str] = &[
     tr_noop!("inherits"),
     tr_noop!("instantiates"),
     tr_noop!("overrides"),
+    tr_noop!("implements"),
     tr_noop!("creates"),
     tr_noop!("sends"),
     tr_noop!("starts"),
@@ -365,6 +386,8 @@ pub(crate) const MAP_WORDS: &[&str] = &[
     tr_noop!("rewrites"),
     tr_noop!("uses"),
     tr_noop!("handled by"),
+    tr_noop!("implemented for"),
+    tr_noop!("adopted by"),
     tr_noop!("includes"),
     tr_noop!("calls"),
     tr_noop!("reads"),

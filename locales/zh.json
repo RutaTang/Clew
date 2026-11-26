@@ -4125,5 +4125,18 @@
  "{file} did not compile (the compiler's output is above).": "{file} 编译失败（编译器的输出见上方）。",
  "The build was stopped.": "构建已停止。",
  "This program runs without the debugger: {status}": "此程序在不使用调试器的情况下运行：{status}",
- "Flutter found no device to run this app on.": "Flutter 找不到可运行此应用的设备。"
+ "Flutter found no device to run this app on.": "Flutter 找不到可运行此应用的设备。",
+ "GenServer calls": "GenServer 调用",
+ "Protocols and behaviours": "协议与 behaviour",
+ "each supervisor and application and an arrow to each child it starts (labelled worker or supervisor), and from each DynamicSupervisor to what is started under it": "每个监督者（supervisor）和应用（application），以及指向它启动的每个子进程的箭头（标注 worker 或 supervisor）；还有从每个 DynamicSupervisor 指向在其下启动的进程的箭头",
+ "each function that calls or casts to a GenServer, an arrow to the handle_call or handle_cast clause that answers its request": "每个对 GenServer 执行 call 或 cast 的函数，以及指向响应该请求的 handle_call 或 handle_cast 子句的箭头",
+ "each protocol and an arrow to each type it is implemented for, and each behaviour and an arrow to each module that adopts it": "每个协议（protocol），以及指向为其实现了该协议的每个类型的箭头；每个 behaviour，以及指向采用它的每个模块的箭头",
+ "protocol": "协议",
+ "behaviour": "behaviour",
+ "implemented for": "实现于",
+ "adopted by": "被采用于",
+ "Overrides": "重写",
+ "each method that overrides one of a base class or implements one of an interface, with an arrow to the nearest one up its type's ancestry (Java, Kotlin, Scala and C#)": "每个重写基类方法或实现接口方法的方法，以及沿其类型的祖先向上指向最近的那个方法的箭头（Java、Kotlin、Scala 和 C#）",
+ "implements": "实现",
+ "each type and an arrow to each type class it has an instance of, from given and implicit definitions and derives clauses": "每个类型，以及指向它拥有其实例的每个类型类的箭头，读自 given 和 implicit 定义以及 derives 子句"
 }
