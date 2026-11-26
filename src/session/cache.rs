@@ -152,7 +152,9 @@ use crate::incremental::Version;
 /// fields from a typed value as a receiver, and a Go parameter's package;
 /// a factory's value by its function's return; a Kotlin class's companion
 /// object's bases among its own.
-pub(crate) const CACHE_VERSION: u32 = 39;
+/// 40: a Go package's variables among its fields; `Object`/`Any`/`object`
+/// a parameter kind of its own, below a class the argument is.
+pub(crate) const CACHE_VERSION: u32 = 40;
 
 /// A cached symbol (the index entry minus the paths, which are reconstructed
 /// from the project root + relative path on load).

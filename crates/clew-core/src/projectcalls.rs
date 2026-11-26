@@ -283,6 +283,124 @@ fn lexical_join(dir: &Path, path: &str) -> PathBuf {
     out
 }
 
+/// The files a project build names (its `pom.xml`, `build.gradle`,
+/// `build.sbt`, `*.csproj`, `go.mod`, `pubspec.yaml`, `mix.exs`, …).
+fn is_build_file(name: &str) -> bool {
+    matches!(
+        name,
+        "pom.xml"
+            | "build.gradle"
+            | "build.gradle.kts"
+            | "settings.gradle"
+            | "settings.gradle.kts"
+            | "build.sbt"
+            | "build.sc"
+            | "build.mill"
+            | "go.mod"
+            | "go.work"
+            | "Cargo.toml"
+            | "package.json"
+            | "pubspec.yaml"
+            | "mix.exs"
+            | "rebar.config"
+            | "cabal.project"
+            | "stack.yaml"
+            | "build.zig"
+            | "Gemfile"
+            | "CMakeLists.txt"
+            | "meson.build"
+            | "Makefile"
+            | "WORKSPACE"
+            | "MODULE.bazel"
+            | "pyproject.toml"
+            | "setup.py"
+            | "composer.json"
+            | "deno.json"
+    ) || [".csproj", ".fsproj", ".sln", ".slnx", ".cabal", ".gemspec"]
+        .iter()
+        .any(|ext| name.ends_with(ext))
+}
+
+/// Each node's project, where the folder the files share holds several
+/// that build alone ([`is_build_file`]): a file's is the topmost folder
+/// under the shared one with a build file of its own, and two that import
+/// from one another are one (a package and the examples that use it).
+/// `None` where the shared folder builds the whole (one project, the
+/// common case) or no build file is found; a node of no project is `None`.
+fn independent_projects(
+    nodes: &[SymNode],
+    common: &Path,
+    scope: &HashMap<PathBuf, HashSet<PathBuf>>,
+) -> Option<Vec<Option<usize>>> {
+    let mut builds: HashMap<PathBuf, bool> = HashMap::new();
+    let mut has_build = |dir: &Path| -> bool {
+        *builds.entry(dir.to_path_buf()).or_insert_with(|| {
+            std::fs::read_dir(dir).is_ok_and(|entries| {
+                entries
+                    .flatten()
+                    .any(|e| e.file_name().to_str().is_some_and(is_build_file))
+            })
+        })
+    };
+    if common.as_os_str().is_empty() || has_build(common) {
+        return None;
+    }
+    let mut roots: Vec<PathBuf> = Vec::new();
+    let mut root_of_dir: HashMap<PathBuf, Option<usize>> = HashMap::new();
+    let mut project_of = |file: &Path| -> Option<usize> {
+        let dir = file.parent()?;
+        if let Some(&known) = root_of_dir.get(dir) {
+            return known;
+        }
+        let mut found = None;
+        let mut at = common.to_path_buf();
+        for part in dir.strip_prefix(common).ok()?.components() {
+            at.push(part);
+            if has_build(&at) {
+                found = Some(at.clone());
+                break;
+            }
+        }
+        let id = found.map(|root| match roots.iter().position(|r| *r == root) {
+            Some(i) => i,
+            None => {
+                roots.push(root);
+                roots.len() - 1
+            }
+        });
+        root_of_dir.insert(dir.to_path_buf(), id);
+        id
+    };
+    let mut project: Vec<Option<usize>> = nodes.iter().map(|n| project_of(&n.file)).collect();
+    let pairs: Vec<(usize, usize)> = scope
+        .iter()
+        .flat_map(|(file, imported)| imported.iter().map(move |other| (file, other)))
+        .filter_map(|(file, other)| Some((project_of(file)?, project_of(other)?)))
+        .collect();
+    if roots.len() < 2 {
+        return None;
+    }
+    // One project, whichever imports from the other.
+    let mut parent: Vec<usize> = (0..roots.len()).collect();
+    fn find(parent: &mut [usize], mut i: usize) -> usize {
+        while parent[i] != i {
+            parent[i] = parent[parent[i]];
+            i = parent[i];
+        }
+        i
+    }
+    for (a, b) in pairs {
+        let (ra, rb) = (find(&mut parent, a), find(&mut parent, b));
+        if ra != rb {
+            parent[ra] = rb;
+        }
+    }
+    for p in project.iter_mut().flatten() {
+        *p = find(&mut parent, *p);
+    }
+    Some(project)
+}
+
 /// Whether a language's classes name every base they have (Java, Kotlin,
 /// C#, Dart — a Dart mixin by `with`): a project class's methods are its
 /// own and its project bases', or else a library's.
@@ -779,6 +897,89 @@ fn go_struct_fields(src: &str, symbols: &[Located]) -> Vec<(String, String, Stri
     out
 }
 
+/// [`go_import_names`] of `src`, read once per file (kept among the
+/// `fields` it caches).
+fn go_imports(src: &str, fields: &mut HashMap<(usize, String), Option<String>>) -> Vec<String> {
+    fields
+        .entry((usize::MAX - 1, String::new()))
+        .or_insert_with(|| Some(go_import_names(src).join(" ")))
+        .as_deref()
+        .unwrap_or("")
+        .split(' ')
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// A Go file's package-level variables with their types, as fields of its
+/// package ([`FileContext::fields`]): `var Form Binding = formBinding{}` is
+/// `Form`, of the `formBinding` it is (a composite literal says the value's
+/// type exactly, where the declaration names an interface), `var log =
+/// &Logger{}` of `Logger`; one of no type this can read is none.
+fn go_package_vars(src: &str, package: &str) -> Vec<(String, String, String)> {
+    let mut out = Vec::new();
+    let mut in_block = false;
+    for line in src.lines() {
+        let code = line.split("//").next().unwrap_or("").trim_end();
+        let spec = if in_block {
+            if code.trim_start().starts_with(')') {
+                in_block = false;
+                continue;
+            }
+            // Only the block's own lines, not a value's continuation.
+            if !line.starts_with('\t') || line.starts_with("\t\t") {
+                continue;
+            }
+            code.trim()
+        } else if let Some(rest) = code.strip_prefix("var ") {
+            let rest = rest.trim();
+            if rest == "(" {
+                in_block = true;
+                continue;
+            }
+            rest
+        } else {
+            continue;
+        };
+        let (decl, value) = match spec.split_once('=') {
+            Some((d, v)) => (d.trim(), Some(v.trim())),
+            None => (spec, None),
+        };
+        let mut words = decl.split_whitespace();
+        let Some(names) = words.next() else {
+            continue;
+        };
+        let declared: Option<String> = words
+            .next()
+            .map(|t| t.trim_start_matches('*'))
+            .filter(|t| {
+                t.chars()
+                    .all(|c| c == '_' || c == '.' || c.is_alphanumeric())
+            })
+            .map(str::to_string);
+        // `formBinding{}`, `&Logger{…}`: the value's own type.
+        let literal = value.and_then(|v| {
+            let v = v.trim_start_matches('&');
+            let end = v.find('{')?;
+            let ty = &v[..end];
+            (!ty.is_empty()
+                && ty
+                    .chars()
+                    .all(|c| c == '_' || c == '.' || c.is_alphanumeric()))
+            .then(|| ty.to_string())
+        });
+        let Some(ty) = literal.or(declared) else {
+            continue;
+        };
+        for name in names.split(',').map(str::trim) {
+            if is_plain_name(name) && name != "_" {
+                out.push((package.to_string(), name.to_string(), ty.clone()));
+            }
+        }
+    }
+    out
+}
+
 /// The names a Go file calls its imports by: an import's alias, else its
 /// path's last element — a major version's (`/v10`) or a `.vN` suffix
 /// passed over (`validator`, `yaml`). A blank or dot import names none.
@@ -1134,7 +1335,13 @@ pub fn context_in(src: &str, lang: Lang, symbols: &[Located]) -> FileContext {
         returns,
         parameters,
         fields: match lang {
-            Lang::Go => go_struct_fields(src, symbols),
+            Lang::Go => {
+                let mut fields = go_struct_fields(src, symbols);
+                if let Some(package) = package_of(src, lang) {
+                    fields.extend(go_package_vars(src, &package));
+                }
+                fields
+            }
             _ => Vec::new(),
         },
     }
@@ -2155,23 +2362,39 @@ impl ProjectCallGraph {
                     .filter(move |&i| i != callee && facts[i].takes(cs.arity))
             };
             if fits(callee) {
-                // An argument of a class the parameter names exactly: that
-                // overload is the most specific (`sleep(time)` with `time:
-                // FiniteDuration` is `sleep(FiniteDuration)`, not
-                // `sleep(Duration)`).
-                let exact = |i: usize| {
-                    arguments.split(',').any(|a| a.starts_with('T'))
-                        && node_parameters[i].is_some_and(|params| {
-                            arguments.split(',').zip(params.split(',')).all(|(a, p)| {
-                                if a.starts_with('T') {
-                                    a.trim_end_matches('?') == p.trim_end_matches('?')
+                // The most specific of the overloads that fit, by what the
+                // arguments of a known class are passed as: the class itself
+                // (`sleep(time)` with `time: FiniteDuration` is
+                // `sleep(FiniteDuration)`, not `sleep(Duration)`), then a
+                // class it extends or implements, or a type parameter —
+                // before `Object` or a class this knows nothing of
+                // (`Send(ping)` is `Send(IRequest<T>)`, not `Send(object)`).
+                let rank = |i: usize| -> usize {
+                    node_parameters[i].map_or(0, |params| {
+                        arguments
+                            .split(',')
+                            .zip(params.split(','))
+                            .filter(|(a, _)| a.starts_with('T'))
+                            .map(|(a, p)| {
+                                // (A nullable mark trimmed, a type parameter's
+                                // `?` is nothing.)
+                                let (a, p) = (a.trim_end_matches('?'), p.trim_end_matches('?'));
+                                if a == p {
+                                    2
+                                } else if p.is_empty()
+                                    || p.strip_prefix('T')
+                                        .is_some_and(|class| descends(&a[1..], class))
+                                {
+                                    1
                                 } else {
-                                    passes(a, p, lang, &declared, &descends)
+                                    0
                                 }
                             })
-                        })
+                            .sum()
+                    })
                 };
-                return exact(callee) || !others().any(exact);
+                let own = rank(callee);
+                return !others().filter(|&i| fits(i)).any(|i| rank(i) > own);
             }
             !others().any(fits)
         };
@@ -2284,7 +2507,15 @@ impl ProjectCallGraph {
                     // package's (`http.Header`) is a library's value, whose
                     // methods are none of the project's.
                     Some(Receiver::Type(t)) if t.starts_with(THROUGH) => {
-                        let ty = through(&t[THROUGH.len()..]);
+                        // `.`: the calling file's own package.
+                        let chain = &t[THROUGH.len()..];
+                        let chain = match chain.strip_prefix(".|") {
+                            Some(rest) => {
+                                format!("{}|{rest}", fc.context.package.as_deref().unwrap_or(""))
+                            }
+                            None => chain.to_string(),
+                        };
+                        let ty = through(&chain);
                         if ty.as_deref().is_some_and(|ty| {
                             ty.split_once('.')
                                 .is_some_and(|(pkg, _)| !go_packages.contains_key(pkg))
@@ -2876,6 +3107,17 @@ impl ProjectCallGraph {
                     }
                 }
             }
+        }
+
+        // Projects that share a folder and nothing else (a repository of
+        // samples, each with its own build): none calls another's code.
+        if let Some(universe) = independent_projects(&nodes, &common, scope) {
+            edges.retain(
+                |&(caller, callee)| match (universe[caller], universe[callee]) {
+                    (Some(a), Some(b)) => a == b,
+                    _ => true,
+                },
+            );
         }
 
         finalize(nodes, edges)
@@ -4191,6 +4433,7 @@ fn parameter_kinds(src: &str, l: &Located, lang: Lang) -> Option<String> {
     if inner.is_empty() || (lang == Lang::Cpp && inner == "void") {
         return None;
     }
+    let generic = type_parameters(&text[..open], lang);
     let mut kinds: Vec<String> = Vec::new();
     for (i, part) in split_top_level(inner).enumerate() {
         let part = part.trim();
@@ -4209,9 +4452,127 @@ fn parameter_kinds(src: &str, l: &Located, lang: Lang) -> Option<String> {
             kinds.push("v".to_string());
             break;
         }
+        // One of its own type parameters (`const Container&`, `T`): any.
+        let base = ty
+            .trim_start_matches("const ")
+            .trim()
+            .split(['<', '[', '&', '*', ' ', '?'])
+            .next()
+            .unwrap_or("");
+        if generic.iter().any(|g| g == base) {
+            kinds.push("?".to_string());
+            continue;
+        }
         kinds.push(type_kind(ty, lang));
     }
     (!kinds.is_empty()).then(|| kinds.join(","))
+}
+
+/// The type parameters a declaration's text before its parameter list
+/// names: C++'s `template <typename Container, class It>`, Java's and
+/// Kotlin's `<T extends X>` / `fun <reified T>`, C#'s `Send<TRequest>`,
+/// Scala's `def f[F[_], A]`.
+fn type_parameters(signature: &str, lang: Lang) -> Vec<String> {
+    let (open, close) = match lang {
+        Lang::Scala => ('[', ']'),
+        _ => ('<', '>'),
+    };
+    let mut out = Vec::new();
+    // C#'s and Scala's follow the name, the parameter list's opening next
+    // (`Task<object> Send<T>(`): a group before is the return type's.
+    let mut rest = signature;
+    if matches!(lang, Lang::CSharp | Lang::Scala) {
+        let trimmed = signature.trim_end();
+        if !trimmed.ends_with(close) {
+            return out;
+        }
+        let mut depth = 0i32;
+        let start = trimmed.char_indices().rev().find_map(|(i, c)| {
+            if c == close {
+                depth += 1;
+            } else if c == open {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            None
+        });
+        match start {
+            Some(start) => rest = &trimmed[start..],
+            None => return out,
+        }
+    }
+    while let Some(at) = rest.find(open) {
+        let mut depth = 0i32;
+        let mut end = None;
+        for (i, c) in rest[at..].char_indices() {
+            if c == open {
+                depth += 1;
+            } else if c == close {
+                depth -= 1;
+                if depth == 0 {
+                    end = Some(at + i);
+                    break;
+                }
+            }
+        }
+        let Some(end) = end else {
+            break;
+        };
+        // A type's own arguments (`Map<String, Int>`) name no parameter:
+        // only a group a keyword or a name's end comes before.
+        let before = rest[..at].trim_end();
+        let opens_parameters = match lang {
+            Lang::Cpp => before.ends_with("template"),
+            Lang::Java | Lang::Kotlin => {
+                before.is_empty()
+                    || before.ends_with("fun")
+                    || before.split_whitespace().last().is_some_and(|w| {
+                        matches!(
+                            w,
+                            "public"
+                                | "private"
+                                | "protected"
+                                | "static"
+                                | "final"
+                                | "abstract"
+                                | "synchronized"
+                                | "default"
+                        )
+                    })
+            }
+            _ => true,
+        };
+        if opens_parameters {
+            for item in split_top_level(&rest[at + 1..end]) {
+                let words: Vec<&str> = item
+                    .split(|c: char| c.is_whitespace() || c == ':' || c == '[' || c == '=')
+                    .filter(|w| {
+                        !w.is_empty()
+                            && !matches!(
+                                *w,
+                                "typename"
+                                    | "class"
+                                    | "reified"
+                                    | "in"
+                                    | "out"
+                                    | "const"
+                                    | "+"
+                                    | "-"
+                            )
+                    })
+                    .collect();
+                if let Some(name) = words.first()
+                    && is_plain_name(name.trim_start_matches(['+', '-']))
+                {
+                    out.push(name.trim_start_matches(['+', '-']).to_string());
+                }
+            }
+        }
+        rest = &rest[end + 1..];
+    }
+    out
 }
 
 /// The type a parameter's text declares — `...` for a variadic one — or
@@ -4319,9 +4680,10 @@ fn split_top_level_at(text: &str, sep: char) -> &str {
 
 /// The kind of value a type is, as argument and parameter kinds name it: `s`
 /// a string, `i` an integer, `f` a floating-point number, `b` a boolean,
-/// `c` a character, `p` a C or C++ character pointer, `a` an array, `?` one
-/// that takes anything (`Object`, `Any`, a type parameter, a pointer, a
-/// template's `auto`), else `T` and the class's name (`TCart`). A nullable
+/// `c` a character, `p` a C or C++ character pointer, `a` an array, `o` the
+/// type every value is (`Object`, `Any`, C#'s `object`), `?` one that takes
+/// anything this cannot rank (a type parameter, a pointer, `auto`), else
+/// `T` and the class's name (`TCart`). A nullable
 /// type (`String?`, C#'s `int?`) ends with `?`.
 fn type_kind(ty: &str, lang: Lang) -> String {
     let mut t = ty.trim();
@@ -4369,7 +4731,7 @@ fn type_kind(ty: &str, lang: Lang) -> String {
             "float" | "double" | "Float" | "Double" => "f",
             "boolean" | "Boolean" => "b",
             "char" | "Character" => "c",
-            "Object" => "?",
+            "Object" => "o",
             _ => "",
         },
         Lang::Kotlin | Lang::Scala => match last {
@@ -4378,7 +4740,8 @@ fn type_kind(ty: &str, lang: Lang) -> String {
             "Float" | "Double" => "f",
             "Boolean" => "b",
             "Char" => "c",
-            "Any" | "AnyRef" | "AnyVal" => "?",
+            "Any" | "AnyRef" => "o",
+            "AnyVal" => "?",
             _ => "",
         },
         Lang::CSharp => match last {
@@ -4389,7 +4752,8 @@ fn type_kind(ty: &str, lang: Lang) -> String {
             "float" | "double" | "decimal" | "Single" | "Double" | "Decimal" => "f",
             "bool" | "Boolean" => "b",
             "char" | "Char" => "c",
-            "object" | "Object" | "dynamic" | "var" => "?",
+            "object" | "Object" => "o",
+            "dynamic" | "var" => "?",
             _ => "",
         },
         Lang::Cpp => {
@@ -4468,7 +4832,12 @@ fn passes(
     declared: &dyn Fn(&str) -> bool,
     descends: &dyn Fn(&str, &str) -> bool,
 ) -> bool {
-    if arg == "?" || param == "?" || param == "v" {
+    // `Object`, `Any`, `object`: what any value is (but null, for a Kotlin
+    // type not nullable).
+    if arg == "n" && param == "o" && lang == Lang::Kotlin {
+        return false;
+    }
+    if arg == "?" || matches!(param.trim_end_matches('?'), "" | "o" | "v") {
         return true;
     }
     let nullable = param.ends_with('?');
@@ -5505,11 +5874,31 @@ fn receiver_of(
             .entry((scope.from, root.to_string()))
             .or_insert_with(|| Bindings::from(scope.from, places))
             .said_before(call.start_byte(), root, scope, src, lang);
-        if let Said::Type(ty, _) = said
+        if let Said::Type(ty, _) = &said
             && !ty.starts_with(RETURNED)
         {
             return Some(Receiver::Type(format!(
                 "{THROUGH}{ty}|{}",
+                path.replace('.', "|")
+            )));
+        }
+        // A variable of an imported package (`binding.Form.Bind(…)`), or
+        // one of this package's (`defaultLogger.out.Write(…)`).
+        if said == Said::Nothing {
+            let root = if go_imports(src, fields).iter().any(|i| i == root) {
+                root
+            } else if !path.contains('.') {
+                return Some(Receiver::Type(format!("{THROUGH}.|{root}|{path}")));
+            } else {
+                "."
+            };
+            let path = if root == "." {
+                receiver.to_string()
+            } else {
+                path.to_string()
+            };
+            return Some(Receiver::Type(format!(
+                "{THROUGH}{root}|{}",
                 path.replace('.', "|")
             )));
         }
@@ -5523,6 +5912,13 @@ fn receiver_of(
             }
             if lang == Lang::CSharp
                 && let Some(ty) = service_type(receiver)
+            {
+                return Some(Receiver::Declared(ty));
+            }
+            // Scala's summoner (`Spawn[IO].background(fa)`): the instance of
+            // the type class it names, as declared.
+            if lang == Lang::Scala
+                && let Some(ty) = scala_summoned(receiver)
             {
                 return Some(Receiver::Declared(ty));
             }
@@ -5590,6 +5986,12 @@ fn receiver_of(
         && !receiver.starts_with(|c: char| c.is_uppercase())
     {
         *unbound = Some(receiver.to_string());
+    }
+    // A Go name no import gives: a variable of the package (`Form` with
+    // `var Form Binding = formBinding{}` in another of its files), of the
+    // type its declaration says, once the package's files are read.
+    if lang == Lang::Go && !go_imports(src, fields).iter().any(|i| i == receiver) {
+        return Some(Receiver::Type(format!("{THROUGH}.|{receiver}")));
     }
     // A JavaScript runtime's own object, not bound here (`console`,
     // `document`, `localStorage`): its methods are the runtime's.
@@ -6182,6 +6584,18 @@ fn binding_at(head: &str, after: &str, lang: Lang) -> Binding {
     {
         return Binding::Typed(ty.to_string(), true);
     }
+    // A Go name given another's value (`b := Form`): a package variable's
+    // type, once the package is read.
+    if lang == Lang::Go
+        && let Some(rhs) = assigned
+    {
+        let expr = rhs.trim_start();
+        let end = expr.find(['\n', ';', ')', ',', '}']).unwrap_or(expr.len());
+        let name = expr[..end].trim();
+        if is_plain_name(name) && !matches!(name, "nil" | "true" | "false" | "iota") {
+            return Binding::Typed(format!("{THROUGH}.|{name}"), true);
+        }
+    }
     // A Go value another package's function returns (`w :=
     // httptest.NewRecorder()`): named by that function, which the graph
     // tells a library's from the project's by the file's imports.
@@ -6591,6 +7005,29 @@ fn constructed_type(rhs: &str, lang: Lang) -> Option<String> {
         _ => return None,
     };
     whole_expression(rest).then(|| ty.to_string())
+}
+
+/// The type class a Scala summoner names — `Spawn` for `Spawn[IO]`,
+/// `Async` for `Async[F]` — its type arguments the whole rest.
+fn scala_summoned(receiver: &str) -> Option<String> {
+    let (name, rest) = receiver.split_once('[')?;
+    let name = name.trim();
+    let inner = rest.strip_suffix(']')?;
+    let mut depth = 0i32;
+    for c in inner.chars() {
+        match c {
+            '[' => depth += 1,
+            ']' => {
+                depth -= 1;
+                if depth < 0 {
+                    return None;
+                }
+            }
+            '(' | ')' => return None,
+            _ => {}
+        }
+    }
+    (depth == 0 && type_like(name, Lang::Scala)).then(|| name.to_string())
 }
 
 /// The `T` .NET's dependency injection resolves, the whole expression:
@@ -11470,6 +11907,204 @@ def main():
             factory_type("Cart.Create()", Lang::CSharp).as_deref(),
             Some("Cart")
         );
+    }
+
+    /// Projects that only share a folder — samples, each with its own build —
+    /// call none of each other's code; one that imports from another is one
+    /// with it.
+    #[test]
+    fn independent_projects_do_not_call_each_other() {
+        let dir = crate::testutil::TempDir::new("independent-projects");
+        let root = dir.path();
+        let write = |rel: &str, text: &str| {
+            let path = root.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, text).unwrap();
+            path
+        };
+        write("anorm/build.sbt", "name := \"anorm\"\n");
+        write("slick/build.sbt", "name := \"slick\"\n");
+        write("uses-anorm/build.sbt", "name := \"uses\"\n");
+        let repo =
+            "package models\nclass ComputerRepository {\n  def delete(id: Long): Unit = ()\n}\n";
+        let controller = "package controllers\nclass HomeController(repo: ComputerRepository) {\n  def remove(id: Long): Unit = repo.delete(id)\n}\n";
+        let files = [
+            write("anorm/app/models/ComputerRepository.scala", repo),
+            write("anorm/app/controllers/HomeController.scala", controller),
+            write("slick/app/models/ComputerRepository.scala", repo),
+            write(
+                "uses-anorm/app/Main.scala",
+                "package app\nclass Main(repo: ComputerRepository) {\n  def run(): Unit = repo.delete(1)\n}\n",
+            ),
+        ];
+        let sources: Vec<(PathBuf, String)> = files
+            .iter()
+            .map(|f| (f.clone(), std::fs::read_to_string(f).unwrap()))
+            .collect();
+        let named: Vec<(String, String)> = sources
+            .iter()
+            .map(|(f, s)| (f.display().to_string(), s.clone()))
+            .collect();
+        let pairs: Vec<(&str, &str)> = named
+            .iter()
+            .map(|(f, s)| (f.as_str(), s.as_str()))
+            .collect();
+        // `uses-anorm` imports anorm's repository: one project with it.
+        let scope: HashMap<PathBuf, HashSet<PathBuf>> =
+            HashMap::from([(files[3].clone(), HashSet::from([files[0].clone()]))]);
+        let g = ProjectCallGraph::build(defs_of(&pairs), &sources, &scope);
+        let reached = |caller: &str| {
+            let at = (0..g.node_count())
+                .find(|&n| g.node(n).name == caller)
+                .unwrap();
+            let mut out: Vec<String> = g
+                .callees_of(at)
+                .iter()
+                .map(|&c| {
+                    let file = &g.node(c).file;
+                    file.strip_prefix(root)
+                        .unwrap_or(file)
+                        .display()
+                        .to_string()
+                })
+                .collect();
+            out.sort();
+            out
+        };
+        assert_eq!(
+            reached("remove"),
+            ["anorm/app/models/ComputerRepository.scala"]
+        );
+        assert_eq!(
+            reached("run"),
+            ["anorm/app/models/ComputerRepository.scala"]
+        );
+    }
+
+    /// A Go package's variables, declared in one file and used in another,
+    /// are of the type their value is (`Form = formBinding{}` declared a
+    /// `Binding`): `Form.Bind(…)`, `b := Form; b.Name()` and, from another
+    /// package, `binding.Form.Name()` reach `formBinding`'s.
+    #[test]
+    fn a_go_package_variable_has_its_values_type() {
+        let decls = "package binding\n\ntype Binding interface {\n\tName() string\n\tBind(r int) error\n}\n\ntype formBinding struct{}\n\nfunc (formBinding) Name() string { return \"form\" }\n\nfunc (formBinding) Bind(r int) error { return nil }\n\ntype uriBinding struct{}\n\nfunc (uriBinding) Name() string { return \"uri\" }\n\nvar (\n\tForm Binding = formBinding{}\n\tURI          = uriBinding{}\n)\n";
+        let user = "package binding\n\nfunc a() {\n\t_ = Form.Bind(1)\n}\n\nfunc b() {\n\tf := Form\n\t_ = f.Name()\n}\n";
+        let other = "package gin\n\nimport \"example.com/gin/binding\"\n\nfunc c() {\n\t_ = binding.Form.Name()\n}\n";
+        let g = graph(&[
+            ("/p/binding/binding.go", decls),
+            ("/p/binding/use.go", user),
+            ("/p/gin.go", other),
+        ]);
+        let reached = |caller: &str| {
+            let at = (0..g.node_count())
+                .find(|&n| g.node(n).name == caller)
+                .unwrap();
+            let mut out: Vec<String> = g
+                .callees_of(at)
+                .iter()
+                .map(|&c| format!("{}:{}", g.node(c).name, g.node(c).line))
+                .collect();
+            out.sort();
+            out
+        };
+        assert_eq!(reached("a"), ["Bind:12"], "{:?}", edges(&g));
+        assert_eq!(reached("b"), ["Name:10"], "{:?}", edges(&g));
+        assert_eq!(reached("c"), ["Name:10"], "{:?}", edges(&g));
+        assert_eq!(
+            go_package_vars(decls, "binding"),
+            [
+                (
+                    "binding".to_string(),
+                    "Form".to_string(),
+                    "formBinding".to_string()
+                ),
+                (
+                    "binding".to_string(),
+                    "URI".to_string(),
+                    "uriBinding".to_string()
+                )
+            ]
+        );
+    }
+
+    /// A Scala summoner (`Spawn[IO].background(fa)`) is the type class's
+    /// instance: its method, its base's, or an instance's override.
+    #[test]
+    fn a_scala_summoner_is_its_type_class() {
+        let src = "trait GenSpawn[F[_]] {\n  def background[A](fa: F[A]): Int = 0\n}\ntrait Spawn[F[_]] extends GenSpawn[F]\nobject Spawn {\n  def apply[F[_]](implicit F: Spawn[F]): Spawn[F] = F\n}\nclass Other {\n  def background(x: Int): Int = 1\n}\nclass IOLike {\n  def bg(): Int = Spawn[IO].background(this)\n}\n";
+        let g = graph(&[("/p/src/Spawn.scala", src)]);
+        let at = (0..g.node_count())
+            .find(|&n| g.node(n).name == "bg")
+            .unwrap();
+        let reached: Vec<String> = g
+            .callees_of(at)
+            .iter()
+            .map(|&c| format!("{}:{}", g.node(c).name, g.node(c).line))
+            .collect();
+        assert_eq!(reached, ["background:2"], "{:?}", edges(&g));
+        assert_eq!(scala_summoned("Async[F]").as_deref(), Some("Async"));
+        assert_eq!(
+            scala_summoned("MonadCancel[F, Throwable]").as_deref(),
+            Some("MonadCancel")
+        );
+        assert_eq!(scala_summoned("xs[0]"), None);
+        assert_eq!(scala_summoned("Ref[IO](1)"), None);
+    }
+
+    /// Of the overloads an argument of a known class fits, the most specific:
+    /// its own class, then a class it extends or implements, before
+    /// `Object`/`object`/`Any` or a class the project knows nothing of.
+    #[test]
+    fn the_most_specific_overload_is_reached() {
+        let cs = "public interface IBaseRequest {}\npublic interface IRequest<T> : IBaseRequest {}\npublic class Ping : IRequest<Pong> {}\npublic class Mediator\n{\n    public Task<T> Send<T>(IRequest<T> request) => null;\n    public Task<object> Send(object request) => null;\n}\npublic class Use\n{\n    public void A(Mediator m)\n    {\n        var ping = new Ping();\n        m.Send(ping);\n    }\n}\n";
+        let java = "class Cart {}\nclass Shop {\n  void put(Object o) {}\n  void put(Cart c) {}\n  void a(Cart c) { put(c); }\n  void b(Thing t) { put(t); }\n}\n";
+        // A template's own parameter takes the vector; `std::span` is another
+        // class.
+        let cpp = "#include <vector>\ntemplate <typename Container>\nint to_hex(const Container& c, size_t n = 32) { return 0; }\ntemplate <typename Value, size_t Extent>\nint to_hex(const std::span<Value, Extent>& c, size_t n = 32) { return 1; }\nvoid run(std::vector<char> buf) {\n  to_hex(buf);\n}\n";
+        assert_eq!(
+            type_parameters(
+                "template <typename Container, class It>\nint to_hex",
+                Lang::Cpp
+            ),
+            ["Container", "It"]
+        );
+        assert_eq!(
+            type_parameters("public <T extends Comparable<T>> T max", Lang::Java),
+            ["T"]
+        );
+        assert_eq!(
+            type_parameters("fun <reified T : Any> parse", Lang::Kotlin),
+            ["T"]
+        );
+        assert_eq!(
+            type_parameters("public Task<TResponse> Send<TResponse>", Lang::CSharp),
+            ["TResponse"]
+        );
+        assert!(type_parameters("public Task<object> Send", Lang::CSharp).is_empty());
+        assert_eq!(
+            type_parameters("def sleep[F[_], A]", Lang::Scala),
+            ["F", "A"]
+        );
+        assert!(type_parameters("public Map<String, Integer> build", Lang::Java).is_empty());
+        for (file, src, caller, callee, want) in [
+            ("/p/src/Mediator.cs", cs, "A", "Send", vec![6]),
+            ("/p/src/Shop.java", java, "a", "put", vec![4]),
+            ("/p/src/Shop.java", java, "b", "put", vec![3, 4]),
+            ("/p/src/hex.cpp", cpp, "run", "to_hex", vec![3]),
+        ] {
+            let g = graph(&[(file, src)]);
+            let at = (0..g.node_count())
+                .find(|&n| g.node(n).name == caller)
+                .unwrap();
+            let mut reached: Vec<usize> = g
+                .callees_of(at)
+                .iter()
+                .filter(|&&c| g.node(c).name == callee)
+                .map(|&c| g.node(c).line)
+                .collect();
+            reached.sort_unstable();
+            assert_eq!(reached, want, "{file} {caller}: {:?}", edges(&g));
+        }
     }
 
     /// A class's body is open where its braces say, those in strings,
