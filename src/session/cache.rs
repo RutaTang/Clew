@@ -160,7 +160,9 @@ use crate::incremental::Version;
 /// fewest arguments its own list's; Zig's fields and file variables.
 /// 43: one link of a chain typed by its method's return; Dart's `const`
 /// constructor calls.
-pub(crate) const CACHE_VERSION: u32 = 43;
+/// 44: functions declared inside another ([`CachedCalls::nested`]); C++
+/// specifier macros; Zig's standard-library results.
+pub(crate) const CACHE_VERSION: u32 = 44;
 
 /// A cached symbol (the index entry minus the paths, which are reconstructed
 /// from the project root + relative path on load).
@@ -300,6 +302,10 @@ pub struct CachedCalls {
     /// (`clew_core::projectcalls::FileContext::fields`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fields: Vec<(String, String, String)>,
+    /// Definition lines of functions declared inside another
+    /// (`clew_core::projectcalls::FileContext::nested`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nested: Vec<usize>,
 }
 
 /// Everything cached about one file: how to confirm it is unchanged (mtime,
@@ -434,6 +440,7 @@ mod tests {
                 returns: vec![(3, "Cart".into())],
                 parameters: vec![(3, "s,i".into())],
                 fields: vec![("Context".into(), "Request".into(), "http.Request".into())],
+                nested: vec![9],
             }),
         }
     }

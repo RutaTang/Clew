@@ -166,6 +166,10 @@ pub struct FileContext {
     /// "http.Request")`), pointers and embedding read through: what a chain
     /// of fields from a value is ([`THROUGH`]).
     pub fields: Vec<(String, String, String)>,
+    /// Definition lines of the functions a Scala, Kotlin, Java, C# or Dart
+    /// file declares inside another (a local `def`, an anonymous class's
+    /// method): no method call on some other value reaches them.
+    pub nested: Vec<usize>,
 }
 
 /// The mark a receiver's type starts with when the receiver was assigned
@@ -604,6 +608,15 @@ fn declared_return(src: &str, l: &Located, lang: Lang) -> Option<String> {
                 .unwrap_or(ty);
             // Zig's `callconv(.c)`, an error set's `E!T`.
             let ty = ty.rsplit('!').next().unwrap_or(ty);
+            // A Zig path through the file's own name for a part of the
+            // standard library (`Io.net.Stream`): in full, for the aliases
+            // to read ([`context_in`]).
+            if lang == Lang::Zig
+                && let Some(path) = zig_type_name(ty.trim())
+                && path.contains('.')
+            {
+                return Some(path);
+            }
             ty.trim().to_string()
         }
         Lang::Java | Lang::CSharp | Lang::Dart | Lang::Cpp => {
@@ -850,6 +863,27 @@ fn declared_arity(src: &str, l: &Located, lang: Lang) -> Option<(u8, u8)> {
         u8::try_from(fewest).unwrap_or(ANY),
         u8::try_from(most).unwrap_or(ANY),
     ))
+}
+
+/// The definition lines of the callables inside another callable's span
+/// ([`FileContext::nested`]).
+fn nested_functions(symbols: &[Located]) -> Vec<usize> {
+    let spans: Vec<(usize, usize)> = symbols
+        .iter()
+        .filter(|l| is_callable(&l.symbol.kind) || calls_only(&l.symbol.kind))
+        .map(|l| (l.symbol.line, l.symbol.end_line.max(l.symbol.line)))
+        .collect();
+    symbols
+        .iter()
+        .filter(|l| is_callable(&l.symbol.kind))
+        .filter(|l| {
+            let (line, end) = (l.symbol.line, l.symbol.end_line.max(l.symbol.line));
+            spans
+                .iter()
+                .any(|&(first, last)| first < line && end <= last && (first, last) != (line, end))
+        })
+        .map(|l| l.symbol.line)
+        .collect()
 }
 
 /// A Zig file's container fields with their types ([`FileContext::fields`]):
@@ -1395,6 +1429,36 @@ pub fn context_in(src: &str, lang: Lang, symbols: &[Located]) -> FileContext {
             .collect(),
         _ => Vec::new(),
     };
+    // A Zig function's result of a standard-library type the file names by
+    // an alias (`const Io = std.Io;`, `fn testStream() Io.net.Stream`): the
+    // library's, by its path in full.
+    let returns = if lang == Lang::Zig {
+        let aliases: HashMap<&str, &str> = src
+            .lines()
+            .filter_map(|line| {
+                let line = line.strip_prefix("pub ").unwrap_or(line);
+                let (name, value) = line.strip_prefix("const ")?.split_once('=')?;
+                let value = value.trim().strip_suffix(';')?.trim_end();
+                (value == "std" || value.starts_with("std.")).then_some((name.trim(), value))
+            })
+            .collect();
+        returns
+            .into_iter()
+            .map(|(line, ty)| {
+                let (first, rest) = ty.split_once('.').unwrap_or((ty.as_str(), ""));
+                match aliases.get(first) {
+                    Some(path) if rest.is_empty() => (line, path.to_string()),
+                    Some(path) => (line, format!("{path}.{rest}")),
+                    // A project type by its own name (`analysis.Type` is a
+                    // `Type`), the standard library's in full.
+                    None if first == "std" => (line, ty),
+                    None => (line, ty.rsplit('.').next().unwrap_or(&ty).to_string()),
+                }
+            })
+            .collect()
+    } else {
+        returns
+    };
     FileContext {
         package: package_of(src, lang),
         enclosing: enclosing_packages(src, lang),
@@ -1414,6 +1478,12 @@ pub fn context_in(src: &str, lang: Lang, symbols: &[Located]) -> FileContext {
                 fields
             }
             Lang::Zig => zig_fields(src, symbols),
+            _ => Vec::new(),
+        },
+        nested: match lang {
+            Lang::Scala | Lang::Kotlin | Lang::Java | Lang::CSharp | Lang::Dart => {
+                nested_functions(symbols)
+            }
             _ => Vec::new(),
         },
     }
@@ -2374,6 +2444,20 @@ impl ProjectCallGraph {
             }
         }
         let declared = |ty: &str| declared_types.contains(ty);
+        // The functions declared inside another ([`FileContext::nested`]).
+        let nested_lines: HashSet<(&Path, usize)> = files
+            .iter()
+            .flat_map(|f| {
+                f.context
+                    .nested
+                    .iter()
+                    .map(move |&line| (f.file.as_path(), line))
+            })
+            .collect();
+        let nested_node: Vec<bool> = nodes
+            .iter()
+            .map(|n| nested_lines.contains(&(n.file.as_path(), n.line)))
+            .collect();
         // Every Go struct's fields, by the struct's name and the field's.
         let field_types: HashMap<(&str, &str), &str> = files
             .iter()
@@ -2595,7 +2679,8 @@ impl ProjectCallGraph {
                             let first = types.next().flatten()?;
                             (types.all(|t| t == Some(first))
                                 && (declared_types.contains(first)
-                                    || project_types.contains(first)))
+                                    || project_types.contains(first)
+                                    || first.starts_with("std.")))
                             .then(|| first.to_string())
                         });
                         let function = function.split_once('#').map_or(function, |(_, m)| m);
@@ -2618,7 +2703,8 @@ impl ProjectCallGraph {
                                             // value of no known type did.
                                             (types.all(|t| t == Some(first))
                                                 && (declared_types.contains(first)
-                                                    || project_types.contains(first)))
+                                                    || project_types.contains(first)
+                                                    || first.starts_with("std.")))
                                             .then(|| first.to_string())
                                         })
                                         .clone()
@@ -3146,6 +3232,34 @@ impl ProjectCallGraph {
                             })
                         })
                     });
+                // A method called on a value of no known type: no function
+                // declared inside another (a local `def`, an anonymous
+                // class's method) is the value's.
+                // A bare call of a function the caller declares inside it,
+                // before the call: that one, as its scope shadows all others.
+                let local = |c: usize| {
+                    nested_node[c]
+                        && nodes[c].file == fc.file
+                        && nodes[caller].line < nodes[c].line
+                        && nodes[c].line < cs.line
+                };
+                let outer_only: Vec<usize>;
+                let targets: &[usize] = if cs.method
+                    && cs.receiver.is_none()
+                    && targets.iter().any(|&c| nested_node[c])
+                {
+                    outer_only = targets
+                        .iter()
+                        .copied()
+                        .filter(|&c| !nested_node[c])
+                        .collect();
+                    &outer_only
+                } else if !cs.method && targets.iter().any(|&c| local(c)) {
+                    outer_only = targets.iter().copied().filter(|&c| local(c)).collect();
+                    &outer_only
+                } else {
+                    targets
+                };
                 let kept: Vec<usize>;
                 let targets: &[usize] = if let Some(own) = cpp_own {
                     kept = targets
@@ -12496,6 +12610,15 @@ def main():
             "{:?}",
             fc.owners
         );
+        // A function's specifier macro before its type hides no function,
+        // and a macro called (`FMT_ASSERT(…)`) is left as it is.
+        let specified = "namespace spdlog {\nSPDLOG_INLINE std::shared_ptr<logger> get(const std::string &name) {\n    FMT_ASSERT(name.size(), \"x\");\n    return nullptr;\n}\nFMT_CONSTEXPR20 FMT_INLINE auto size() const -> int { return 0; }\n}\n";
+        let names: Vec<String> = crate::outline::extract_located(specified, "cpp")
+            .into_iter()
+            .map(|l| l.symbol.name)
+            .collect();
+        assert!(names.contains(&"get".to_string()), "{names:?}");
+        assert!(names.contains(&"size".to_string()), "{names:?}");
         let g = graph(&[("/p/src/logger.cpp", src)]);
         let at = (0..g.node_count())
             .find(|&n| g.node(n).name == "run")
@@ -12640,6 +12763,34 @@ def main():
         );
         assert_eq!(chain_link("repo.find(id)"), Some(("repo", "find")));
         assert_eq!(chain_link("find(id)"), None);
+    }
+
+    /// A method called on a value of no known type reaches no function
+    /// declared inside another (a local `def`), which a bare call in its
+    /// function still does; a Zig function's result of a standard-library
+    /// type the file names by an alias is the library's.
+    #[test]
+    fn nested_functions_and_zig_library_results() {
+        let scala = "class IOFiber {\n  def cancel(): Unit = ()\n}\nobject IOPlatform {\n  def unsafeRunTimed(): Unit = {\n    def cancel(): Unit = ()\n    cancel()\n  }\n}\nclass Suite {\n  def t(): Unit = make().cancel()\n}\n";
+        let g = graph(&[("/p/src/IO.scala", scala)]);
+        let reached = |g: &ProjectCallGraph, caller: &str| {
+            let at = (0..g.node_count())
+                .find(|&n| g.node(n).name == caller)
+                .unwrap();
+            let mut out: Vec<usize> = g.callees_of(at).iter().map(|&c| g.node(c).line).collect();
+            out.sort_unstable();
+            out
+        };
+        assert_eq!(reached(&g, "t"), [2], "{:?}", edges(&g));
+        assert_eq!(reached(&g, "unsafeRunTimed"), [6], "{:?}", edges(&g));
+        let zig = "const std = @import(\"std\");\nconst Io = std.Io;\npub const Socket = struct {\n    pub fn close(self: *Socket) void {}\n};\nfn testStream() Io.net.Stream {\n    return undefined;\n}\nfn run() void {\n    const stream = testStream();\n    stream.close();\n}\n";
+        let g = graph(&[("/p/src/net.zig", zig)]);
+        assert_eq!(
+            reached(&g, "run").into_iter().filter(|&l| l == 4).count(),
+            0,
+            "{:?}",
+            edges(&g)
+        );
     }
 
     /// A class's body is open where its braces say, those in strings,

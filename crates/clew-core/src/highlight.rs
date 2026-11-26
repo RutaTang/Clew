@@ -2049,6 +2049,40 @@ fn without_export_macros(source: &str) -> Option<String> {
             }
         }
     }
+    // A function's specifier macros before its type, at a line's start
+    // (`SPDLOG_INLINE std::shared_ptr<logger> get(…)`, `FMT_CONSTEXPR20
+    // FMT_INLINE auto size() const`): blanked too, a word following each.
+    let mut line_start = 0;
+    for line in source.split_inclusive('\n') {
+        let mut i = line_start + (line.len() - line.trim_start().len());
+        loop {
+            let start = i;
+            while i < bytes.len() && word(bytes[i]) {
+                i += 1;
+            }
+            let w = &source[start..i];
+            let capitals = w.len() > 2
+                && w.bytes()
+                    .all(|c| c == b'_' || c.is_ascii_uppercase() || c.is_ascii_digit())
+                && w.bytes().any(|c| c == b'_')
+                && w.bytes().next().is_some_and(|c| c.is_ascii_uppercase());
+            if !capitals || i >= bytes.len() || bytes[i] != b' ' {
+                break;
+            }
+            let mut j = i;
+            while j < bytes.len() && bytes[j] == b' ' {
+                j += 1;
+            }
+            // A type or a name follows (not `(`, `=` or `;`: a macro's call
+            // or a value).
+            if j >= bytes.len() || !(word(bytes[j]) || bytes[j] == b':') {
+                break;
+            }
+            spans.push((start, i));
+            i = j;
+        }
+        line_start += line.len();
+    }
     if spans.is_empty() {
         return None;
     }
