@@ -1859,7 +1859,7 @@ where
                 shell.request_redraw();
             }
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
-                let Some(point) = cursor.position_in(bounds) else {
+                let Some(point) = text_point(cursor, bounds, viewport) else {
                     return;
                 };
                 let arrow_x0 = FOLD_ARROW_COL as f32 * state.char_width;
@@ -1995,7 +1995,7 @@ where
                 state.pressed = false;
             }
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Right)) => {
-                let Some(local) = cursor.position_in(bounds) else {
+                let Some(local) = text_point(cursor, bounds, viewport) else {
                     return;
                 };
                 let hit = self.hit(state, local, Rounding::Under);
@@ -2013,11 +2013,11 @@ where
         tree: &tree::Tree,
         layout: Layout<'_>,
         cursor: mouse::Cursor,
-        _viewport: &Rectangle,
+        viewport: &Rectangle,
         _renderer: &Renderer,
     ) -> mouse::Interaction {
         let state = tree.state.downcast_ref::<State<Renderer::Paragraph>>();
-        let Some(p) = cursor.position_in(layout.bounds()) else {
+        let Some(p) = text_point(cursor, layout.bounds(), viewport) else {
             return mouse::Interaction::None;
         };
         let gutter_px = gutter_width(state.char_width, self.font_size);
@@ -3214,6 +3214,19 @@ impl<Message> CodeView<'_, Message> {
     }
 }
 
+/// Where the pointer is, relative to the code view at `bounds`, for a
+/// press: over the view, or in the blank the view's `viewport` holds right
+/// of it or below it. The view is as wide as its longest line and as tall
+/// as its lines, so in a file of short lines a click right of them, or
+/// below the last, fell outside it and did nothing; every editor puts the
+/// caret at that line's end (or on the last line) instead, which is where
+/// [`CodeView::hit`] puts it.
+fn text_point(cursor: mouse::Cursor, bounds: Rectangle, viewport: &Rectangle) -> Option<Point> {
+    let p = cursor.position()?;
+    let past = viewport.contains(p) && p.x >= bounds.x && p.y >= bounds.y;
+    (bounds.contains(p) || past).then(|| Point::new(p.x - bounds.x, p.y - bounds.y))
+}
+
 /// Columns a string of annotation text occupies at one monospace advance per
 /// column, counting non-ASCII characters double (CJK and emoji are about two
 /// advances wide) — an estimate that errs on the reachable side.
@@ -4218,6 +4231,58 @@ mod hit_tests {
                 (text, out)
             })
             .collect()
+    }
+
+    /// A click in the blank right of a short line puts the caret at that
+    /// line's end, and one below the last line on the last line, as in
+    /// every editor. The view is only as wide as its longest line and as
+    /// tall as its lines, and a press outside it did nothing: in a file of
+    /// short lines a click a little right of the text was lost, and the
+    /// breakpoint key then toggled the line the caret was still on.
+    #[test]
+    fn a_click_right_of_the_lines_or_below_them_places_the_caret() {
+        let src = "-module(cart).\n\n    Sum.";
+        let lines = plain_lines(src);
+        let code = CodeView::new(
+            &lines,
+            14,
+            FONT,
+            LH,
+            iced::Color::WHITE,
+            |(l, c)| Msg::Press(l, c),
+            |(l, c)| Msg::Drag(l, c),
+            |(l, c), _| Msg::Context(l, c),
+        );
+        let elem: iced::Element<'_, Msg> = iced::widget::scrollable(code)
+            .direction(iced::widget::scrollable::Direction::Both {
+                vertical: Default::default(),
+                horizontal: Default::default(),
+            })
+            .width(iced::Fill)
+            .height(iced::Fill)
+            .into();
+        let mut sim = iced_test::simulator(elem);
+        let x = gutter() + 600.0;
+        for (at, button) in [
+            (Point::new(x, 2.0 * LH + LH * 0.5), mouse::Button::Left),
+            (Point::new(x, 9.0 * LH), mouse::Button::Left),
+            (Point::new(x, 0.5 * LH), mouse::Button::Right),
+        ] {
+            sim.point_at(at);
+            let _ = sim.simulate([
+                Event::Mouse(mouse::Event::ButtonPressed(button)),
+                Event::Mouse(mouse::Event::ButtonReleased(button)),
+            ]);
+        }
+        let got: Vec<Msg> = sim
+            .into_messages()
+            .filter(|m| matches!(m, Msg::Press(..) | Msg::Context(..)))
+            .collect();
+        assert_eq!(
+            got,
+            [Msg::Press(2, 8), Msg::Press(2, 8), Msg::Context(0, 14)],
+            "the end of the line clicked beside, the last line below them"
+        );
     }
 
     /// Press (and release) the left button at `(x, row)` for each probe;
