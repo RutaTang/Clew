@@ -1106,13 +1106,21 @@ fn lang_spec(lang: Lang) -> Option<LangSpec> {
         // outline merges a function's clauses into one item); the clauses of
         // an anonymous `fun` are `fun_clause`s, so its calls are the
         // enclosing function's.
-        Lang::Erlang => spec(&["function_clause"], &["call"]),
+        // `fun add/2` and `fun cart:add/2` name a function to be called
+        // (`lists:map(fun cart:add/2, …)`): a use of it, as a call is.
+        Lang::Erlang => spec(
+            &["function_clause"],
+            &["call", "internal_fun", "external_fun"],
+        ),
         // A `bind` is a scope as well as a `function`: `main = do …` and
         // `f = \x -> …` are binds, and the outline lists every top-level one
         // as a function — without it `main`'s calls had no caller. A bind
         // in a `do` block (`x <- act`) has a pattern, not a name, so it is
         // none.
-        Lang::Haskell => spec(&["function", "bind"], &["apply"]),
+        // A function passed as a value (`foldr add 0 xs`, `show . add 1`)
+        // is used where it is passed, as the function it is passed to calls
+        // it: higher-order and point-free code use most functions so.
+        Lang::Haskell => spec(&["function", "bind"], &["apply", "variable", "qualified"]),
         Lang::Zig => spec(&["function_declaration"], &["call_expression"]),
         // `Foo(…)` constructs a class as a function is called; `a.b(…)`
         // is a `navigation_expression` callee.
@@ -1125,7 +1133,9 @@ fn lang_spec(lang: Lang) -> Option<LangSpec> {
         ),
         // A `def` is a call to the grammar too: a `call` is a function's
         // scope when it defines one (see `fn_names`), and a call otherwise.
-        Lang::Elixir => spec(&["call"], &["call"]),
+        // `&add/2` captures a function to be called (`&Cart.add/2`'s
+        // `Cart.add` is a call node of its own).
+        Lang::Elixir => spec(&["call"], &["call", "unary_operator"]),
         // A schema has no calls; a Lean proof names the lemmas it uses inside
         // tactics (`rw [h]`, `simp [f]`) far more often than it applies them,
         // so a call graph of applications alone would say a proof uses
@@ -1463,6 +1473,12 @@ fn elixir_def_name(call: Node, src: &str) -> Option<String> {
     (name.kind() == "identifier").then(|| node_text(name, src).to_string())
 }
 
+/// The Haskell operators whose operands are functions applied or composed:
+/// a function named as one is used there (`show . add 1`, `f <$> xs`).
+const HASKELL_FUNCTION_OPERATORS: &[&str] = &[
+    "$", "&", ".", "<$>", "<$", "$>", "<&>", "<*>", "<*", "*>", ">>=", "=<<", ">=>", "<=<",
+];
+
 /// Whether an Elixir `call` (whose parent is `parent`) is the head of a
 /// `def` — `add(a, b)` in `def add(a, b) do`, guarded (`when …`) or not:
 /// the function it defines, which it does not call. Read as a call, every
@@ -1693,6 +1709,48 @@ fn callee_name(call: Node, parent: Option<Node>, src: &str, lang: Lang) -> Optio
         // held in a variable (`F(x)`) or written in place names nothing.
         // The atom is taken as written, as the outline takes it: a quoted
         // `'f'` or a `node@host` is no identifier run.
+        // `fun add/2`, `fun cart:add/2`: the function named, to be called.
+        (Lang::Erlang, "internal_fun" | "external_fun") => {
+            let function = call.child_by_field_name("fun")?;
+            return (function.kind() == "atom").then(|| {
+                (
+                    node_text(function, src).to_string(),
+                    call.kind() == "external_fun",
+                )
+            });
+        }
+        // `&add/2`: the function captured (`&Cart.add/2` is a call node).
+        (Lang::Elixir, "unary_operator") => {
+            let capture = call.child(0).is_some_and(|op| node_text(op, src) == "&");
+            let operand = call.child_by_field_name("operand")?;
+            let left = operand.child_by_field_name("left")?;
+            return (capture && operand.kind() == "binary_operator" && left.kind() == "identifier")
+                .then(|| (node_text(left, src).to_string(), false));
+        }
+        // A function passed as a value: an application's argument
+        // (`foldr add 0`), or the operand of an operator that applies or
+        // composes it (`show . add 1`, `f <$> xs`, `print $ x`). As an
+        // application's function it is that application's callee.
+        (Lang::Haskell, "variable" | "qualified") => {
+            let parent = parent?;
+            let passed = match parent.kind() {
+                "apply" => parent.child_by_field_name("argument") == Some(call),
+                "infix" => parent
+                    .child_by_field_name("operator")
+                    .is_some_and(|op| HASKELL_FUNCTION_OPERATORS.contains(&node_text(op, src))),
+                _ => false,
+            };
+            if !passed {
+                return None;
+            }
+            return match call.kind() {
+                "variable" => Some((node_text(call, src).to_string(), false)),
+                _ => {
+                    let id = call.child_by_field_name("id")?;
+                    (id.kind() == "variable").then(|| (node_text(id, src).to_string(), true))
+                }
+            };
+        }
         (Lang::Erlang, "call") => {
             let function = call.child_by_field_name("expr")?;
             if function.kind() != "atom" {
@@ -2910,6 +2968,12 @@ fn module_receiver(call: Node, parent: Option<Node>, src: &str, lang: Lang) -> O
             let target = call.child_by_field_name("target")?;
             let left = target.child_by_field_name("left")?;
             (target.kind() == "dot" && left.kind() == "alias").then_some(left)?
+        }
+        // `fun cart:add/2` names its module itself.
+        Lang::Erlang if call.kind() == "external_fun" => {
+            let module = call.child_by_field_name("module")?;
+            let atom = module.child_by_field_name("name")?;
+            (atom.kind() == "atom").then_some(atom)?
         }
         Lang::Erlang => {
             let remote = parent.filter(|p| p.kind() == "remote")?;
@@ -4416,6 +4480,53 @@ mod edge_tests {
         }
     }
 
+    /// A function passed as a value is used where it is passed: Haskell's
+    /// `foldr add 0 xs` and `show . add 1 <$> ys`, Erlang's `fun add/2`
+    /// and `fun cart:add/2`, Elixir's `&add/2`. Only applications counted,
+    /// a Haskell program's `main` reached nothing it folded with, and the
+    /// function read as reached from no entry point. A function named as
+    /// an application's function is that application's call, not two.
+    #[test]
+    fn a_function_passed_as_a_value_is_used_where_it_is_passed() {
+        let g = graph(&[
+            (
+                "/p/src/Cart.hs",
+                "module Cart where\nadd :: Int -> Int -> Int\nadd a b = a + b\ndouble :: Int -> Int\ndouble = (* 2)\n",
+            ),
+            (
+                "/p/app/Main.hs",
+                "module Main where\nimport Cart\nmain :: IO ()\nmain = do\n  print (foldr add 0 [1, 2])\n  print $ double . add 1 <$> [3]\n",
+            ),
+        ]);
+        assert_eq!(callers_named(&g, "/p/src/Cart.hs", "add", 0), ["main@4"]);
+        assert_eq!(callers_named(&g, "/p/src/Cart.hs", "double", 0), ["main@4"]);
+        let calls = calls_of("main = print (add 1 2)\n", "haskell");
+        assert_eq!(
+            calls.iter().filter(|c| c.callee == "add").count(),
+            1,
+            "{calls:?}"
+        );
+
+        let g = graph(&[
+            (
+                "/p/src/cart.erl",
+                "-module(cart).\n-export([add/2]).\nadd(A, B) -> A + B.\n",
+            ),
+            (
+                "/p/src/shop.erl",
+                "-module(shop).\ntotal(Xs) -> lists:foldl(fun cart:add/2, 0, Xs).\nsum(Xs) -> lists:foldl(fun plus/2, 0, Xs).\nplus(A, B) -> A + B.\n",
+            ),
+        ]);
+        assert_eq!(callers_named(&g, "/p/src/cart.erl", "add", 0), ["total@2"]);
+        assert_eq!(callers_named(&g, "/p/src/shop.erl", "plus", 0), ["sum@3"]);
+
+        let g = graph(&[(
+            "/p/lib/cart.ex",
+            "defmodule Cart do\n  def add(a), do: a + 1\n  def all(xs), do: Enum.map(xs, &add/1)\nend\n",
+        )]);
+        assert_eq!(callers_named(&g, "/p/lib/cart.ex", "add", 0), ["all@3"]);
+    }
+
     /// A test titled as a function is named is no call's target, takes no
     /// key of the function's, and is no `callee_keys` entry over it: in
     /// one file, `function adds` and `it('adds', …)`.
@@ -5646,7 +5757,8 @@ tax(X) -> X.
 
         let mut calls = calls_of(src, "erlang");
         calls.sort_by_key(|c| c.line);
-        // `helper(0)`, then `shop:helper(X)`.
+        // `helper(0)`, then `shop:helper(X)`, then `fun helper/1` (a use:
+        // what the fun is called with calls it).
         let method = |callee: &str| -> Vec<bool> {
             calls
                 .iter()
@@ -5654,14 +5766,15 @@ tax(X) -> X.
                 .map(|c| c.method)
                 .collect()
         };
-        assert_eq!(method("helper"), [false, true]);
+        assert_eq!(method("helper"), [false, true, false]);
         assert_eq!(method("map"), [true]);
         assert!(!calls.iter().any(|c| c.callee == "F"), "{calls:?}");
     }
 
     /// Haskell: an application is a call of its head, once however many
     /// arguments it takes; a function passed as an argument (`map price`)
-    /// is not called, a constructor (`Just`) or a type (`IO ()`) is no call,
+    /// is used there, as `map` calls it; a constructor (`Just`) or a type
+    /// (`IO ()`) is no call,
     /// and a `where`-bound helper's calls are its function's. `main = do …`
     /// is a scope. A bare `lookup` is the Prelude's, not another module's.
     #[test]
@@ -5704,6 +5817,7 @@ table = Map.fromList []
             ("wrap", "inner"),
             ("main", "total"),
             ("main", "helper"),
+            ("total", "price"),
         ] {
             assert!(
                 has(&g, &format!("{file}:{from}"), &format!("{file}:{to}")),
@@ -5711,12 +5825,11 @@ table = Map.fromList []
                 edges(&g)
             );
         }
-        for (from, to) in [
-            ("/p/Shop.hs:total", "/p/Shop.hs:price"),
-            ("/p/Shop.hs:price", "/p/Store.hs:lookup"),
-        ] {
-            assert!(!has(&g, from, to), "{from} -> {to}: {:?}", edges(&g));
-        }
+        assert!(
+            !has(&g, "/p/Shop.hs:price", "/p/Store.hs:lookup"),
+            "price -> lookup: {:?}",
+            edges(&g)
+        );
         let calls = calls_of(src, "haskell");
         assert_eq!(
             calls
