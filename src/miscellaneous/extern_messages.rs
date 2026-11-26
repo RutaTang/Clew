@@ -181,6 +181,7 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("dotnet could not build {project} (its output is above)."),
     tr_noop!("CMake could not configure the build (its output is above)."),
     tr_noop!("The build was stopped."),
+    tr_noop!("Flutter found no device to run this app on."),
     tr_noop!("CMake could not build {target} (its output is above)."),
     tr_noop!("{target} was built, but its program wasn't found in {folder}."),
     tr_noop!("{file} did not compile (the compiler's output is above)."),

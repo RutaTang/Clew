@@ -346,6 +346,17 @@ pub fn resolve(
                 None => store::find_on_path_unresolved("dart")
                     .ok_or("dart not found — install the Dart/Flutter SDK")?,
             };
+            // A Flutter app's program: Flutter's own adapter, on a device
+            // of the app's (Dart alone has no `dart:ui` to run it with).
+            if let Some(package) = flutter_app(root, &in_dir(cwd, program)) {
+                let flutter = flutter_beside(&command)
+                    .or_else(|| store::find_on_path_unresolved("flutter"))
+                    .ok_or("flutter not found — install the Flutter SDK")?;
+                let device = flutter_device(&flutter, &package)?;
+                return Ok(Resolution::Ready(flutter_spec(
+                    flutter, program, args, &package, &device,
+                )));
+            }
             Ok(Resolution::Ready(dart_spec(command, program, args, cwd)))
         }
         "go" => {
@@ -1565,6 +1576,105 @@ fn src_layout(root: &Path) -> Option<PathBuf> {
 /// How many of `src`'s entries are looked at for a package: a `src` of
 /// thousands is no Python layout, and the look happens before each run.
 const MAX_SRC_ENTRIES: usize = 512;
+
+/// The Flutter package `file` is in: the nearest `pubspec.yaml` above it
+/// that depends on Flutter's SDK.
+fn flutter_app(root: &Path, file: &Path) -> Option<PathBuf> {
+    let mut dir = file.parent()?.to_path_buf();
+    loop {
+        if let Some(pubspec) = crate::statefile::read_capped(&dir.join("pubspec.yaml"), 1 << 20) {
+            return pubspec.contains("sdk: flutter").then_some(dir);
+        }
+        if dir == root || !dir.pop() || !dir.starts_with(root) {
+            return None;
+        }
+    }
+}
+
+/// The `flutter` beside a Flutter SDK's `dart` (`flutter/bin/dart`).
+fn flutter_beside(dart: &Path) -> Option<PathBuf> {
+    let flutter = dart.with_file_name(if cfg!(windows) {
+        "flutter.bat"
+    } else {
+        "flutter"
+    });
+    flutter.is_file().then_some(flutter)
+}
+
+/// The device a Flutter app runs on, of `flutter devices`': this
+/// computer's own desktop where the app has that platform, else the web
+/// where it has that, else the first there is. More than one device made
+/// `flutter run` ask which, and no one answered.
+fn flutter_device(flutter: &Path, package: &Path) -> Result<String, String> {
+    let mut cmd = crate::spawn::command(flutter);
+    cmd.args(["devices", "--machine"]).current_dir(package);
+    let out = store::run_bounded(cmd, std::time::Duration::from_secs(120))?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let listed: serde_json::Value = text
+        .find('[')
+        .and_then(|at| serde_json::from_str(&text[at..]).ok())
+        .unwrap_or(serde_json::Value::Null);
+    let devices: Vec<(String, String)> = listed
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|d| d["isSupported"].as_bool() != Some(false))
+        .filter_map(|d| {
+            Some((
+                d["id"].as_str()?.to_string(),
+                d["targetPlatform"].as_str().unwrap_or("").to_string(),
+            ))
+        })
+        .collect();
+    match pick_flutter_device(&devices, |platform| package.join(platform).is_dir()) {
+        Some(device) => Ok(device),
+        None => Err("Flutter found no device to run this app on.".to_string()),
+    }
+}
+
+/// [`flutter_device`]'s choice among `devices` (id, target platform), by
+/// the platforms the app `has` a folder for.
+fn pick_flutter_device(devices: &[(String, String)], has: impl Fn(&str) -> bool) -> Option<String> {
+    let desktop = if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(windows) {
+        "windows"
+    } else {
+        "linux"
+    };
+    let own = devices
+        .iter()
+        .find(|(id, _)| id == desktop)
+        .filter(|_| has(desktop));
+    let web = devices
+        .iter()
+        .find(|(_, platform)| platform.starts_with("web"))
+        .filter(|_| has("web"));
+    own.or(web).or(devices.first()).map(|(id, _)| id.clone())
+}
+
+/// Flutter's DAP adapter for an app (`flutter debug_adapter` over stdio),
+/// run on `device` from its package.
+fn flutter_spec(
+    command: PathBuf,
+    program: &str,
+    args: &[String],
+    package: &Path,
+    device: &str,
+) -> AdapterSpec {
+    AdapterSpec {
+        command,
+        args: vec!["debug_adapter".into()],
+        launch: json!({
+            "request": "launch",
+            "program": program,
+            "args": args,
+            "cwd": package.to_string_lossy(),
+            "toolArgs": ["-d", device],
+        }),
+        transport: AdapterTransport::Stdio,
+    }
+}
 
 /// Dart's SDK ships a DAP adapter: `dart debug_adapter` over stdio.
 fn dart_spec(command: PathBuf, program: &str, args: &[String], cwd: &Path) -> AdapterSpec {
@@ -3500,6 +3610,26 @@ mod tests {
         };
         assert_eq!(spec.command, dart);
         assert_eq!(spec.args, ["debug_adapter"]);
+        // A Flutter app runs on this computer's desktop where it has that
+        // platform, else the web, else the first device.
+        let devices = [
+            ("chrome".to_string(), "web-javascript".to_string()),
+            ("linux".to_string(), "linux-x64".to_string()),
+        ];
+        #[cfg(target_os = "linux")]
+        assert_eq!(
+            pick_flutter_device(&devices, |_| true).as_deref(),
+            Some("linux")
+        );
+        assert_eq!(
+            pick_flutter_device(&devices, |p| p == "web").as_deref(),
+            Some("chrome")
+        );
+        assert_eq!(
+            pick_flutter_device(&devices, |_| false).as_deref(),
+            Some("chrome")
+        );
+        assert_eq!(pick_flutter_device(&[], |_| true), None);
         let gone = resolve(
             "dart",
             "/p/main.dart",

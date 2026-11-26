@@ -4123,5 +4123,6 @@
  "The build was stopped.": "빌드가 중지되었습니다.",
  "A remote project's programs run without the debugger: {status}": "원격 프로젝트의 프로그램은 디버거 없이 실행됩니다: {status}",
  "Mill runs this program where the debugger can't reach it, so it runs without it: {status}": "Mill은 디버거가 닿지 않는 곳에서 이 프로그램을 실행하므로 디버거 없이 실행됩니다: {status}",
- "This program runs without the debugger: {status}": "이 프로그램은 디버거 없이 실행됩니다: {status}"
+ "This program runs without the debugger: {status}": "이 프로그램은 디버거 없이 실행됩니다: {status}",
+ "Flutter found no device to run this app on.": "Flutter가 이 앱을 실행할 기기를 찾지 못했습니다."
 }

@@ -4123,5 +4123,6 @@
  "The build was stopped.": "构建已停止。",
  "A remote project's programs run without the debugger: {status}": "远程项目的程序在不使用调试器的情况下运行：{status}",
  "Mill runs this program where the debugger can't reach it, so it runs without it: {status}": "Mill 在调试器无法触及的地方运行此程序，因此它将不使用调试器运行：{status}",
- "This program runs without the debugger: {status}": "此程序在不使用调试器的情况下运行：{status}"
+ "This program runs without the debugger: {status}": "此程序在不使用调试器的情况下运行：{status}",
+ "Flutter found no device to run this app on.": "Flutter 找不到可运行此应用的设备。"
 }
