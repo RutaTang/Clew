@@ -151,9 +151,12 @@ pub struct FileFacts {
 /// cannot know — exactly as the server's snapshot does, so a local and a
 /// remote project resolve the same specifiers.
 pub fn analyze_file(abs: &Path, rel: &str, content: &str, lang: &'static str) -> FileFacts {
-    let Some(analysis) = outline::analyze_scoped(content, lang) else {
+    let Some(mut analysis) = outline::analyze_scoped(content, lang) else {
         return FileFacts::default();
     };
+    // A Play template is the function it compiles to.
+    let template = outline::twirl_template(rel, content);
+    analysis.symbols.extend(template.clone());
     // Each method's type, class or trait, by its line: what a symbol is
     // found by from outside it (`Regex::new`).
     let owners = analysis.owners.clone();
@@ -167,7 +170,7 @@ pub fn analyze_file(abs: &Path, rel: &str, content: &str, lang: &'static str) ->
     .map(|calls| calls.with_context(analysis.context.clone()))
     .filter(|calls| !calls.is_empty())
     .map(Arc::new);
-    let symbols = if highlight::has_outline(lang) {
+    let symbols = if highlight::has_outline(lang) || template.is_some() {
         let lines: Vec<&str> = content.lines().collect();
         // A component file's entry points and tests are its script's.
         let entries = clew_core::outline::EntryPoints::new(&lines, analysis.lang.key(), rel);
@@ -743,6 +746,32 @@ mod tests {
         let back = from_cached_calls(abs, &cached).expect("a sound entry");
         assert_eq!(back.calls, calls.calls);
         assert_eq!(back.context.arities, calls.context.arities);
+    }
+
+    /// A Play template is indexed as the function it compiles to, though a
+    /// page has no symbols of its own.
+    #[test]
+    fn a_play_template_is_indexed_as_its_function() {
+        let content = "@import models.User\n@(users: Seq[User])\n<ul></ul>\n";
+        let facts = analyze_file(
+            Path::new("/p/app/views/users/list.scala.html"),
+            "app/views/users/list.scala.html",
+            content,
+            "html",
+        );
+        let names: Vec<(&str, &str, usize)> = facts
+            .symbols
+            .iter()
+            .map(|s| (s.name.as_str(), s.kind.as_str(), s.line))
+            .collect();
+        assert_eq!(names, [("list", "function", 2)]);
+        let page = analyze_file(
+            Path::new("/p/web/index.html"),
+            "web/index.html",
+            "<p>hi</p>\n",
+            "html",
+        );
+        assert!(page.symbols.is_empty());
     }
 
     /// What a call passes and what each overload takes come back from the

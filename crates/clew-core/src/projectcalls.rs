@@ -177,6 +177,7 @@ fn is_type_kind(kind: &str, lang: Lang) -> bool {
         kind,
         "class" | "interface" | "struct" | "trait" | "type" | "enum" | "object" | "record"
     ) || (kind == "module" && matches!(lang, Lang::Ruby | Lang::Elixir))
+        || (kind == "mixin" && lang == Lang::Dart)
 }
 
 /// The modules an Elixir file names after `keyword` (`use `, `import `) at
@@ -254,6 +255,86 @@ fn cpp_call_scope(call: Node, src: &str) -> Option<String> {
     let scope = scope.split('<').next().unwrap_or(scope);
     let last = scope.rsplit("::").next().unwrap_or(scope).trim();
     (!last.is_empty()).then(|| last.to_string())
+}
+
+/// `dir` joined with the relative `path`, its `.` and `..` resolved by
+/// name alone (`src/../t.zig` is `t.zig`), as an import names a file.
+fn lexical_join(dir: &Path, path: &str) -> PathBuf {
+    let mut out = dir.to_path_buf();
+    for part in path.split(['/', '\\']) {
+        match part {
+            "" | "." => {}
+            ".." => {
+                out.pop();
+            }
+            part => out.push(part),
+        }
+    }
+    out
+}
+
+/// Whether a language's classes name every base they have (Java, Kotlin,
+/// C#, Dart — a Dart mixin by `with`): a project class's methods are its
+/// own and its project bases', or else a library's.
+fn closed_hierarchy(lang: Lang) -> bool {
+    matches!(lang, Lang::Java | Lang::Kotlin | Lang::CSharp | Lang::Dart)
+}
+
+/// Whether `path` names a Play template's package or a template —
+/// `views.html`, `views.html.users.list`: names, the second a template
+/// format.
+fn template_path(path: &str) -> bool {
+    let parts: Vec<&str> = path.split('.').collect();
+    parts.len() >= 2
+        && matches!(parts[1], "html" | "txt" | "xml" | "js")
+        && parts.iter().all(|p| is_plain_name(p))
+}
+
+/// Whether `path` names a controller of Play's reverse router —
+/// `routes.HomeController`, `controllers.routes.HomeController`,
+/// `routes.javascript.HomeController`: generated, no project code.
+fn reverse_route(path: &str) -> bool {
+    let parts: Vec<&str> = path.split('.').collect();
+    let Some(at) = parts.iter().position(|p| *p == "routes") else {
+        return false;
+    };
+    let packages = &parts[..at];
+    let rest = &parts[at + 1..];
+    packages
+        .iter()
+        .all(|p| p.starts_with(char::is_lowercase) && is_plain_name(p))
+        && match rest {
+            [controller] => controller.starts_with(char::is_uppercase),
+            ["javascript" | "ref", controller] => controller.starts_with(char::is_uppercase),
+            _ => false,
+        }
+        && rest.iter().all(|p| is_plain_name(p))
+}
+
+/// The function a Play template compiles to, by its file
+/// (`app/views/users/list.scala.html` is `views.html.users.list`: the
+/// source root's first folder, the format, the rest, the name), or `None`
+/// for no template.
+fn template_name(file: &Path) -> Option<String> {
+    let name = file.file_name()?.to_str()?;
+    let (stem, format) = name.rsplit_once(".scala.")?;
+    if !matches!(format, "html" | "txt" | "xml" | "js") {
+        return None;
+    }
+    let folders: Vec<&str> = file
+        .parent()?
+        .components()
+        .filter_map(|c| c.as_os_str().to_str())
+        .collect();
+    // Play's `app/`, or sbt-twirl's `src/main/twirl/`.
+    let root = folders
+        .iter()
+        .rposition(|f| matches!(*f, "app" | "twirl"))?;
+    let (first, rest) = folders[root + 1..].split_first()?;
+    let mut parts = vec![*first, format];
+    parts.extend(rest);
+    parts.push(stem);
+    Some(parts.join("."))
 }
 
 /// Where a definition's parameter list is in its text ([`parameter_list`]).
@@ -554,6 +635,7 @@ fn declared_arity(src: &str, l: &Located, lang: Lang) -> Option<(u8, u8)> {
         return Some((0, 0));
     }
     let (mut fewest, mut most) = (0u32, 0u32);
+    let mut any_default = false;
     let mut variadic = false;
     let mut passed_by_dot = false;
     for (i, part) in split_top_level(inner).enumerate() {
@@ -613,11 +695,15 @@ fn declared_arity(src: &str, l: &Located, lang: Lang) -> Option<(u8, u8)> {
         if !defaulted {
             fewest += 1;
         }
+        any_default |= defaulted;
     }
     if passed_by_dot {
         fewest = fewest.saturating_sub(1);
     }
-    if matches!(lang, Lang::C | Lang::Cpp) {
+    // A C++ definition's defaults may be its prototype's, elsewhere — but a
+    // list that shows one holds them all (C++ gives a parameter its default
+    // once), and its fewest is its own.
+    if matches!(lang, Lang::C | Lang::Cpp) && !any_default {
         fewest = 0;
     }
     let most = if variadic { u32::from(ANY) } else { most };
@@ -1903,6 +1989,13 @@ impl ProjectCallGraph {
             }
         }
         let declared = |ty: &str| declared_types.contains(ty);
+        // Play's templates, by the function each compiles to.
+        let templates: HashMap<String, usize> = (0..nodes.len())
+            .filter_map(|i| {
+                let name = template_name(&nodes[i].file)?;
+                name.ends_with(nodes[i].name.as_str()).then_some((name, i))
+            })
+            .collect();
         // Whether what `cs` passes fits `callee`'s parameters — or, if not,
         // no overload of it fits either (the kinds then say nothing).
         let fits_arguments = |callee: usize, cs: &CallSite, lang: Lang| -> bool {
@@ -1918,19 +2011,38 @@ impl ProjectCallGraph {
                         .all(|(a, p)| passes(a, p, lang, &declared, &descends))
                 })
             };
-            if fits(callee) {
-                return true;
-            }
             let file = owner[callee]
                 .is_none()
                 .then_some(nodes[callee].file.as_path());
-            !overloads
-                .get(&(nodes[callee].name.as_str(), owner[callee], file))
-                .is_some_and(|family| {
-                    family
-                        .iter()
-                        .any(|&i| i != callee && facts[i].takes(cs.arity) && fits(i))
-                })
+            let family = overloads.get(&(nodes[callee].name.as_str(), owner[callee], file));
+            let facts = &facts;
+            let others = || {
+                family
+                    .into_iter()
+                    .flatten()
+                    .copied()
+                    .filter(move |&i| i != callee && facts[i].takes(cs.arity))
+            };
+            if fits(callee) {
+                // An argument of a class the parameter names exactly: that
+                // overload is the most specific (`sleep(time)` with `time:
+                // FiniteDuration` is `sleep(FiniteDuration)`, not
+                // `sleep(Duration)`).
+                let exact = |i: usize| {
+                    arguments.split(',').any(|a| a.starts_with('T'))
+                        && node_parameters[i].is_some_and(|params| {
+                            arguments.split(',').zip(params.split(',')).all(|(a, p)| {
+                                if a.starts_with('T') {
+                                    a.trim_end_matches('?') == p.trim_end_matches('?')
+                                } else {
+                                    passes(a, p, lang, &declared, &descends)
+                                }
+                            })
+                        })
+                };
+                return exact(callee) || !others().any(exact);
+            }
+            !others().any(fits)
         };
         // A test class's methods (`StatusCodesTest.get`): the runner holds
         // its instance, so no other code calls them on a value.
@@ -2123,6 +2235,64 @@ impl ProjectCallGraph {
                     }
                     continue;
                 }
+                // A Play template: `views.html.index(…)`, Java's
+                // `views.html.index.render(…)` — the function its file
+                // compiles to, no method of the name elsewhere.
+                if matches!(fc.lang, Lang::Java | Lang::Scala)
+                    && let Some(path) = cs.qualifier.as_deref()
+                    && template_path(path)
+                {
+                    let called = format!("{path}.{}", cs.callee);
+                    let template = templates.get(&called).or_else(|| {
+                        matches!(cs.callee.as_str(), "render" | "apply" | "f")
+                            .then(|| templates.get(path))
+                            .flatten()
+                    });
+                    if let Some(&template) = template
+                        && edges.len() < MAX_EDGES
+                    {
+                        edges.insert((caller, template));
+                    }
+                    continue;
+                }
+                // Play's reverse router (`routes.HomeController.index`): code
+                // the build generates, returning the action's route — no
+                // call of the action, nor of any function of the project's.
+                if matches!(fc.lang, Lang::Java | Lang::Scala)
+                    && cs.qualifier.as_deref().is_some_and(reverse_route)
+                {
+                    continue;
+                }
+                // Zig's `posix.read(…)` with `posix = @import("posix.zig")`:
+                // that file's own function of the name, nothing else's.
+                if fc.lang == Lang::Zig
+                    && let Some(path) = cs.qualifier.as_deref()
+                    && path.ends_with(".zig")
+                {
+                    let file = fc
+                        .file
+                        .parent()
+                        .map(|dir| lexical_join(dir, path))
+                        .unwrap_or_default();
+                    let stem = file.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+                    let callee_name = logical_name(&cs.callee, Some(fc.lang));
+                    let found: Vec<usize> = defs
+                        .named
+                        .get(callee_name)
+                        .into_iter()
+                        .flat_map(|named| named.all.iter().copied())
+                        .filter(|&i| nodes[i].file == file && owner[i].is_none_or(|o| o == stem))
+                        .collect();
+                    for callee in found {
+                        if edges.len() < MAX_EDGES
+                            && (in_test || !test_node[callee])
+                            && facts[callee].takes(cs.arity)
+                        {
+                            edges.insert((caller, callee));
+                        }
+                    }
+                    continue;
+                }
                 // A Scala object called as a function (`RelPath("a")`), where
                 // no function in scope has the name: its `apply`.
                 if fc.lang == Lang::Scala && !cs.method && callees.is_empty() {
@@ -2180,6 +2350,16 @@ impl ProjectCallGraph {
                                 .filter(|c| extension_nodes.contains(c))
                                 .collect()
                         }
+                        // A project class with no method of the name, nor
+                        // any project class above or below it, in a language
+                        // whose classes name every base: one it inherits from
+                        // a library (`hashCode`, an `Activity`'s `onCreate`),
+                        // or one the project extends it with.
+                        (true, true) if closed_hierarchy(fc.lang) => callees
+                            .iter()
+                            .copied()
+                            .filter(|c| extension_nodes.contains(c))
+                            .collect(),
                         // No method of the name on the type or above it
                         // that this can see (a mixin, a library's base): by
                         // the name in scope, as with no type.
@@ -2331,9 +2511,13 @@ impl ProjectCallGraph {
                         | Lang::Cpp,
                     ) => {
                         let last = ty.rsplit(['.', ':']).next().unwrap_or(ty);
-                        !project_types.contains(last)
+                        let declared = declared_types.contains(last);
+                        (!project_types.contains(last)
                             && !project_types.contains(ty.as_str())
-                            && !declared_types.contains(last)
+                            && !declared)
+                            // A project class neither it nor a project class
+                            // above it defines the method of: the library's.
+                            || (declared && narrowed.is_empty() && closed_hierarchy(fc.lang))
                     }
                     // Zig's standard library's (`writer: *std.Io.Writer`).
                     (Some(Receiver::Type(ty)), Lang::Zig) => ty == "std" || ty.starts_with("std."),
@@ -2401,8 +2585,36 @@ impl ProjectCallGraph {
                 let cpp_scoped = (!cs.method && fc.lang == Lang::Cpp)
                     .then_some(cs.qualifier.as_deref())
                     .flatten();
+                // A C++ bare call in a member function: its class's member
+                // (or a base's), where one has the name — name lookup finds
+                // the class's scope before any around it (`listeners()` in
+                // `UnitTestImpl` is `this->listeners()`, never `UnitTest`'s).
+                let cpp_own = (!cs.method && cs.qualifier.is_none() && fc.lang == Lang::Cpp)
+                    .then_some(owner[caller])
+                    .flatten()
+                    .map(|own| own.rsplit(['.', ':']).next().unwrap_or(own))
+                    .filter(|own| {
+                        targets.iter().any(|&c| {
+                            owner[c].is_some_and(|o| {
+                                let o = o.rsplit(['.', ':']).next().unwrap_or(o);
+                                o == *own || descends(own, o)
+                            })
+                        })
+                    });
                 let kept: Vec<usize>;
-                let targets: &[usize] = if cpp_member {
+                let targets: &[usize] = if let Some(own) = cpp_own {
+                    kept = targets
+                        .iter()
+                        .copied()
+                        .filter(|&c| {
+                            owner[c].is_some_and(|o| {
+                                let o = o.rsplit(['.', ':']).next().unwrap_or(o);
+                                o == own || descends(own, o)
+                            })
+                        })
+                        .collect();
+                    &kept
+                } else if cpp_member {
                     kept = targets
                         .iter()
                         .copied()
@@ -3090,44 +3302,84 @@ pub fn calls_in(tree: &Tree, source: &str, lang: Lang, symbols: &[Located]) -> V
     );
     in_test_blocks(&mut out, symbols);
     if lang == Lang::Zig {
-        zig_std_aliases(&mut out, source);
+        zig_aliases(&mut out, source);
     }
     out
 }
 
-/// A Zig file's names for the standard library's declarations (`const Ast
-/// = std.zig.Ast;`, `const Allocator = std.mem.Allocator;`): a receiver of
-/// such a type is the library's — `tree.render(…)` with `tree: Ast` calls
-/// `std.zig.Ast.render`, no project function — named by its path in full.
-fn zig_std_aliases(calls: &mut [CallSite], source: &str) {
-    let aliases: HashMap<&str, &str> = source
-        .lines()
-        .filter_map(|line| {
-            let line = line.trim_start();
-            let line = line.strip_prefix("pub ").unwrap_or(line);
-            let (name, value) = line.strip_prefix("const ")?.split_once('=')?;
-            let name = name.trim();
-            let value = value.trim().strip_suffix(';')?.trim_end();
-            let std_path = value == "std"
-                || (value.starts_with("std.")
-                    && value
-                        .chars()
-                        .all(|c| c == '_' || c == '.' || c.is_alphanumeric()));
-            (std_path && name != "std" && is_plain_name(name)).then_some((name, value))
-        })
-        .collect();
-    if aliases.is_empty() {
+/// A Zig file's names for what it imports, read off its top-level `const`s:
+/// - the standard library's declarations (`const Ast = std.zig.Ast;`,
+///   `const Allocator = std.mem.Allocator;`) — a receiver of such a type is
+///   the library's (`tree.render(…)` with `tree: Ast` calls
+///   `std.zig.Ast.render`, no project function), named by its path in full;
+/// - another file (`const posix = @import("posix.zig");`) — `posix.read(…)`
+///   is that file's own `read`, the call's qualifier its path;
+/// - a type of another file (`const BufferPool = @import("buffer.zig").Pool;`)
+///   — `BufferPool.init(…)` is `Pool`'s.
+fn zig_aliases(calls: &mut [CallSite], source: &str) {
+    let mut std_aliases: HashMap<&str, &str> = HashMap::new();
+    let mut files: HashMap<&str, &str> = HashMap::new();
+    let mut types: HashMap<&str, &str> = HashMap::new();
+    for line in source.lines() {
+        let line = line.trim_start();
+        let line = line.strip_prefix("pub ").unwrap_or(line);
+        let Some((name, value)) = line.strip_prefix("const ").and_then(|l| l.split_once('='))
+        else {
+            continue;
+        };
+        let name = name.trim();
+        let Some(value) = value.trim().strip_suffix(';').map(str::trim_end) else {
+            continue;
+        };
+        if name == "std" || !is_plain_name(name) {
+            continue;
+        }
+        let path_like = |v: &str| {
+            v.chars()
+                .all(|c| c == '_' || c == '.' || c.is_alphanumeric())
+        };
+        if value == "std" || (value.starts_with("std.") && path_like(value)) {
+            std_aliases.insert(name, value);
+        } else if let Some(rest) = value.strip_prefix("@import(\"")
+            && let Some((path, member)) = rest.split_once("\")")
+            && path.ends_with(".zig")
+        {
+            match member.strip_prefix('.') {
+                None if member.is_empty() => {
+                    files.insert(name, path);
+                }
+                Some(member) if path_like(member) => {
+                    types.insert(name, member.rsplit('.').next().unwrap_or(member));
+                }
+                _ => {}
+            }
+        }
+    }
+    if std_aliases.is_empty() && files.is_empty() && types.is_empty() {
         return;
     }
     for call in calls {
         if let Some(Receiver::Type(ty) | Receiver::Declared(ty)) = &mut call.receiver {
             let (first, rest) = ty.split_once('.').unwrap_or((ty.as_str(), ""));
-            if let Some(path) = aliases.get(first) {
+            if let Some(path) = std_aliases.get(first) {
                 *ty = if rest.is_empty() {
                     path.to_string()
                 } else {
                     format!("{path}.{rest}")
                 };
+            } else if let Some(member) = types.get(first).filter(|_| rest.is_empty()) {
+                *ty = member.to_string();
+            }
+        }
+        if call.receiver.is_none()
+            && let Some(q) = call.qualifier.as_deref()
+        {
+            if let Some(path) = files.get(q) {
+                call.qualifier = Some(path.to_string());
+            } else if let Some(path) = std_aliases.get(q) {
+                // `mem.eql(…)` with `const mem = std.mem;`: the library's.
+                call.receiver = Some(Receiver::Type(path.to_string()));
+                call.qualifier = None;
             }
         }
     }
@@ -5050,6 +5302,35 @@ fn receiver_of(
             .flatten()
             .map(Receiver::Type);
     }
+    // A Zig file's name for a file it imports (`const posix =
+    // @import("posix.zig");`): its functions, whatever binds the name.
+    if lang == Lang::Zig && is_plain_name(receiver) {
+        let imported = fields
+            .entry((usize::MAX, receiver.to_string()))
+            .or_insert_with(|| {
+                let head = format!("const {receiver} = @import(\"");
+                // The file itself, not a declaration of it
+                // (`@import("buffer.zig").Pool` names a type).
+                src.lines()
+                    .any(|line| {
+                        let line = line.strip_prefix("pub ").unwrap_or(line);
+                        line.starts_with(&head) && line.trim_end().ends_with("\");")
+                    })
+                    .then(String::new)
+            });
+        if imported.is_some() {
+            *unbound = Some(receiver.to_string());
+            return None;
+        }
+    }
+    // A Play template's package (`views.html` in `views.html.index(…)`, or
+    // the template itself in Java's `views.html.index.render(…)`).
+    if matches!(lang, Lang::Java | Lang::Scala)
+        && (template_path(receiver) || reverse_route(receiver))
+    {
+        *unbound = Some(receiver.to_string());
+        return None;
+    }
     if !is_plain_name(receiver) {
         // A chain on a value just built: `IO.pure(1).flatMap(…)`,
         // `new Cart().add(…)`, `Cart(items).total()`.
@@ -5116,7 +5397,10 @@ fn receiver_of(
     // Nor a field: in Scala, a package or an object (`os` in `os.read(p)`),
     // or a member inherited from a trait; in Go, an imported package
     // (`require.Error(t, err)`) or a package-level variable.
-    if matches!(lang, Lang::Scala | Lang::Go) && !receiver.starts_with(|c: char| c.is_uppercase()) {
+    // In Zig, a file imported by name (`posix` for `@import("posix.zig")`).
+    if matches!(lang, Lang::Scala | Lang::Go | Lang::Zig)
+        && !receiver.starts_with(|c: char| c.is_uppercase())
+    {
         *unbound = Some(receiver.to_string());
     }
     // A JavaScript runtime's own object, not bound here (`console`,
@@ -6493,6 +6777,8 @@ const CLASS_KINDS: &[&str] = &[
     "struct_declaration",
     "object_declaration",
     "abstract_class_declaration",
+    // Dart's `mixin HydratedMixin on BlocBase`.
+    "mixin_declaration",
     // Scala's `object Cart` and `trait Pricing`.
     "object_definition",
     "trait_definition",
@@ -6554,6 +6840,14 @@ fn owner_from(node: Node, src: &str, lang: Lang) -> Option<String> {
                 if let Some(name) = n.child_by_field_name("name") {
                     return base_type_name(node_text(name, src));
                 }
+            }
+            // Dart's `mixin M on B { … }` names itself in an unnamed child.
+            "mixin_declaration" if lang == Lang::Dart => {
+                let mut cursor = n.walk();
+                let name = n
+                    .named_children(&mut cursor)
+                    .find(|c| c.kind() == "identifier")?;
+                return base_type_name(node_text(name, src));
             }
             kind if CLASS_KINDS.contains(&kind) => {
                 // A C or C++ class whose node a macro stretched past its
@@ -10631,6 +10925,174 @@ def main():
         assert_eq!(
             enclosing_packages("package cats\npackage effect\npackage std\n", Lang::Scala),
             ["cats", "cats.effect"]
+        );
+    }
+
+    /// A Play template is the function its file compiles to:
+    /// `app/views/users/list.scala.html` is `views.html.users.list`, called
+    /// from Scala as `views.html.users.list(…)` and from Java as
+    /// `views.html.users.list.render(…)` — never a controller's method of
+    /// the template's name.
+    #[test]
+    fn a_play_template_is_called_by_its_package_path() {
+        let scala = "package controllers\nclass HomeController {\n  def index() = Ok(views.html.index(\"hi\"))\n  def users() = Ok(views.html.users.list(Nil))\n}\n";
+        let java = "package controllers;\npublic class TimeController {\n  public Result index() {\n    return ok(views.html.index.render(\"hi\"));\n  }\n}\n";
+        let index = "@(title: String)\n<h1>@title</h1>\n";
+        let list = "@import models.User\n@(users: Seq[User])\n<ul></ul>\n";
+        let files = [
+            ("/p/app/controllers/HomeController.scala", scala),
+            ("/p/app/controllers/TimeController.java", java),
+        ];
+        let mut defs = defs_of(&files);
+        for (rel, src) in [
+            ("app/views/index.scala.html", index),
+            ("app/views/users/list.scala.html", list),
+        ] {
+            let t = crate::outline::twirl_template(rel, src).expect("a template");
+            defs.push(Def {
+                name: t.symbol.name,
+                kind: t.symbol.kind,
+                file: PathBuf::from(format!("/p/{rel}")),
+                line: t.symbol.line,
+            });
+        }
+        let sources: Vec<(PathBuf, String)> = files
+            .iter()
+            .map(|(f, s)| (PathBuf::from(f), s.to_string()))
+            .collect();
+        let g = ProjectCallGraph::build(defs, &sources, &HashMap::new());
+        let edges = edges(&g);
+        for (from, to) in [
+            (
+                "/p/app/controllers/HomeController.scala:index",
+                "/p/app/views/index.scala.html:index",
+            ),
+            (
+                "/p/app/controllers/HomeController.scala:users",
+                "/p/app/views/users/list.scala.html:list",
+            ),
+            (
+                "/p/app/controllers/TimeController.java:index",
+                "/p/app/views/index.scala.html:index",
+            ),
+        ] {
+            assert!(
+                edges.contains(&(from.to_string(), to.to_string())),
+                "{from} -> {to}: {edges:?}"
+            );
+        }
+        assert_eq!(edges.len(), 3, "{edges:?}");
+        assert_eq!(
+            template_name(Path::new("/p/app/views/users/list.scala.html")).as_deref(),
+            Some("views.html.users.list")
+        );
+        assert_eq!(
+            template_name(Path::new("/p/src/main/twirl/mail/welcome.scala.txt")).as_deref(),
+            Some("mail.txt.welcome")
+        );
+        assert_eq!(template_name(Path::new("/p/app/views/index.html")), None);
+        let t = crate::outline::twirl_template("app/views/users/list.scala.html", list).unwrap();
+        assert_eq!((t.symbol.name.as_str(), t.symbol.line), ("list", 2));
+        assert!(crate::outline::twirl_template("app/views/index.html", index).is_none());
+    }
+
+    /// The fourth audit's misses, each a rule of its language:
+    /// - a project class neither it nor a project class above it defines a
+    ///   method of inherits it from a library (Java's `hashCode`), though
+    ///   the project's extensions of it are its own;
+    /// - a C++ bare call in a member function is its class's member first;
+    /// - a Zig file's import names that file (`posix.read`) or a type of it
+    ///   (`BufferPool = @import("buffer.zig").Pool`);
+    /// - Dart's named factory is no call of its class, and a mixin's
+    ///   override is the method an exact type runs;
+    /// - Play's reverse router is generated code;
+    /// - an argument of exactly a parameter's class picks that overload;
+    /// - a C++ list that shows a default holds the fewest arguments.
+    #[test]
+    fn fourth_audit_rules() {
+        let reached = |g: &ProjectCallGraph, caller: &str| {
+            let mut out: Vec<String> = (0..g.node_count())
+                .filter(|&n| g.node(n).name == caller)
+                .flat_map(|at| g.callees_of(at).to_vec())
+                .map(|c| format!("{}:{}", g.node(c).name, g.node(c).line))
+                .collect();
+            out.sort();
+            out.dedup();
+            out
+        };
+        // Library-inherited methods.
+        let java = "class TreeMap2 extends java.util.AbstractMap<String, String> {}\nclass Other {\n  public int hashCode() { return 1; }\n}\nclass Use {\n  void a(TreeMap2 m) { m.hashCode(); }\n  void b() { new TreeMap2().hashCode(); }\n}\n";
+        let g = graph(&[("/p/src/Use.java", java)]);
+        assert_eq!(reached(&g, "a"), Vec::<String>::new());
+        assert_eq!(reached(&g, "b"), Vec::<String>::new());
+        let kotlin = "class Box : java.util.AbstractList<Int>()\nfun Box.extra(): Int = 1\nclass Other {\n    fun extra(): Int = 2\n    override fun hashCode(): Int = 1\n}\nfun use(b: Box) {\n    b.hashCode()\n    b.extra()\n}\n";
+        let g = graph(&[("/p/src/Use.kt", kotlin)]);
+        assert_eq!(reached(&g, "use"), ["extra:2"]);
+        // C++ class scope.
+        let cpp = "class UnitTest {\n public:\n  int listeners() { return 0; }\n};\nclass UnitTestImpl {\n public:\n  int listeners() { return 1; }\n  void configure();\n};\nvoid UnitTestImpl::configure() { listeners(); }\n";
+        let g = graph(&[("/p/src/gtest.cc", cpp)]);
+        assert_eq!(reached(&g, "configure"), ["listeners:7"]);
+        // Zig imports.
+        let g = graph(&[
+            (
+                "/p/src/posix.zig",
+                "pub fn read(fd: i32) usize {\n    return 0;\n}\n",
+            ),
+            (
+                "/p/src/t.zig",
+                "pub fn reset() void {}\npub const Context = struct {\n    pub fn reset(self: *Context) void {}\n    pub fn read(self: *Context) void {}\n};\n",
+            ),
+            (
+                "/p/src/buffer.zig",
+                "pub const Pool = struct {\n    pub fn init(a: u8) Pool {\n        return .{};\n    }\n};\n",
+            ),
+            (
+                "/p/src/main.zig",
+                "const posix = @import(\"posix.zig\");\nconst t = @import(\"t.zig\");\nconst BufferPool = @import(\"buffer.zig\").Pool;\nconst Conn = struct {\n    pub fn init(a: u8) Conn {\n        return .{};\n    }\n};\nfn run() void {\n    _ = posix.read(1);\n    t.reset();\n    _ = BufferPool.init(2);\n}\n",
+            ),
+        ]);
+        assert_eq!(
+            reached(&g, "run"),
+            ["init:2", "read:1", "reset:1"],
+            "{:?}",
+            edges(&g)
+        );
+        // Dart.
+        let dart = "class Temperature {\n  const Temperature({required this.value});\n  factory Temperature.fromJson(Map<String, dynamic> json) => Temperature(value: 0);\n  final int value;\n}\nclass BlocBase {\n  void onChange(int c) {}\n}\nmixin Hydrated on BlocBase {\n  void onChange(int c) {}\n}\nclass Bloc extends BlocBase {}\nclass HydratedBloc extends Bloc with Hydrated {}\nclass MyBloc extends HydratedBloc {}\nvoid a() {\n  Temperature(value: 1);\n}\nvoid b() {\n  MyBloc().onChange(1);\n}\n";
+        let g = graph(&[("/p/lib/weather.dart", dart)]);
+        assert_eq!(reached(&g, "a"), ["Temperature:2"]);
+        assert_eq!(reached(&g, "b"), ["onChange:10"], "{:?}", edges(&g));
+        // Play's reverse router.
+        let scala = "package controllers\nclass HomeController {\n  def index() = Ok(\"hi\")\n}\nclass LogoutController {\n  def logout() = Redirect(routes.HomeController.index)\n}\n";
+        let g = graph(&[("/p/app/controllers/Logout.scala", scala)]);
+        assert_eq!(reached(&g, "logout"), Vec::<String>::new());
+        assert!(reverse_route("controllers.routes.HomeController"));
+        assert!(reverse_route("routes.javascript.HomeController"));
+        assert!(!reverse_route("routes.home"));
+        // Exact overloads.
+        let scala = "trait GenTemporal {\n  def sleep(time: Duration): Unit = ()\n  def sleep(time: FiniteDuration): Unit = ()\n  def delayBy(time: FiniteDuration): Unit = sleep(time)\n}\n";
+        let g = graph(&[("/p/src/GenTemporal.scala", scala)]);
+        assert_eq!(reached(&g, "delayBy"), ["sleep:3"]);
+        // C++ defaults.
+        let cpp = "#include <vector>\ntemplate <typename C>\nint to_hex(const C& container, size_t per_line = 32) { return 0; }\ntemplate <typename It>\nint to_hex(const It first, const It last, size_t per_line = 32) { return 1; }\nvoid run(std::vector<char> buf) {\n  to_hex(buf);\n}\n";
+        let g = graph(&[("/p/src/hex.cpp", cpp)]);
+        assert_eq!(reached(&g, "run"), ["to_hex:3"]);
+        // A destructor a C++ header read as C hides.
+        let names: Vec<String> = crate::outline::extract_located(
+            "class basic_memory_buffer {\n public:\n  FMT_CONSTEXPR explicit basic_memory_buffer(\n      const Allocator& alloc = Allocator())\n      : alloc_(alloc) {\n    this->set(store_, SIZE);\n  }\n  FMT_CONSTEXPR20 ~basic_memory_buffer() { deallocate(); }\n};\n",
+            "c",
+        )
+        .into_iter()
+        .map(|l| l.symbol.name)
+        .collect();
+        assert_eq!(
+            names,
+            [
+                "basic_memory_buffer",
+                "basic_memory_buffer",
+                "~basic_memory_buffer"
+            ],
+            "the class, its constructor and its destructor"
         );
     }
 

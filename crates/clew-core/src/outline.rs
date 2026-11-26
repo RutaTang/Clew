@@ -1142,6 +1142,7 @@ fn located_in_tree(tree: &Tree, source: &str, lang: Lang) -> Vec<Located> {
     while let Some(m) = matches.next() {
         let mut kind: Option<&str> = None;
         let mut name: Option<&str> = None;
+        let mut name_at = 0;
         let mut def: Option<Node> = None;
         for capture in m.captures {
             let capture_name = capture_names[capture.index as usize];
@@ -1150,6 +1151,7 @@ fn located_in_tree(tree: &Tree, source: &str, lang: Lang) -> Vec<Located> {
                 def = Some(capture.node);
             } else if capture_name == "name" {
                 name = source.get(capture.node.byte_range()).or(name);
+                name_at = capture.node.start_byte();
             }
         }
         let (Some(kind), Some(name), Some(def)) = (kind, name, def) else {
@@ -1166,7 +1168,29 @@ fn located_in_tree(tree: &Tree, source: &str, lang: Lang) -> Vec<Located> {
             _ if matches!(kind, "test" | "suite") => test_title(name).into(),
             _ => name.into(),
         };
+        // A destructor a C++ header read as C names by its class's name
+        // alone (`~basic_memory_buffer()`): never what a call of the class
+        // (a constructor) runs.
+        let name: std::borrow::Cow<str> = if matches!(lang, Lang::C | Lang::Cpp)
+            && source
+                .get(..name_at)
+                .is_some_and(|b| b.trim_end().ends_with('~'))
+        {
+            format!("~{name}").into()
+        } else {
+            name
+        };
         let name = &*name;
+        // A Dart named constructor (`factory Temperature.fromJson(…)`) is
+        // its second name's: `Temperature(…)` never calls it.
+        if lang == Lang::Dart
+            && source
+                .get(name_at + name.len()..)
+                .and_then(|rest| rest.strip_prefix('.'))
+                .is_some_and(|rest| rest.starts_with(|c: char| c == '_' || c.is_alphabetic()))
+        {
+            continue;
+        }
         let line = def.start_position().row + 1;
         let (decl_line, body) = shape_of(def, lang);
         let (declaration, signature_end, declaration_line) = declaration_bytes(def, lang, source);
@@ -2044,6 +2068,52 @@ impl Analysis {
 /// language key or a parser failure. Blocking; run off the UI thread.
 pub fn analyze(source: &str, lang_key: &str) -> Option<Analysis> {
     analyze_impl(source, lang_key, false)
+}
+
+/// A Play template (Twirl: `app/views/index.scala.html`) as the one
+/// function it compiles to, named by its file (`index`, of package
+/// `views.html`), at its parameter line (`@(users: Seq[User])`): what a
+/// controller calls, as `views.html.index(users)` or Java's
+/// `views.html.index.render(users)`. `None` for any other file.
+pub fn twirl_template(rel: &str, content: &str) -> Option<Located> {
+    let file = rel.rsplit(['/', '\\']).next()?;
+    let (stem, format) = file.rsplit_once(".scala.")?;
+    if !matches!(format, "html" | "txt" | "xml" | "js")
+        || stem.is_empty()
+        || !stem.chars().all(|c| c == '_' || c.is_alphanumeric())
+    {
+        return None;
+    }
+    let mut at = 0;
+    let mut signature = (1, 0, 0);
+    for (i, line) in content.lines().enumerate() {
+        if line.trim_start().starts_with("@(") {
+            signature = (i + 1, at, at + line.len());
+            break;
+        }
+        at += line.len() + 1;
+    }
+    let (line, start, end) = signature;
+    Some(Located {
+        symbol: Symbol {
+            name: stem.to_string(),
+            kind: "function".to_string(),
+            line,
+            end_line: content.lines().count().max(line),
+        },
+        declaration: (start, content.len()),
+        signature_end: end,
+        cpp_public: None,
+        decl_line: line,
+        body: None,
+        container: None,
+        owner: Owner {
+            scope: (0, content.len()),
+            member_of: None,
+        },
+        accessed: false,
+        internal: false,
+    })
 }
 
 /// [`analyze`] with Rust imports scoped to their file's module, for a local or

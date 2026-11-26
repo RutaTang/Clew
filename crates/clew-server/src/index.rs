@@ -166,7 +166,14 @@ fn analyze_indexable(root: &Path, abs: &Path, rel: &str) -> Option<Analyzed> {
     // nothing a reader looks up.
     let analysis = (!clew_core::fs_scan::is_minified_source(&content))
         .then(|| outline::analyze_scoped(&content, lang))
-        .flatten();
+        .flatten()
+        .map(|mut analysis| {
+            // A Play template is the function it compiles to.
+            analysis
+                .symbols
+                .extend(outline::twirl_template(rel, &content));
+            analysis
+        });
     Some(Analyzed {
         lang,
         content,
@@ -401,6 +408,19 @@ mod tests {
             "pub use crate::a::*;\npub fn boot() {}\nfn main() {}\n#[cfg(test)]\nmod tests {\n    use super::*;\n}\n",
         )
         .unwrap();
+        // A Play template is indexed as the function it compiles to, as the
+        // client's own index has it.
+        let view = root.join("app/views/index.scala.html");
+        std::fs::create_dir_all(view.parent().unwrap()).unwrap();
+        std::fs::write(&view, "@(title: String)\n<h1>@title</h1>\n").unwrap();
+        let entry =
+            super::file_symbols_for(&root, &view, "app/views/index.scala.html").expect("indexable");
+        assert!(
+            entry
+                .symbols
+                .iter()
+                .any(|s| s.name == "index" && s.kind == "function")
+        );
         let entry = super::file_symbols_for(&root, &abs, "src/shell.rs").expect("indexable");
         let imports: Vec<&str> = entry.imports.iter().map(|i| i.module.as_str()).collect();
         assert_eq!(imports, ["pub crate::a::*", "self::*"]);

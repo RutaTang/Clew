@@ -144,7 +144,11 @@ use crate::incremental::Version;
 /// ([`CachedCalls::call_arguments`], [`CachedCalls::parameters`]), Java's
 /// and C#'s built-in types bind, and a Scala file's chained package clauses
 /// open their packages ([`CachedCalls::enclosing`]).
-pub(crate) const CACHE_VERSION: u32 = 37;
+/// 38: a Play template is a function; a destructor a C++ header read as C
+/// declares is `~Name`; a Dart named constructor is its second name's and a
+/// mixin owns its methods; a C++ parameter list that shows a default gives
+/// its fewest arguments; Zig's file imports qualify their calls.
+pub(crate) const CACHE_VERSION: u32 = 38;
 
 /// A cached symbol (the index entry minus the paths, which are reconstructed
 /// from the project root + relative path on load).
