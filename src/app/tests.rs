@@ -9,6 +9,7 @@ mod ask_space;
 mod askfloat;
 #[cfg(unix)]
 mod build_app;
+mod corpus;
 mod embedding;
 mod fakerun;
 mod graph_search;
@@ -25330,6 +25331,7 @@ fn fill_project_session(app: &mut App) {
             owners: HashMap::new(),
             accessed: HashSet::new(),
             internal: HashSet::new(),
+            context: Default::default(),
         }),
     );
     p.tracked_ignored.insert("src/lib.rs".into());

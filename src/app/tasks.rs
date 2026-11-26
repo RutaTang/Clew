@@ -1395,13 +1395,16 @@ pub(crate) fn gather_explain_inputs_from(
                 line: item.symbol.line,
             });
         }
-        file_calls.push(projectcalls::FileCalls::new(
-            path.clone(),
-            analysis.lang,
-            analysis.calls.clone(),
-            &analysis.symbols,
-            analysis.owners.clone(),
-        ));
+        file_calls.push(
+            projectcalls::FileCalls::new(
+                path.clone(),
+                analysis.lang,
+                analysis.calls.clone(),
+                &analysis.symbols,
+                analysis.owners.clone(),
+            )
+            .with_context(analysis.context.clone()),
+        );
     }
     let (stand_in_defs, stand_in_calls) = unread_stand_ins(&unread, recorded);
     all_defs.extend(stand_in_defs);

@@ -164,6 +164,7 @@ pub fn analyze_file(abs: &Path, rel: &str, content: &str, lang: &'static str) ->
         &analysis.symbols,
         analysis.owners.clone(),
     )
+    .map(|calls| calls.with_context(analysis.context.clone()))
     .filter(|calls| !calls.is_empty())
     .map(Arc::new);
     let symbols = if highlight::has_outline(lang) {
@@ -256,6 +257,7 @@ fn to_cached_calls(calls: &FileCalls) -> CachedCalls {
             None => 0,
             Some(Receiver::Own) => 1,
             Some(Receiver::Type(ty)) => intern(ty, &mut names, &mut seen) + 2,
+            Some(Receiver::Declared(ty)) => -(intern(ty, &mut names, &mut seen) + 2),
         });
     }
     let mut owners: Vec<(usize, &str)> = calls
@@ -293,6 +295,9 @@ fn to_cached_calls(calls: &FileCalls) -> CachedCalls {
         owners,
         accessed,
         internal,
+        package: calls.context.package.clone(),
+        types: calls.context.types.clone(),
+        extensions: calls.context.extensions.clone(),
     }
 }
 
@@ -332,6 +337,7 @@ fn from_cached_calls(abs: &Path, cached: &CachedCalls) -> Option<FileCalls> {
             receiver: match receiver {
                 0 => None,
                 1 => Some(Receiver::Own),
+                n if n < 0 => Some(Receiver::Declared(name(-n - 2)?)),
                 n => Some(Receiver::Type(name(n - 2)?)),
             },
             line: usize::try_from(line).ok()?,
@@ -369,6 +375,11 @@ fn from_cached_calls(abs: &Path, cached: &CachedCalls) -> Option<FileCalls> {
         owners,
         accessed: cached.accessed.iter().copied().collect(),
         internal: cached.internal.iter().copied().collect(),
+        context: clew_core::projectcalls::FileContext {
+            package: cached.package.clone(),
+            types: cached.types.clone(),
+            extensions: cached.extensions.clone(),
+        },
     })
 }
 

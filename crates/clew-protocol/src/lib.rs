@@ -177,7 +177,8 @@ pub use payload::*;
 ///
 /// v37: [`SourceManifests::zig`]: the modules a Zig project's `build.zig`
 /// names, so `@import("greet")` resolves to the file the build roots it at
-/// on a remote project too.
+/// on a remote project too; and [`SourceManifests::dart`], each Dart
+/// package's name, so a workspace's packages import one another.
 pub const PROTOCOL_VERSION: u32 = 37;
 
 /// A hash of this crate's source as a token stream — comments and whitespace
@@ -285,6 +286,10 @@ pub struct SourceManifests {
     /// `@import`s them by (`.imports`, `addImport`, `b.addModule`), each
     /// with its root source file, relative to the build.zig's folder.
     pub zig: Vec<(Rel, Vec<(String, String)>)>,
+    /// Each Dart package's `pubspec.yaml` (by rel) with its name: a pub
+    /// workspace's packages import one another as `package:<name>/…`, the
+    /// file under that package's `lib/`.
+    pub dart: Vec<(Rel, String)>,
 }
 
 impl SourceManifests {
@@ -296,6 +301,7 @@ impl SourceManifests {
             && self.lean.is_empty()
             && self.js.is_empty()
             && self.zig.is_empty()
+            && self.dart.is_empty()
     }
 }
 

@@ -1850,6 +1850,8 @@ pub struct Analysis {
     pub calls: Vec<crate::projectcalls::CallSite>,
     /// The class each callable belongs to (`projectcalls::owners_in`).
     pub owners: std::collections::HashMap<usize, String>,
+    /// The file's package and its types' bases (`projectcalls::context_in`).
+    pub context: crate::projectcalls::FileContext,
 }
 
 impl Analysis {
@@ -1934,6 +1936,7 @@ fn analyze_impl(source: &str, lang_key: &str, scope_rust: bool) -> Option<Analys
             imports: crate::imports::imports_in(&tree, source, lang),
             calls: Vec::new(),
             owners: Default::default(),
+            context: Default::default(),
         });
     }
     let symbols = located_in(&tree, source, lang);
@@ -1946,12 +1949,14 @@ fn analyze_impl(source: &str, lang_key: &str, scope_rust: bool) -> Option<Analys
         Lang::Lean => lean_owners(source, &symbols),
         _ => crate::projectcalls::owners_in(&tree, source, lang, &symbols),
     };
+    let context = crate::projectcalls::context_in(source, lang, &symbols);
     Some(Analysis {
         lang,
         symbols,
         imports,
         calls,
         owners,
+        context,
     })
 }
 
@@ -1968,6 +1973,7 @@ pub fn analyze_definitions(source: &str, lang_key: &str) -> Option<Analysis> {
         imports: Vec::new(),
         calls: Vec::new(),
         owners: Default::default(),
+        context: Default::default(),
     })
 }
 

@@ -268,6 +268,7 @@ pub(crate) fn build_project_calls_graph(
                 &analysis.symbols,
                 analysis.owners,
             )
+            .map(|c| c.with_context(analysis.context))
             .filter(|c| !c.is_empty()),
         );
     }

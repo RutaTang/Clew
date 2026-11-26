@@ -183,6 +183,9 @@ pub struct Resolver {
     /// package sees its own build's names, not those of the build around it. What the project's
     /// manifests say ([`Resolver::with_manifests`]); empty without them.
     zig_modules: Vec<(PathBuf, HashMap<String, PathBuf>)>,
+    /// Each Dart package of the project by its name, with its `lib/`
+    /// folder: what `package:<name>/…` names. See [`Resolver::resolve_dart`].
+    dart_packages: HashMap<String, PathBuf>,
     /// The Python source roots the project's `pyproject.toml`s name
     /// (`src`, `lib`, maturin's `python`, pytest's `pythonpath`, …), that
     /// exist: where an absolute import is looked for after the project's
@@ -847,6 +850,20 @@ impl Resolver {
         }
         zig.sort_by_key(|(dir, _)| std::cmp::Reverse(dir.components().count()));
         self.zig_modules = zig;
+        let mut dart = HashMap::new();
+        for (rel, name) in &manifests.dart {
+            if let Some(lib) = self
+                .root
+                .join(rel)
+                .parent()
+                .map(|dir| dir.join("lib"))
+                .filter(|lib| lib.starts_with(&self.root))
+            {
+                // Two packages of one name: the shallowest, read first.
+                dart.entry(name.clone()).or_insert(lib);
+            }
+        }
+        self.dart_packages = dart;
         let mut python_roots: Vec<PathBuf> = Vec::new();
         for (rel, named) in &manifests.python {
             let Some(base) = self.root.join(rel).parent().map(Path::to_path_buf) else {
@@ -1044,6 +1061,7 @@ impl Resolver {
             haskell_roots,
             rust_libs: HashMap::new(),
             zig_modules: Vec::new(),
+            dart_packages: HashMap::new(),
             python_roots: Vec::new(),
             erlang_modules,
             erlang_headers,
@@ -1104,7 +1122,7 @@ impl Resolver {
             "dart" => self.resolve_dart(raw, from),
             "lean" => self.resolve_lean(raw, from),
             // Kotlin's and Scala's packages and classes are Java's.
-            "java" | "kotlin" | "scala" => self.resolve_java(raw, from, declared.package),
+            "java" | "kotlin" | "scala" => self.resolve_java(raw, from, declared),
             "elixir" => self.resolve_elixir(raw),
             "csharp" => self.resolve_csharp(raw, from, declared.namespaces),
             "php" => self.resolve_php(raw, from),
@@ -1229,7 +1247,8 @@ impl Resolver {
     /// ([`ImportGraph::packages`]). A name in a package of the project's own
     /// that no file is stays unresolved; any other is a library's, named by
     /// its package (`java.util`).
-    fn resolve_java(&self, raw: &RawImport, from: &Path, package: Option<&str>) -> Target {
+    fn resolve_java(&self, raw: &RawImport, from: &Path, declared: &Declared<'_>) -> Target {
+        let package = declared.package;
         let spec = raw.module.as_str();
         let (name, star) = match spec.strip_suffix(".*") {
             Some(name) => (name, true),
@@ -1290,10 +1309,29 @@ impl Resolver {
             })
             .max(1);
         let package = &segs[..package_len];
-        if roots
+        let filed = roots
             .iter()
-            .any(|root| self.dirs.contains(&join_all(root, package)))
-        {
+            .any(|root| self.dirs.contains(&join_all(root, package)));
+        // A package the project's files declare wherever they are: its node,
+        // which reaches them — the longest of the name's prefixes that is
+        // one. Kotlin and Scala put a package's files anywhere, a class in
+        // any file of it; a Java class is its own file, so a Java package
+        // filed under its name with no file of the class is missing it.
+        if let Some(namespaces) = declared.namespaces {
+            for end in (1..=segs.len()).rev() {
+                let node = self.package_node(&segs[..end].join("."));
+                let Some(files) = namespaces.files(&node).filter(|f| !f.is_empty()) else {
+                    continue;
+                };
+                let java_only = files
+                    .iter()
+                    .all(|f| f.extension().is_some_and(|e| e == "java"));
+                if !(filed && java_only) {
+                    return Target::Internal(node);
+                }
+            }
+        }
+        if filed {
             return Target::Unresolved(spec.to_string());
         }
         Target::External(package.join("."))
@@ -1374,6 +1412,13 @@ impl Resolver {
     /// namespace (`Acme.Core/`, a project's) is common.
     pub fn namespace_node(&self, namespace: &str) -> PathBuf {
         self.root.join(format!("namespace {namespace}"))
+    }
+
+    /// The node a Java, Kotlin or Scala package is in the graph when its
+    /// files are not filed under its name (`<root>/package os`): Kotlin and
+    /// Scala put a package's files wherever they like.
+    pub fn package_node(&self, package: &str) -> PathBuf {
+        self.root.join(format!("package {package}"))
     }
 
     // --- PHP ---
@@ -1762,14 +1807,21 @@ impl Resolver {
         if let Some(rest) = spec.strip_prefix("dart:") {
             return Target::External(format!("dart:{}", rest.split('/').next().unwrap_or(rest)));
         }
-        // `package:<name>/<path>` — another package, except a file referring to its
-        // own package by name, which maps back into `lib/<path>`.
+        // `package:<name>/<path>` — another package, except one of the
+        // project's: its own (the root's pubspec) or a workspace's other
+        // package by its pubspec's name, whose `lib/<path>` it names.
         if let Some(rest) = spec.strip_prefix("package:") {
             let (pkg, path) = rest.split_once('/').unwrap_or((rest, ""));
-            if self.dart_package.as_deref() == Some(pkg) && !path.is_empty() {
-                let cand = normalize(&self.root.join("lib").join(path));
-                if self.has_file(&cand) {
-                    return Target::Internal(cand);
+            if !path.is_empty() {
+                let lib = match self.dart_package.as_deref() == Some(pkg) {
+                    true => Some(self.root.join("lib")),
+                    false => self.dart_packages.get(pkg).cloned(),
+                };
+                if let Some(lib) = lib {
+                    let cand = normalize(&lib.join(path));
+                    if self.has_file(&cand) {
+                        return Target::Internal(cand);
+                    }
                 }
             }
             return Target::External(format!("package:{pkg}"));
@@ -3772,6 +3824,12 @@ impl ImportGraph {
                     .filter(|r| r.is_mod_decl)
                     .map(|r| resolver.namespace_node(&r.module))
                     .collect(),
+                Some("java" | "kotlin" | "scala") => queued
+                    .raw
+                    .iter()
+                    .filter(|r| r.is_mod_decl)
+                    .map(|r| resolver.package_node(&r.module))
+                    .collect(),
                 _ => Vec::new(),
             };
             namespaces_changed.extend(self.namespaces.set(file, declares));
@@ -3866,14 +3924,25 @@ impl ImportGraph {
             let parent = r.module.rsplit_once('.').map(|(namespace, _)| namespace);
             [Some(r.module.as_str()), parent].into_iter().flatten()
         }
+        // A JVM import's packages: each prefix of its name.
+        fn packages(r: &RawImport) -> impl Iterator<Item = &str> {
+            let name = r.module.as_str();
+            name.match_indices('.').map(move |(at, _)| &name[..at])
+        }
         self.raw
             .iter()
-            .filter(|(file, _)| lang_of(file) == Some("csharp"))
-            .filter(|(_, raws)| {
-                raws.iter()
+            .filter(|(file, raws)| match lang_of(file) {
+                Some("csharp") => raws
+                    .iter()
                     .filter(|r| !r.is_mod_decl)
                     .flat_map(names)
-                    .any(|name| changed.contains(&resolver.namespace_node(name)))
+                    .any(|name| changed.contains(&resolver.namespace_node(name))),
+                Some("java" | "kotlin" | "scala") => raws
+                    .iter()
+                    .filter(|r| !r.is_mod_decl)
+                    .flat_map(packages)
+                    .any(|name| changed.contains(&resolver.package_node(name))),
+                _ => false,
             })
             .map(|(file, _)| file.clone())
             .collect()
@@ -8833,6 +8902,55 @@ mod resolution_tests {
 
     // --- Dart ---
 
+    /// A pub workspace's packages import one another by name: the file under
+    /// the named package's `lib/`, as its pubspec says it is named; a name
+    /// no pubspec gives stays another's.
+    #[test]
+    fn dart_workspace_packages_import_one_another() {
+        let root = Path::new("/w");
+        let paths: Vec<PathBuf> = [
+            "pkgs/shelf/pubspec.yaml",
+            "pkgs/shelf/lib/shelf.dart",
+            "pkgs/shelf/lib/src/request.dart",
+            "pkgs/shelf_router/pubspec.yaml",
+            "pkgs/shelf_router/lib/src/router.dart",
+        ]
+        .iter()
+        .map(|f| root.join(f))
+        .collect();
+        let r = Resolver::with_meta(root, &paths, None, None).with_manifests(
+            &clew_protocol::SourceManifests {
+                dart: vec![
+                    ("pkgs/shelf/pubspec.yaml".into(), "shelf".into()),
+                    (
+                        "pkgs/shelf_router/pubspec.yaml".into(),
+                        "shelf_router".into(),
+                    ),
+                ],
+                ..Default::default()
+            },
+        );
+        let res = |s: &str| {
+            r.resolve(
+                &ri(s),
+                &root.join("pkgs/shelf_router/lib/src/router.dart"),
+                "dart",
+            )
+        };
+        assert_eq!(
+            res("package:shelf/shelf.dart"),
+            Target::Internal(root.join("pkgs/shelf/lib/shelf.dart"))
+        );
+        assert_eq!(
+            res("package:shelf/src/request.dart"),
+            Target::Internal(root.join("pkgs/shelf/lib/src/request.dart"))
+        );
+        assert_eq!(
+            res("package:meta/meta.dart"),
+            Target::External("package:meta".into())
+        );
+    }
+
     #[test]
     fn dart_package_relative_and_sdk_imports() {
         let root = Path::new("/d");
@@ -9060,6 +9178,61 @@ mod resolution_tests {
     /// project file declares is a library's. A file whose namespaces change
     /// moves the `using`s of them with it, as a build from scratch would
     /// have them.
+    /// A Kotlin or Scala package is wherever its files say they are: an
+    /// import of it, or of a class or member of it, that no folder of its
+    /// name holds, reaches the files declaring it (`package os` under
+    /// `os/src/`), as a C# `using` reaches its namespace's; a name no file
+    /// declares stays a library's.
+    #[test]
+    fn jvm_imports_reach_the_files_declaring_their_package() {
+        let root = Path::new("/jvm");
+        let model = "os/src/Model.scala";
+        let ops = "os/src/FileOps.scala";
+        let tests = "os/test/src/PathTests.scala";
+        let repo = "lib/data/Repo.kt";
+        let service = "app/web/Service.kt";
+        let sources = [
+            (model, "package os\n\nclass Path(s: String)\n"),
+            (
+                ops,
+                "package os\n\nobject read {\n  def apply(p: Path): String = \"\"\n}\n",
+            ),
+            (
+                tests,
+                "package test.os\n\nimport os._\nimport os.Path\nimport utest._\n\nobject PathTests\n",
+            ),
+            (repo, "package shop.data\n\nclass Repo\n"),
+            (
+                service,
+                "package shop.web\n\nimport shop.data.Repo\nimport kotlinx.coroutines.launch\n\nclass Service(val repo: Repo)\n",
+            ),
+        ];
+        let g = graph_with(root, &sources, false);
+        let at = |f: &str| root.join(f);
+        let names: Vec<&str> = sources.iter().map(|(f, _)| *f).collect();
+        let r = resolver(root, &names);
+        let os = r.package_node("os");
+        assert_eq!(
+            targets(&g, &at(tests)),
+            [
+                Target::Internal(os.clone()),
+                Target::Internal(os.clone()),
+                Target::External("utest".into()),
+            ]
+        );
+        let mut reached = g.imported_files(&at(tests), &g.packages());
+        reached.sort();
+        assert_eq!(reached, [at(ops), at(model)]);
+        assert_eq!(
+            targets(&g, &at(service)),
+            [
+                Target::Internal(r.package_node("shop.data")),
+                Target::External("kotlinx.coroutines".into()),
+            ]
+        );
+        assert_eq!(g.imported_files(&at(service), &g.packages()), [at(repo)]);
+    }
+
     #[test]
     fn csharp_usings_reach_the_files_declaring_their_namespace() {
         let root = Path::new("/cs");

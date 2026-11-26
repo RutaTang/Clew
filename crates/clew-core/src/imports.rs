@@ -177,7 +177,12 @@ pub fn read_go_module(root: &Path) -> Option<String> {
 /// nested `name:` under `dependencies:` isn't mistaken for it. Bounded and
 /// plain-file-only for the same reason as [`read_go_module`].
 pub fn read_dart_package(root: &Path) -> Option<String> {
-    let text = crate::statefile::read_capped(&root.join("pubspec.yaml"), MAX_METADATA_BYTES)?;
+    read_pubspec_name(&root.join("pubspec.yaml"))
+}
+
+/// The package name the `pubspec.yaml` at `path` gives (`name: shelf`).
+pub fn read_pubspec_name(path: &Path) -> Option<String> {
+    let text = crate::statefile::read_capped(path, MAX_METADATA_BYTES)?;
     for line in text.lines() {
         if line.starts_with(char::is_whitespace) {
             continue;
@@ -253,6 +258,7 @@ pub fn bears_on_manifests(rel: &str) -> bool {
         || name == "Cargo.toml"
         || name == "pyproject.toml"
         || name == "build.zig"
+        || name == "pubspec.yaml"
         || is_lakefile(name)
         || is_haskell_manifest(name)
         || [".php", ".hs", ".lhs", ".lean"]
@@ -311,6 +317,12 @@ pub fn source_manifests<S: AsRef<str>>(root: &Path, rels: &[S]) -> clew_protocol
         let roots = read_python_source_roots(&root.join(rel));
         if !roots.is_empty() {
             out.python.push((rel.to_string(), roots));
+        }
+    }
+    // Each Dart package's name — a pubspec is Dart's alone (or Flutter's).
+    for rel in picked_up_to(&|name| name == "pubspec.yaml", MAX_CARGO_MANIFESTS) {
+        if let Some(name) = read_pubspec_name(&root.join(rel)) {
+            out.dart.push((rel.to_string(), name));
         }
     }
     // A build.zig is itself Zig: where there is one, there is Zig. Each is

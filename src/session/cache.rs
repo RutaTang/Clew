@@ -107,7 +107,12 @@ use crate::incremental::Version;
 /// another file's call to it.
 /// 25: Haskell's operators (`a <+> b = …`) and backticked functions are
 /// symbols, and their uses calls; an older entry has neither.
-pub(crate) const CACHE_VERSION: u32 = 25;
+/// 26: a receiver declared as a type (a parameter's, a field's, a local's)
+/// or `this`/`self` is kept, and each file's package and its types' bases
+/// ([`CachedCalls::package`], [`CachedCalls::types`]) — what a call is
+/// resolved through to the type's method, inherited or overridden, and to
+/// another file of its package; an older entry has none of them.
+pub(crate) const CACHE_VERSION: u32 = 26;
 
 /// A cached symbol (the index entry minus the paths, which are reconstructed
 /// from the project root + relative path on load).
@@ -173,7 +178,7 @@ pub struct CachedCalls {
     /// One number per call site, in `sites`' order: what its receiver is
     /// known to be (`clew_core::projectcalls::CallSite::receiver`) — `0`
     /// unknown, `1` the caller's own class, a type's index in `names` plus
-    /// two.
+    /// two; a type it is declared as, that index plus two, negated.
     #[serde(default)]
     pub receivers: Vec<i64>,
     /// Two numbers per method whose class is known
@@ -189,6 +194,17 @@ pub struct CachedCalls {
     /// (`clew_core::projectcalls::FileCalls::internal`).
     #[serde(default)]
     pub internal: Vec<usize>,
+    /// The file's package (`clew_core::projectcalls::FileContext::package`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package: Option<String>,
+    /// The types the file declares with their bases
+    /// (`clew_core::projectcalls::FileContext::types`), only those with any.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub types: Vec<(String, Vec<String>)>,
+    /// Definition lines of extension methods
+    /// (`clew_core::projectcalls::FileContext::extensions`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extensions: Vec<usize>,
 }
 
 /// Everything cached about one file: how to confirm it is unchanged (mtime,
@@ -310,6 +326,9 @@ mod tests {
                 owners: vec![3, 1],
                 accessed: vec![3],
                 internal: vec![9],
+                package: Some("shop".into()),
+                types: vec![("Cart".into(), vec!["Base".into()])],
+                extensions: vec![3],
             }),
         }
     }

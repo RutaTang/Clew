@@ -1031,6 +1031,7 @@ fn project_symbols(
                     "build.zig".into(),
                     vec![("greet".into(), "src/greet.zig".into())],
                 )],
+                dart: vec![("pkgs/shelf/pubspec.yaml".into(), "shelf".into())],
             }))),
             _ => Patch::Unchanged,
         },
