@@ -1142,7 +1142,10 @@ fn lang_spec(lang: Lang) -> Option<LangSpec> {
         // A function passed as a value (`foldr add 0 xs`, `show . add 1`)
         // is used where it is passed, as the function it is passed to calls
         // it: higher-order and point-free code use most functions so.
-        Lang::Haskell => spec(&["function", "bind"], &["apply", "variable", "qualified"]),
+        Lang::Haskell => spec(
+            &["function", "bind"],
+            &["apply", "variable", "qualified", "infix", "prefix_id"],
+        ),
         Lang::Zig => spec(&["function_declaration"], &["call_expression"]),
         // `Foo(…)` constructs a class as a function is called; `a.b(…)`
         // is a `navigation_expression` callee.
@@ -1453,6 +1456,7 @@ fn fn_names(
         // named function).
         // `def name(…) do`: the name is the call its first argument is.
         Lang::Elixir => return elixir_def_name(node, src).into_iter().collect(),
+        Lang::Haskell => return haskell_fn_name(node, src).into_iter().collect(),
         Lang::Dart if node.kind() == "function_body" => {
             // The sibling the walk carried: `prev_sibling` finds it through
             // `parent()`, a walk down from the root, and a scan of the
@@ -1469,6 +1473,52 @@ fn fn_names(
         .map(|n| node_text(n, src).to_string());
     binding_name(parent, src).into_iter().chain(own).collect()
 }
+
+/// A Haskell function's name: `add` of `add a b = …`, the operator of
+/// `(<+>) a b = …` and of `a <+> b = …`, the function of ``x `plus` y = …``
+/// — as the outline names them, the operator without its parentheses.
+fn haskell_fn_name(node: Node, src: &str) -> Option<String> {
+    if let Some(name) = node.child_by_field_name("name") {
+        let name = match name.kind() {
+            "prefix_id" => name.named_child(0)?,
+            _ => name,
+        };
+        return Some(node_text(name, src).to_string());
+    }
+    let head = node.named_child(0).filter(|h| h.kind() == "infix")?;
+    haskell_infix_name(head, src).map(|(name, _)| name)
+}
+
+/// What an infix application `a <+> b` (or ``x `plus` y``) applies: the
+/// operator, or the function between backticks, and whether it is another
+/// module's (``x `M.plus` y``). A constructor (`x : xs`, `a :+: b`) applies
+/// no function.
+fn haskell_infix_name(infix: Node, src: &str) -> Option<(String, bool)> {
+    let op = infix.child_by_field_name("operator")?;
+    match op.kind() {
+        "operator" => Some((node_text(op, src).to_string(), false)),
+        "infix_id" => {
+            let inner = op.named_child(0)?;
+            match inner.kind() {
+                "variable" => Some((node_text(inner, src).to_string(), false)),
+                "qualified" => {
+                    let id = inner.child_by_field_name("id")?;
+                    (id.kind() == "variable").then(|| (node_text(id, src).to_string(), true))
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// The base library's operators, which no project defines: an infix use of
+/// one is no call of the project's, and is not kept as one.
+const HASKELL_BASE_OPERATORS: &[&str] = &[
+    "+", "-", "*", "/", "^", "^^", "**", "==", "/=", "<", "<=", ">", ">=", "&&", "||", "$", "$!",
+    ".", "<$>", "<$", "$>", "<&>", "<*>", "<*", "*>", ">>=", ">>", "=<<", ">=>", "<=<", "++", "!!",
+    "<>", "<|>", "&", "@", "~", "|", "=", "->", "<-", "=>", "::", "\\",
+];
 
 /// The function an Elixir `def` (or `defp`, `defmacro`, …) call defines:
 /// its first argument's name — `f(x)`, `f(x) when …` or a bare `f`.
@@ -1753,6 +1803,35 @@ fn callee_name(call: Node, parent: Option<Node>, src: &str, lang: Lang) -> Optio
         // (`foldr add 0`), or the operand of an operator that applies or
         // composes it (`show . add 1`, `f <$> xs`, `print $ x`). As an
         // application's function it is that application's callee.
+        // An operator applied infix (`a <+> b`), a function written between
+        // backticks (``x `plus` y``): calls of them — the project's own, as
+        // the base library's (`+`, `$`, `<$>`) name none of its functions. A
+        // definition's head (`a <+> b = …`) defines what it names.
+        (Lang::Haskell, "infix") => {
+            if parent.is_some_and(|p| p.kind() == "function") {
+                return None;
+            }
+            let (name, other_module) = haskell_infix_name(call, src)?;
+            return (!HASKELL_BASE_OPERATORS.contains(&name.as_str()))
+                .then_some((name, other_module));
+        }
+        // An operator passed as a value (`foldr (<+>) 0 xs`): used there,
+        // as a function is. As an application's function it is that
+        // application's callee.
+        (Lang::Haskell, "prefix_id") => {
+            let parent = parent?;
+            let passed = match parent.kind() {
+                "apply" => parent.child_by_field_name("argument") == Some(call),
+                "infix" => parent
+                    .child_by_field_name("operator")
+                    .is_some_and(|op| HASKELL_FUNCTION_OPERATORS.contains(&node_text(op, src))),
+                _ => false,
+            };
+            let op = call.named_child(0).filter(|op| op.kind() == "operator")?;
+            let name = node_text(op, src);
+            return (passed && !HASKELL_BASE_OPERATORS.contains(&name))
+                .then(|| (name.to_string(), false));
+        }
         (Lang::Haskell, "variable" | "qualified") => {
             let parent = parent?;
             let passed = match parent.kind() {
@@ -1790,6 +1869,14 @@ fn callee_name(call: Node, parent: Option<Node>, src: &str, lang: Lang) -> Optio
             let function = call.child_by_field_name("function")?;
             return match function.kind() {
                 "variable" => Some((node_text(function, src).to_string(), false)),
+                // `(<+>) 1 2`.
+                "prefix_id" => {
+                    let op = function
+                        .named_child(0)
+                        .filter(|op| op.kind() == "operator")?;
+                    let name = node_text(op, src);
+                    (!HASKELL_BASE_OPERATORS.contains(&name)).then(|| (name.to_string(), false))
+                }
                 "qualified" => {
                     let id = function.child_by_field_name("id")?;
                     (id.kind() == "variable").then(|| (node_text(id, src).to_string(), true))
@@ -4577,6 +4664,50 @@ mod edge_tests {
     /// a Haskell program's `main` reached nothing it folded with, and the
     /// function read as reached from no entry point. A function named as
     /// an application's function is that application's call, not two.
+    /// A Haskell operator of the project's is called where it is applied
+    /// — infix (`1 <+> 2`), in parentheses (`(<+>) 3 4`) or passed
+    /// (`foldr (<+>) 0`) — and a function between backticks (``x `plus`
+    /// y``) where it stands. An operator's own definition, `a <+> b = …`,
+    /// calls nothing by its head, and the base library's operators (`+`,
+    /// `$`) are no call of the project's.
+    #[test]
+    fn a_haskell_operator_and_a_backticked_function_are_called() {
+        let src = "\
+module Ops where
+
+(<+>) :: Int -> Int -> Int
+a <+> b = a + b
+
+x `plus` y = x + y
+
+infixed = 1 <+> 2
+prefixed = (<+>) 3 4
+folded xs = foldr (<+>) 0 xs
+ticked = 5 `plus` 6
+base = show $ 1 + 2
+";
+        let g = graph(&[("/p/src/Ops.hs", src)]);
+        let edges = edges(&g);
+        for from in ["infixed", "prefixed", "folded"] {
+            assert!(
+                has(&g, &format!("/p/src/Ops.hs:{from}"), "/p/src/Ops.hs:<+>"),
+                "{from} -> <+>: {edges:?}"
+            );
+        }
+        assert!(
+            has(&g, "/p/src/Ops.hs:ticked", "/p/src/Ops.hs:plus"),
+            "{edges:?}"
+        );
+        assert!(
+            !has(&g, "/p/src/Ops.hs:<+>", "/p/src/Ops.hs:<+>"),
+            "a definition's head is no call: {edges:?}"
+        );
+        assert!(
+            edges.iter().all(|(from, _)| !from.ends_with(":base")),
+            "{edges:?}"
+        );
+    }
+
     #[test]
     fn a_function_passed_as_a_value_is_used_where_it_is_passed() {
         let g = graph(&[

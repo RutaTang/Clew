@@ -92,6 +92,7 @@ pub mod framing;
 pub mod fs_scan;
 pub mod git;
 pub mod globalconfig;
+pub mod heritage;
 pub mod highlight;
 pub mod imports;
 pub mod inactive;

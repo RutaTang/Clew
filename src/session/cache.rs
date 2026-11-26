@@ -105,7 +105,9 @@ use crate::incremental::Version;
 /// 24: a C or C++ function of its file alone (`static`, an anonymous
 /// namespace's) is marked so; an older entry marks none, and would link
 /// another file's call to it.
-pub(crate) const CACHE_VERSION: u32 = 24;
+/// 25: Haskell's operators (`a <+> b = …`) and backticked functions are
+/// symbols, and their uses calls; an older entry has neither.
+pub(crate) const CACHE_VERSION: u32 = 25;
 
 /// A cached symbol (the index entry minus the paths, which are reconstructed
 /// from the project root + relative path on load).

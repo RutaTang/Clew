@@ -623,6 +623,9 @@ pub fn build_file(source: &str, lang_key: &str) -> Vec<DocItem> {
         Lang::Lean => crate::lean::module_publics(source),
         _ => None,
     };
+    // An Erlang module's `-export` and a Haskell module's export list say
+    // what the module gives others, file-wide, not at each declaration.
+    let module_exports = ModuleExports::of(source, lang);
     // In index order, so a parent's verdict exists before its members'.
     let mut public: Vec<bool> = vec![false; n];
     for i in 0..n {
@@ -666,6 +669,12 @@ pub fn build_file(source: &str, lang_key: &str) -> Vec<DocItem> {
                     || (parent[i].is_none() && exported.contains(raws[i].name.as_str()))
             }
         };
+        if let Some(exports) = &module_exports
+            && !local
+        {
+            let owner = member_of.map(|p| (raws[p].name.as_str(), public[p]));
+            public[i] = exports.allows(&raws[i].name, &raws[i].kind, owner);
+        }
         // Lean's module system: in a file that is a `module`, a declaration
         // is public only marked so or in a `public section`.
         if let Some(publics) = &lean_publics
@@ -1653,6 +1662,263 @@ fn is_plain_ident(s: &str) -> bool {
 /// `decl` is its declaration text (its signature), `name` its identifier, and
 /// `is_member` says whether it is nested inside a type-like item (a class
 /// member) rather than declared at the top level of the file.
+/// What an Erlang or Haskell module exports, read off its file: Erlang's
+/// `-export([add/2])` and `-export_type([money/0])`, Haskell's module
+/// header `module Cart (add, Shape(..), Mode(Fast)) where`. `None` where
+/// everything is exported — `-compile(export_all)`'s functions, a Haskell
+/// module with no export list — or where a file says nothing (an Erlang
+/// header, whose records and macros are every includer's).
+struct ModuleExports {
+    lang: Lang,
+    /// Exported by name: Erlang's functions (any arity), Haskell's values,
+    /// types and classes.
+    names: HashSet<String>,
+    /// Erlang's `-export_type`.
+    types: HashSet<String>,
+    /// Erlang's `-compile(export_all)`: every function.
+    all_functions: bool,
+    /// Haskell's `T(..)`: the type or class with every constructor, field or
+    /// method.
+    whole: HashSet<String>,
+    /// Haskell's `T(A, b)`: the type or class with the ones named.
+    some: HashMap<String, HashSet<String>>,
+}
+
+impl ModuleExports {
+    fn of(source: &str, lang: Lang) -> Option<ModuleExports> {
+        match lang {
+            Lang::Erlang => Self::erlang(source),
+            Lang::Haskell => Self::haskell(source),
+            _ => None,
+        }
+    }
+
+    fn empty(lang: Lang) -> ModuleExports {
+        ModuleExports {
+            lang,
+            names: HashSet::new(),
+            types: HashSet::new(),
+            all_functions: false,
+            whole: HashSet::new(),
+            some: HashMap::new(),
+        }
+    }
+
+    fn erlang(source: &str) -> Option<ModuleExports> {
+        // Comments out, a `%` in a string aside (none in an attribute).
+        let text: String = source
+            .lines()
+            .map(|l| l.split('%').next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n");
+        // A header (no `-module`) is every includer's: nothing to judge.
+        text.contains("-module(").then_some(())?;
+        let mut out = Self::empty(Lang::Erlang);
+        let attribute = |name: &str| {
+            let mut found = Vec::new();
+            let mut rest = text.as_str();
+            while let Some(at) = rest.find(name) {
+                let after = &rest[at + name.len()..];
+                let end = after.find(").").unwrap_or(after.len());
+                found.push(after[..end].to_string());
+                rest = &after[end..];
+            }
+            found
+        };
+        let names_in = |list: &str| -> Vec<String> {
+            list.trim()
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .split(',')
+                .filter_map(|entry| entry.split('/').next())
+                .map(|name| name.trim().trim_matches('\'').to_string())
+                .filter(|name| !name.is_empty())
+                .collect()
+        };
+        for list in attribute("-export(") {
+            out.names.extend(names_in(&list));
+        }
+        for list in attribute("-export_type(") {
+            out.types.extend(names_in(&list));
+        }
+        out.all_functions = attribute("-compile(")
+            .iter()
+            .any(|options| options.contains("export_all"));
+        Some(out)
+    }
+
+    fn haskell(source: &str) -> Option<ModuleExports> {
+        let text = haskell_without_comments(source);
+        let mut out = Self::empty(Lang::Haskell);
+        // The header is the file's first word (its pragmas are comments
+        // here); with none, the module is `module Main (main) where`.
+        let body = text.trim_start();
+        let Some(after) = body
+            .strip_prefix("module")
+            .filter(|rest| rest.starts_with(char::is_whitespace))
+        else {
+            out.names.insert("main".into());
+            return Some(out);
+        };
+        let where_at = find_keyword(after, "where")?;
+        let head = &after[..where_at];
+        let open = head.find('(')?; // no list: everything is exported
+        let close = head.rfind(')')?;
+        let list = &head[open + 1..close];
+        for entry in split_top_level(list) {
+            let entry = entry.trim();
+            if entry.is_empty() || entry.starts_with("module ") {
+                continue;
+            }
+            let entry = ["type ", "pattern "]
+                .iter()
+                .find_map(|k| entry.strip_prefix(k))
+                .unwrap_or(entry)
+                .trim();
+            let (name, subs) = match entry.strip_prefix('(') {
+                // `(<+>)`, `(:+:)(..)`.
+                Some(op) => {
+                    let end = op.find(')').unwrap_or(op.len());
+                    (
+                        op[..end].trim().to_string(),
+                        op.get(end + 1..).unwrap_or(""),
+                    )
+                }
+                None => {
+                    let end = entry
+                        .find(|c: char| !(c.is_alphanumeric() || c == '_' || c == '\'' || c == '.'))
+                        .unwrap_or(entry.len());
+                    let name = entry[..end].rsplit('.').next().unwrap_or("").to_string();
+                    (name, &entry[end..])
+                }
+            };
+            if name.is_empty() {
+                continue;
+            }
+            let subs = subs.trim();
+            match subs.strip_prefix('(').and_then(|s| s.strip_suffix(')')) {
+                Some(inner) if inner.trim() == ".." => {
+                    out.whole.insert(name.clone());
+                }
+                Some(inner) => {
+                    let named = inner
+                        .split(',')
+                        .map(|m| {
+                            m.trim()
+                                .trim_start_matches('(')
+                                .trim_end_matches(')')
+                                .trim()
+                        })
+                        .filter(|m| !m.is_empty())
+                        .map(str::to_string)
+                        .collect();
+                    out.some.insert(name.clone(), named);
+                }
+                None => {}
+            }
+            out.names.insert(name);
+        }
+        Some(out)
+    }
+
+    /// Whether `name`, a `kind` (of `owner`, a type or class, with that
+    /// owner's verdict), is exported.
+    fn allows(&self, name: &str, kind: &str, owner: Option<(&str, bool)>) -> bool {
+        match self.lang {
+            Lang::Erlang => match owner {
+                // A record's fields go with their record.
+                Some((_, owner_public)) => owner_public,
+                None => match kind {
+                    "function" => self.all_functions || self.names.contains(name),
+                    "type" => self.types.contains(name),
+                    // A module's own records and macros are its own.
+                    "struct" | "macro" => false,
+                    _ => true,
+                },
+            },
+            _ => match owner {
+                Some((owner, owner_public)) => {
+                    owner_public
+                        && (self.whole.contains(owner)
+                            || self.some.get(owner).is_some_and(|s| s.contains(name))
+                            || self.names.contains(name))
+                }
+                None => self.names.contains(name),
+            },
+        }
+    }
+}
+
+/// Haskell source without its comments (`-- …`, nested `{- … -}`), each
+/// replaced by a space; `{-# … #-}` pragmas too.
+fn haskell_without_comments(source: &str) -> String {
+    let bytes = source.as_bytes();
+    let mut out = String::with_capacity(source.len());
+    let (mut i, mut depth) = (0, 0usize);
+    while i < bytes.len() {
+        if bytes[i..].starts_with(b"{-") {
+            depth += 1;
+            i += 2;
+            continue;
+        }
+        if depth > 0 {
+            if bytes[i..].starts_with(b"-}") {
+                depth -= 1;
+                i += 2;
+                if depth == 0 {
+                    out.push(' ');
+                }
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+        // `--` starts a comment unless more symbol characters make it an
+        // operator (`-->`).
+        if bytes[i..].starts_with(b"--") {
+            let dashes = bytes[i..].iter().take_while(|&&b| b == b'-').count();
+            let next = bytes.get(i + dashes).copied().unwrap_or(b' ');
+            if !b"!#$%&*+./<=>?@\\^|~:".contains(&next) {
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+                continue;
+            }
+        }
+        let ch = source[i..].chars().next().unwrap_or(' ');
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+/// Where `word` first stands as a word of its own in `text`.
+fn find_keyword(text: &str, word: &str) -> Option<usize> {
+    let ident = |c: char| c.is_alphanumeric() || c == '_' || c == '\'' || c == '.';
+    text.match_indices(word)
+        .map(|(i, _)| i)
+        .find(|&i| !text[..i].ends_with(ident) && !text[i + word.len()..].starts_with(ident))
+}
+
+/// `text` split at its commas outside parentheses.
+fn split_top_level(text: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let (mut depth, mut start) = (0i32, 0);
+    for (i, c) in text.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            ',' if depth == 0 => {
+                parts.push(&text[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&text[start..]);
+    parts
+}
+
 fn is_public(decl: &str, name: &str, lang: Lang, is_member: bool) -> bool {
     let d = decl.trim_start();
     match lang {
@@ -1721,8 +1987,8 @@ fn is_public(decl: &str, name: &str, lang: Lang, is_member: bool) -> bool {
         // `private` sections a class opens are decided in `build_file`'s
         // caller as they are for C++.
         Lang::Ruby => !name.starts_with('_'),
-        // The export list says (a module without one exports everything):
-        // not seen from one declaration, so every one counts.
+        // The export list says, file-wide (`ModuleExports`); without one,
+        // everything counts.
         Lang::Erlang | Lang::Haskell => true,
         // Public unless it says otherwise; `internal` is its module's own.
         Lang::Kotlin => !modifiers(d).any(|w| matches!(w, "private" | "protected" | "internal")),
@@ -1849,6 +2115,96 @@ fn elixir_moduledoc(lines: &[&str]) -> String {
     {
         Some(text) => text.replace("\\\"", "\"").trim().to_string(),
         None => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod module_export_tests {
+    use super::build_file;
+
+    /// (name, public) of every item and child, in order.
+    fn verdicts(source: &str, lang: &str) -> Vec<(String, bool)> {
+        let mut out = Vec::new();
+        for item in build_file(source, lang) {
+            out.push((item.name.clone(), item.public));
+            for child in &item.children {
+                out.push((child.name.clone(), child.public));
+            }
+        }
+        out
+    }
+
+    fn public(items: &[(String, bool)], name: &str) -> bool {
+        items
+            .iter()
+            .find(|(n, _)| n == name)
+            .unwrap_or_else(|| panic!("{name} in {items:?}"))
+            .1
+    }
+
+    /// An Erlang module's API is what it exports: `helper` and a type not
+    /// in `-export_type` are its own, as are its records and macros; a
+    /// header's are every includer's, and `export_all` exports every
+    /// function.
+    #[test]
+    fn an_erlang_modules_api_is_what_it_exports() {
+        let module = "-module(cart).\n-export([add/2,\n         total/1]). % the API\n-export_type([money/0]).\n-type money() :: integer().\n-type secret() :: atom().\n-record(item, {name, price}).\n-define(TAX, 2).\n\nadd(A, B) -> A + B.\n\ntotal(Xs) -> lists:foldl(fun add/2, 0, Xs).\n\nhelper(X) -> X.\n";
+        let items = verdicts(module, "erlang");
+        for (name, want) in [
+            ("add", true),
+            ("total", true),
+            ("helper", false),
+            ("money", true),
+            ("secret", false),
+            ("item", false),
+            ("price", false),
+            ("TAX", false),
+        ] {
+            assert_eq!(public(&items, name), want, "{name}: {items:?}");
+        }
+        let all = "-module(t).\n-compile([export_all, nowarn_export_all]).\nhelper(X) -> X.\n";
+        assert!(public(&verdicts(all, "erlang"), "helper"));
+        let header = "-record(item, {name}).\n-define(TAX, 2).\n";
+        let items = verdicts(header, "erlang");
+        assert!(
+            public(&items, "item") && public(&items, "name"),
+            "{items:?}"
+        );
+    }
+
+    /// A Haskell module's API is its export list: `T(..)` with every
+    /// constructor or method, `T(A)` with the ones named, an operator in
+    /// parentheses; a module with no list exports everything, and a file
+    /// with no header is `Main`, exporting `main`.
+    #[test]
+    fn a_haskell_modules_api_is_its_export_list() {
+        let module = "{-# LANGUAGE OverloadedStrings #-}\n-- | Carts.\nmodule Cart\n  ( add -- adds\n  , Shape(..)\n  , Mode(Fast)\n  , HasArea(area)\n  , (<+>)\n  , module Data.List\n  ) where\n\nimport Data.List\n\n-- | Adds.\nadd :: Int -> Int -> Int\nadd a b = a + b\n\nhelper :: Int -> Int\nhelper = id\n\ndata Shape = Circle Double | Square Double\n\ndata Mode = Fast | Slow\n\nclass HasArea a where\n  area :: a -> Double\n  perimeter :: a -> Double\n\n(<+>) :: Int -> Int -> Int\na <+> b = a + b\n\nx `plus` y = x + y\n";
+        let items = verdicts(module, "haskell");
+        for (name, want) in [
+            ("add", true),
+            ("helper", false),
+            ("Shape", true),
+            ("Circle", true),
+            ("Square", true),
+            ("Mode", true),
+            ("Fast", true),
+            ("Slow", false),
+            ("HasArea", true),
+            ("area", true),
+            ("perimeter", false),
+            ("<+>", true),
+            ("plus", false),
+        ] {
+            assert_eq!(public(&items, name), want, "{name}: {items:?}");
+        }
+        let open = "module Cart where\nhelper = id\n";
+        assert!(public(&verdicts(open, "haskell"), "helper"));
+        let main = "import Cart\nmain = print 1\nhelper = id\n";
+        let items = verdicts(main, "haskell");
+        assert!(
+            public(&items, "main") && !public(&items, "helper"),
+            "{items:?}"
+        );
     }
 }
 

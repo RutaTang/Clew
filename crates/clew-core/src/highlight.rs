@@ -1059,6 +1059,9 @@ const ERLANG_TAGS: &str = r#"
 const HASKELL_TAGS: &str = r#"
 (declarations (function name: (variable) @name) @definition.function)
 (declarations (bind name: (variable) @name) @definition.function)
+(declarations (function name: (prefix_id (operator) @name)) @definition.function)
+(declarations (function (infix operator: (operator) @name)) @definition.function)
+(declarations (function (infix operator: (infix_id (variable) @name))) @definition.function)
 (data_type name: (name) @name) @definition.type
 (newtype name: (name) @name) @definition.type
 (type_synonym name: (name) @name) @definition.type
@@ -1068,6 +1071,7 @@ const HASKELL_TAGS: &str = r#"
 (field name: (field_name (variable) @name)) @definition.field
 (class name: (name) @name) @definition.class
 (class_declarations (signature name: (variable) @name) @definition.method)
+(class_declarations (signature name: (prefix_id (operator) @name)) @definition.method)
 (infix
   left_operand: (apply function: (variable) @_fn argument: (literal (string) @name))
   (#any-of? @_fn "it" "specify" "prop" "testCase" "testProperty")) @definition.test

@@ -56,6 +56,9 @@ fn family(lang: Option<&str>) -> Option<&str> {
     match lang? {
         "typescript" | "tsx" | "javascript" | "jsx" => Some("js"),
         "c" | "cpp" => Some("c"),
+        // A Kotlin class extends a Java one, a Scala trait a Java interface:
+        // one class path.
+        "java" | "kotlin" | "scala" => Some("jvm"),
         other => Some(other),
     }
 }
@@ -327,139 +330,7 @@ impl TypeGraph {
     }
 }
 
-/// The names a type's declaration says it extends, implements or is based
-/// on: after `extends`, `implements` and `with` (Java, TypeScript, Dart,
-/// PHP, Scala); a Python class's bases; a Rust trait's supertraits and a C++
-/// class's bases after `:`. Generic arguments are stripped first, so a bound
-/// inside `<…>` is not read as a base; each name's last path segment is what
-/// comes back.
-pub fn inherited_names(signature: &str, lang: Option<&str>) -> Vec<String> {
-    let flat = without_angle_brackets(signature);
-    let flat = flat.split('{').next().unwrap_or("").trim();
-    let mut names = Vec::new();
-    let mut push = |part: &str| {
-        let part = part.trim();
-        if part.is_empty() || part.contains('=') {
-            return;
-        }
-        let word = part
-            .split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '.' || c == ':'))
-            .find(|w| !w.is_empty() && !is_access_word(w));
-        if let Some(w) = word {
-            let last = w.rsplit(['.', ':']).next().unwrap_or(w);
-            if !last.is_empty() && !names.iter().any(|n| n == last) {
-                names.push(last.to_string());
-            }
-        }
-    };
-    for keyword in ["extends", "implements", "with"] {
-        let mut rest = flat;
-        while let Some(at) = find_word(rest, keyword) {
-            let after = &rest[at + keyword.len()..];
-            let end = ["extends", "implements", "with", "where", "permits"]
-                .iter()
-                .filter_map(|k| find_word(after, k))
-                .min()
-                .unwrap_or(after.len());
-            for part in after[..end].split(',') {
-                push(part);
-            }
-            rest = &after[end..];
-        }
-    }
-    match lang {
-        Some("python") => {
-            if let Some(open) = flat.find('(')
-                && let Some(close) = flat[open..].find(')')
-            {
-                for part in flat[open + 1..open + close].split(',') {
-                    push(part);
-                }
-            }
-        }
-        Some("rust") => {
-            // Visibility restrictions and `unsafe` precede the trait, and
-            // `pub(in crate::m)` itself contains colons. Its syntax field
-            // identifies the supertraits without borrowing a generic bound
-            // or a predicate from the `where` clause.
-            if let Some(bounds) = rust_supertraits(signature) {
-                for part in bounds.split('+') {
-                    push(part);
-                }
-            }
-        }
-        Some("cpp") | Some("c") => {
-            if let Some(colon) = flat.find(':')
-                && !flat[colon..].starts_with("::")
-            {
-                for part in flat[colon + 1..].split(',') {
-                    push(part);
-                }
-            }
-        }
-        _ => {}
-    }
-    names
-}
-
-fn rust_supertraits(signature: &str) -> Option<String> {
-    find_word(signature, "trait")?;
-    let signature = signature.trim_end();
-    let source = if signature.ends_with('{') {
-        format!("{signature}}}")
-    } else if !signature.contains('{') {
-        format!("{signature} {{}}")
-    } else {
-        signature.to_string()
-    };
-    let tree = clew_core::highlight::parse(&source, clew_core::highlight::Lang::Rust)?;
-    let mut cursor = tree.root_node().walk();
-    let item = tree
-        .root_node()
-        .named_children(&mut cursor)
-        .find(|n| n.kind() == "trait_item")?;
-    let bounds = item.child_by_field_name("bounds")?;
-    let text = source.get(bounds.byte_range())?.trim_start_matches(':');
-    Some(without_angle_brackets(text))
-}
-
-fn is_access_word(w: &str) -> bool {
-    matches!(
-        w,
-        "public" | "private" | "protected" | "virtual" | "final" | "abstract"
-    )
-}
-
-/// `text` with every balanced `<…>` removed.
-fn without_angle_brackets(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut depth = 0usize;
-    for c in text.chars() {
-        match c {
-            '<' => depth += 1,
-            '>' if depth > 0 => depth -= 1,
-            _ if depth == 0 => out.push(c),
-            _ => {}
-        }
-    }
-    out
-}
-
-/// Where `word` occurs in `text` as a whole word.
-fn find_word(text: &str, word: &str) -> Option<usize> {
-    let mut from = 0;
-    while let Some(at) = text[from..].find(word) {
-        let at = from + at;
-        let before = text[..at].chars().next_back();
-        let after = text[at + word.len()..].chars().next();
-        let bounded = |c: Option<char>| c.is_none_or(|c| !(c.is_alphanumeric() || c == '_'));
-        if bounded(before) && bounded(after) {
-            return Some(at);
-        }
-        from = at + word.len();
-    }
-    None
-}
+pub use clew_core::heritage::inherited_names;
 
 #[cfg(test)]
 mod tests {
@@ -558,6 +429,118 @@ mod tests {
             ["Shape", "Named"]
         );
         assert_eq!(of("class A extends B with C, D {", "dart"), ["B", "C", "D"]);
+        // Kotlin's and C#'s bases after the `:` past the constructor.
+        assert_eq!(
+            of(
+                "class Circle(val r: Double) : Shape(1, 2), Drawable { }",
+                "kotlin"
+            ),
+            ["Shape", "Drawable"]
+        );
+        assert_eq!(of("object Unit : Shape()", "kotlin"), ["Shape"]);
+        assert_eq!(
+            of("class Del(b: Drawable) : Drawable by b", "kotlin"),
+            ["Drawable"]
+        );
+        assert_eq!(of("interface A : B, C", "kotlin"), ["B", "C"]);
+        assert_eq!(of("open class Shape", "kotlin"), Vec::<String>::new());
+        assert_eq!(
+            of("public class Circle : Shape, IDrawable", "csharp"),
+            ["Shape", "IDrawable"]
+        );
+        assert_eq!(
+            of("public record Point(int X, int Y) : IDrawable", "csharp"),
+            ["IDrawable"]
+        );
+        assert_eq!(
+            of("public class Repo<T> : IRepo<T> where T : class", "csharp"),
+            ["IRepo"]
+        );
+        // Ruby's `<`, never a singleton class.
+        assert_eq!(of("class Circle < Shape end", "ruby"), ["Shape"]);
+        assert_eq!(of("class Sq < Geo::Shape end", "ruby"), ["Shape"]);
+        assert_eq!(of("class Shape end", "ruby"), Vec::<String>::new());
+        assert_eq!(of("class << self end", "ruby"), Vec::<String>::new());
+        // Haskell's superclasses and derived classes; a method's context
+        // after `where` is not the class's.
+        assert_eq!(
+            of(
+                "class Eq a => Ord2 a where cmp :: Show b => a -> b",
+                "haskell"
+            ),
+            ["Eq"]
+        );
+        assert_eq!(
+            of("class (Eq a, Show a) => Ord3 a where", "haskell"),
+            ["Eq", "Show"]
+        );
+        assert_eq!(
+            of(
+                "data Shape = Circle Double deriving (Show, Eq) deriving anyclass (ToJSON)",
+                "haskell"
+            ),
+            ["Show", "Eq", "ToJSON"]
+        );
+        assert_eq!(
+            of("newtype Age = Age Int deriving stock Show", "haskell"),
+            ["Show"]
+        );
+    }
+
+    /// Kotlin, C#, Ruby and Haskell types inherit as they say it, and a
+    /// Kotlin class extends a Java one: the edges are drawn.
+    #[test]
+    fn kotlin_csharp_ruby_and_haskell_types_inherit_and_jvm_types_meet() {
+        let file = |rel: &str, lang: &str, source: &str| DocFile {
+            rel: rel.into(),
+            doc: String::new(),
+            items: clew_core::apidoc::build_file(source, lang),
+        };
+        let graph = TypeGraph::build(
+            Path::new("/p"),
+            &[
+                file("src/Shape.java", "java", "public class Shape {}\n"),
+                file(
+                    "src/Circle.kt",
+                    "kotlin",
+                    "interface Drawable\nclass Circle(val r: Double) : Shape(), Drawable\n",
+                ),
+                file(
+                    "Shapes.cs",
+                    "csharp",
+                    "public interface IArea {}\npublic class Base {}\npublic class Square : Base, IArea {}\n",
+                ),
+                file(
+                    "lib/shapes.rb",
+                    "ruby",
+                    "class Polygon\nend\nclass Hexagon < Polygon\nend\n",
+                ),
+                file(
+                    "src/Shapes.hs",
+                    "haskell",
+                    "class HasArea a where\n  area :: a -> Double\nclass HasArea a => Solid a where\n  volume :: a -> Double\ndata Cube = Cube Double deriving anyclass (HasArea)\n",
+                ),
+            ],
+            &StructureIndex::default(),
+        );
+        let edge = |from: &str, to: &str| {
+            graph.edges.iter().any(|e| {
+                graph.nodes[e.0].name == from
+                    && graph.nodes[e.1].name == to
+                    && e.2 == Relation::Inherits
+            })
+        };
+        for (from, to) in [
+            ("Circle", "Shape"),
+            ("Circle", "Drawable"),
+            ("Square", "Base"),
+            ("Square", "IArea"),
+            ("Hexagon", "Polygon"),
+            ("Solid", "HasArea"),
+            ("Cube", "HasArea"),
+        ] {
+            assert!(edge(from, to), "{from} inherits {to}: {:?}", graph.edges);
+        }
     }
 
     #[test]
