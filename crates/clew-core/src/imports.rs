@@ -93,9 +93,8 @@ pub fn imports_in(tree: &Tree, source: &str, lang: Lang) -> Vec<RawImport> {
         Lang::Kotlin => kotlin_imports(root, source, query),
         Lang::Scala => scala_imports(root, source, query),
         Lang::Elixir => elixir_imports(root, source, query),
-        Lang::C
-        | Lang::Cpp
-        | Lang::Json
+        Lang::C | Lang::Cpp => c_includes(root, source, query),
+        Lang::Json
         | Lang::Bash
         | Lang::Yaml
         | Lang::Toml
@@ -132,9 +131,8 @@ pub fn import_query(lang: Lang) -> Result<&'static Query, QueryError> {
         Lang::Kotlin => Some(KOTLIN_QUERY),
         Lang::Scala => Some(SCALA_QUERY),
         Lang::Elixir => Some(ELIXIR_QUERY),
-        Lang::C
-        | Lang::Cpp
-        | Lang::Json
+        Lang::C | Lang::Cpp => Some(C_QUERY),
+        Lang::Json
         | Lang::Bash
         | Lang::Yaml
         | Lang::Toml
@@ -1784,6 +1782,35 @@ fn zig_imports(root: Node, src: &str, query: &Query) -> Vec<RawImport> {
     out
 }
 
+// C's and C++'s `#include "cart.hpp"` and `#include <vector>`; an include
+// of a macro (`#include CONFIG_H`) names no file as written.
+const C_QUERY: &str = r#"
+(preproc_include path: [(string_literal) (system_lib_string)] @path)
+"#;
+
+/// C and C++: each `#include`, a quoted one as its path (`cart.hpp`), an
+/// angle-bracketed one with its brackets (`<vector>`), which the resolver
+/// looks for in the include path only, never beside the includer.
+fn c_includes(root: Node, src: &str, query: &Query) -> Vec<RawImport> {
+    let mut out = Vec::new();
+    for_each_match(root, query, src, |caps| {
+        if out.len() >= MAX_RUST_IMPORTS {
+            return;
+        }
+        let Some(path) = capture(caps, "path") else {
+            return;
+        };
+        let module = match path.kind() {
+            "system_lib_string" => Some(node_text(path, src).trim()),
+            _ => literal_text(path, src).map(str::trim),
+        };
+        if let Some(module) = module.filter(|m| !matches!(*m, "" | "<>")) {
+            push_module(&mut out, module, line_of(path));
+        }
+    });
+    out
+}
+
 /// Strip a single pair of surrounding `"`, `'` or backtick quotes.
 fn strip_quotes(s: &str) -> &str {
     let s = s.trim();
@@ -2180,7 +2207,7 @@ mod extraction_tests {
 
     #[test]
     fn languages_without_an_import_model_extract_nothing() {
-        assert!(imports_of("#include <stdio.h>\n", "c").is_empty());
+        assert!(imports_of("{\"a\": 1}\n", "json").is_empty());
         assert!(imports_of("source ./lib.sh\n", "bash").is_empty());
         assert!(imports_of("x", "klingon").is_empty());
     }
@@ -2396,6 +2423,17 @@ mod extraction_tests {
     }
 
     /// Zig's `@import` names a file or a package; no other builtin imports.
+    /// C's and C++'s includes: a quoted one by its path, an angle one with
+    /// its brackets; an include of a macro, and one in a comment, by none.
+    #[test]
+    fn c_and_cpp_includes() {
+        let src = "#include <stdio.h>\n#include \"util/x.h\"\n#include CONFIG_H\n\
+                   // #include \"no.h\"\n#if 1\n#  include <sys/stat.h>\n#endif\n";
+        assert_eq!(modules(src, "c"), ["<stdio.h>", "util/x.h", "<sys/stat.h>"]);
+        let cpp = "#include <vector>\n#include \"cart.hpp\"\nint main() {}\n";
+        assert_eq!(modules(cpp, "cpp"), ["<vector>", "cart.hpp"]);
+    }
+
     #[test]
     fn zig_imports_files_and_packages() {
         let src = "const std = @import(\"std\");\nconst x = @import(\"util/x.zig\");\n\

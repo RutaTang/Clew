@@ -187,6 +187,9 @@ pub struct Resolver {
     erlang_modules: HashMap<String, Vec<PathBuf>>,
     /// Each Erlang header's file name (`x.hrl`) with the files so named.
     erlang_headers: HashMap<String, Vec<PathBuf>>,
+    /// Each file a C or C++ `#include` can name (a header, or a source file
+    /// included whole), by its file name, with the files so named, sorted.
+    c_headers: HashMap<String, Vec<PathBuf>>,
     /// Each Erlang application the project holds by its `src/<app>.app.src`,
     /// with the application's directory — whatever that directory is called.
     erlang_apps: HashMap<String, PathBuf>,
@@ -935,10 +938,21 @@ impl Resolver {
         let mut erlang_modules: HashMap<String, Vec<PathBuf>> = HashMap::new();
         let mut erlang_headers: HashMap<String, Vec<PathBuf>> = HashMap::new();
         let mut erlang_apps: HashMap<String, PathBuf> = HashMap::new();
+        let mut c_headers: HashMap<String, Vec<PathBuf>> = HashMap::new();
         for file in &file_set {
             let Some(name) = file.file_name().and_then(|n| n.to_str()) else {
                 continue;
             };
+            if file
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| C_INCLUDABLE.contains(&e))
+            {
+                c_headers
+                    .entry(name.to_string())
+                    .or_default()
+                    .push(file.clone());
+            }
             if let Some(module) = name.strip_suffix(".erl") {
                 erlang_modules
                     .entry(module.to_string())
@@ -964,6 +978,7 @@ impl Resolver {
         for files in erlang_modules
             .values_mut()
             .chain(erlang_headers.values_mut())
+            .chain(c_headers.values_mut())
         {
             files.sort();
         }
@@ -1010,6 +1025,7 @@ impl Resolver {
             erlang_modules,
             erlang_headers,
             erlang_apps,
+            c_headers,
             js_packages: HashMap::new(),
         }
     }
@@ -1073,6 +1089,7 @@ impl Resolver {
             "erlang" => self.resolve_erlang(raw, from),
             "haskell" => self.resolve_haskell(raw, from),
             "zig" => self.resolve_zig(raw, from),
+            "c" | "cpp" => self.resolve_c(raw, from),
             "html" | "css" | "scss" | "less" => self.resolve_web(raw, from, lang),
             _ => Target::External(raw.module.clone()),
         }
@@ -1586,6 +1603,57 @@ impl Resolver {
             return Target::Internal(file);
         }
         Target::Unresolved(spec.to_string())
+    }
+
+    // --- C and C++ ---
+
+    /// An `#include "cart.hpp"` is the file beside the includer first, as
+    /// the preprocessor looks; then, as an `#include <shop/cart.hpp>` is, a
+    /// project file the include path reaches — one whose path ends in the
+    /// include's (under `include/`, `src/`, a library's folder: wherever a
+    /// `-I` points, the path's end finds it), of several the one nearest
+    /// the includer. A header that is no project file is a library's: the
+    /// C++ standard library's (`<vector>`), the C library's (`<stdio.h>`),
+    /// POSIX's (`<unistd.h>`, `<sys/stat.h>`), or a package's by its first
+    /// folder or name (`<boost/asio.hpp>` is `boost`, `<zlib.h>` `zlib`).
+    fn resolve_c(&self, raw: &RawImport, from: &Path) -> Target {
+        let spec = raw.module.trim();
+        let (angle, path) = match spec.strip_prefix('<').and_then(|s| s.strip_suffix('>')) {
+            Some(inner) => (true, inner.trim()),
+            None => (false, spec),
+        };
+        let path = path.strip_prefix("./").unwrap_or(path);
+        if path.is_empty() {
+            return Target::Unresolved(spec.to_string());
+        }
+        if !angle && !path.starts_with('/') {
+            let beside = normalize(&from.parent().unwrap_or(&self.root).join(path));
+            if self.has_file(&beside) {
+                return Target::Internal(beside);
+            }
+        }
+        let rel = Path::new(path);
+        let shared = |f: &Path| {
+            f.components()
+                .zip(from.components())
+                .take_while(|(a, b)| a == b)
+                .count()
+        };
+        let found = rel
+            .is_relative()
+            .then(|| rel.file_name().and_then(|n| n.to_str()))
+            .flatten()
+            .and_then(|name| self.c_headers.get(name))
+            .and_then(|files| {
+                files
+                    .iter()
+                    .filter(|f| f.as_path() != from && f.ends_with(rel))
+                    .max_by_key(|f| (shared(f), std::cmp::Reverse(f.components().count())))
+            });
+        match found {
+            Some(file) => Target::Internal(file.clone()),
+            None => Target::External(c_library(path)),
+        }
     }
 
     // --- Lean ---
@@ -2437,6 +2505,97 @@ fn js_package(spec: &str) -> String {
 const JS_EXTS: &[&str] = &[
     "ts", "tsx", "d.ts", "mts", "cts", "js", "jsx", "mjs", "cjs", "json",
 ];
+
+/// What a C or C++ `#include` can name: headers, and source files a build
+/// includes whole (`x.inc`, `x.def`, a template's `.tpp`).
+const C_INCLUDABLE: &[&str] = &[
+    "h", "hh", "hpp", "hxx", "h++", "ipp", "tpp", "inl", "inc", "def", "c", "cc", "cpp", "cxx",
+];
+
+/// The C standard library's headers.
+const C_STANDARD_HEADERS: &[&str] = &[
+    "assert.h",
+    "complex.h",
+    "ctype.h",
+    "errno.h",
+    "fenv.h",
+    "float.h",
+    "inttypes.h",
+    "iso646.h",
+    "limits.h",
+    "locale.h",
+    "math.h",
+    "setjmp.h",
+    "signal.h",
+    "stdalign.h",
+    "stdarg.h",
+    "stdatomic.h",
+    "stdbit.h",
+    "stdbool.h",
+    "stdckdint.h",
+    "stddef.h",
+    "stdint.h",
+    "stdio.h",
+    "stdlib.h",
+    "stdnoreturn.h",
+    "string.h",
+    "tgmath.h",
+    "threads.h",
+    "time.h",
+    "uchar.h",
+    "wchar.h",
+    "wctype.h",
+];
+
+/// POSIX's own headers (beside its `sys/`, `arpa/`, `net/` and `netinet/`).
+const POSIX_HEADERS: &[&str] = &[
+    "unistd.h",
+    "fcntl.h",
+    "pthread.h",
+    "dirent.h",
+    "dlfcn.h",
+    "poll.h",
+    "termios.h",
+    "netdb.h",
+    "strings.h",
+    "syslog.h",
+    "sched.h",
+    "semaphore.h",
+    "spawn.h",
+    "glob.h",
+    "grp.h",
+    "pwd.h",
+    "regex.h",
+    "libgen.h",
+    "fnmatch.h",
+    "utime.h",
+    "aio.h",
+    "mqueue.h",
+    "ftw.h",
+];
+
+/// The library a header that is no project file belongs to (see
+/// [`Resolver::resolve_c`]).
+fn c_library(path: &str) -> String {
+    let first = path.split('/').next().unwrap_or(path);
+    if (!path.contains('/') && !path.contains('.')) || first == "bits" {
+        // `<vector>`, `<cstdio>`; GCC's own `<bits/…>`.
+        return "std".into();
+    }
+    if C_STANDARD_HEADERS.contains(&path) {
+        return "libc".into();
+    }
+    if POSIX_HEADERS.contains(&path) || matches!(first, "sys" | "arpa" | "net" | "netinet") {
+        return "posix".into();
+    }
+    match path.contains('/') {
+        true => first.to_string(),
+        false => path
+            .rsplit_once('.')
+            .map_or(path, |(stem, _)| stem)
+            .to_string(),
+    }
+}
 
 fn normalize(p: &Path) -> PathBuf {
     let mut out = PathBuf::new();
@@ -5715,6 +5874,73 @@ mod tests {
 
     /// A Zig `@import` of a path is the file beside the importer; a bare
     /// name is a package.
+    /// A C or C++ `#include "x.h"` is the file beside the includer, then —
+    /// as an `#include <x.h>` is — the project file whose path ends in the
+    /// include's, the nearest of several; a header no project file is, is
+    /// its library's.
+    #[test]
+    fn c_includes_resolve_beside_then_by_path_and_name_libraries() {
+        let root = Path::new("/p");
+        let r = resolver(
+            root,
+            &[
+                "src/main.cpp",
+                "src/cart.hpp",
+                "src/detail/util.h",
+                "include/shop/order.hpp",
+                "include/shop/cart.hpp",
+                "lib/a/config.h",
+                "lib/b/config.h",
+                "lib/b/b.c",
+                "x.inc",
+            ],
+        );
+        let at = |spec: &str, from: &str| r.resolve(&ri(spec), &root.join(from), "cpp");
+        let file = |f: &str| Target::Internal(root.join(f));
+        assert_eq!(at("cart.hpp", "src/main.cpp"), file("src/cart.hpp"));
+        assert_eq!(at("./cart.hpp", "src/main.cpp"), file("src/cart.hpp"));
+        assert_eq!(
+            at("detail/util.h", "src/main.cpp"),
+            file("src/detail/util.h")
+        );
+        assert_eq!(at("../x.inc", "src/main.cpp"), file("x.inc"));
+        // Through the include path: by the path's end.
+        assert_eq!(
+            at("shop/order.hpp", "src/main.cpp"),
+            file("include/shop/order.hpp")
+        );
+        assert_eq!(
+            at("<shop/cart.hpp>", "src/main.cpp"),
+            file("include/shop/cart.hpp")
+        );
+        // An angle include is never the file beside the includer first.
+        assert_eq!(
+            at("<cart.hpp>", "include/shop/order.hpp"),
+            file("include/shop/cart.hpp")
+        );
+        // Of two, the one nearest the includer.
+        assert_eq!(at("config.h", "lib/b/b.c"), file("lib/b/config.h"));
+        // Libraries.
+        for (spec, library) in [
+            ("<vector>", "std"),
+            ("<cstdio>", "std"),
+            ("<bits/stdc++.h>", "std"),
+            ("<stdio.h>", "libc"),
+            ("<unistd.h>", "posix"),
+            ("<sys/stat.h>", "posix"),
+            ("<boost/asio.hpp>", "boost"),
+            ("<zlib.h>", "zlib"),
+            ("gtest/gtest.h", "gtest"),
+        ] {
+            assert_eq!(
+                at(spec, "src/main.cpp"),
+                Target::External(library.into()),
+                "{spec}"
+            );
+        }
+        assert_eq!(at("<>", "src/main.cpp"), Target::Unresolved("<>".into()));
+    }
+
     #[test]
     fn zig_imports_resolve_files_and_leave_packages_external() {
         let root = Path::new("/p");

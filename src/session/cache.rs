@@ -102,7 +102,10 @@ use crate::incremental::Version;
 /// block), and a function passed as a value is a call of it (Haskell's
 /// `foldr add`, Erlang's `fun add/2`, Elixir's `&add/2`); an older entry
 /// has neither.
-pub(crate) const CACHE_VERSION: u32 = 23;
+/// 24: a C or C++ function of its file alone (`static`, an anonymous
+/// namespace's) is marked so; an older entry marks none, and would link
+/// another file's call to it.
+pub(crate) const CACHE_VERSION: u32 = 24;
 
 /// A cached symbol (the index entry minus the paths, which are reconstructed
 /// from the project root + relative path on load).
@@ -180,6 +183,10 @@ pub struct CachedCalls {
     /// (`clew_core::projectcalls::FileCalls::accessed`).
     #[serde(default)]
     pub accessed: Vec<usize>,
+    /// Definition lines of C and C++ functions of the file alone
+    /// (`clew_core::projectcalls::FileCalls::internal`).
+    #[serde(default)]
+    pub internal: Vec<usize>,
 }
 
 /// Everything cached about one file: how to confirm it is unchanged (mtime,
@@ -300,6 +307,7 @@ mod tests {
                 receivers: vec![1],
                 owners: vec![3, 1],
                 accessed: vec![3],
+                internal: vec![9],
             }),
         }
     }

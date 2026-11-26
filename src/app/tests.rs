@@ -17334,6 +17334,60 @@ fn a_call_graph_linked_before_the_imports_resolved_is_rebuilt_against_them() {
     assert!(app.call_graph_current());
 }
 
+/// A C++ class declared in a header and defined in its own `.cpp`: the
+/// header is in the import graph of the files that include it (directly,
+/// or through another header), and the methods' callers are found through
+/// it — `Cart::add` read "No callers" though `main.cpp` called it.
+#[test]
+fn a_cpp_method_defined_beside_its_header_has_its_callers() {
+    let (mut app, root) = calls_project(
+        "calls-cpp-header",
+        &[
+            (
+                "cart.hpp",
+                "#pragma once\n\nclass Cart {\npublic:\n    int add(int a, int b);\n    static Cart make();\n};\n",
+            ),
+            (
+                "cart.cpp",
+                "#include \"cart.hpp\"\n\nint Cart::add(int a, int b) { return a + b; }\n\nCart Cart::make() { return Cart(); }\n",
+            ),
+            (
+                "main.cpp",
+                "#include <cstdio>\n#include \"cart.hpp\"\n\nint total(Cart &c) { return c.add(1, 2) + c.add(3, 4); }\n\nint main() {\n    Cart c = Cart::make();\n    std::printf(\"%d\\n\", total(c) + c.add(5, 6));\n    return 0;\n}\n",
+            ),
+            ("shop/shop.hpp", "#pragma once\n#include \"../cart.hpp\"\n"),
+            (
+                "shop/app.cpp",
+                "#include \"shop.hpp\"\nint run_shop(Cart &c) { return c.add(7, 8); }\n",
+            ),
+        ],
+        true,
+    );
+    let scope = app.proj.import_graph.scope_map();
+    assert_eq!(
+        scope.get(&root.join("main.cpp")),
+        Some(&HashSet::from([root.join("cart.hpp")])),
+        "{scope:?}"
+    );
+    let build = app.update(Message::Graph(GraphMsg::OpenOverlay(Overlay::ProjectCalls)));
+    for msg in run_task(build) {
+        if matches!(msg, Message::Graph(GraphMsg::ProjectCallsBuilt { .. })) {
+            let _ = app.update(msg);
+        }
+    }
+    let g = &app.proj.project_calls.graph;
+    let add = g
+        .id_of(&root.join("cart.cpp"), "add")
+        .expect("add is a node");
+    let mut callers: Vec<String> = g
+        .callers_of(add)
+        .iter()
+        .map(|&id| g.node(id).name.clone())
+        .collect();
+    callers.sort();
+    assert_eq!(callers, ["main", "run_shop", "total"]);
+}
+
 /// A project of `(rel, text)` files, scanned, and — when `index` is set —
 /// indexed with its imports resolved.
 fn calls_project(tag: &str, files: &[(&str, &str)], index: bool) -> (App, PathBuf) {
@@ -25275,6 +25329,7 @@ fn fill_project_session(app: &mut App) {
             bodies: HashMap::new(),
             owners: HashMap::new(),
             accessed: HashSet::new(),
+            internal: HashSet::new(),
         }),
     );
     p.tracked_ignored.insert("src/lib.rs".into());

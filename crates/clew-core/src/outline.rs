@@ -208,6 +208,36 @@ pub struct Located {
     /// `@property` (a `@cached_property`, a property's `@x.setter`). A
     /// call graph sees no call of it, and that says nothing of its use.
     pub accessed: bool,
+    /// A C or C++ function of its file alone (internal linkage): declared
+    /// `static` outside a class, or in an anonymous namespace. No other
+    /// file's call reaches it, whatever it declares.
+    pub internal: bool,
+}
+
+/// Whether the C or C++ function `def` (its declarator, or any node of its
+/// declaration) is its file's alone: `static` outside a class — a class's
+/// `static` member is the class's, reached from anywhere — or declared in an
+/// anonymous namespace.
+fn file_local(def: Node, lang: Lang, source: &str) -> bool {
+    if !matches!(lang, Lang::C | Lang::Cpp) {
+        return false;
+    }
+    let Some(decl) = std::iter::successors(Some(def), |n| n.parent())
+        .find(|n| matches!(n.kind(), "function_definition" | "declaration"))
+    else {
+        return false;
+    };
+    let in_class = decl
+        .parent()
+        .is_some_and(|p| p.kind() == "field_declaration_list");
+    let mut cursor = decl.walk();
+    let is_static = !in_class
+        && decl.children(&mut cursor).any(|c| {
+            c.kind() == "storage_class_specifier" && source.get(c.byte_range()) == Some("static")
+        });
+    is_static
+        || std::iter::successors(decl.parent(), |n| n.parent())
+            .any(|n| n.kind() == "namespace_definition" && n.child_by_field_name("name").is_none())
 }
 
 /// Where a definition is declared, to tell same-name definitions of
@@ -254,6 +284,7 @@ impl PartialEq for Located {
             && self.container == other.container
             && self.owner == other.owner
             && self.accessed == other.accessed
+            && self.internal == other.internal
     }
 }
 
@@ -485,6 +516,7 @@ fn c_tests(mut out: Vec<Located>, source: &str) -> Vec<Located> {
                 member_of: None,
             },
             accessed: false,
+            internal: false,
         });
     }
     out.sort_by_key(|l| (l.symbol.line, l.declaration.0));
@@ -823,6 +855,7 @@ fn lean_where_helpers(command: &str, line: usize) -> Vec<Located> {
                     member_of: None,
                 },
                 accessed: false,
+                internal: false,
             }
         })
         .collect()
@@ -887,6 +920,7 @@ fn lean_fields(command: &str, line: usize, found: &mut Vec<Located>) {
                 member_of: None,
             },
             accessed: false,
+            internal: false,
         };
         // `mk ::`: the constructor.
         if let Some(name) = t.strip_suffix("::").map(str::trim)
@@ -950,6 +984,7 @@ fn lean_head_located(command: &str, head: &crate::lean::Head, line: usize) -> Lo
             member_of: None,
         },
         accessed: false,
+        internal: false,
     }
 }
 
@@ -1033,6 +1068,7 @@ fn located_in_tree(tree: &Tree, source: &str, lang: Lang) -> Vec<Located> {
             container: container_of(def, lang),
             owner: owner_of(def, source, lang),
             accessed: lang == Lang::Python && python_property(def, source),
+            internal: file_local(def, lang, source),
         });
     }
     drop_overload_stubs(&mut out, &overloads);

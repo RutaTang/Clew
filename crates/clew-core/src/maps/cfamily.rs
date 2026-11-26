@@ -46,7 +46,9 @@ fn normal(path: &str) -> String {
 
 fn includes(corpus: &Corpus) -> Option<ProjectMap> {
     let files: BTreeSet<&str> = corpus.in_langs(LANGS).map(|s| s.rel.as_str()).collect();
-    // A header by its trailing path, for `<lib/x.h>` and include paths.
+    // A header by its trailing path, for `<lib/x.h>` and include paths: of
+    // several, the one nearest the includer (the most folders shared), then
+    // the shallowest — as the import graph resolves it.
     let resolve = |from: &str, path: &str, quoted: bool| -> Option<String> {
         if quoted {
             let near = normal(&format!("{}/{path}", dir_of(from)));
@@ -54,10 +56,16 @@ fn includes(corpus: &Corpus) -> Option<ProjectMap> {
                 return Some(near);
             }
         }
+        let shared = |f: &str| {
+            f.split('/')
+                .zip(from.split('/'))
+                .take_while(|(a, b)| a == b)
+                .count()
+        };
         files
             .iter()
             .filter(|f| f.ends_with(&format!("/{path}")) || **f == path)
-            .min_by_key(|f| f.len())
+            .min_by_key(|f| (std::cmp::Reverse(shared(f)), f.len()))
             .map(|f| f.to_string())
     };
     let mut graph: BTreeMap<String, Vec<(String, bool)>> = BTreeMap::new();
@@ -380,6 +388,10 @@ mod tests {
             ("include/lib/api.h", "#include \"lib/types.h\"\n"),
             ("include/lib/types.h", ""),
             ("src/use.c", "#include <lib/api.h>\n"),
+            // Of three `config.h`, the one nearest the includer.
+            ("lib/a/config.h", ""),
+            ("lib/b/config.h", ""),
+            ("lib/b/b.c", "#include <config.h>\n"),
         ]));
         let inc = maps.iter().find(|m| m.id == "c.includes").unwrap();
         let got = edges(inc);
@@ -389,6 +401,7 @@ mod tests {
             e("src/util/str.h", "src/config.h", "line 1"),
             e("src/use.c", "include/lib/api.h", "line 1"),
             e("include/lib/api.h", "include/lib/types.h", "line 1"),
+            e("lib/b/b.c", "lib/b/config.h", "line 1"),
         ] {
             assert!(got.contains(&want), "{want:?} in {got:?}");
         }

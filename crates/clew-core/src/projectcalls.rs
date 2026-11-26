@@ -296,6 +296,10 @@ pub struct FileCalls {
     /// Python `@property`; see [`crate::outline::Located::accessed`]): no
     /// call reaches them, and none needs to for them to be used.
     pub accessed: HashSet<usize>,
+    /// Definition lines of C and C++ functions of the file alone (`static`;
+    /// see [`crate::outline::Located::internal`]): no other file's call
+    /// reaches them.
+    pub internal: HashSet<usize>,
 }
 
 impl FileCalls {
@@ -344,6 +348,7 @@ impl FileCalls {
             && self.declarations.is_empty()
             && self.owners.is_empty()
             && self.accessed.is_empty()
+            && self.internal.is_empty()
     }
 
     /// Assemble from facts already read off the file's tree (see
@@ -382,6 +387,11 @@ impl FileCalls {
             accessed: symbols
                 .iter()
                 .filter(|l| l.accessed && is_callable(&l.symbol.kind))
+                .map(|l| l.symbol.line)
+                .collect(),
+            internal: symbols
+                .iter()
+                .filter(|l| l.internal && is_callable(&l.symbol.kind))
                 .map(|l| l.symbol.line)
                 .collect(),
         }
@@ -435,16 +445,19 @@ impl ProjectCallGraph {
             })
             .collect();
 
-        let declarations: HashMap<&Path, &HashSet<usize>> = files
+        let declarations: HashMap<&Path, (&HashSet<usize>, &HashSet<usize>)> = files
             .iter()
-            .map(|f| (f.file.as_path(), &f.declarations))
+            .map(|f| (f.file.as_path(), (&f.declarations, &f.internal)))
             .collect();
         let facts: Vec<NodeFacts> = nodes
             .iter()
             .map(|n| NodeFacts {
                 bodyless: declarations
                     .get(n.file.as_path())
-                    .is_some_and(|d| d.contains(&n.line)),
+                    .is_some_and(|(d, _)| d.contains(&n.line)),
+                internal: declarations
+                    .get(n.file.as_path())
+                    .is_some_and(|(_, i)| i.contains(&n.line)),
                 lang: crate::highlight::detect(&n.file).and_then(Lang::from_key),
             })
             .collect();
@@ -527,7 +540,14 @@ impl ProjectCallGraph {
         let empty_scope: HashSet<PathBuf> = HashSet::new();
         let mut edges: HashSet<(usize, usize)> = HashSet::new();
         for fc in files {
-            let imported = scope.get(&fc.file).unwrap_or(&empty_scope);
+            let direct = scope.get(&fc.file).unwrap_or(&empty_scope);
+            // A C or C++ file sees what every header it includes includes,
+            // as the preprocessor pastes them in: `main.cpp` includes
+            // `shop.hpp`, which includes `cart.hpp`, and calls `Cart`'s
+            // methods.
+            let included = (matches!(fc.lang, Lang::C | Lang::Cpp) && !fc.calls.is_empty())
+                .then(|| include_closure(&fc.file, direct, scope));
+            let imported = included.as_ref().unwrap_or(direct);
             let site = Site {
                 file: &fc.file,
                 lang: fc.lang,
@@ -558,7 +578,7 @@ impl ProjectCallGraph {
                 };
                 let callees = resolved
                     .entry((cs.callee.as_str(), cs.method))
-                    .or_insert_with(|| resolve_callees(&defs, &nodes, &facts, cs, &site));
+                    .or_insert_with(|| resolve_callees(&defs, &nodes, &facts, &owner, cs, &site));
                 // A receiver of a known type calls that type's method of the
                 // name: `cart.total()` after `cart = Cart()` is `Cart.total`,
                 // not every `total` there is. A type with no method of the
@@ -975,6 +995,8 @@ impl SymNode {
 struct NodeFacts {
     /// A declaration without a body (see [`FileCalls::declarations`]).
     bodyless: bool,
+    /// A C or C++ function of its file alone (see [`FileCalls::internal`]).
+    internal: bool,
     /// The language of the node's file, by extension.
     lang: Option<Lang>,
 }
@@ -3010,6 +3032,33 @@ fn logical_name(name: &str, lang: Option<Lang>) -> &str {
     }
 }
 
+/// Most files a C or C++ file's includes reach, through one another
+/// ([`include_closure`]): past it, the rest are not looked in.
+const MAX_INCLUDED: usize = 4_096;
+
+/// Every file `file` includes, through the headers it includes too: what
+/// the preprocessor pastes into it. `direct` is its own includes, `scope`
+/// every file's.
+fn include_closure(
+    file: &Path,
+    direct: &HashSet<PathBuf>,
+    scope: &HashMap<PathBuf, HashSet<PathBuf>>,
+) -> HashSet<PathBuf> {
+    let mut seen: HashSet<PathBuf> = direct.clone();
+    let mut queue: Vec<&PathBuf> = direct.iter().collect();
+    while let Some(next) = queue.pop() {
+        for inner in scope.get(next).into_iter().flatten() {
+            if seen.len() >= MAX_INCLUDED {
+                return seen;
+            }
+            if inner.as_path() != file && seen.insert(inner.clone()) {
+                queue.push(inner);
+            }
+        }
+    }
+    seen
+}
+
 /// Most definitions one call resolves to (see [`resolve_callees`]): more
 /// than any overload set, or than the `new` of each module a crate root
 /// declares.
@@ -3022,7 +3071,11 @@ const MAX_EDGES: usize = 2_000_000;
 /// by scope so a name isn't sprayed across every same-named definition:
 ///   1. a definition in the **same file** (a local helper), else
 ///   2. definitions in files the caller **imports** (in scope via `use`), else
-///   3. for a *free* call only, a **globally unique** definition of that name
+///   3. in C and C++, the definitions a **declaration in scope** names — a
+///      header's `int add(int, int);` in `class Cart`, a file's own
+///      prototype — with that declaration's owner, wherever they are (the
+///      program links its files into one), else
+///   4. for a *free* call only, a **globally unique** definition of that name
 ///      in a language that shares a namespace with the call site (a `.tsx`
 ///      component calling a `.ts` helper, C++ calling C).
 ///
@@ -3035,6 +3088,7 @@ fn resolve_callees(
     defs: &Defs,
     nodes: &[SymNode],
     facts: &[NodeFacts],
+    owner: &[Option<&str>],
     call: &CallSite,
     site: &Site,
 ) -> Vec<usize> {
@@ -3100,11 +3154,48 @@ fn resolve_callees(
         scoped.sort_unstable();
         return scoped;
     }
+    // C and C++: what a header in scope (or the file's own prototype)
+    // declares, another file defines — the include brings the declaration
+    // only. Its definitions are the ones of its owner: `Cart`'s `add` for a
+    // declaration in `class Cart`, a free function's for a free one; never
+    // another file's `static` one, which is that file's alone.
+    // Looked up from the name's declarations, few, not from the files in
+    // scope, which a C++ file's includes make hundreds.
+    if matches!(site.lang, Lang::C | Lang::Cpp) && with_body {
+        let declared: HashSet<Option<&str>> = named
+            .all
+            .iter()
+            .copied()
+            .filter(|&i| facts[i].bodyless)
+            .filter(|&i| nodes[i].file == site.file || site.imported.contains(&nodes[i].file))
+            .map(|i| owner[i])
+            .collect();
+        if !declared.is_empty() {
+            let linked: Vec<usize> = named
+                .defined
+                .iter()
+                .copied()
+                .filter(|&i| {
+                    matches!(facts[i].lang, Some(Lang::C | Lang::Cpp))
+                        && !facts[i].internal
+                        && declared.contains(&owner[i])
+                })
+                .take(MAX_CANDIDATES + 1)
+                .collect();
+            if linked.len() > MAX_CANDIDATES {
+                return Vec::new();
+            }
+            if !linked.is_empty() {
+                return linked;
+            }
+        }
+    }
     // A lone global definition of this name — accepted only when its language
     // can be reached from the call site's. Otherwise a Go `Foo()` would resolve
     // to a JS function named `Foo`, a spurious cross-language edge.
     if !call.method
         && let [only] = cands
+        && !facts[*only].internal
         && facts[*only]
             .lang
             .is_some_and(|l| l.shares_namespace_with(site.lang))
@@ -5402,11 +5493,13 @@ function build() {
     }
 
     /// C: calls resolve to the DEFINITION, never to a header prototype, and
-    /// across files by the unique-name rule.
+    /// across files by the unique-name rule — a GNU-style definition (its
+    /// type on the line above its name) too. (A `static` one is its file's
+    /// alone: see `a_c_or_cpp_function_declared_in_a_header_is_reached_through_it`.)
     #[test]
     fn c_calls_link_definitions_not_prototypes() {
         let header = "int helper(void);\nint unused_decl(int);\n";
-        let lib = "static int\nhelper(void)\n{\n  return 1;\n}\n";
+        let lib = "int\nhelper(void)\n{\n  return 1;\n}\n";
         let main = "#include \"util.h\"\nint main(void) {\n  return helper() + local();\n}\nint local(void) { return 0; }\n";
         let g = graph(&[
             ("/p/util.h", header),
@@ -5428,6 +5521,85 @@ function build() {
             "a call landed on the prototype: {:?}",
             edges(&g)
         );
+    }
+
+    /// C and C++ link a program's files into one: a header declares what
+    /// another file defines (`int add(int, int);` in `class Cart`, defined
+    /// as `int Cart::add` in `cart.cpp`), and a file that includes it calls
+    /// the definition — the include brings the declaration only. `c.add(…)`
+    /// in `main.cpp` read "No callers" on `Cart::add`. A declaration in
+    /// scope (the header included, or the file's own prototype) reaches the
+    /// definitions of its name with its owner: `Cart`'s `add`, not
+    /// `Order`'s, which no header in scope declares.
+    #[test]
+    fn a_c_or_cpp_function_declared_in_a_header_is_reached_through_it() {
+        let header = "#pragma once\n\nclass Cart {\npublic:\n    int add(int a, int b);\n    static Cart make();\n};\n";
+        let source = "#include \"cart.hpp\"\n\nint Cart::add(int a, int b) { return a + b; }\n\nCart Cart::make() { return Cart(); }\n";
+        let order_h = "#pragma once\nstruct Order { int add(int a); };\n";
+        let order = "#include \"order.hpp\"\nint Order::add(int a) { return a; }\n";
+        let main = "#include <cstdio>\n#include \"cart.hpp\"\n\nint total(Cart &c) { return c.add(1, 2) + c.add(3, 4); }\n\nint main() {\n    Cart c = Cart::make();\n    std::printf(\"%d\\n\", total(c) + c.add(5, 6));\n    return 0;\n}\n";
+        // Through a header that includes the class's.
+        let shop_h = "#pragma once\n#include \"cart.hpp\"\n";
+        let app = "#include \"shop.hpp\"\nint run_shop(Cart &c) { return c.add(7, 8); }\n";
+        let c_h = "int twice(int x);\n";
+        let c_lib = "#include \"calc.h\"\nint twice(int x) { return x * 2; }\n";
+        let c_main = "#include \"calc.h\"\nint run(void) { return twice(2); }\n";
+        // In C, the other program's `twice` is no header's in scope.
+        let other = "static int twice(int x) { return x; }\nint other(void) { return twice(1); }\n";
+        let files: &[(&str, &str)] = &[
+            ("/p/cart.hpp", header),
+            ("/p/cart.cpp", source),
+            ("/p/order.hpp", order_h),
+            ("/p/order.cpp", order),
+            ("/p/main.cpp", main),
+            ("/p/shop.hpp", shop_h),
+            ("/p/app.cpp", app),
+            ("/p/calc.h", c_h),
+            ("/p/calc.c", c_lib),
+            ("/p/run.c", c_main),
+            ("/p/tool/other.c", other),
+        ];
+        let sources: Vec<(PathBuf, String)> = files
+            .iter()
+            .map(|(f, s)| (PathBuf::from(f), s.to_string()))
+            .collect();
+        let includes = |from: &str, to: &[&str]| {
+            (
+                PathBuf::from(from),
+                to.iter().map(PathBuf::from).collect::<HashSet<PathBuf>>(),
+            )
+        };
+        let scope: HashMap<PathBuf, HashSet<PathBuf>> = [
+            includes("/p/cart.cpp", &["/p/cart.hpp"]),
+            includes("/p/order.cpp", &["/p/order.hpp"]),
+            includes("/p/main.cpp", &["/p/cart.hpp"]),
+            includes("/p/shop.hpp", &["/p/cart.hpp"]),
+            includes("/p/app.cpp", &["/p/shop.hpp"]),
+            includes("/p/calc.c", &["/p/calc.h"]),
+            includes("/p/run.c", &["/p/calc.h"]),
+        ]
+        .into_iter()
+        .collect();
+        let g = ProjectCallGraph::build(defs_of(files), &sources, &scope);
+        for (from, to) in [
+            ("/p/main.cpp:total", "/p/cart.cpp:add"),
+            ("/p/main.cpp:main", "/p/cart.cpp:add"),
+            ("/p/main.cpp:main", "/p/cart.cpp:make"),
+            ("/p/main.cpp:main", "/p/main.cpp:total"),
+            ("/p/app.cpp:run_shop", "/p/cart.cpp:add"),
+            ("/p/run.c:run", "/p/calc.c:twice"),
+            ("/p/tool/other.c:other", "/p/tool/other.c:twice"),
+        ] {
+            assert!(has(&g, from, to), "{from} -> {to}: {:?}", edges(&g));
+        }
+        for (from, to) in [
+            ("/p/main.cpp:total", "/p/order.cpp:add"),
+            ("/p/main.cpp:main", "/p/order.cpp:add"),
+            ("/p/main.cpp:total", "/p/cart.hpp:add"),
+            ("/p/run.c:run", "/p/tool/other.c:twice"),
+        ] {
+            assert!(!has(&g, from, to), "not {from} -> {to}: {:?}", edges(&g));
+        }
     }
 
     #[test]
