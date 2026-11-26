@@ -217,6 +217,72 @@ fn is_test_class_name(owner: &str) -> bool {
             .is_some_and(|rest| rest.ends_with(|c: char| c.is_lowercase()))
 }
 
+/// The scope a C++ call names its function in, by its last part: `Cart`
+/// for `Cart::make()`, `fmt` for `fmt::format(…)`, `vector` for
+/// `std::vector<int>::size_type(…)`.
+fn cpp_call_scope(call: Node, src: &str) -> Option<String> {
+    let function = call.child_by_field_name("function")?;
+    if function.kind() != "qualified_identifier" {
+        return None;
+    }
+    let text = node_text(function, src);
+    let (scope, _) = text.rsplit_once("::")?;
+    let scope = scope.split('<').next().unwrap_or(scope);
+    let last = scope.rsplit("::").next().unwrap_or(scope).trim();
+    (!last.is_empty()).then(|| last.to_string())
+}
+
+/// The names a Go file calls its imports by: an import's alias, else its
+/// path's last element — a major version's (`/v10`) or a `.vN` suffix
+/// passed over (`validator`, `yaml`). A blank or dot import names none.
+fn go_import_names(src: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut in_block = false;
+    for line in src.lines() {
+        let t = line.trim();
+        let spec = if in_block {
+            if t.starts_with(')') {
+                in_block = false;
+                continue;
+            }
+            t
+        } else if let Some(rest) = t.strip_prefix("import") {
+            let rest = rest.trim_start();
+            if rest.starts_with('(') {
+                in_block = true;
+                continue;
+            }
+            rest
+        } else if t.starts_with("func ") || t.starts_with("type ") || t.starts_with("var ") {
+            break;
+        } else {
+            continue;
+        };
+        let Some(open) = spec.find('"') else { continue };
+        let alias = spec[..open].trim();
+        let Some(path) = spec[open + 1..].split('"').next() else {
+            continue;
+        };
+        let name = if alias.is_empty() {
+            let mut parts = path.rsplit('/');
+            let mut last = parts.next().unwrap_or(path);
+            if last.len() > 1
+                && last.starts_with('v')
+                && last[1..].chars().all(|c| c.is_ascii_digit())
+            {
+                last = parts.next().unwrap_or(last);
+            }
+            last.split(".v").next().unwrap_or(last).to_string()
+        } else {
+            alias.to_string()
+        };
+        if name != "_" && name != "." && !name.is_empty() {
+            names.push(name);
+        }
+    }
+    names
+}
+
 /// The modules a Ruby class or module mixes in: its body's `include`,
 /// `extend` and `prepend` (`include Comparable, Helpers`) — whose methods
 /// its own call with no receiver.
@@ -333,8 +399,9 @@ pub fn context_in(src: &str, lang: Lang, symbols: &[Located]) -> FileContext {
         .map(|l| l.symbol.line)
         .collect();
     let modules_after = |keyword: &str| -> Vec<String> {
-        match lang {
-            Lang::Elixir => elixir_modules_after(src, keyword),
+        match (lang, keyword) {
+            (Lang::Elixir, _) => elixir_modules_after(src, keyword),
+            (Lang::Go, "import ") => go_import_names(src),
             _ => Vec::new(),
         }
     };
@@ -1157,6 +1224,18 @@ impl ProjectCallGraph {
                     .insert(f.file.as_path());
             }
         }
+        // A Go package's files by its name (`package binding`).
+        let mut go_packages: HashMap<&str, HashSet<&Path>> = HashMap::new();
+        for f in files.iter().copied() {
+            if f.lang == Lang::Go
+                && let Some(package) = f.context.package.as_deref()
+            {
+                go_packages
+                    .entry(package)
+                    .or_default()
+                    .insert(f.file.as_path());
+            }
+        }
         // A Scala object's `apply`: what calling the object runs
         // (`RelPath("a")`, `os.read(p)` for `object read`).
         let applies_of = |object: &str| -> Vec<usize> {
@@ -1321,6 +1400,39 @@ impl ProjectCallGraph {
                     }
                     continue;
                 }
+                // Go's `pkg.Func(…)`: an imported package's function — the
+                // project package's of that name, or else a library's, no
+                // project function at all.
+                if fc.lang == Lang::Go
+                    && cs.method
+                    && cs.receiver.is_none()
+                    && let Some(package) = cs.qualifier.as_deref()
+                    && fc.context.imports.iter().any(|i| i == package)
+                {
+                    let callee_name = logical_name(&cs.callee, Some(fc.lang));
+                    let found: Vec<usize> = go_packages
+                        .get(package)
+                        .map(|package_files| {
+                            defs.named
+                                .get(callee_name)
+                                .into_iter()
+                                .flat_map(|named| named.all.iter().copied())
+                                .filter(|&i| {
+                                    owner[i].is_none()
+                                        && package_files.contains(nodes[i].file.as_path())
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    if found.len() <= MAX_CANDIDATES {
+                        for callee in found {
+                            if edges.len() < MAX_EDGES && (in_test || !test_node[callee]) {
+                                edges.insert((caller, callee));
+                            }
+                        }
+                    }
+                    continue;
+                }
                 // A Scala object called as a function (`RelPath("a")`), where
                 // no function in scope has the name: its `apply`.
                 if fc.lang == Lang::Scala && !cs.method && callees.is_empty() {
@@ -1430,6 +1542,7 @@ impl ProjectCallGraph {
                             | Lang::Ruby
                             | Lang::Go
                             | Lang::Dart
+                            | Lang::Zig
                     )
                     && let Some(ty) = wanted
                 {
@@ -1513,6 +1626,14 @@ impl ProjectCallGraph {
                     }
                     // Zig's standard library's (`writer: *std.Io.Writer`).
                     (Some(Receiver::Type(ty)), Lang::Zig) => ty == "std" || ty.starts_with("std."),
+                    // A value an imported library package's function made
+                    // (`httptest.NewRecorder()`).
+                    (Some(Receiver::Type(ty)), Lang::Go) => {
+                        ty.split_once('.').is_some_and(|(pkg, _)| {
+                            fc.context.imports.iter().any(|i| i == pkg)
+                                && !go_packages.contains_key(pkg)
+                        })
+                    }
                     _ => false,
                 };
                 let extensions_only: Vec<usize>;
@@ -1577,6 +1698,14 @@ impl ProjectCallGraph {
                             // bare from anywhere.
                             (false, Some(o))
                                 if nodes[c].name == o.rsplit('.').next().unwrap_or(o) =>
+                            {
+                                true
+                            }
+                            // `Cart::make()`: the class named.
+                            (false, Some(o))
+                                if cs.qualifier.as_deref().is_some_and(|q| {
+                                    q == o.rsplit(['.', ':']).next().unwrap_or(o)
+                                }) =>
                             {
                                 true
                             }
@@ -2374,7 +2503,12 @@ fn walk(
                 _ if lang == Lang::Rust => rust_path_receiver(node, src),
                 _ => None,
             };
-            let qualifier = unbound.filter(|_| receiver.is_none());
+            let qualifier = unbound.filter(|_| receiver.is_none()).or_else(|| {
+                // C++'s `Cart::make()`: the class (or namespace) it names.
+                (lang == Lang::Cpp && !method)
+                    .then(|| cpp_call_scope(node, src))
+                    .flatten()
+            });
             let arity = call_arity(node, parent, src, lang);
             out.push(CallSite {
                 caller: current.as_ref().map(|(name, _)| name.to_string()),
@@ -2620,11 +2754,20 @@ fn calls_a_parameter(
     }
     let mut at = call.parent();
     while let Some(node) = at {
-        let names = parameters
-            .entry(node.id())
-            .or_insert_with(|| parameter_names(node, src, lang));
-        if names.iter().any(|n| n == callee) {
-            return true;
+        // A Dart method's body follows its signature, beside it rather
+        // than inside it: `void on(E e, Emitter<int> emit) { … }`.
+        let signature = node
+            .kind()
+            .ends_with("body")
+            .then(|| node.prev_named_sibling())
+            .flatten();
+        for holder in std::iter::once(node).chain(signature) {
+            let names = parameters
+                .entry(holder.id())
+                .or_insert_with(|| parameter_names(holder, src, lang));
+            if names.iter().any(|n| n == callee) {
+                return true;
+            }
         }
         at = node.parent();
     }
@@ -3589,8 +3732,9 @@ fn receiver_of(
         return Some(Receiver::Declared(ty));
     }
     // Nor a field: in Scala, a package or an object (`os` in `os.read(p)`),
-    // or a member inherited from a trait.
-    if lang == Lang::Scala && !receiver.starts_with(|c: char| c.is_uppercase()) {
+    // or a member inherited from a trait; in Go, an imported package
+    // (`require.Error(t, err)`) or a package-level variable.
+    if matches!(lang, Lang::Scala | Lang::Go) && !receiver.starts_with(|c: char| c.is_uppercase()) {
         *unbound = Some(receiver.to_string());
     }
     // A JavaScript runtime's own object, not bound here (`console`,
@@ -4150,6 +4294,43 @@ fn binding_at(head: &str, after: &str, lang: Lang) -> Binding {
     {
         return Binding::Typed("std".to_string(), true);
     }
+    // A Zig struct's `init` makes one of it (`var p = try Params.init(a, 5)`).
+    if lang == Lang::Zig
+        && let Some(rhs) = assigned
+        && let Some(ty) = rhs
+            .trim_start()
+            .trim_start_matches("try ")
+            .trim_start()
+            .split_once(".init(")
+            .map(|(ty, _)| ty.trim())
+            .filter(|ty| {
+                ty.rsplit('.')
+                    .next()
+                    .is_some_and(|t| t.starts_with(char::is_uppercase))
+            })
+            .filter(|ty| {
+                ty.chars()
+                    .all(|c| c == '_' || c == '.' || c.is_alphanumeric())
+            })
+    {
+        return Binding::Typed(ty.to_string(), true);
+    }
+    // A Go value another package's function returns (`w :=
+    // httptest.NewRecorder()`): named by that function, which the graph
+    // tells a library's from the project's by the file's imports.
+    if lang == Lang::Go
+        && let Some(rhs) = assigned
+        && let Some((pkg, rest)) = rhs.trim_start().trim_start_matches('&').split_once('.')
+        && pkg.starts_with(char::is_lowercase)
+        && pkg.chars().all(|c| c == '_' || c.is_alphanumeric())
+        && rest.starts_with(char::is_uppercase)
+    {
+        let name: String = rest
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        return Binding::Typed(format!("{pkg}.{name}"), true);
+    }
     if let Some(rhs) = assigned {
         return match constructed_type(rhs, lang) {
             Some(ty) => Binding::Typed(ty, true),
@@ -4649,6 +4830,7 @@ fn owner_from(node: Node, src: &str, lang: Lang) -> Option<String> {
     match lang {
         Lang::Elixir => return elixir_module_of(node, src),
         Lang::Erlang => return erlang_module_of(node, src),
+        Lang::Zig => return zig_container_of(node, src),
         _ => {}
     }
     let mut cur = Some(node);
@@ -4720,10 +4902,63 @@ fn unfinished_class(error: Node, inside: Node, src: &str) -> Option<String> {
             }
             "{" => open = named.take().or(open),
             "}" => open = None,
+            // `struct formatter;`: a declaration, no body opened.
+            ";" => named = None,
             _ => {}
         }
     }
     open.and_then(|name| base_type_name(&name))
+}
+
+/// The Zig container a function at `node` is in: the struct (union, enum)
+/// its declaration names (`pub const Params = struct { … }`), a generic's
+/// function (`fn List(comptime T: type) type { return struct { … } }`), or
+/// — a function of the file itself — the file's own name for itself
+/// (`const Analyser = @This();`).
+fn zig_container_of(node: Node, src: &str) -> Option<String> {
+    let mut at = Some(node);
+    while let Some(n) = at {
+        if matches!(
+            n.kind(),
+            "struct_declaration" | "union_declaration" | "enum_declaration" | "opaque_declaration"
+        ) {
+            let mut up = n.parent();
+            while let Some(p) = up {
+                match p.kind() {
+                    "variable_declaration" => {
+                        let mut cursor = p.walk();
+                        return p
+                            .named_children(&mut cursor)
+                            .find(|c| c.kind() == "identifier")
+                            .map(|c| node_text(c, src).to_string());
+                    }
+                    "function_declaration" => {
+                        return p
+                            .child_by_field_name("name")
+                            .map(|c| node_text(c, src).to_string());
+                    }
+                    "source_file" => return None,
+                    _ => up = p.parent(),
+                }
+            }
+            return None;
+        }
+        if n.kind() == "source_file" {
+            let mut cursor = n.walk();
+            return n
+                .named_children(&mut cursor)
+                .filter(|d| d.kind() == "variable_declaration")
+                .find(|d| node_text(*d, src).contains("@This()"))
+                .and_then(|d| {
+                    let mut c = d.walk();
+                    d.named_children(&mut c)
+                        .find(|c| c.kind() == "identifier")
+                        .map(|c| node_text(c, src).to_string())
+                });
+        }
+        at = n.parent();
+    }
+    None
 }
 
 /// The Elixir module a definition at `node` is in, by its full name: each
@@ -4920,7 +5155,35 @@ fn resolve_callees(
     if local.len() > MAX_CANDIDATES {
         return Vec::new();
     }
-    if !local.is_empty() {
+    // A same-file definition the call's shape cannot reach — another
+    // class's member, for a bare call in a language that calls only free
+    // functions, constructors and its own class's members bare; a free
+    // function, for a method call — hides none in scope that it can
+    // (`fmt::format(…)` in a test file with `formatter<T>::format`s).
+    let shape_fits = |i: usize| -> bool {
+        let bare = !call.method
+            && matches!(
+                site.lang,
+                Lang::Dart
+                    | Lang::JavaScript
+                    | Lang::TypeScript
+                    | Lang::Tsx
+                    | Lang::Python
+                    | Lang::Php
+            );
+        let method = call.method
+            && call.receiver.is_none()
+            && matches!(
+                site.lang,
+                Lang::Java | Lang::Kotlin | Lang::Scala | Lang::CSharp
+            );
+        match owner[i] {
+            None => !method,
+            Some(o) => !bare || nodes[i].name == o.rsplit(['.', ':']).next().unwrap_or(o),
+        }
+    };
+    let look_further = !local.is_empty() && !local.iter().any(|&i| shape_fits(i));
+    if !local.is_empty() && !look_further {
         return local;
     }
     // From whichever side is smaller: the candidates, or the files in scope.
@@ -4942,6 +5205,17 @@ fn resolve_callees(
     };
     if scoped.len() > MAX_CANDIDATES {
         return Vec::new();
+    }
+    if look_further {
+        // The file's own still count: its class's members, called bare
+        // from one of its methods.
+        let mut both: Vec<usize> = local.into_iter().chain(scoped).collect();
+        both.sort_unstable();
+        both.dedup();
+        if both.len() > MAX_CANDIDATES {
+            return Vec::new();
+        }
+        return both;
     }
     if !scoped.is_empty() {
         let mut scoped = scoped;
@@ -8175,6 +8449,10 @@ def main():
                 "class Bloc {\n  void emit(int s) {}\n}\nclass Counter extends Bloc {\n  void setUp() {\n    on((event, emit) {\n      emit(1);\n    });\n  }\n}\n",
             ),
             (
+                "/p/lib/handler.dart",
+                "class Bloc {\n  void emit(int s) {}\n}\nclass Counter extends Bloc {\n  void _onEvent(CounterEvent event, Emitter<int> emit) {\n    return emit(state + 1);\n  }\n}\n",
+            ),
+            (
                 "/p/src/run.ts",
                 "function emit(s: number) {}\nexport function run(emit: (s: number) => void) {\n  emit(1);\n}\nexport const go = (emit) => emit(2);\n",
             ),
@@ -8356,6 +8634,45 @@ def main():
         let stub = "defmodule SsoTest do\n  defp stub_uri(\n         assertion \\\\ fn _c, _t, _r, _s -> :ok end\n       ) do\n    assertion\n  end\nend\n";
         let fc = FileCalls::read(Path::new("/p/test/sso_test.exs"), stub).unwrap();
         assert_eq!(fc.context.arities, [(2, 0, 1)], "{:?}", fc.context.arities);
+    }
+
+    /// A Go call qualified by an imported package is that package's: a
+    /// library's (`require.Error(t, err)`, a value `httptest.NewRecorder()`
+    /// made) reaches no project method, a project package's only its own
+    /// functions. A Zig struct's `init` makes one of it, and its methods are
+    /// its struct's.
+    #[test]
+    fn package_and_class_qualified_calls_reach_what_they_name() {
+        let g = graph(&[
+            (
+                "/p/errors.go",
+                "package gin\n\ntype SliceValidationError []error\n\nfunc (e SliceValidationError) Error() string { return \"\" }\n\ntype mockWriter struct{}\n\nfunc (m *mockWriter) Header() int { return 0 }\n",
+            ),
+            (
+                "/p/binding/default.go",
+                "package binding\n\nfunc Validate(v int) error { return nil }\n",
+            ),
+            (
+                "/p/context_test.go",
+                "package gin\n\nimport (\n\t\"net/http/httptest\"\n\t\"testing\"\n\n\t\"github.com/gin-gonic/gin/binding\"\n\t\"github.com/stretchr/testify/require\"\n)\n\nfunc TestHeader(t *testing.T) {\n\tw := httptest.NewRecorder()\n\tw.Header()\n\terr := binding.Validate(1)\n\trequire.Error(t, err)\n}\n",
+            ),
+            (
+                "/p/src/params.zig",
+                "pub const Params = struct {\n    pub fn init(n: usize) !Params { return .{}; }\n    pub fn get(self: *Params, k: []const u8) ?[]const u8 { return null; }\n};\npub const Router = struct {\n    pub fn get(self: *Router, path: []const u8) void {}\n};\ntest \"params\" {\n    var params = try Params.init(5);\n    _ = params.get(\"p2\");\n}\n",
+            ),
+        ]);
+        let e = edges(&g);
+        let from_test = |to: &str| has(&g, "/p/context_test.go:TestHeader", to);
+        assert!(!from_test("/p/errors.go:Header"), "{e:?}");
+        assert!(!from_test("/p/errors.go:Error"), "{e:?}");
+        assert!(from_test("/p/binding/default.go:Validate"), "{e:?}");
+        let params_get: Vec<usize> = (0..g.node_count())
+            .filter(|&n| g.node(n).file == Path::new("/p/src/params.zig"))
+            .flat_map(|n| g.callees_of(n).iter().copied())
+            .filter(|&c| g.node(c).name == "get")
+            .map(|c| g.node(c).line)
+            .collect();
+        assert_eq!(params_get, [3], "{e:?}");
     }
 
     /// An Elixir file's `use`s and `import`s, the multi-alias form too.

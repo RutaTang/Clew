@@ -126,7 +126,10 @@ use crate::incremental::Version;
 /// 31: a Kotlin function whose body calls a method of its own name is no
 /// extension ([`CachedCalls::extensions`]); an Elixir default that is an
 /// anonymous function is one argument ([`CachedCalls::arities`]).
-pub(crate) const CACHE_VERSION: u32 = 31;
+/// 32: a Go file's imported package names ([`CachedCalls::imports`]), a
+/// Zig function's container ([`CachedCalls::owners`]), and a C++ call's
+/// scope (`Cart` in `Cart::make()`, [`CachedCalls::qualifiers`]).
+pub(crate) const CACHE_VERSION: u32 = 32;
 
 /// A cached symbol (the index entry minus the paths, which are reconstructed
 /// from the project root + relative path on load).
