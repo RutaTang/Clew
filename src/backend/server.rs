@@ -1156,10 +1156,15 @@ struct RemoteLayout {
 /// each is checked to be a plain `[A-Za-z0-9._-]` token (they are compile-time
 /// constants; this guards the build, not user input).
 fn remote_layout() -> Result<RemoteLayout, Failure> {
+    let stamp = build_stamp(
+        server_bin_path().as_deref(),
+        clew_core::server_dist::pins_release_digests(),
+    );
     let dir = format!(
-        "{CLIENT_VERSION}-p{}-{}",
+        "{CLIENT_VERSION}-p{}-{}{}",
         clew_protocol::PROTOCOL_VERSION,
-        clew_protocol::SCHEMA_FINGERPRINT
+        clew_protocol::SCHEMA_FINGERPRINT,
+        stamp.map(|s| format!("-dev{s}")).unwrap_or_default()
     );
     if dir.is_empty()
         || !dir
@@ -1182,6 +1187,29 @@ fn remote_layout() -> Result<RemoteLayout, Failure> {
     })
 }
 
+/// What tells one developer build's server from another's. A build that
+/// pins its release's digests deploys the release's asset, the same bytes for
+/// a version, and needs nothing more than the version, protocol and schema.
+/// A developer's rebuild keeps all three while its server's code changes, and
+/// the remote kept running the build it already had. So its directory also
+/// carries a stamp of this installation's own clew-server, its size and when
+/// it was written (hashing a debug build's few hundred megabytes on every
+/// connect would cost seconds): each rebuild deploys afresh.
+fn build_stamp(own: Option<&Path>, pins_release: bool) -> Option<String> {
+    if pins_release {
+        return None;
+    }
+    let meta = std::fs::metadata(own?).ok()?;
+    let written = meta
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?;
+    let id = format!("{}:{}", meta.len(), written.as_nanos());
+    let digest = clew_core::lsp::registry::Sha256::of(id.as_bytes()).to_string();
+    Some(digest[..12].to_string())
+}
+
 /// A remote command that runs `script` under `sh`, whatever the user's login
 /// shell is. `script` must not contain a single quote; every caller builds it
 /// from constants and validated tokens, and this refuses rather than escapes.
@@ -1196,9 +1224,10 @@ fn sh_c(script: &str) -> Result<String, Failure> {
 }
 
 /// Probe for this build's server, and sweep the other builds' directories
-/// nobody has used for two weeks. The probe touches the current directory, so
-/// a build in use is never old enough to be swept — by this client or by
-/// another machine's clew connecting to the same account.
+/// nobody has used for two weeks — a developer build's (`-dev`), one a day
+/// unused, as each rebuild deploys one. The probe touches the current
+/// directory, so a build in use is never old enough to be swept — by this
+/// client or by another machine's clew connecting to the same account.
 fn probe_script(layout: &RemoteLayout) -> String {
     let dir = &layout.dir;
     format!(
@@ -1206,6 +1235,8 @@ fn probe_script(layout: &RemoteLayout) -> String {
          if [ -x \"$S\" ]; then touch \"$D\" 2>/dev/null; \"$S\" --version 2>/dev/null; fi; \
          find \"$R\" -mindepth 1 -maxdepth 1 -type d -name \"*-p*\" ! -name \"{dir}\" \
          -mtime +14 -exec rm -rf {{}} + 2>/dev/null; \
+         find \"$R\" -mindepth 1 -maxdepth 1 -type d -name \"*-p*-dev*\" ! -name \"{dir}\" \
+         -mtime +0 -exec rm -rf {{}} + 2>/dev/null; \
          find \"$D\" -maxdepth 1 -name \"clew-server.*.tmp\" -mtime +1 -exec rm -f {{}} + 2>/dev/null; \
          exit 0"
     )
@@ -2503,11 +2534,15 @@ exit 3
         let stale = root.join("0.0.1-p1-deadbeef");
         let recent = root.join("0.0.2-p2-cafef00d");
         let unrelated = root.join("notes");
-        for d in [&stale, &recent, &unrelated] {
+        // A developer's rebuilds: yesterday's goes, today's stays.
+        let old_rebuild = root.join("0.0.2-p2-cafef00d-dev0123456789ab");
+        let new_rebuild = root.join("0.0.2-p2-cafef00d-devba9876543210");
+        for d in [&stale, &recent, &unrelated, &old_rebuild, &new_rebuild] {
             std::fs::create_dir_all(d).unwrap();
         }
         set_mtime_days_ago(&stale, 30);
         set_mtime_days_ago(&unrelated, 30);
+        set_mtime_days_ago(&old_rebuild, 2);
         let old_tmp = current.join("clew-server.1-abc.tmp");
         std::fs::write(&old_tmp, b"partial").unwrap();
         set_mtime_days_ago(&old_tmp, 3);
@@ -2523,6 +2558,11 @@ exit 3
             "the build in use stays"
         );
         assert!(recent.exists(), "a recently used build stays");
+        assert!(
+            !old_rebuild.exists(),
+            "a developer build unused for a day is swept"
+        );
+        assert!(new_rebuild.exists(), "a developer build used today stays");
         assert!(unrelated.exists(), "only build-shaped names are swept");
         assert!(!old_tmp.exists(), "an abandoned upload is removed");
         let age = std::fs::metadata(&current).unwrap().modified().unwrap();
@@ -2531,6 +2571,36 @@ exit 3
             "the probe marks the build in use as used"
         );
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// A developer's rebuild of the server, under the same version, protocol
+    /// and schema, is deployed to its own directory, so the remote runs it
+    /// rather than the build it already has; a release build's server, the
+    /// release's asset, needs no stamp, nor does a build with no server.
+    #[test]
+    fn each_developer_rebuild_of_the_server_has_its_own_directory() {
+        let dir = temp("build-stamp");
+        let server = dir.join("clew-server");
+        std::fs::write(&server, b"first build").unwrap();
+        let first = build_stamp(Some(&server), false).expect("a developer build is stamped");
+        assert_eq!(first.len(), 12);
+        assert!(first.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(
+            build_stamp(Some(&server), false).as_deref(),
+            Some(first.as_str())
+        );
+        std::fs::write(&server, b"the second build").unwrap();
+        set_mtime_days_ago(&server, 1);
+        let second = build_stamp(Some(&server), false).unwrap();
+        assert_ne!(first, second, "a rebuild is another directory");
+        assert_eq!(
+            build_stamp(Some(&server), true),
+            None,
+            "a release build's is the release's"
+        );
+        assert_eq!(build_stamp(Some(&dir.join("missing")), false), None);
+        assert_eq!(build_stamp(None, false), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The install script puts exactly the streamed bytes in place, private

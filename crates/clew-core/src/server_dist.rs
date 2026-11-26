@@ -68,6 +68,13 @@ pub const DOWNLOAD_DEADLINE: Duration = Duration::from_secs(15 * 60);
 /// (see the module docs). `None` in a build made without it.
 const EMBEDDED_DIGESTS: Option<&str> = option_env!("CLEW_SERVER_DIGESTS");
 
+/// Whether this build pins its release's server digests (a release build):
+/// its server for a version is the release's asset, the same bytes wherever
+/// it is deployed. A build without them may be any developer's rebuild.
+pub fn pins_release_digests() -> bool {
+    EMBEDDED_DIGESTS.is_some()
+}
+
 /// How long a cached build of ANOTHER version or protocol survives unused.
 const STALE_DIST_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
