@@ -1168,6 +1168,8 @@ enum JvmBuild {
     Sbt,
     /// A Scala file with no build of its own, its tests by scala-cli.
     ScalaCli,
+    /// Mill's: its tests run in its own JVM (`testLocal`), given the agent.
+    Mill,
 }
 
 /// The build that runs `file`'s tests where the JVM debugger reaches them,
@@ -1178,7 +1180,7 @@ fn jvm_debug_build(root: &Path, file: &Path) -> Option<JvmBuild> {
         return Some(JvmBuild::Sbt);
     }
     if above(root, file, &["build.mill", "build.sc"]).is_some() {
-        return None;
+        return Some(JvmBuild::Mill);
     }
     if above(
         root,
@@ -1210,8 +1212,77 @@ fn mill_module(build: &Path, file: &Path) -> Option<String> {
     (!parts.is_empty() && parts.len() < rel.components().count()).then(|| parts.join("."))
 }
 
-/// A Scala file's tests run by scala-cli: no build of its own around it
-/// (Mill's runs its tests where the debugger is not).
+/// The JVM options file Mill's own JVM starts with (`MILL_JVM_OPTS_PATH`)
+/// for a run under the debugger: the build's own options — its
+/// `.mill-jvm-opts`, or the file the variable already names — then the
+/// `agent`'s, written to Clew's data directory. Mill's launcher JVM, which
+/// `JAVA_OPTS` reaches, is not the one that runs the code.
+fn mill_jvm_opts(dir: &Path, agent: &str, port: u16) -> Result<PathBuf, String> {
+    let own = std::env::var_os("MILL_JVM_OPTS_PATH")
+        .filter(|p| !p.is_empty())
+        .map(|p| dir.join(p))
+        .unwrap_or_else(|| dir.join(".mill-jvm-opts"));
+    let mut opts = std::fs::read_to_string(&own).unwrap_or_default();
+    if !opts.is_empty() && !opts.ends_with('\n') {
+        opts.push('\n');
+    }
+    opts.push_str(agent);
+    opts.push('\n');
+    let folder = crate::lsp::store::data_root()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("debug-adapters")
+        .join("mill");
+    std::fs::create_dir_all(&folder)
+        .map_err(|e| format!("cannot write {}: {e}", folder.display()))?;
+    // Earlier runs' files, read long since, go.
+    if let Ok(entries) = std::fs::read_dir(&folder) {
+        for entry in entries.flatten() {
+            let old = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .is_some_and(|age| age > std::time::Duration::from_secs(3600));
+            if old {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+    let path = folder.join(format!("jvm-opts-{port}"));
+    std::fs::write(&path, opts).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    Ok(path)
+}
+
+/// The words Mill's `testLocal` hands the test framework to run `runnable`
+/// alone: MUnit's full name (`shop.CartSuite.adds`, a suite's
+/// `shop.CartSuite.*`), ScalaTest's suite (`-s`) and test (`-z`); a file
+/// its suites'. None for a framework that has none: the module's tests.
+fn mill_local_filter(source: &str, runnable: &Runnable, lang: &str) -> Vec<String> {
+    let class = jvm_test_name(source, runnable);
+    let classes = match &class {
+        Some((class, _)) => vec![class.clone()],
+        None => file_test_classes(lang, source),
+    };
+    if source.contains("org.scalatest") {
+        let mut words: Vec<String> = classes
+            .iter()
+            .flat_map(|c| ["-s".to_string(), c.clone()])
+            .collect();
+        if runnable.kind == RunnableKind::Test {
+            words.extend(["-z".to_string(), runnable.name.clone()]);
+        }
+        return words;
+    }
+    if source.contains("munit.") {
+        return match (&class, runnable.kind) {
+            (Some((class, Some(name))), RunnableKind::Test) => vec![format!("{class}.{name}")],
+            _ => classes.iter().map(|c| format!("{c}.*")).collect(),
+        };
+    }
+    Vec::new()
+}
+
+/// A Scala file's tests run by scala-cli: no build of its own around it.
 fn scala_cli_tests(root: &Path, file: &Path, lang: &str) -> Option<JvmBuild> {
     let built = above(
         root,
@@ -1271,11 +1342,7 @@ pub fn main_debugger(root: &Path, file: &Path, lang: &str) -> Option<&'static st
             ],
         )
         .map(|_| "java"),
-        // Mill forks its program where the agent can't be put from its
-        // command line: run, out of the debugger's reach, and said so.
-        "scala" => above(root, file, &["build.mill", "build.sc"])
-            .is_none()
-            .then_some("java"),
+        "scala" => Some("java"),
         "elixir" => Some("elixir"),
         // A .NET program, built and run under netcoredbg; a Zig file on
         // its own, built for the session under lldb (a build.zig's
@@ -1370,20 +1437,45 @@ pub fn debug_main(
             let mut args = run.args;
             let port = free_port()?;
             let agent = JDWP_AGENT.replace("127.0.0.1:0", &format!("127.0.0.1:{port}"));
-            let sbt = run
+            let tool = run
                 .program
                 .file_stem()
-                .is_some_and(|n| n.to_string_lossy() == "sbt");
-            match sbt {
-                true => {
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let mut env = None;
+            match tool.as_str() {
+                "sbt" => {
                     for (i, set) in sbt_forked_under("run", &agent).into_iter().enumerate() {
                         args.insert(i, set);
                     }
                 }
-                false => args.extend(["--java-opt".to_string(), agent]),
+                // Mill's program in its own JVM (`runMainLocal`, with no
+                // server), started with the agent in its options file: it
+                // forks `runMain`'s where the agent can't be put.
+                "mill" => {
+                    args = args
+                        .into_iter()
+                        .map(|a| match a.strip_suffix(".runMain") {
+                            Some(module) => format!("{module}.runMainLocal"),
+                            None => match a.strip_suffix(".run") {
+                                Some(module) => format!("{module}.runLocal"),
+                                None => a,
+                            },
+                        })
+                        .collect();
+                    args.insert(0, "--no-server".into());
+                    env = Some(mill_jvm_opts(&run.cwd, &agent, port)?);
+                }
+                _ => args.extend(["--java-opt".to_string(), agent]),
             }
             let mut debug = jvm(run.program, args, run.cwd);
             debug.launch.insert("port".into(), port.into());
+            if let Some(opts) = env {
+                debug.launch.insert(
+                    "env".into(),
+                    serde_json::json!({ "MILL_JVM_OPTS_PATH": opts.to_string_lossy() }),
+                );
+            }
             Ok(debug)
         }
         "csharp" => {
@@ -1681,6 +1773,7 @@ pub fn debug_test(
             };
             let mut args = run.args;
             let mut agent_port: Option<u16> = None;
+            let mut mill_env: Option<PathBuf> = None;
             match build {
                 JvmBuild::Gradle => {
                     args.push("--init-script".into());
@@ -1714,6 +1807,21 @@ pub fn debug_test(
                     args.splice(at..at, ["--java-opt".to_string(), agent]);
                     agent_port = Some(port);
                 }
+                // Mill forks its tests where the agent can't be put from
+                // its command line: they run in its own JVM instead
+                // (`testLocal`, `--no-server`), started with the agent in
+                // its options file, on a port of Clew's.
+                JvmBuild::Mill => {
+                    let dir = above(root, file, &["build.mill", "build.sc"])
+                        .unwrap_or_else(|| root.to_path_buf());
+                    let module = mill_module(&dir, file).ok_or_else(|| no_main(file))?;
+                    args = vec!["--no-server".into(), format!("{module}.testLocal")];
+                    args.extend(mill_local_filter(source, runnable, lang));
+                    let port = free_port()?;
+                    let agent = JDWP_AGENT.replace("127.0.0.1:0", &format!("127.0.0.1:{port}"));
+                    mill_env = Some(mill_jvm_opts(&run.cwd, &agent, port)?);
+                    agent_port = Some(port);
+                }
             }
             let mut command = vec![serde_json::Value::from(
                 run.program.to_string_lossy().into_owned(),
@@ -1723,6 +1831,12 @@ pub fn debug_test(
             debug.launch.insert("command".into(), command.into());
             if let Some(port) = agent_port {
                 debug.launch.insert("port".into(), port.into());
+            }
+            if let Some(opts) = mill_env {
+                debug.launch.insert(
+                    "env".into(),
+                    serde_json::json!({ "MILL_JVM_OPTS_PATH": opts.to_string_lossy() }),
+                );
             }
             Ok(debug)
         }
@@ -3226,6 +3340,7 @@ mod tests {
             "mix",
             "kotlinc",
             "scala-cli",
+            "mill",
             "dotnet",
             "cabal",
         ] {
@@ -3378,14 +3493,33 @@ mod tests {
         write("fk/build.sbt", "Test / fork := true\n");
         let forked = write("fk/src/test/scala/acme/CartSuite.scala", "");
         assert_eq!(test_debugger(&root, &forked, "scala"), Some("java"));
-        // Mill's tests are out of its reach; scala-cli's, a file with no
-        // build, its test JVM under the agent before MUnit's words.
+        // Mill's tests in Mill's own JVM, under the agent; scala-cli's (a
+        // file with no build) its test JVM's, before MUnit's words.
         write("ml/build.mill", "");
+        write("ml/.mill-jvm-opts", "-Xmx2g");
         let mill = write(
             "ml/foo/test/src/CartSuite.scala",
             "class CartSuite extends munit.FunSuite {\n  test(\"adds\") {\n  }\n}\n",
         );
-        assert_eq!(test_debugger(&root, &mill, "scala"), None);
+        assert_eq!(test_debugger(&root, &mill, "scala"), Some("java"));
+        let d = debug("scala", &mill, 2);
+        assert_eq!(
+            d.args,
+            ["--no-server", "foo.test.testLocal", "CartSuite.adds"],
+            "Mill's tests in its own JVM, one by MUnit's name"
+        );
+        // That JVM — not the launcher's, which `JAVA_OPTS` reaches — starts
+        // with the build's own options and then the agent's.
+        let port = d.launch["port"].as_u64().unwrap();
+        let opts = d.launch["env"]["MILL_JVM_OPTS_PATH"].as_str().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(opts).unwrap(),
+            format!(
+                "-Xmx2g\n{}\n",
+                JDWP_AGENT.replace("127.0.0.1:0", &format!("127.0.0.1:{port}"))
+            )
+        );
+        assert!(d.launch["env"].get("JAVA_OPTS").is_none());
         assert_eq!(
             mill_module(&root.join("ml"), &mill).as_deref(),
             Some("foo.test")
@@ -3406,7 +3540,7 @@ mod tests {
             "ml/foo/src/Main.scala",
             "object Main:\n  def main(args: Array[String]): Unit = ()\n",
         );
-        assert_eq!(main_debugger(&root, &mill_main, "scala"), None);
+        assert_eq!(main_debugger(&root, &mill_main, "scala"), Some("java"));
         let cli = write(
             "cli2/Cart.test.scala",
             "class CartSuite extends munit.FunSuite {\n  test(\"adds\") {\n  }\n}\n",
@@ -3533,6 +3667,7 @@ mod tests {
             "kotlinc",
             "sbt",
             "scala-cli",
+            "mill",
             "mix",
             "elixir",
             "dotnet",
@@ -3618,6 +3753,23 @@ mod tests {
         write("fk/build.sbt", "run / fork := true\n");
         let forked = write("fk/src/main/scala/Main.scala", "object Main\n");
         assert_eq!(main_debugger(&root, &forked, "scala"), Some("java"));
+        // Mill's program in Mill's own JVM (`runMainLocal`, no server), the
+        // agent in that JVM's options file.
+        write("ml/build.mill", "");
+        let ml = write(
+            "ml/foo/src/Main.scala",
+            "package shop\n\nobject Main:\n  def main(args: Array[String]): Unit = ()\n",
+        );
+        let d = debug("scala", &ml);
+        assert_eq!(
+            command(&d)[1..],
+            ["--no-server", "foo.runMainLocal", "shop.Main"]
+        );
+        let opts = d.launch["env"]["MILL_JVM_OPTS_PATH"].as_str().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(opts).unwrap(),
+            format!("{}\n", agent(&d))
+        );
 
         write(
             "ex/mix.exs",

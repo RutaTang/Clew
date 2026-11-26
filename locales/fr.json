@@ -4122,7 +4122,6 @@
  "{file} did not compile (the compiler's output is above).": "{file} n’a pas compilé (la sortie du compilateur est ci-dessus).",
  "The build was stopped.": "La compilation a été arrêtée.",
  "A remote project's programs run without the debugger: {status}": "Les programmes d’un projet distant s’exécutent sans le débogueur : {status}",
- "Mill runs this program where the debugger can't reach it, so it runs without it: {status}": "Mill exécute ce programme hors de portée du débogueur ; il s’exécute donc sans lui : {status}",
  "This program runs without the debugger: {status}": "Ce programme s’exécute sans le débogueur : {status}",
  "Flutter found no device to run this app on.": "Flutter n’a trouvé aucun appareil sur lequel exécuter cette application."
 }

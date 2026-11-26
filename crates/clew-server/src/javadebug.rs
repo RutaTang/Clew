@@ -18,6 +18,7 @@
 //! elements along a path from it (`order.items[0].price`).
 
 use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -78,6 +79,9 @@ where
         process: None,
         scratch: None,
         roots: Vec::new(),
+        project: None,
+        sources: std::sync::OnceLock::new(),
+        found: std::sync::Mutex::new(HashMap::new()),
         state: Arc::new(Mutex::new(State::default())),
     };
     let mut input = BufReader::new(input);
@@ -864,8 +868,11 @@ fn jdwp_error(code: u16) -> String {
 struct Wanted {
     id: u64,
     line: i32,
-    /// The JDWP request, once set.
-    request: Option<i32>,
+    /// Its JDWP requests: one on each class it is in, as each loads — a
+    /// class a build loads again in another class loader (Mill's tests,
+    /// to find them and then to run them) is another class, and the one
+    /// that ran had none.
+    requests: Vec<i32>,
 }
 
 /// What a `variablesReference` stands for.
@@ -935,6 +942,13 @@ struct Adapter {
     scratch: Option<PathBuf>,
     /// Where source files are, by their package's path.
     roots: Vec<PathBuf>,
+    /// The folder the session runs in, whose source files a class's
+    /// file is looked for among where the roots do not have it.
+    project: Option<PathBuf>,
+    /// Those files by name, walked once when first wanted.
+    sources: std::sync::OnceLock<HashMap<String, Vec<PathBuf>>>,
+    /// Each class's file found there, by its package and file name.
+    found: std::sync::Mutex<HashMap<(String, String), Option<PathBuf>>>,
     state: Arc<Mutex<State>>,
 }
 
@@ -1056,6 +1070,7 @@ impl Adapter {
             .unwrap_or_default();
         classpath.extend(build_outputs(&cwd));
         self.roots = source_roots(&cwd);
+        self.project = Some(cwd.clone());
         let main = match (args["mainClass"].as_str(), &program) {
             (Some(main), _) => main.to_string(),
             (None, Some(program)) if program.extension().is_some_and(|e| e == "java") => {
@@ -1153,6 +1168,7 @@ impl Adapter {
             .collect();
         let (program, rest) = words.split_first().ok_or("the build to run is empty")?;
         self.roots = source_roots(cwd);
+        self.project = Some(cwd.to_path_buf());
         // Its variables: `JAVA_OPTS` for a JVM a script starts (kotlinc's).
         let vars: Vec<(String, String)> = env
             .as_object()
@@ -1160,16 +1176,30 @@ impl Adapter {
             .flatten()
             .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
             .collect();
-        let mut child = clew_core::spawn::tokio_command(Path::new(program))
-            .args(rest)
-            .envs(vars)
-            .current_dir(cwd)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|e| format!("cannot run {}: {e}", program))?;
+        // As a shell runs it: a launcher with no `#!` line (Mill's own
+        // `./mill`) runs through `sh`.
+        let spawn = |program: &OsStr, words: Vec<&OsStr>| {
+            clew_core::spawn::tokio_command(program)
+                .args(words)
+                .envs(vars.clone())
+                .current_dir(cwd)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .kill_on_drop(true)
+                .spawn()
+        };
+        let rest_os: Vec<&OsStr> = rest.iter().map(OsStr::new).collect();
+        let mut child = match spawn(OsStr::new(program), rest_os.clone()) {
+            #[cfg(unix)]
+            Err(e) if e.raw_os_error() == Some(8) => {
+                let mut words = vec![OsStr::new(program)];
+                words.extend(rest_os);
+                spawn(OsStr::new("sh"), words)
+            }
+            other => other,
+        }
+        .map_err(|e| format!("cannot run {}: {e}", program))?;
         let (port_tx, mut ports) = tokio::sync::mpsc::unbounded_channel::<u16>();
         if let Some(stdout) = child.stdout.take() {
             tokio::spawn(watch_lines(
@@ -1337,7 +1367,7 @@ impl Adapter {
         let mut state = self.state.lock().await;
         if let Some((_, old)) = state.breakpoints.remove(&path) {
             for wanted in old {
-                if let Some(request) = wanted.request {
+                for request in wanted.requests {
                     let _ = vm.clear(2, request).await;
                 }
             }
@@ -1347,7 +1377,7 @@ impl Adapter {
             .map(|&line| Wanted {
                 id: NEXT_BREAKPOINT.fetch_add(1, Ordering::Relaxed),
                 line,
-                request: None,
+                requests: Vec::new(),
             })
             .collect();
         match &in_file {
@@ -1388,9 +1418,9 @@ impl Adapter {
         }
         let answers: Vec<Value> = wanted
             .iter()
-            .map(|w| match w.request {
-                Some(_) => json!({ "id": w.id, "verified": true, "line": w.line }),
-                None => json!({
+            .map(|w| match w.requests.is_empty() {
+                false => json!({ "id": w.id, "verified": true, "line": w.line }),
+                true => json!({
                     "id": w.id, "verified": false, "line": w.line,
                     "message": "set when its class loads",
                 }),
@@ -1488,14 +1518,56 @@ impl Adapter {
     async fn source_of(&self, vm: &Jdwp, class: u64, signature: &str) -> Option<PathBuf> {
         let file = vm.source_file(class).await.ok()?;
         let name = class_name(signature);
-        let package = name.rsplit_once('.').map(|(p, _)| p.replace('.', "/"));
-        self.roots.iter().find_map(|root| {
-            let path = match &package {
-                Some(package) => root.join(package).join(&file),
+        let package = name.rsplit_once('.').map(|(p, _)| p.to_string());
+        let folder = package.as_ref().map(|p| p.replace('.', "/"));
+        let rooted = self.roots.iter().find_map(|root| {
+            let path = match &folder {
+                Some(folder) => root.join(folder).join(&file),
                 None => root.join(&file),
             };
             path.is_file().then_some(path)
-        })
+        });
+        if rooted.is_some() {
+            return rooted;
+        }
+        // A module in a folder of its own (`core/src/main/scala`, Mill's
+        // `foo/src`), or a file not in its package's folder (Kotlin's,
+        // Scala's): the project's file of that name declaring that
+        // package — the files breakpoints are in first.
+        let key = (package.clone().unwrap_or_default(), file.clone());
+        if let Some(known) = self.found.lock().ok()?.get(&key) {
+            return known.clone();
+        }
+        let mut candidates: Vec<PathBuf> = {
+            let state = self.state.lock().await;
+            state
+                .breakpoints
+                .keys()
+                .map(PathBuf::from)
+                .filter(|p| p.file_name().is_some_and(|n| n.to_string_lossy() == file))
+                .collect()
+        };
+        if let Some(project) = &self.project {
+            let named = self
+                .sources
+                .get_or_init(|| sources_by_name(project))
+                .get(&file);
+            candidates.extend(named.into_iter().flatten().cloned());
+        }
+        let in_folder = |p: &PathBuf| match &folder {
+            Some(folder) => p.parent().is_some_and(|d| d.ends_with(folder)),
+            None => true,
+        };
+        let path = candidates
+            .into_iter()
+            .filter(|p| {
+                std::fs::read_to_string(p).is_ok_and(|source| package_of(&source) == package)
+            })
+            .min_by_key(|p| (!in_folder(p), p.components().count()));
+        if let Ok(mut found) = self.found.lock() {
+            found.insert(key, path.clone());
+        }
+        path
     }
 
     async fn scopes(&self, args: &Value) -> Result<Value, String> {
@@ -1622,7 +1694,7 @@ async fn place(vm: &Jdwp, class: u64, wanted: &mut [Wanted]) -> Vec<u64> {
             tables.push((*method, table));
         }
     }
-    for w in wanted.iter_mut().filter(|w| w.request.is_none()) {
+    for w in wanted.iter_mut() {
         let at = tables.iter().find_map(|(method, table)| {
             table
                 .iter()
@@ -1642,8 +1714,11 @@ async fn place(vm: &Jdwp, class: u64, wanted: &mut [Wanted]) -> Vec<u64> {
                 .request(2, vec![vm.data().u8(7).location(location)])
                 .await
             {
-                w.request = Some(request);
-                placed.push(w.id);
+                // Said verified once: on its first class.
+                if w.requests.is_empty() {
+                    placed.push(w.id);
+                }
+                w.requests.push(request);
             }
         }
     }
@@ -3182,6 +3257,52 @@ fn source_roots(root: &Path) -> Vec<PathBuf> {
     .collect()
 }
 
+/// The JVM source files under `root` by their names (`Cart.scala`), for a
+/// class's file that is not under a standard source root. Hidden folders,
+/// dependencies' and builds' output are passed by, and the walk stops at a
+/// bound in a project too large to walk whole.
+fn sources_by_name(root: &Path) -> HashMap<String, Vec<PathBuf>> {
+    const MOST_ENTRIES: usize = 100_000;
+    let mut named: HashMap<String, Vec<PathBuf>> = HashMap::new();
+    let mut seen = 0;
+    let mut folders = vec![root.to_path_buf()];
+    while let Some(folder) = folders.pop() {
+        let Ok(entries) = std::fs::read_dir(&folder) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            seen += 1;
+            if seen > MOST_ENTRIES {
+                return named;
+            }
+            let path = entry.path();
+            let name = entry.file_name();
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if kind.is_dir() {
+                let passed = name.to_string_lossy().starts_with('.')
+                    || clew_core::fs_scan::is_noise_dir(&name)
+                    || clew_core::fs_scan::is_build_output_dir(&path);
+                if !passed {
+                    folders.push(path);
+                }
+            } else if kind.is_file()
+                && path
+                    .extension()
+                    .and_then(OsStr::to_str)
+                    .is_some_and(|e| matches!(e, "java" | "kt" | "kts" | "scala" | "groovy"))
+            {
+                named
+                    .entry(name.to_string_lossy().into_owned())
+                    .or_default()
+                    .push(path);
+            }
+        }
+    }
+    named
+}
+
 /// A build's class output: Maven's `target/classes`, Gradle's
 /// `build/classes/java/main`, theirs for tests, an IDE's `bin/` and `out/`.
 fn build_outputs(root: &Path) -> Vec<PathBuf> {
@@ -3353,6 +3474,42 @@ fn scratch_dir() -> Result<PathBuf, String> {
 mod tests {
     use super::*;
     use crate::dapout::testing::Client;
+
+    #[test]
+    fn a_modules_sources_are_found_by_name_past_builds_output() {
+        let dir = clew_core::testutil::TempDir::new("java-sources-by-name");
+        let write = |rel: &str| {
+            let path = dir.path().join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, "package shop\n").unwrap();
+        };
+        write("build.mill");
+        write("foo/src/Cart.scala");
+        write("core/src/main/scala/shop/Cart.scala");
+        write("app/src/main/java/shop/Main.java");
+        // Mill's output, a dependency's folder and a hidden one: passed by.
+        write("out/foo/compile.dest/Cart.scala");
+        write("target/streams/Cart.scala");
+        write(".bsp/Cart.scala");
+        write("foo/src/notes.txt");
+        let named = sources_by_name(dir.path());
+        let mut carts: Vec<String> = named["Cart.scala"]
+            .iter()
+            .map(|p| {
+                p.strip_prefix(dir.path())
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+            .collect();
+        carts.sort();
+        assert_eq!(
+            carts,
+            ["core/src/main/scala/shop/Cart.scala", "foo/src/Cart.scala"]
+        );
+        assert_eq!(named["Main.java"].len(), 1);
+        assert!(!named.contains_key("notes.txt"));
+    }
 
     #[test]
     fn signatures_paths_and_lines_are_read() {
