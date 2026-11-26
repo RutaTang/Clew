@@ -4138,5 +4138,7 @@
  "Overrides": "重写",
  "each method that overrides one of a base class or implements one of an interface, with an arrow to the nearest one up its type's ancestry (Java, Kotlin, Scala and C#)": "每个重写基类方法或实现接口方法的方法，以及沿其类型的祖先向上指向最近的那个方法的箭头（Java、Kotlin、Scala 和 C#）",
  "implements": "实现",
- "each type and an arrow to each type class it has an instance of, from given and implicit definitions and derives clauses": "每个类型，以及指向它拥有其实例的每个类型类的箭头，读自 given 和 implicit 定义以及 derives 子句"
+ "each type and an arrow to each type class it has an instance of, from given and implicit definitions and derives clauses": "每个类型，以及指向它拥有其实例的每个类型类的箭头，读自 given 和 implicit 定义以及 derives 子句",
+ "Behaviours": "Behaviour",
+ "each behaviour (a module of callbacks, or one a -behaviour names) and an arrow to each module that adopts it": "每个 behaviour（含回调的模块，或 -behaviour 所指定的模块），以及指向采用它的每个模块的箭头"
 }

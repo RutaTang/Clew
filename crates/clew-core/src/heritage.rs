@@ -103,6 +103,33 @@ pub fn inherited_names(signature: &str, lang: Option<&str>) -> Vec<String> {
                 push(&name);
             }
         }
+        // Go's embedded types: a struct member or an interface element that
+        // is a type alone (`User`, `*Logger`, `io.Closer`, a tag aside) —
+        // the struct has their methods, the interface their method sets.
+        Some("go") => {
+            if let (Some(open), Some(close)) = (signature.find('{'), signature.rfind('}')) {
+                for member in signature[open + 1..close.max(open + 1)].split(';') {
+                    let member = member.split('`').next().unwrap_or("").trim();
+                    let words: Vec<&str> = member.split_whitespace().collect();
+                    if let [one] = words.as_slice()
+                        && !one.contains(['(', '|', '~', '['])
+                    {
+                        push(one.trim_start_matches('*'));
+                    }
+                }
+            }
+        }
+        // A Dart mixin's `on` types: what it may be mixed into, and whose
+        // members it uses.
+        Some("dart") if find_word(signature, "mixin").is_some() => {
+            if let Some(at) = find_word(flat, "on") {
+                let after = &flat[at + 2..];
+                let end = find_word(after, "implements").unwrap_or(after.len());
+                for part in after[..end].split(',') {
+                    push(part);
+                }
+            }
+        }
         _ => {}
     }
     names

@@ -4138,5 +4138,7 @@
  "Overrides": "オーバーライド",
  "each method that overrides one of a base class or implements one of an interface, with an arrow to the nearest one up its type's ancestry (Java, Kotlin, Scala and C#)": "基底クラスのメソッドをオーバーライドする、またはインターフェースのメソッドを実装する各メソッドと、その型の祖先をたどって最も近いメソッドへの矢印（Java、Kotlin、Scala、C#）",
  "implements": "実装",
- "each type and an arrow to each type class it has an instance of, from given and implicit definitions and derives clauses": "各型と、それがインスタンスを持つ各型クラスへの矢印（given と implicit の定義、derives 節から）"
+ "each type and an arrow to each type class it has an instance of, from given and implicit definitions and derives clauses": "各型と、それがインスタンスを持つ各型クラスへの矢印（given と implicit の定義、derives 節から）",
+ "Behaviours": "ビヘイビア",
+ "each behaviour (a module of callbacks, or one a -behaviour names) and an arrow to each module that adopts it": "各ビヘイビア（コールバックを持つモジュール、または -behaviour が指定するもの）と、それを採用する各モジュールへの矢印"
 }

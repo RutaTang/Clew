@@ -4138,5 +4138,7 @@
  "Overrides": "Redéfinitions",
  "each method that overrides one of a base class or implements one of an interface, with an arrow to the nearest one up its type's ancestry (Java, Kotlin, Scala and C#)": "chaque méthode qui redéfinit une méthode d'une classe de base ou implémente une méthode d'une interface, avec une flèche vers la plus proche en remontant l'ascendance de son type (Java, Kotlin, Scala et C#)",
  "implements": "implémente",
- "each type and an arrow to each type class it has an instance of, from given and implicit definitions and derives clauses": "chaque type et une flèche vers chaque classe de types dont il a une instance, d'après les définitions given et implicit et les clauses derives"
+ "each type and an arrow to each type class it has an instance of, from given and implicit definitions and derives clauses": "chaque type et une flèche vers chaque classe de types dont il a une instance, d'après les définitions given et implicit et les clauses derives",
+ "Behaviours": "Behaviours",
+ "each behaviour (a module of callbacks, or one a -behaviour names) and an arrow to each module that adopts it": "chaque behaviour (un module de callbacks, ou celui que nomme un -behaviour) et une flèche vers chaque module qui l'adopte"
 }

@@ -485,6 +485,31 @@ mod tests {
             of("newtype Age = Age Int deriving stock Show", "haskell"),
             ["Show"]
         );
+        // Go's embedded types, and nothing else of its members.
+        assert_eq!(
+            of(
+                "Admin struct { User; *Logger; shop.Base `json:\"base\"`; Level int; Name, Nick string }",
+                "go"
+            ),
+            ["User", "Logger", "Base"]
+        );
+        assert_eq!(
+            of(
+                "ReadCloser interface { Reader; io.Closer; Close() error; ~int | ~string }",
+                "go"
+            ),
+            ["Reader", "Closer"]
+        );
+        assert_eq!(of("Logger struct {}", "go"), Vec::<String>::new());
+        // A Dart mixin's `on`; an extension's is no inheritance.
+        assert_eq!(
+            of("mixin Walker on Animal, Legs implements Mover {}", "dart"),
+            ["Mover", "Animal", "Legs"]
+        );
+        assert_eq!(
+            of("extension Shout on String", "dart"),
+            Vec::<String>::new()
+        );
     }
 
     /// Kotlin, C#, Ruby and Haskell types inherit as they say it, and a
@@ -516,6 +541,11 @@ mod tests {
                     "class Polygon\nend\nclass Hexagon < Polygon\nend\n",
                 ),
                 file(
+                    "shop/user.go",
+                    "go",
+                    "package shop\ntype User struct {\n\tName string\n}\ntype Admin struct {\n\tUser\n\tLevel int // its rank\n}\ntype Reader interface { Read() }\ntype ReadCloser interface {\n\tReader\n\tClose() error\n}\n",
+                ),
+                file(
                     "src/Shapes.hs",
                     "haskell",
                     "class HasArea a where\n  area :: a -> Double\nclass HasArea a => Solid a where\n  volume :: a -> Double\ndata Cube = Cube Double deriving anyclass (HasArea)\n",
@@ -538,6 +568,8 @@ mod tests {
             ("Hexagon", "Polygon"),
             ("Solid", "HasArea"),
             ("Cube", "HasArea"),
+            ("Admin", "User"),
+            ("ReadCloser", "Reader"),
         ] {
             assert!(edge(from, to), "{from} inherits {to}: {:?}", graph.edges);
         }

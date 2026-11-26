@@ -10,7 +10,10 @@
 //!   `handle_cast`, `handle_info`);
 //! - **gen_server calls** — each `gen_server:call`/`cast` to a module, an
 //!   arrow to the `handle_call`/`handle_cast` clause that answers its
-//!   request.
+//!   request;
+//! - **behaviours** — each behaviour (a module of `-callback`s, or one a
+//!   `-behaviour` names: OTP's `gen_server` too) and an arrow to each module
+//!   that adopts it.
 
 use std::collections::BTreeMap;
 
@@ -29,7 +32,34 @@ pub fn maps(corpus: &Corpus) -> Vec<ProjectMap> {
     out.extend(supervision(&modules));
     out.extend(messages(&modules));
     out.extend(calls(&modules));
+    out.extend(behaviours(&modules));
     out
+}
+
+fn behaviours(modules: &[Module]) -> Option<ProjectMap> {
+    let mut map = MapBuilder::new(
+        "erlang.behaviours",
+        "Behaviours",
+        "each behaviour (a module of callbacks, or one a -behaviour names) and an arrow to each module that adopts it",
+    );
+    for m in modules {
+        if !all_of(m.tree.root_node(), "callback").is_empty() {
+            let at = map.node("behaviour", &m.name, &m.name);
+            map.place(at, &m.source.rel, m.line);
+        }
+    }
+    for m in modules {
+        for b in &m.behaviours {
+            let from = map.node("behaviour", b, b);
+            if let Some(own) = modules.iter().find(|x| &x.name == b) {
+                map.place(from, &own.source.rel, own.line);
+            }
+            let to = map.node("module", &m.name, &m.name);
+            map.place(to, &m.source.rel, m.line);
+            map.edge(from, to, "adopted by");
+        }
+    }
+    map.finish()
 }
 
 struct Module<'a> {
@@ -405,6 +435,38 @@ fn calls(modules: &[Module]) -> Option<ProjectMap> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A behaviour of the project's (its `-callback`s) and OTP's, each to
+    /// the modules that adopt it; one nobody adopts yet is still shown.
+    #[test]
+    fn behaviours_reach_the_modules_that_adopt_them() {
+        let maps = maps(&Corpus::of(&[
+            (
+                "src/store.erl",
+                "-module(store).\n-callback put(term()) -> ok.\n",
+            ),
+            (
+                "src/codec.erl",
+                "-module(codec).\n-callback encode(term()) -> binary().\n",
+            ),
+            (
+                "src/mem_store.erl",
+                "-module(mem_store).\n-behaviour(store).\n-behaviour(gen_server).\nput(_) -> ok.\n",
+            ),
+        ]));
+        let b = maps.iter().find(|m| m.id == "erlang.behaviours").unwrap();
+        let got = edges(b);
+        assert_eq!(
+            got,
+            [
+                e("gen_server", "mem_store", "adopted by"),
+                e("store", "mem_store", "adopted by"),
+            ]
+        );
+        let store = b.nodes.iter().find(|n| n.label == "store").unwrap();
+        assert_eq!((store.file.as_str(), store.line), ("src/store.erl", 1));
+        assert!(b.nodes.iter().any(|n| n.label == "codec"));
+    }
 
     fn edges(map: &ProjectMap) -> Vec<(String, String, String)> {
         let mut out: Vec<_> = map

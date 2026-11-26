@@ -546,13 +546,19 @@ pub fn build_file(source: &str, lang_key: &str) -> Vec<DocItem> {
                 },
                 line: s.line,
                 end_line: s.end_line,
-                signature: source
-                    .get(l.declaration.0..l.signature_end)
-                    .unwrap_or_default()
-                    .trim_end_matches([';', ','])
-                    .split_whitespace()
-                    .collect::<Vec<_>>()
-                    .join(" "),
+                signature: {
+                    let text = source
+                        .get(l.declaration.0..l.signature_end)
+                        .unwrap_or_default();
+                    match lang {
+                        Lang::Go => go_signature(text),
+                        _ => text
+                            .trim_end_matches([';', ','])
+                            .split_whitespace()
+                            .collect::<Vec<_>>()
+                            .join(" "),
+                    }
+                },
                 doc: docs.get(&s.line).cloned().unwrap_or_default(),
                 container: l.container,
             }
@@ -1662,6 +1668,28 @@ fn is_plain_ident(s: &str) -> bool {
 /// `decl` is its declaration text (its signature), `name` its identifier, and
 /// `is_member` says whether it is nested inside a type-like item (a class
 /// member) rather than declared at the top level of the file.
+/// A Go declaration on one line, a struct's or an interface's members kept
+/// apart as Go would with semicolons — `Admin struct { User; *Logger; Level
+/// int }` — where spaces alone left `User *Logger` a field of that type or
+/// two embedded ones. Comments are dropped.
+fn go_signature(text: &str) -> String {
+    let flat = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let Some(open) = text.find('{') else {
+        return flat(text.trim_end_matches([';', ',']));
+    };
+    let close = text.rfind('}').filter(|&c| c > open).unwrap_or(text.len());
+    let members: Vec<String> = text[open + 1..close]
+        .lines()
+        .map(|l| flat(l.split("//").next().unwrap_or("")))
+        .filter(|l| !l.is_empty())
+        .collect();
+    let head = flat(&text[..open]);
+    match members.is_empty() {
+        true => format!("{head} {{}}"),
+        false => format!("{head} {{ {} }}", members.join("; ")),
+    }
+}
+
 /// What an Erlang or Haskell module exports, read off its file: Erlang's
 /// `-export([add/2])` and `-export_type([money/0])`, Haskell's module
 /// header `module Cart (add, Shape(..), Mode(Fast)) where`. `None` where

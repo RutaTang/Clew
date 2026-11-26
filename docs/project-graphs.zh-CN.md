@@ -12,7 +12,7 @@
 - **Go** —— 每个类型实现了哪些接口，每个函数启动了哪些 goroutine、它们共用哪些 channel，以及包依赖图，包括其中的环和分层。
 - **Rust** —— 每个 trait 和它的实现（包括 derive），`unsafe` 代码，以及 crate 的公开 API。
 - **C 和 C++** —— include 关系图和每个头文件的代价，C++ 的重写（override），以及模板和它们的实例化。
-- **Erlang** —— 监督树（子进程规格、重启策略、启动它的应用），每个模块发送和接收的消息，以及每个 `gen_server` 调用对应处理它的子句。
+- **Erlang** —— 监督树（子进程规格、重启策略、启动它的应用），每个模块发送和接收的消息，以及每个 `gen_server` 调用对应处理它的子句。此外还有每个 behaviour（含 `-callback` 的模块，或 OTP 的 `gen_server`）及采用它的模块。
 - **Elixir** —— 监督树（应用和每个监督者的子进程，按其 `children` 列表所写——一个模块、`{Module, opts}`、映射中的 `start:`、`Supervisor.child_spec`——及其重启策略，还有 `DynamicSupervisor` 启动的进程），每个 `GenServer.call` 和 `cast` 对应的应答它的 `handle_call` 或 `handle_cast` 子句（发给 `__MODULE__`、按名字指定的模块，或其所在模块的 pid），以及每个协议及其实现的类型、每个 behaviour 及采用它的模块。
 - **Java、Kotlin、Scala 和 C#** —— 每个重写基类方法或实现接口（Scala 的 trait）方法的方法，以及沿其类型的祖先向上指向最近那个方法的箭头：Kotlin 和 Scala 的方法写明 `override`，C# 重写基类方法时也写明，Java 方法按名字重写；Kotlin 或 Scala 的类可以继承 Java 的类。
 - **Haskell** —— 类型类实例（包括 deriving），以及每个函数所在的 monad 栈。

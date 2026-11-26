@@ -4138,5 +4138,7 @@
  "Overrides": "재정의",
  "each method that overrides one of a base class or implements one of an interface, with an arrow to the nearest one up its type's ancestry (Java, Kotlin, Scala and C#)": "기반 클래스의 메서드를 재정의하거나 인터페이스의 메서드를 구현하는 각 메서드와, 그 타입의 조상을 거슬러 올라가 가장 가까운 메서드로 가는 화살표(Java, Kotlin, Scala, C#)",
  "implements": "구현",
- "each type and an arrow to each type class it has an instance of, from given and implicit definitions and derives clauses": "각 타입과, 그 타입이 인스턴스를 가진 각 타입 클래스로 가는 화살표(given과 implicit 정의, derives 절에서)"
+ "each type and an arrow to each type class it has an instance of, from given and implicit definitions and derives clauses": "각 타입과, 그 타입이 인스턴스를 가진 각 타입 클래스로 가는 화살표(given과 implicit 정의, derives 절에서)",
+ "Behaviours": "비헤이비어",
+ "each behaviour (a module of callbacks, or one a -behaviour names) and an arrow to each module that adopts it": "각 비헤이비어(콜백을 가진 모듈, 또는 -behaviour가 지정하는 모듈)와, 그것을 채택한 각 모듈로 가는 화살표"
 }

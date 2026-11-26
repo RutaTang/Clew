@@ -90,6 +90,7 @@ pub(crate) const MAP_TITLES: &[&str] = &[
     tr_noop!("gen_server calls"),
     tr_noop!("GenServer calls"),
     tr_noop!("Protocols and behaviours"),
+    tr_noop!("Behaviours"),
     tr_noop!("Dependency injection"),
     tr_noop!("Entity relations"),
     tr_noop!("WordPress hooks"),
@@ -122,6 +123,9 @@ pub(crate) const MAP_TITLES: &[&str] = &[
 /// What each project map draws (clew-core's `maps`).
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) const MAP_DESCRIPTIONS: &[&str] = &[
+    tr_noop!(
+        "each behaviour (a module of callbacks, or one a -behaviour names) and an arrow to each module that adopts it"
+    ),
     tr_noop!(
         "each type and an arrow to each type class it has an instance of, from given and implicit definitions and derives clauses"
     ),
