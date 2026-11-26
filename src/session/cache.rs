@@ -158,7 +158,9 @@ use crate::incremental::Version;
 /// method's return (`@value#method` receivers).
 /// 42: a C++ class's export macro is no name of it; a C++ function's
 /// fewest arguments its own list's; Zig's fields and file variables.
-pub(crate) const CACHE_VERSION: u32 = 42;
+/// 43: one link of a chain typed by its method's return; Dart's `const`
+/// constructor calls.
+pub(crate) const CACHE_VERSION: u32 = 43;
 
 /// A cached symbol (the index entry minus the paths, which are reconstructed
 /// from the project root + relative path on load).

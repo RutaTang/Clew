@@ -6121,6 +6121,32 @@ fn receiver_of(
                 return Some(Receiver::Declared(factory_guess(receiver, &ty, lang)));
             }
         }
+        // One link of a chain (`const Pipeline().addMiddleware(m)` before
+        // `.addHandler(h)`, `repo.find(id)` before `.total()`): what that
+        // method returns, on the type of what it is called on.
+        if matches!(
+            lang,
+            Lang::Java | Lang::Kotlin | Lang::Scala | Lang::CSharp | Lang::Dart | Lang::Cpp
+        ) && let Some((base, method)) = chain_link(receiver)
+        {
+            let base_type = constructed_type(base, lang).or_else(|| {
+                is_plain_name(base).then_some(())?;
+                let places = scope.places;
+                match bindings
+                    .entry((scope.from, base.to_string()))
+                    .or_insert_with(|| Bindings::from(scope.from, places))
+                    .said_before(call.start_byte(), base, scope, src, lang)
+                {
+                    Said::Type(ty, _) if !ty.starts_with(RETURNED) && !ty.starts_with(THROUGH) => {
+                        Some(ty)
+                    }
+                    _ => None,
+                }
+            });
+            if let Some(ty) = base_type {
+                return Some(Receiver::Declared(format!("{RETURNED}{ty}#{method}")));
+            }
+        }
         return None;
     }
     let places = scope.places;
@@ -7187,7 +7213,8 @@ const CPP_NOT_TYPES: &[&str] = &[
 fn constructed_type(rhs: &str, lang: Lang) -> Option<String> {
     let mut rhs = rhs.trim_start();
     let mut built_with_new = false;
-    for prefix in ["new ", "&mut ", "&"] {
+    // (Dart's `const Pipeline()` builds one as `new` does.)
+    for prefix in ["new ", "const ", "&mut ", "&"] {
         if let Some(rest) = rhs.strip_prefix(prefix) {
             rhs = rest.trim_start();
             built_with_new |= prefix == "new ";
@@ -7496,6 +7523,36 @@ fn returned_call(rhs: &str, lang: Lang) -> Option<String> {
         Some(receiver) => format!("@{receiver}#{name}"),
         None => name.to_string(),
     })
+}
+
+/// The last call of a chain, split: `const Pipeline().addMiddleware(m)` is
+/// `const Pipeline()` and `addMiddleware`, `repo.find(id)` `repo` and
+/// `find` — or `None` where the text is no call on something.
+fn chain_link(receiver: &str) -> Option<(&str, &str)> {
+    let receiver = receiver.trim();
+    let inner = receiver.strip_suffix(')')?;
+    let mut depth = 1i32;
+    let open = inner.char_indices().rev().find_map(|(i, c)| {
+        match c {
+            ')' => depth += 1,
+            '(' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+        None
+    })?;
+    let callee = inner[..open].trim_end();
+    let callee = callee.split('<').next().unwrap_or(callee).trim_end();
+    let (base, method) = ["?.", "->", "."]
+        .iter()
+        .filter_map(|sep| callee.rfind(sep).map(|at| (at, sep.len())))
+        .max_by_key(|&(at, _)| at)
+        .map(|(at, len)| (&callee[..at], &callee[at + len..]))?;
+    (is_plain_name(method) && !base.trim().is_empty()).then(|| (base.trim(), method))
 }
 
 /// [`returned_call`]'s function alone, its receiver dropped.
@@ -12551,6 +12608,38 @@ def main():
         assert_eq!(reached("run"), Vec::<String>::new(), "{:?}", edges(&g));
         assert_eq!(reached("go"), Vec::<String>::new(), "{:?}", edges(&g));
         assert_eq!(reached("serve"), ["acquire:4"], "{:?}", edges(&g));
+    }
+
+    /// One link of a chain is of what its method returns on the type it is
+    /// called on: `const Pipeline().addMiddleware(m).addHandler(h)` calls
+    /// `Pipeline`'s `addHandler`, not an extension of the same name on
+    /// another type; `repo.find(id).total()` the found `Cart`'s.
+    #[test]
+    fn a_chain_link_is_of_its_methods_return_type() {
+        let dart = "class Pipeline {\n  const Pipeline();\n  Pipeline addMiddleware(int m) => this;\n  int addHandler(int h) => 0;\n}\nextension MiddlewareExtensions on Function {\n  int addHandler(int h) => 1;\n}\nvoid run() {\n  const Pipeline().addMiddleware(1).addHandler(2);\n}\n";
+        let java = "class Cart {\n  int total() { return 0; }\n}\nclass Order {\n  int total() { return 1; }\n}\nclass Repo {\n  Cart find(int id) { return null; }\n}\nclass Use {\n  void run(Repo repo) {\n    repo.find(1).total();\n  }\n}\n";
+        for (file, src, method, want) in [
+            ("/p/lib/pipeline.dart", dart, "addHandler", 4),
+            ("/p/src/Use.java", java, "total", 2),
+        ] {
+            let g = graph(&[(file, src)]);
+            let at = (0..g.node_count())
+                .find(|&n| g.node(n).name == "run")
+                .unwrap();
+            let reached: Vec<usize> = g
+                .callees_of(at)
+                .iter()
+                .filter(|&&c| g.node(c).name == method)
+                .map(|&c| g.node(c).line)
+                .collect();
+            assert_eq!(reached, [want], "{file}: {:?}", edges(&g));
+        }
+        assert_eq!(
+            chain_link("const Pipeline().addMiddleware(m)"),
+            Some(("const Pipeline()", "addMiddleware"))
+        );
+        assert_eq!(chain_link("repo.find(id)"), Some(("repo", "find")));
+        assert_eq!(chain_link("find(id)"), None);
     }
 
     /// A class's body is open where its braces say, those in strings,
