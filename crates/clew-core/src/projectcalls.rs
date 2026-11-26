@@ -305,10 +305,18 @@ pub fn context_in(src: &str, lang: Lang, symbols: &[Located]) -> FileContext {
             extension_spans.iter().any(within)
                 || match lang {
                     Lang::CSharp => head.contains("(this ") || head.contains("( this "),
-                    // `fun Type.name(`, `fun <T> List<T>.name(`.
-                    Lang::Kotlin => head
-                        .find(&format!(".{}", l.symbol.name))
-                        .is_some_and(|at| head[..at].contains("fun ")),
+                    // `fun Type.name(`, `fun <T> List<T>.name(` — in the
+                    // signature, before its body (`{`, `= …`): a body's
+                    // `client.name(…)` makes no extension.
+                    Lang::Kotlin => head.find("fun ").is_some_and(|fun| {
+                        let signature = &head[fun..];
+                        let end = [signature.find('{'), signature.find(" = ")]
+                            .into_iter()
+                            .flatten()
+                            .min()
+                            .unwrap_or(signature.len());
+                        signature[..end].contains(&format!(".{}", l.symbol.name))
+                    }),
                     // Scala 3's `extension (c: Circle)` above the `def`,
                     // with no top-level definition between them.
                     Lang::Scala => {
@@ -1596,8 +1604,14 @@ impl ProjectCallGraph {
                         continue;
                     }
                     // `client.get(…)`: no value is a test class's, its own
-                    // class's methods called on another value included.
-                    if cs.method && cs.receiver.is_none() && test_method[callee] {
+                    // class's methods called on another value included —
+                    // but for its extensions, which are called on another
+                    // value (`assertThat(x).isSymmetricEqualTo(y)`).
+                    if cs.method
+                        && cs.receiver.is_none()
+                        && test_method[callee]
+                        && !extension_nodes.contains(&callee)
+                    {
                         continue;
                     }
                     // A self-call is kept as a callee only (see `finalize`).
@@ -8234,9 +8248,19 @@ def main():
             ),
             (
                 "/p/src/test/kotlin/p/StatusCodesTest.kt",
-                "package p\n\nclass StatusCodesTest {\n    @Test\n    fun put() {\n        client.put(\"/x\")\n    }\n}\n",
+                "package p\n\nclass StatusCodesTest {\n    @Test\n    fun put() {\n        client.put(\"/x\")\n        assertThat(1).isSymmetric(2)\n    }\n\n    fun <T : Any> Assert<T>.isSymmetric(expected: T) = expected\n}\n",
             ),
         ]);
+        // A test class's extension is called on another value.
+        assert!(
+            has(
+                &g,
+                "/p/src/test/kotlin/p/StatusCodesTest.kt:put",
+                "/p/src/test/kotlin/p/StatusCodesTest.kt:isSymmetric"
+            ),
+            "{:?}",
+            edges(&g)
+        );
         let e = edges(&g);
         for (from, to) in [
             ("/p/include/store.h:size", "/p/include/store.h:size"),

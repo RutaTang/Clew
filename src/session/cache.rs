@@ -123,7 +123,10 @@ use crate::incremental::Version;
 /// ([`CachedCalls::package`]).
 /// 30: an Erlang or Elixir function's arities and a call's
 /// ([`CachedCalls::arities`], [`CachedCalls::call_arities`]).
-pub(crate) const CACHE_VERSION: u32 = 30;
+/// 31: a Kotlin function whose body calls a method of its own name is no
+/// extension ([`CachedCalls::extensions`]); an Elixir default that is an
+/// anonymous function is one argument ([`CachedCalls::arities`]).
+pub(crate) const CACHE_VERSION: u32 = 31;
 
 /// A cached symbol (the index entry minus the paths, which are reconstructed
 /// from the project root + relative path on load).
