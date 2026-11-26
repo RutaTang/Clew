@@ -1122,6 +1122,7 @@ fn deploy_bytes(platform: &str) -> Result<Vec<u8>, String> {
         platform,
         CLIENT_VERSION,
         clew_protocol::PROTOCOL_VERSION,
+        server_bin_path().as_deref(),
     )?;
     upload_bytes(verified)
 }

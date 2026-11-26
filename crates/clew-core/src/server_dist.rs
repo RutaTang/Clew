@@ -31,6 +31,14 @@
 //!   host, over the same TLS connection, as the binary, and the cached copy
 //!   beside the cached binary proves nothing about local tampering.
 //!
+//! - **This installation's own clew-server**, for a remote of this computer's
+//!   platform, is deployed in place of a download: by a release build only
+//!   when its bytes are the release's own asset (the digest it pins), so
+//!   nothing about what is trusted changes; by a build without the list as
+//!   it is — the one server that speaks its exact protocol, whose code
+//!   fingerprint no published build matches (a remote was unusable until a
+//!   release carried that protocol).
+//!
 //! Either way the VERIFIED BYTES are what the caller gets ([`server_binary`]),
 //! so the deployer streams exactly what was checked instead of re-reading a
 //! path that could have changed since.
@@ -46,6 +54,10 @@ use crate::lsp::store::data_root;
 /// A response larger than this is broken or hostile; reading it to the end
 /// would balloon memory before any other check can reject it.
 const MAX_SERVER_BYTES: u64 = 100 * 1024 * 1024;
+
+/// The most of this installation's own clew-server a deploy reads: a
+/// developer's unoptimised build runs to a few hundred megabytes.
+const MAX_OWN_SERVER_BYTES: u64 = 1024 * 1024 * 1024;
 
 /// Wall-clock budget for downloading one server binary. Public so the
 /// client's own bound on a whole [`server_binary`] call can be derived from it
@@ -140,21 +152,64 @@ pub struct VerifiedServer {
     pub sha256: String,
 }
 
+/// The platform slug a remote's `uname -sm` gives for this computer, where
+/// Clew publishes a server for it (Linux's two architectures); `None`
+/// elsewhere.
+fn this_platform() -> Option<&'static str> {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("linux", "x86_64") => Some("linux-x86_64"),
+        ("linux", "aarch64") => Some("linux-aarch64"),
+        _ => None,
+    }
+}
+
+/// This installation's own clew-server at `own`, for a remote whose platform
+/// is `slug`: only for a remote of this computer's platform, and — in a
+/// release build — only when its bytes are the release's asset (`pinned`).
+/// `None` when it is not to be used, or cannot be read whole.
+fn own_server(own: &Path, slug: &str, pinned: Option<&str>) -> Option<VerifiedServer> {
+    use std::io::Read;
+    if this_platform() != Some(slug) {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    std::fs::File::open(own)
+        .ok()?
+        .take(MAX_OWN_SERVER_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.is_empty() || bytes.len() as u64 > MAX_OWN_SERVER_BYTES {
+        return None;
+    }
+    let sha256 = hex_sha256(&bytes);
+    match pinned {
+        Some(digest) if !digest.eq_ignore_ascii_case(&sha256) => None,
+        _ => Some(VerifiedServer { bytes, sha256 }),
+    }
+}
+
 /// The clew-server binary for `platform` at the client's `version` and
-/// `protocol`: from the cache if it still verifies, otherwise downloaded from
-/// the release host, verified, and cached. The protocol version is part of
-/// the ASSET NAME, not just the cache key: a release that predates this
-/// protocol simply has no matching asset, which surfaces as a clear error
-/// here — never as a deployed server whose frames don't parse. Blocking; run
-/// off the UI thread.
+/// `protocol`: this installation's own (`own`) where it serves that platform
+/// (see the module docs), else from the cache if it still verifies,
+/// otherwise downloaded from the release host, verified, and cached. The
+/// protocol version is part of the ASSET NAME, not just the cache key: a
+/// release that predates this protocol simply has no matching asset, which
+/// surfaces as a clear error here — never as a deployed server whose frames
+/// don't parse. Blocking; run off the UI thread.
 pub fn server_binary(
     platform: &str,
     version: &str,
     protocol: u32,
+    own: Option<&Path>,
 ) -> Result<VerifiedServer, String> {
     let slug = slug(platform)?; // validated: safe to join into a path / URL
     let asset = asset_name(&slug, protocol);
     let pinned = embedded_digest(EMBEDDED_DIGESTS, &asset)?;
+    // Read fresh each time, never cached: a developer's next build speaks
+    // another protocol under the same version.
+    if let Some(own) = own.and_then(|own| own_server(own, &slug, pinned.as_deref())) {
+        return Ok(own);
+    }
     let dist = dist_root()?;
     let release = format!("v{version}-p{protocol}");
     let dir = dist.join(&release).join(&slug);
@@ -636,7 +691,7 @@ mod tests {
         let _url =
             crate::testutil::EnvVars::new().set("CLEW_SERVER_DIST_URL", format!("http://{addr}"));
 
-        let first = server_binary("Linux x86_64", "9.9.9", 99);
+        let first = server_binary("Linux x86_64", "9.9.9", 99, None);
         if EMBEDDED_DIGESTS.is_some() {
             // A release build pins its own assets, and this fake is not one.
             assert!(first.is_err());
@@ -645,10 +700,11 @@ mod tests {
         let first = first.expect("downloaded and verified");
         assert_eq!(first.bytes, b"\x7fELF fake server");
         // Served from the cache now: no request reaches the host for it.
-        let second = server_binary("Linux x86_64", "9.9.9", 99).expect("served from the cache");
+        let second =
+            server_binary("Linux x86_64", "9.9.9", 99, None).expect("served from the cache");
         assert_eq!(second.bytes, first.bytes);
 
-        let corrupted = server_binary("Linux x86_64", "9.9.8", 99)
+        let corrupted = server_binary("Linux x86_64", "9.9.8", 99, None)
             .expect_err("bytes that do not match their checksum must be refused");
         assert!(corrupted.contains("checksum"), "{corrupted}");
         assert!(
@@ -666,5 +722,53 @@ mod tests {
                 .mode();
             assert_eq!(mode & 0o777, 0o700, "the cache is private");
         }
+    }
+
+    /// This installation's own clew-server goes to a remote of this
+    /// computer's platform, read as it is now (a developer's next build
+    /// speaks another protocol under the same version), with no download;
+    /// never to another platform's remote, which gets the published build.
+    #[test]
+    fn this_installations_server_goes_to_a_remote_of_its_platform() {
+        let _data = crate::testutil::DataDir::new("server-dist-own");
+        let dir = crate::testutil::TempDir::new("server-dist-own-bin");
+        let own = dir.join("clew-server");
+        std::fs::write(&own, b"\x7fELF this build").unwrap();
+        // Nothing is published: a download would fail.
+        let _url =
+            crate::testutil::EnvVars::new().set("CLEW_SERVER_DIST_URL", "http://127.0.0.1:9");
+        let other = match this_platform() {
+            Some("linux-x86_64") => "Linux aarch64",
+            _ => "Linux x86_64",
+        };
+        assert!(
+            server_binary(other, "9.9.9", 99, Some(&own)).is_err(),
+            "another platform's"
+        );
+        let Some(here) = this_platform() else {
+            return;
+        };
+        let uname = match here {
+            "linux-x86_64" => "Linux x86_64",
+            _ => "Linux aarch64",
+        };
+        let served = server_binary(uname, "9.9.9", 99, Some(&own));
+        if EMBEDDED_DIGESTS.is_some() {
+            // A release build takes only its release's own bytes.
+            assert!(served.is_err());
+            return;
+        }
+        let served = served.expect("this installation's own");
+        assert_eq!(served.bytes, b"\x7fELF this build");
+        assert_eq!(served.sha256, hex_sha256(b"\x7fELF this build"));
+        // A rebuilt one is what goes next: nothing of the last was kept.
+        std::fs::write(&own, b"\x7fELF the next build").unwrap();
+        let next = server_binary(uname, "9.9.9", 99, Some(&own)).unwrap();
+        assert_eq!(next.bytes, b"\x7fELF the next build");
+        assert_eq!(
+            own_server(&own, here, Some("0".repeat(64).as_str())).map(|s| s.sha256),
+            None,
+            "a pinned digest it does not match"
+        );
     }
 }
