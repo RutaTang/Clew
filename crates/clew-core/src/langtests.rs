@@ -2763,6 +2763,8 @@ fn enclosing_class(lines: &[&str], line1: usize) -> Option<String> {
 /// The namespace a C# file's code is in: its file-scoped or first
 /// block-bodied `namespace`.
 fn csharp_namespace(source: &str) -> Option<String> {
+    // A byte-order mark is no part of the first line's text.
+    let source = source.strip_prefix('\u{feff}').unwrap_or(source);
     source.lines().find_map(|l| {
         let name = l.trim().strip_prefix("namespace ")?;
         let name = name
@@ -2825,6 +2827,17 @@ mod tests {
 
     /// Each language's tests by its convention, each spanning its body —
     /// a file's every test a group, first.
+    /// A file saved with a byte-order mark before its `namespace` line is
+    /// still in that namespace: the test's full name has it.
+    #[test]
+    fn a_csharp_namespace_after_a_byte_order_mark() {
+        assert_eq!(
+            csharp_namespace("\u{feff}namespace Shop.Tests;\n\npublic class CartTests {}\n")
+                .as_deref(),
+            Some("Shop.Tests")
+        );
+    }
+
     #[test]
     fn each_languages_tests_are_found() {
         let go = "package cart\n\nimport \"testing\"\n\nfunc TestAdd(t *testing.T) {\n\tt.Run(\"x\", nil)\n}\n\nfunc helper() {}\n\nfunc BenchmarkAdd(b *testing.B) {\n}\n";

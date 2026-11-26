@@ -119,7 +119,9 @@ use crate::incremental::Version;
 /// none of them.
 /// 28: a method of a class its grammar could not finish (Kotlin's, with a
 /// property named `where`) is still its class's ([`CachedCalls::owners`]).
-pub(crate) const CACHE_VERSION: u32 = 28;
+/// 29: a file saved with a byte-order mark is in its package or namespace
+/// ([`CachedCalls::package`]).
+pub(crate) const CACHE_VERSION: u32 = 29;
 
 /// A cached symbol (the index entry minus the paths, which are reconstructed
 /// from the project root + relative path on load).

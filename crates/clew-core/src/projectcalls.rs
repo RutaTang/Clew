@@ -151,6 +151,7 @@ fn is_type_kind(kind: &str, lang: Lang) -> bool {
 /// `import Shop.{Cart, Order}` (over several lines too). A module computed
 /// at compile time (`import unquote(__MODULE__)`) names none.
 fn elixir_modules_after(src: &str, keyword: &str) -> Vec<String> {
+    let src = src.strip_prefix('\u{feff}').unwrap_or(src);
     let is_name = |c: char| c.is_alphanumeric() || matches!(c, '_' | '.');
     let mut out = Vec::new();
     for (at, line) in src.split('\n').scan(0usize, |offset, line| {
@@ -338,6 +339,9 @@ fn package_of(src: &str, lang: Lang) -> Option<String> {
         Lang::CSharp => "namespace",
         _ => return None,
     };
+    // A byte-order mark before the first line (Visual Studio writes one)
+    // is no part of its text: `\u{feff}using System;` is a `using`.
+    let src = src.strip_prefix('\u{feff}').unwrap_or(src);
     let mut parts: Vec<String> = Vec::new();
     let mut in_block_comment = false;
     for line in src.lines().take(2000) {
@@ -7644,6 +7648,34 @@ def main():
         ]);
         assert!(
             has(&g, "/p/src/Run.kt:run", "/p/src/Query.kt:limit"),
+            "{:?}",
+            edges(&g)
+        );
+    }
+
+    /// A C# file Visual Studio saved starts with a byte-order mark: still
+    /// in its namespace, so `new CacheEntry<T>(…)` beside it is a call of the
+    /// constructor there.
+    #[test]
+    fn a_file_with_a_byte_order_mark_is_in_its_namespace() {
+        let entry = "\u{feff}using System;\n\nnamespace Shop.Services;\n\npublic class CacheEntry<T>\n{\n    public CacheEntry(T item)\n    {\n        Value = item;\n    }\n    public T Value { get; set; }\n}\n";
+        assert_eq!(
+            package_of(entry, Lang::CSharp).as_deref(),
+            Some("Shop.Services")
+        );
+        let g = graph(&[
+            ("/p/src/Services/CacheEntry.cs", entry),
+            (
+                "/p/src/Services/Decorator.cs",
+                "\u{feff}using System;\n\nnamespace Shop.Services;\n\npublic class Decorator\n{\n    public void Refresh(int items)\n    {\n        var entry = new CacheEntry<int>(items);\n    }\n}\n",
+            ),
+        ]);
+        assert!(
+            has(
+                &g,
+                "/p/src/Services/Decorator.cs:Refresh",
+                "/p/src/Services/CacheEntry.cs:CacheEntry"
+            ),
             "{:?}",
             edges(&g)
         );

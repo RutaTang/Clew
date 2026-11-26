@@ -3193,6 +3193,8 @@ fn parameter_types(signature: &str) -> Vec<String> {
 
 /// The package a Java source declares.
 fn package_of(source: &str) -> Option<String> {
+    // A byte-order mark before `package` is no part of the line.
+    let source = source.strip_prefix('\u{feff}').unwrap_or(source);
     // Scala's packages may be chained (`package acme` then `package
     // shop`): acme.shop.
     let mut parts: Vec<String> = Vec::new();
@@ -3569,6 +3571,11 @@ mod tests {
             Some("acme.cart")
         );
         assert_eq!(package_of("package object acme {\n}\n"), None);
+        // Saved with a byte-order mark, as Windows editors may.
+        assert_eq!(
+            package_of("\u{feff}package demo.shop;\nclass A {}").as_deref(),
+            Some("demo.shop")
+        );
         // The agent's line, and the JVM's notices of its options.
         assert_eq!(
             agent_port("Listening for transport dt_socket at address: 41007\n"),
