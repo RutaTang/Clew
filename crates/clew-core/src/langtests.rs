@@ -61,11 +61,17 @@ pub fn tests(lang: &str, rel: &str, source: &str) -> Vec<Runnable> {
         "zig" => zig_tests(&lines),
         "erlang" => erlang_tests(rel, &lines),
         "elixir" => called_tests(&lines, &["test"], &["describe"]),
-        "haskell" => called_tests(
-            &lines,
-            &["it", "prop", "specify", "testCase", "testProperty"],
-            &["describe", "context", "testGroup"],
-        ),
+        "haskell" => {
+            // hspec's `spec = describe "Cart" $ do`: the group a binding
+            // opens, read as the call it is bound to.
+            let unbound: Vec<String> = lines.iter().map(|l| haskell_unbound(l)).collect();
+            let unbound: Vec<&str> = unbound.iter().map(String::as_str).collect();
+            called_tests(
+                &unbound,
+                &["it", "prop", "specify", "testCase", "testProperty"],
+                &["describe", "context", "testGroup"],
+            )
+        }
         "c" | "cpp" => cpp_tests(&lines),
         _ => Vec::new(),
     };
@@ -388,6 +394,22 @@ fn called_tests(lines: &[&str], tests: &[&str], groups: &[&str]) -> Vec<Runnable
         }
     }
     out
+}
+
+/// A Haskell line without the binding it starts with: `spec = describe
+/// "Cart" $ do` as `describe "Cart" $ do`, at the line's own indent.
+fn haskell_unbound(line: &str) -> String {
+    let at = indent(line);
+    let bound = line[at..].split_once(" = ").filter(|(name, _)| {
+        !name.is_empty()
+            && name
+                .chars()
+                .all(|c| c.is_alphanumeric() || matches!(c, '_' | '\''))
+    });
+    match bound {
+        Some((_, rest)) => [&line[..at], rest.trim_start()].concat(),
+        None => line.to_string(),
+    }
 }
 
 /// Go: `func TestX(t *testing.T)`, `BenchmarkX`, `FuzzX` and `ExampleX`,
@@ -2901,13 +2923,23 @@ mod tests {
             ]
         );
 
+        // hspec's group bound to `spec`, as it is written most: a group of
+        // its own, around its tests.
         let hs =
             "spec :: Spec\nspec = describe \"Cart\" $ do\n  it \"adds\" $ do\n    1 `shouldBe` 1\n";
-        let got: Vec<String> = tests("haskell", "test/CartSpec.hs", hs)
+        let found = tests("haskell", "test/CartSpec.hs", hs);
+        let got: Vec<(String, usize, Vec<String>)> = found
             .iter()
-            .map(|r| r.name.clone())
+            .map(|r| (r.name.clone(), r.line, r.scopes.clone()))
             .collect();
-        assert_eq!(got, ["", "adds"]);
+        assert_eq!(
+            got,
+            [
+                (String::new(), 1, vec![]),
+                ("Cart".into(), 2, vec![]),
+                ("adds".into(), 3, vec!["Cart".to_string()]),
+            ]
+        );
 
         let cpp = "#include <gtest/gtest.h>\n\nTEST(Cart, Adds) {\n  EXPECT_EQ(1, 1);\n}\n\nTEST_CASE(\"cart empties\") {\n}\n";
         let got: Vec<String> = tests("cpp", "tests/cart_test.cpp", cpp)
