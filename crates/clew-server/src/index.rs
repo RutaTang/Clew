@@ -252,7 +252,7 @@ pub(crate) fn build_project_calls_graph(
             analysis
                 .symbols
                 .iter()
-                .filter(|l| outline::is_callable(&l.symbol.kind))
+                .filter(|l| clew_core::projectcalls::is_node_kind(&l.symbol.kind))
                 .map(|l| Def {
                     name: l.symbol.name.clone(),
                     kind: l.symbol.kind.clone(),
@@ -550,7 +550,7 @@ mod tests {
             defs.extend(
                 clew_core::outline::extract(&text, lang)
                     .into_iter()
-                    .filter(|s| clew_core::outline::is_callable(&s.kind))
+                    .filter(|s| clew_core::projectcalls::is_node_kind(&s.kind))
                     .map(|s| Def {
                         name: s.name,
                         kind: s.kind,

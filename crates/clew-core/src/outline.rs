@@ -402,8 +402,93 @@ pub fn located_in(tree: &Tree, source: &str, lang: Lang) -> Vec<Located> {
         Lang::Erlang | Lang::Haskell | Lang::Elixir => {
             merge_clauses(located_in_tree(tree, source, lang), source, lang)
         }
+        Lang::C | Lang::Cpp => c_tests(located_in_tree(tree, source, lang), source),
         _ => located_in_tree(tree, source, lang),
     }
+}
+
+/// A test's or a group's title as its runner says it: the string it is
+/// named by, without its quotes — Scala's, Haskell's and Dart's tags take
+/// the literal whole, and a JavaScript template string its backticks.
+fn test_title(name: &str) -> &str {
+    let name = name.trim();
+    for quote in ["\"\"\"", "\"", "'", "`"] {
+        if let Some(inner) = name
+            .strip_prefix(quote)
+            .and_then(|rest| rest.strip_suffix(quote))
+        {
+            return inner;
+        }
+    }
+    name
+}
+
+/// The macros GoogleTest defines a test with (`TEST(Cart, Adds) { … }`):
+/// to the grammar each is a function of that name.
+const GTEST_MACROS: &[&str] = &["TEST", "TEST_F", "TEST_P"];
+
+/// A C or C++ file's outline with its tests as tests, named as their
+/// runner lists them ([`crate::langtests`]): GoogleTest's `TEST(Cart,
+/// Adds)` was a function `TEST` (every test of a file one name), and
+/// Catch2's and doctest's `TEST_CASE("adds")`, which the grammar reads as a
+/// call and a block, was nothing at all — so neither held the calls made
+/// in it.
+fn c_tests(mut out: Vec<Located>, source: &str) -> Vec<Located> {
+    let lines: Vec<&str> = source.lines().collect();
+    let tests = crate::langtests::c_tests(&lines);
+    if tests.is_empty() {
+        return out;
+    }
+    // Where each line starts, for the byte span of a test the grammar
+    // has no node for.
+    let mut starts = Vec::with_capacity(lines.len() + 1);
+    let mut at = 0;
+    for line in source.split_inclusive('\n') {
+        starts.push(at);
+        at += line.len();
+    }
+    starts.push(source.len());
+    for test in tests {
+        let (first, last) = test.span;
+        if let Some(found) = out.iter_mut().find(|l| {
+            l.symbol.line == test.line
+                && l.symbol.kind == "function"
+                && GTEST_MACROS.contains(&l.symbol.name.as_str())
+        }) {
+            found.symbol.name = test.name;
+            found.symbol.kind = "test".into();
+            continue;
+        }
+        if out
+            .iter()
+            .any(|l| l.symbol.line == test.line && l.symbol.kind == "test")
+        {
+            continue;
+        }
+        let from = starts.get(first - 1).copied().unwrap_or(0);
+        let to = starts.get(last).copied().unwrap_or(source.len());
+        out.push(Located {
+            symbol: Symbol {
+                name: test.name,
+                kind: "test".into(),
+                line: first,
+                end_line: last,
+            },
+            declaration: (from, to),
+            signature_end: starts.get(first).copied().unwrap_or(to),
+            cpp_public: None,
+            decl_line: first,
+            body: Some((first, last)),
+            container: None,
+            owner: Owner {
+                scope: (0, source.len()),
+                member_of: None,
+            },
+            accessed: false,
+        });
+    }
+    out.sort_by_key(|l| (l.symbol.line, l.declaration.0));
+    out
 }
 
 /// A function written as several clauses (Erlang) or equations (Haskell) —
@@ -912,6 +997,7 @@ fn located_in_tree(tree: &Tree, source: &str, lang: Lang) -> Vec<Located> {
             Lang::Sql => crate::apidoc::unquote_sql(name).into(),
             Lang::Css | Lang::Scss | Lang::Less => stylesheet_name(kind, name).into(),
             Lang::Html => markup_name(kind, name).into(),
+            _ if matches!(kind, "test" | "suite") => test_title(name).into(),
             _ => name.into(),
         };
         let name = &*name;
@@ -5598,6 +5684,107 @@ mod language_tests {
         assert_eq!(
             unqualified("<T as core::ops::Add>::Output"),
             "<T as Add>::Output"
+        );
+    }
+}
+
+#[cfg(test)]
+mod test_block_outline_tests {
+    /// A test's or a group's `(line, end_line, kind, name)`.
+    type Row = (usize, usize, String, String);
+
+    /// Each row of `src`'s outline read as `key` that is a test or a group
+    /// of tests.
+    fn tests(src: &str, key: &str) -> Vec<Row> {
+        super::extract(src, key)
+            .into_iter()
+            .filter(|s| matches!(s.kind.as_str(), "test" | "suite"))
+            .map(|s| (s.line, s.end_line, s.kind, s.name))
+            .collect()
+    }
+
+    fn row(line: usize, end: usize, kind: &str, name: &str) -> Row {
+        (line, end, kind.to_string(), name.to_string())
+    }
+
+    /// A test file's outline holds its tests and their groups, in every
+    /// language whose tests are blocks a runner's call opens, each titled
+    /// as its runner says it (no quotes) and spanning its block: ExUnit's,
+    /// RSpec's, MUnit's and ScalaTest's, Kotest's, package:test's, hspec's,
+    /// Zig's (a declaration's test too), GoogleTest's (`Suite.Name`, no
+    /// longer a function `TEST`) and Catch2's.
+    #[test]
+    fn each_languages_test_blocks_are_tests() {
+        let cases: &[(&str, &str, Vec<Row>)] = &[
+            (
+                "elixir",
+                "defmodule CartTest do\n  describe \"cart\" do\n    test \"adds\" do\n      :ok\n    end\n  end\n  test \"breaks\", %{x: _} do\n    :ok\n  end\nend\n",
+                vec![
+                    row(2, 6, "suite", "cart"),
+                    row(3, 5, "test", "adds"),
+                    row(7, 9, "test", "breaks"),
+                ],
+            ),
+            (
+                "ruby",
+                "RSpec.describe Cart do\n  context 'when empty' do\n    it 'adds' do\n      x\n    end\n  end\nend\n",
+                vec![
+                    row(1, 7, "suite", "Cart"),
+                    row(2, 6, "suite", "when empty"),
+                    row(3, 5, "test", "adds"),
+                ],
+            ),
+            (
+                "scala",
+                "class S extends AnyFunSpec {\n  describe(\"Cart\") {\n    it(\"adds\") {\n      x\n    }\n  }\n  test(\"breaks\") {\n    y\n  }\n}\n",
+                vec![
+                    row(2, 6, "suite", "Cart"),
+                    row(3, 5, "test", "adds"),
+                    row(7, 9, "test", "breaks"),
+                ],
+            ),
+            (
+                "kotlin",
+                "class T : FunSpec({\n  context(\"cart\") {\n    test(\"adds\") {\n      x()\n    }\n  }\n})\n",
+                vec![row(2, 6, "suite", "cart"), row(3, 5, "test", "adds")],
+            ),
+            (
+                "dart",
+                "void main() {\n  group('cart', () {\n    test('adds', () {\n      x();\n    });\n  });\n}\n",
+                vec![row(2, 6, "suite", "cart"), row(3, 5, "test", "adds")],
+            ),
+            (
+                "haskell",
+                "spec :: Spec\nspec = describe \"Cart\" $ do\n  it \"adds\" $ x `shouldBe` 1\n  it \"breaks\" (y `shouldBe` 2)\n",
+                vec![
+                    row(2, 4, "suite", "Cart"),
+                    row(3, 3, "test", "adds"),
+                    row(4, 4, "test", "breaks"),
+                ],
+            ),
+            (
+                "zig",
+                "test \"adds\" {\n    x();\n}\ntest add {\n    y();\n}\n",
+                vec![row(1, 3, "test", "adds"), row(4, 6, "test", "add")],
+            ),
+            (
+                "cpp",
+                "TEST(Cart, Adds) {\n  x();\n}\nTEST_F(CartF, Breaks) {\n  y();\n}\nTEST_CASE(\"catches\", \"[cart]\") {\n  z();\n}\n",
+                vec![
+                    row(1, 3, "test", "Cart.Adds"),
+                    row(4, 6, "test", "CartF.Breaks"),
+                    row(7, 9, "test", "catches"),
+                ],
+            ),
+        ];
+        for (key, src, want) in cases {
+            assert_eq!(&tests(src, key), want, "{key}");
+        }
+        // GoogleTest's macro is no function of the file's.
+        assert!(
+            !super::extract("TEST(Cart, Adds) {\n  x();\n}\n", "cpp")
+                .iter()
+                .any(|s| s.name == "TEST"),
         );
     }
 }

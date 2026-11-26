@@ -3231,7 +3231,7 @@ pub(crate) fn project_calls_body(app: &App) -> Element<'_, Message> {
     rows.push(
         text(format!(
             "{}, {}",
-            trn!("1 function", "{n} functions", g.node_count()),
+            trn!("1 function", "{n} functions", g.function_count()),
             trn!("1 call edge", "{n} call edges", g.edge_count()),
         ))
         .size(ts::BODY)

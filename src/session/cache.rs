@@ -94,7 +94,11 @@ use crate::incremental::Version;
 /// declaration keeps its `#[path]`; a receiver is typed by a parameter or a
 /// field; a method keeps its owner ([`CachedSymbol::owner`]). An older entry
 /// has none of these.
-pub(crate) const CACHE_VERSION: u32 = 21;
+/// 22: tests and groups of tests a runner's call opens (ExUnit's, RSpec's,
+/// Kotest's, MUnit's, hspec's, package:test's, GoogleTest's and Catch2's)
+/// are symbols, and the calls made in them are theirs; an older entry has
+/// neither, nor a C++ test but as a function `TEST`.
+pub(crate) const CACHE_VERSION: u32 = 22;
 
 /// A cached symbol (the index entry minus the paths, which are reconstructed
 /// from the project root + relative path on load).

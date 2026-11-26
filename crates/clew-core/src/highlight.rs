@@ -546,14 +546,14 @@ impl Lang {
             // symbols. Use a source-oriented tags query instead.
             Lang::TypeScript | Lang::Tsx => &[TS_TAGS, ECMA_TAGS],
             Lang::Go => &[tree_sitter_go::TAGS_QUERY],
-            Lang::Dart => &[tree_sitter_dart_orchard::TAGS_QUERY],
+            Lang::Dart => &[tree_sitter_dart_orchard::TAGS_QUERY, DART_TEST_TAGS],
             Lang::C => &[tree_sitter_c::TAGS_QUERY],
             Lang::Cpp => &[tree_sitter_cpp::TAGS_QUERY],
             Lang::Java => &[tree_sitter_java::TAGS_QUERY, JAVA_EXTRA_TAGS],
             Lang::Sql => &[SQL_TAGS],
             Lang::Lean => &[LEAN_TAGS],
             Lang::Php => &[PHP_TAGS],
-            Lang::Ruby => &[tree_sitter_ruby::TAGS_QUERY],
+            Lang::Ruby => &[tree_sitter_ruby::TAGS_QUERY, RUBY_TEST_TAGS],
             Lang::CSharp => &[CSHARP_TAGS],
             Lang::Erlang => &[ERLANG_TAGS],
             Lang::Haskell => &[HASKELL_TAGS],
@@ -777,7 +777,9 @@ const KOTLIN_HIGHLIGHTS: &str = r#"
 
 /// The Kotlin outline: the package, classes (an interface, an enum by its
 /// keyword), objects, functions, a class's or a file's properties (not a
-/// function's local `val`s), type aliases and enum entries.
+/// function's local `val`s), type aliases and enum entries; and Kotest's
+/// tests (`test("adds") { … }`, `should`, `it`) and their groups
+/// (`context`, `describe`), each a block a call opens.
 const KOTLIN_TAGS: &str = r#"
 (package_header (qualified_identifier) @name) @definition.module
 (class_declaration "interface" name: (identifier) @name) @definition.interface
@@ -793,11 +795,25 @@ const KOTLIN_TAGS: &str = r#"
 (source_file (property_declaration (variable_declaration (identifier) @name)) @definition.property)
 (type_alias type: (identifier) @name) @definition.type
 (enum_class_body (enum_entry (identifier) @name) @definition.constant)
+(call_expression
+  (call_expression
+    (identifier) @_fn
+    (value_arguments . (value_argument (string_literal (string_content) @name))))
+  (annotated_lambda)
+  (#any-of? @_fn "test" "should" "it" "expect" "scenario")) @definition.test
+(call_expression
+  (call_expression
+    (identifier) @_fn
+    (value_arguments . (value_argument (string_literal (string_content) @name))))
+  (annotated_lambda)
+  (#any-of? @_fn "context" "describe" "feature")) @definition.suite
 "#;
 
 /// The Scala outline (2 and 3): packages, traits, enums and their cases,
 /// classes, objects, functions (an abstract one too), a template's or a
-/// file's `val`s and `var`s, givens and type definitions.
+/// file's `val`s and `var`s, givens and type definitions; and MUnit's and
+/// ScalaTest's tests (`test("adds") { … }`, `it`, `property`) and their
+/// groups (`describe`).
 const SCALA_TAGS: &str = r#"
 (package_clause name: (package_identifier) @name) @definition.module
 (trait_definition name: (identifier) @name) @definition.interface
@@ -814,12 +830,55 @@ const SCALA_TAGS: &str = r#"
 (template_body (val_declaration name: (identifier) @name) @definition.property)
 (given_definition name: (identifier) @name) @definition.property
 (type_definition name: (type_identifier) @name) @definition.type
+(call_expression
+  function: (call_expression
+    function: (identifier) @_fn
+    arguments: (arguments . (string) @name))
+  arguments: (block)
+  (#any-of? @_fn "test" "it" "property")) @definition.test
+(call_expression
+  function: (call_expression
+    function: (identifier) @_fn
+    arguments: (arguments . (string) @name))
+  arguments: (block)
+  (#eq? @_fn "describe")) @definition.suite
+"#;
+
+/// RSpec's examples (`it "adds" do`, `specify`, `scenario`; `test` of
+/// Rails' and Minitest's spec style) and their groups (`describe Cart`,
+/// `context "when empty"`), beside the grammar's own outline.
+const RUBY_TEST_TAGS: &str = r#"
+(call
+  method: (identifier) @_fn
+  arguments: (argument_list . (string (string_content) @name))
+  block: [(do_block) (block)]
+  (#any-of? @_fn "it" "specify" "example" "scenario" "test")) @definition.test
+(call
+  method: (identifier) @_fn
+  arguments: (argument_list . [(string (string_content) @name) (constant) @name (scope_resolution) @name])
+  block: [(do_block) (block)]
+  (#any-of? @_fn "describe" "context" "feature")) @definition.suite
+"#;
+
+/// package:test's tests (`test('adds', () { … })`, Flutter's `testWidgets`)
+/// and groups (`group`), beside the grammar's own outline.
+const DART_TEST_TAGS: &str = r#"
+(method_invocation
+  function: (identifier) @_fn
+  arguments: (argument_part (arguments . (argument (string_literal) @name)))
+  (#any-of? @_fn "test" "testWidgets")) @definition.test
+(method_invocation
+  function: (identifier) @_fn
+  arguments: (argument_part (arguments . (argument (string_literal) @name)))
+  (#eq? @_fn "group")) @definition.suite
 "#;
 
 /// The Elixir outline: modules and protocols, functions (each clause —
 /// merged, see `outline::merge_clauses` — a guarded one and a zero-arity
-/// one without parentheses too), macros and `@type`s. Every definition is a
-/// call to the grammar: `def` names the function its first argument calls.
+/// one without parentheses too), macros and `@type`s; and ExUnit's tests
+/// (`test "adds" do`, a property's) and `describe` groups. Every definition
+/// is a call to the grammar: `def` names the function its first argument
+/// calls.
 const ELIXIR_TAGS: &str = r#"
 (call
   target: (identifier) @_kw
@@ -852,6 +911,16 @@ const ELIXIR_TAGS: &str = r#"
         left: [(call target: (identifier) @name) (identifier) @name]
         operator: "::")))
   (#any-of? @_attr "type" "typep" "opaque")) @definition.type
+(call
+  target: (identifier) @_kw
+  (arguments . (string (quoted_content) @name))
+  (do_block)
+  (#any-of? @_kw "test" "property")) @definition.test
+(call
+  target: (identifier) @_kw
+  (arguments . (string (quoted_content) @name))
+  (do_block)
+  (#eq? @_kw "describe")) @definition.suite
 "#;
 
 /// The capture names of tree-sitter-haskell's highlight query that are not
@@ -984,7 +1053,9 @@ const ERLANG_TAGS: &str = r#"
 
 /// The Haskell outline: functions and bindings (one per equation — merged,
 /// see `outline::merge_clauses`), data types and their constructors and
-/// fields, newtypes, type synonyms, classes and their methods.
+/// fields, newtypes, type synonyms, classes and their methods; and hspec's
+/// and tasty's tests (`it "adds" $ …`, `testCase`) and groups (`describe`,
+/// `testGroup`).
 const HASKELL_TAGS: &str = r#"
 (declarations (function name: (variable) @name) @definition.function)
 (declarations (bind name: (variable) @name) @definition.function)
@@ -997,6 +1068,18 @@ const HASKELL_TAGS: &str = r#"
 (field name: (field_name (variable) @name)) @definition.field
 (class name: (name) @name) @definition.class
 (class_declarations (signature name: (variable) @name) @definition.method)
+(infix
+  left_operand: (apply function: (variable) @_fn argument: (literal (string) @name))
+  (#any-of? @_fn "it" "specify" "prop" "testCase" "testProperty")) @definition.test
+(apply
+  function: (apply function: (variable) @_fn argument: (literal (string) @name))
+  (#any-of? @_fn "it" "specify" "prop" "testCase" "testProperty")) @definition.test
+(infix
+  left_operand: (apply function: (variable) @_fn argument: (literal (string) @name))
+  (#any-of? @_fn "describe" "context" "testGroup")) @definition.suite
+(apply
+  function: (apply function: (variable) @_fn argument: (literal (string) @name))
+  (#any-of? @_fn "describe" "context" "testGroup")) @definition.suite
 "#;
 
 /// The Zig outline: containers bound to a name (structs, enums, unions,
@@ -1014,6 +1097,7 @@ const ZIG_TAGS: &str = r#"
 (union_declaration (function_declaration name: (identifier) @name) @definition.method)
 (function_declaration name: (identifier) @name) @definition.function
 (test_declaration (string (string_content) @name)) @definition.test
+(test_declaration (identifier) @name) @definition.test
 "#;
 
 /// Source-oriented tags query for TypeScript/TSX — captures the symbols in real

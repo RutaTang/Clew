@@ -34,6 +34,21 @@ use tree_sitter::{Node, Tree};
 use crate::highlight::Lang;
 use crate::outline::{Located, is_callable};
 
+/// Whether a definition of `kind` is a node of the graph: a callable, or a
+/// test or group of tests a runner's call opens (`it "adds" do`, `test
+/// "adds" {`, `TEST(Cart, Adds)`, `describe`) — which no call reaches, but
+/// whose calls are made from it. Without them a call in a test block had
+/// no caller, and a function only tests call read "No callers".
+pub fn is_node_kind(kind: &str) -> bool {
+    is_callable(kind) || calls_only(kind)
+}
+
+/// A test or a group of tests: a node that calls, never called — no call
+/// of a name lands on one, as a test's title is no function's name.
+pub fn calls_only(kind: &str) -> bool {
+    matches!(kind, "test" | "suite")
+}
+
 /// A stable identity for a function across edits: its file, its name, and
 /// its ordinal among the file's same-name callables (by line). The line itself
 /// is deliberately excluded so an edge survives lines shifting above it.
@@ -242,14 +257,14 @@ fn finalize(mut nodes: Vec<SymNode>, edges: HashSet<(usize, usize)>) -> ProjectC
 /// strays a type into it cannot shift the keys of the functions.
 fn ordinals_of<'a>(items: impl Iterator<Item = (&'a Path, &'a str, &'a str, usize)>) -> Vec<u32> {
     let items: Vec<_> = items.collect();
-    let ordinals = crate::outline::Ordinals::new(
-        items
-            .iter()
-            .map(|&(file, name, kind, line)| ((file, name), is_callable(kind), line)),
-    );
+    // Tests and groups are numbered among their own kind: a test titled
+    // as a function is named shifts no function's key.
+    let ordinals = crate::outline::Ordinals::new(items.iter().map(|&(file, name, kind, line)| {
+        ((file, name, calls_only(kind)), is_node_kind(kind), line)
+    }));
     items
         .iter()
-        .map(|&(file, name, _, line)| ordinals.of(&(file, name), line))
+        .map(|&(file, name, kind, line)| ordinals.of(&(file, name, calls_only(kind)), line))
         .collect()
 }
 
@@ -343,7 +358,7 @@ impl FileCalls {
         let defined = || {
             symbols
                 .iter()
-                .filter(|l| is_callable(&l.symbol.kind))
+                .filter(|l| is_node_kind(&l.symbol.kind))
                 .filter_map(|l| Some((l.symbol.name.as_str(), l.symbol.line, l.body?)))
         };
         let mut defined_as: HashMap<&str, usize> = HashMap::new();
@@ -409,7 +424,7 @@ impl ProjectCallGraph {
         let files: Vec<&FileCalls> = files.into_iter().collect();
         let nodes: Vec<SymNode> = defs
             .into_iter()
-            .filter(|d| is_callable(&d.kind))
+            .filter(|d| is_node_kind(&d.kind))
             .map(|d| SymNode {
                 name: d.name,
                 kind: d.kind,
@@ -439,6 +454,14 @@ impl ProjectCallGraph {
         // definition of the file, per call cost calls × definitions.
         let mut defs = Defs::default();
         for (i, n) in nodes.iter().enumerate() {
+            // A test calls; no call lands on one.
+            if calls_only(&n.kind) {
+                defs.callers
+                    .entry((n.file.as_path(), n.name.as_str()))
+                    .or_default()
+                    .push(i);
+                continue;
+            }
             let name = logical_name(&n.name, facts[i].lang);
             let named = defs.named.entry(name).or_default();
             named.all.push(i);
@@ -474,6 +497,20 @@ impl ProjectCallGraph {
             .collect();
         // The project's own types (and traits): what defines a method here.
         let project_types: HashSet<&str> = owner.iter().flatten().copied().collect();
+        // Each owned definition by its owner's last part and its name: a
+        // type's (a module's) function, looked up wherever it is defined.
+        let mut by_owner: HashMap<(&str, &str), Vec<usize>> = HashMap::new();
+        for (i, o) in owner.iter().enumerate() {
+            if let Some(o) = o
+                && !calls_only(&nodes[i].kind)
+            {
+                let last = o.rsplit('.').next().unwrap_or(o);
+                by_owner
+                    .entry((last, logical_name(&nodes[i].name, facts[i].lang)))
+                    .or_default()
+                    .push(i);
+            }
+        }
 
         // Python runs a class's `__init__` when the class is called:
         // `Inventory(...)`, `raise OutOfStock(...)`. By the class's name.
@@ -533,8 +570,10 @@ impl ProjectCallGraph {
                 };
                 // A Lean namespace is named from where the call is: `Voice`
                 // for `Clew.Extracted.Voice`, opened.
+                // So is an Elixir module by the last of its parts, as an
+                // `alias Shop.Cart` lets `Cart.add` say it.
                 let owned_by = |c: usize, ty: &str| match owner[c] {
-                    Some(o) if fc.lang == Lang::Lean => {
+                    Some(o) if matches!(fc.lang, Lang::Lean | Lang::Elixir) => {
                         o == ty || o.strip_suffix(ty).is_some_and(|o| o.ends_with('.'))
                     }
                     o => o == Some(ty),
@@ -550,17 +589,23 @@ impl ProjectCallGraph {
                     .unwrap_or_default();
                 // A Rust type's function is its own wherever it is defined:
                 // `Builder::new()` in a file with other `new`s, `Builder`'s
-                // defined in another — the name's nearest were not it.
+                // defined in another — the name's nearest were not it. So
+                // is an Elixir or Erlang module's (`Cart.add(…)`,
+                // `cart:add(…)`), which a call reaches with no import: a
+                // test module's every call of the module it tests had no
+                // callee.
                 if narrowed.is_empty()
-                    && fc.lang == Lang::Rust
-                    && let Some(ty) = wanted.filter(|ty| project_types.contains(ty))
+                    && matches!(fc.lang, Lang::Rust | Lang::Elixir | Lang::Erlang)
+                    && let Some(ty) = wanted
                 {
-                    narrowed = (0..nodes.len())
-                        .filter(|&c| {
-                            owner[c] == Some(ty)
-                                && logical_name(&nodes[c].name, Some(Lang::Rust))
-                                    == logical_name(&cs.callee, Some(Lang::Rust))
-                        })
+                    let last = ty.rsplit('.').next().unwrap_or(ty);
+                    let callee = logical_name(&cs.callee, Some(fc.lang));
+                    narrowed = by_owner
+                        .get(&(last, callee))
+                        .into_iter()
+                        .flatten()
+                        .copied()
+                        .filter(|&c| owned_by(c, ty))
                         .collect();
                 }
                 // A Rust receiver of a type the project defines nothing of —
@@ -673,6 +718,11 @@ impl ProjectCallGraph {
         self.nodes.is_empty()
     }
 
+    /// The functions among the nodes: not the tests that call them.
+    pub fn function_count(&self) -> usize {
+        self.nodes.iter().filter(|n| !calls_only(&n.kind)).count()
+    }
+
     pub fn node_count(&self) -> usize {
         self.nodes.len()
     }
@@ -719,6 +769,10 @@ impl ProjectCallGraph {
         };
         let mut out: HashMap<SymKey, Vec<SymKey>> = HashMap::new();
         for (i, n) in self.nodes.iter().enumerate() {
+            // A test's key may be a same-named function's.
+            if calls_only(&n.kind) {
+                continue;
+            }
             let callees = out.entry(key(i)).or_default();
             // Not itself: what it waits on to be explained first.
             callees.extend(n.callees.iter().filter(|&&c| c != i).map(|&c| key(c)));
@@ -773,6 +827,7 @@ impl ProjectCallGraph {
                 self.ordinals[i] == ordinal
                     && self.nodes[i].name == name
                     && self.nodes[i].file == file
+                    && !calls_only(&self.nodes[i].kind)
             })
     }
 
@@ -788,7 +843,7 @@ impl ProjectCallGraph {
     /// Sorted by name for stable display.
     pub fn uncalled(&self) -> Vec<usize> {
         let mut v: Vec<usize> = (0..self.nodes.len())
-            .filter(|&i| self.nodes[i].callers.is_empty())
+            .filter(|&i| self.nodes[i].callers.is_empty() && !calls_only(&self.nodes[i].kind))
             .collect();
         v.sort_by_key(|&i| self.sort_key(i));
         v
@@ -1128,7 +1183,58 @@ pub fn calls_in(tree: &Tree, source: &str, lang: Lang, symbols: &[Located]) -> V
         callable.as_ref(),
         &mut out,
     );
+    in_test_blocks(&mut out, symbols);
     out
+}
+
+/// Each call made inside a test or a group of tests (`it "adds" do … end`,
+/// `test "adds" { … }`, `describe`) made from it: from the innermost one
+/// around it — unless a function defined inside that test holds it. A test
+/// block is no function to the grammar, so its calls had no caller (or, in
+/// a Dart or hspec file, the `main` or `spec` its tests sit in).
+fn in_test_blocks(calls: &mut [CallSite], symbols: &[Located]) {
+    let span = |l: &Located| (l.symbol.line, l.symbol.end_line.max(l.symbol.line));
+    let blocks: Vec<(usize, usize, &str)> = symbols
+        .iter()
+        .filter(|l| calls_only(&l.symbol.kind))
+        .map(|l| {
+            let (first, last) = span(l);
+            (first, last, l.symbol.name.as_str())
+        })
+        .collect();
+    if blocks.is_empty() {
+        return;
+    }
+    let innermost = |spans: &mut dyn Iterator<Item = (usize, usize)>, line: usize| {
+        spans
+            .filter(|&(first, last)| first <= line && line <= last)
+            .min_by_key(|&(first, last)| (last - first, std::cmp::Reverse(first)))
+    };
+    for call in calls.iter_mut() {
+        let Some(block) = blocks
+            .iter()
+            .filter(|&&(first, last, _)| first <= call.line && call.line <= last)
+            .min_by_key(|&&(first, last, _)| (last - first, std::cmp::Reverse(first)))
+        else {
+            continue;
+        };
+        // The function the walk found around it, if the file defines it
+        // there: a test inside it (Dart's `main`) is nearer; one it is
+        // inside (a helper the test defines) is not.
+        let function = call.caller.as_deref().and_then(|caller| {
+            innermost(
+                &mut symbols
+                    .iter()
+                    .filter(|l| is_callable(&l.symbol.kind) && l.symbol.name == caller)
+                    .map(span),
+                call.line,
+            )
+        });
+        let in_function = function.is_some_and(|(first, last)| block.0 < first || last < block.1);
+        if !in_function {
+            call.caller = Some(block.2.to_string());
+        }
+    }
 }
 
 fn node_text<'a>(node: Node, src: &'a str) -> &'a str {
@@ -1194,6 +1300,10 @@ fn walk(
             && let Some((callee, method)) = callee_name(node, parent, src, lang)
         {
             let receiver = match &current {
+                // `Cart.add(…)`, `cart:add(…)`: the module named.
+                _ if method && matches!(lang, Lang::Elixir | Lang::Erlang) => {
+                    module_receiver(node, parent, src, lang)
+                }
                 Some((_, from)) if method => {
                     let scope = Scope {
                         places: &places,
@@ -1326,6 +1436,32 @@ fn elixir_def_name(call: Node, src: &str) -> Option<String> {
         _ => return None,
     };
     (name.kind() == "identifier").then(|| node_text(name, src).to_string())
+}
+
+/// Whether an Elixir `call` (whose parent is `parent`) is the head of a
+/// `def` — `add(a, b)` in `def add(a, b) do`, guarded (`when …`) or not:
+/// the function it defines, which it does not call. Read as a call, every
+/// function called itself.
+fn elixir_def_head(call: Node, parent: Option<Node>, src: &str) -> bool {
+    let Some(mut up) = parent else {
+        return false;
+    };
+    if up.kind() == "binary_operator" {
+        if up.child_by_field_name("left") != Some(call) {
+            return false;
+        }
+        let Some(next) = up.parent() else {
+            return false;
+        };
+        up = next;
+    }
+    up.kind() == "arguments"
+        && up
+            .named_child(0)
+            .is_some_and(|first| first == call || Some(first) == parent)
+        && up
+            .parent()
+            .is_some_and(|def| elixir_def_name(def, src).is_some())
 }
 
 /// The name of the binding a function expression is assigned to, if it is
@@ -1599,7 +1735,7 @@ fn callee_name(call: Node, parent: Option<Node>, src: &str, lang: Lang) -> Optio
         // Elixir: `f(…)`, or another module's `Mod.f(…)` (like Erlang's
         // `mod:f(…)`). A `def` defines rather than calls (`fn_names`).
         (Lang::Elixir, "call") => {
-            if elixir_def_name(call, src).is_some() {
+            if elixir_def_name(call, src).is_some() || elixir_def_head(call, parent, src) {
                 return None;
             }
             let target = call.child_by_field_name("target")?;
@@ -1677,6 +1813,15 @@ fn callee_name(call: Node, parent: Option<Node>, src: &str, lang: Lang) -> Optio
             Some(inner) => target = inner,
             None => break,
         }
+    }
+    // `f(a)(b)`, Scala's `test("adds") { … }`: the outer call calls what
+    // the inner one returned, a function of no name — the inner one is the
+    // call of `f`. Read by its text, the outer one called the title (`adds`).
+    if matches!(
+        target.kind(),
+        "call_expression" | "call" | "method_invocation"
+    ) {
+        return None;
     }
     // `std::move(x)` is the standard library, never a project function.
     if lang == Lang::Cpp
@@ -2643,6 +2788,11 @@ pub fn owners_in(
 
 /// The class a definition at `node` (any node inside it) belongs to.
 fn owner_from(node: Node, src: &str, lang: Lang) -> Option<String> {
+    match lang {
+        Lang::Elixir => return elixir_module_of(node, src),
+        Lang::Erlang => return erlang_module_of(node, src),
+        _ => {}
+    }
     let mut cur = Some(node);
     while let Some(n) = cur {
         match n.kind() {
@@ -2673,6 +2823,72 @@ fn owner_from(node: Node, src: &str, lang: Lang) -> Option<String> {
         cur = n.parent();
     }
     None
+}
+
+/// The Elixir module a definition at `node` is in, by its full name: each
+/// `defmodule` (or `defprotocol`) around it, outermost first —
+/// `Cart.Inner` for a function of `defmodule Inner` inside `defmodule
+/// Cart`. What another module's `Cart.Inner.f(…)` names.
+fn elixir_module_of(node: Node, src: &str) -> Option<String> {
+    let mut parts: Vec<&str> = Vec::new();
+    let mut cur = Some(node);
+    while let Some(n) = cur {
+        if n.kind() == "call"
+            && n.child_by_field_name("target")
+                .is_some_and(|t| matches!(node_text(t, src), "defmodule" | "defprotocol"))
+            && let Some(name) = n
+                .named_children(&mut n.walk())
+                .find(|c| c.kind() == "arguments")
+                .and_then(|a| a.named_child(0))
+                .filter(|a| a.kind() == "alias")
+        {
+            parts.push(node_text(name, src));
+        }
+        cur = n.parent();
+    }
+    (!parts.is_empty()).then(|| {
+        parts.reverse();
+        parts.join(".")
+    })
+}
+
+/// The Erlang module a definition at `node` is in: its file's
+/// `-module(cart).` — what another module's `cart:add(…)` names.
+fn erlang_module_of(node: Node, src: &str) -> Option<String> {
+    let mut root = node;
+    while let Some(parent) = root.parent() {
+        root = parent;
+    }
+    let mut cursor = root.walk();
+    let attribute = root
+        .named_children(&mut cursor)
+        .find(|n| n.kind() == "module_attribute")?;
+    let name = attribute.child_by_field_name("name")?;
+    Some(node_text(name, src).trim_matches('\'').to_string())
+}
+
+/// The module an Elixir `Cart.add(…)` or an Erlang `cart:add(…)` names —
+/// written out, not one a variable holds (`mod.f()`, `?MODULE:f()`).
+fn module_receiver(call: Node, parent: Option<Node>, src: &str, lang: Lang) -> Option<Receiver> {
+    let module = match lang {
+        Lang::Elixir => {
+            let target = call.child_by_field_name("target")?;
+            let left = target.child_by_field_name("left")?;
+            (target.kind() == "dot" && left.kind() == "alias").then_some(left)?
+        }
+        Lang::Erlang => {
+            let remote = parent.filter(|p| p.kind() == "remote")?;
+            let module = remote.child_by_field_name("module")?;
+            let atom = module.child_by_field_name("module")?;
+            (atom.kind() == "atom").then_some(atom)?
+        }
+        _ => return None,
+    };
+    let name: String = node_text(module, src)
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    Some(Receiver::Type(name.trim_matches('\'').to_string()))
 }
 
 /// A type's own name in how it is written: `*Cart[T]` → `Cart`,
@@ -3944,6 +4160,223 @@ mod edge_tests {
             .map(|(f, s)| (PathBuf::from(f), s.to_string()))
             .collect();
         ProjectCallGraph::build(defs_of(files), &sources, &HashMap::new())
+    }
+
+    /// A function only tests call is called — by each test, in every
+    /// language whose tests are blocks a runner's call opens rather than
+    /// functions: ExUnit's `test "adds" do`, RSpec's `it`, Zig's `test`
+    /// (a declaration's too), MUnit's `test("adds") {`, Kotest's,
+    /// GoogleTest's `TEST(Cart, Adds)`, Catch2's `TEST_CASE`, package:test's
+    /// `test('adds', () {` (in `main`) and hspec's `it "adds" $` (in
+    /// `spec`). Such a call had no caller — or `main`'s, `spec`'s — and the
+    /// function read "No callers", listed as possibly dead. The tests call;
+    /// none is called, nor counted among the functions, nor uncalled.
+    #[test]
+    fn a_test_block_is_the_caller_of_what_it_calls() {
+        let cases: &[(&str, &str, &str, &str, &[&str])] = &[
+            (
+                "/p/lib/cart.ex",
+                "defmodule Cart do\n  def add(a, b), do: a + b\nend\n",
+                "/p/test/cart_test.exs",
+                "defmodule CartTest do\n  use ExUnit.Case\n  describe \"cart\" do\n    test \"adds\" do\n      assert Cart.add(2, 3) == 5\n    end\n  end\n  test \"breaks\", %{x: _} do\n    Cart.add(1, 1)\n  end\nend\n",
+                &["adds@4", "breaks@8"],
+            ),
+            (
+                "/p/lib/cart.rb",
+                "def add(a, b)\n  a + b\nend\n",
+                "/p/spec/cart_spec.rb",
+                "RSpec.describe Cart do\n  before { add(0, 0) }\n  it 'adds' do\n    expect(add(2, 3)).to eq(5)\n  end\nend\n",
+                &["Cart@1", "adds@3"],
+            ),
+            (
+                "/p/cart.zig",
+                "fn add(a: i32, b: i32) i32 {\n    return a + b;\n}\n",
+                "/p/cart_test.zig",
+                "test \"adds\" {\n    _ = add(2, 3);\n}\ntest add {\n    _ = add(1, 1);\n}\n",
+                &["add@4", "adds@1"],
+            ),
+            (
+                "/p/src/main/scala/Cart.scala",
+                "object Cart {\n  def add(a: Int, b: Int): Int = a + b\n}\n",
+                "/p/src/test/scala/CartSuite.scala",
+                "class CartSuite extends munit.FunSuite {\n  test(\"adds\") {\n    assertEquals(Cart.add(2, 3), 5)\n  }\n}\n",
+                &["adds@2"],
+            ),
+            (
+                "/p/src/main/kotlin/Cart.kt",
+                "fun add(a: Int, b: Int): Int = a + b\n",
+                "/p/src/test/kotlin/CartTest.kt",
+                "class CartTest : FunSpec({\n  test(\"adds\") {\n    add(2, 3) shouldBe 5\n  }\n})\n",
+                &["adds@2"],
+            ),
+            (
+                "/p/cart.cpp",
+                "int add(int a, int b) { return a + b; }\n",
+                "/p/cart_test.cpp",
+                "TEST(Cart, Adds) {\n  EXPECT_EQ(5, add(2, 3));\n}\nTEST_CASE(\"adds again\", \"[cart]\") {\n  REQUIRE(add(2, 2) == 4);\n}\n",
+                &["Cart.Adds@1", "adds again@4"],
+            ),
+            (
+                "/p/lib/cart.dart",
+                "int add(int a, int b) => a + b;\n",
+                "/p/test/cart_test.dart",
+                "void main() {\n  group('cart', () {\n    test('adds', () {\n      expect(add(2, 3), 5);\n    });\n  });\n}\n",
+                &["adds@3"],
+            ),
+            (
+                "/p/src/Cart.hs",
+                "module Cart where\nadd :: Int -> Int -> Int\nadd a b = a + b\n",
+                "/p/test/CartSpec.hs",
+                "module CartSpec where\nspec :: Spec\nspec = describe \"Cart\" $ do\n  it \"adds\" $ add 2 3 `shouldBe` 5\n",
+                &["adds@4"],
+            ),
+        ];
+        for &(lib, lib_src, test_file, test_src, want) in cases {
+            // The test file reaches the library's, as the import graph has
+            // it (an Elixir module named, a Scala object): what a qualified
+            // call (`Cart.add`) resolves in.
+            let files = [(lib, lib_src), (test_file, test_src)];
+            let sources: Vec<(PathBuf, String)> = files
+                .iter()
+                .map(|(f, s)| (PathBuf::from(f), s.to_string()))
+                .collect();
+            let scope = HashMap::from([(
+                PathBuf::from(test_file),
+                HashSet::from([PathBuf::from(lib)]),
+            )]);
+            let g = ProjectCallGraph::build(defs_of(&files), &sources, &scope);
+            assert_eq!(callers_named(&g, lib, "add", 0), want, "{test_file}");
+            let tests = (0..g.node_count()).filter(|&i| calls_only(&g.node(i).kind));
+            for t in tests {
+                assert!(
+                    g.node(t).callers.is_empty(),
+                    "{test_file}: {:?} called",
+                    g.node(t)
+                );
+                assert!(
+                    !g.uncalled().contains(&t),
+                    "{test_file}: a test is uncalled"
+                );
+            }
+            assert!(
+                !g.uncalled()
+                    .contains(&g.id_of(Path::new(lib), "add").unwrap()),
+                "{test_file}: add is uncalled"
+            );
+            assert!(g.function_count() < g.node_count(), "{test_file}");
+        }
+    }
+
+    /// An Elixir module's function is reached as `Cart.add(…)` and an
+    /// Erlang module's as `cart:add(…)` from any module, with no import —
+    /// by the module's full name, or an Elixir alias's last part — and is
+    /// the function of that module, not a same-named one of another. No
+    /// call of another module's function had a callee: a function only
+    /// other modules call (a test module's every call) read "No callers".
+    #[test]
+    fn a_modules_function_is_reached_by_the_modules_name() {
+        let g = graph(&[
+            (
+                "/p/lib/shop/cart.ex",
+                "defmodule Shop.Cart do\n  def add(a, b), do: a + b\n  defmodule Line do\n    def add(l), do: l\n  end\nend\n",
+            ),
+            (
+                "/p/lib/other.ex",
+                "defmodule Other do\n  def add(a, b), do: a - b\nend\n",
+            ),
+            (
+                "/p/test/cart_test.exs",
+                "defmodule CartTest do\n  alias Shop.Cart\n  test \"adds\" do\n    Cart.add(2, 3)\n  end\n  def line, do: Shop.Cart.Line.add(1)\nend\n",
+            ),
+        ]);
+        assert_eq!(
+            callers_named(&g, "/p/lib/shop/cart.ex", "add", 0),
+            ["adds@3"]
+        );
+        assert_eq!(
+            callers_named(&g, "/p/lib/shop/cart.ex", "add", 1),
+            ["line@6"]
+        );
+        assert!(callers_named(&g, "/p/lib/other.ex", "add", 0).is_empty());
+
+        let g = graph(&[
+            (
+                "/p/src/cart.erl",
+                "-module(cart).\n-export([add/2]).\nadd(A, B) -> A + B.\n",
+            ),
+            ("/p/src/other.erl", "-module(other).\nadd(A, B) -> A - B.\n"),
+            (
+                "/p/test/cart_tests.erl",
+                "-module(cart_tests).\nadd_test() -> 5 = cart:add(2, 3).\n",
+            ),
+        ]);
+        assert_eq!(
+            callers_named(&g, "/p/src/cart.erl", "add", 0),
+            ["add_test@2"]
+        );
+        assert!(callers_named(&g, "/p/src/other.erl", "add", 0).is_empty());
+    }
+
+    /// A test titled as a function is named is no call's target, takes no
+    /// key of the function's, and is no `callee_keys` entry over it: in
+    /// one file, `function adds` and `it('adds', …)`.
+    #[test]
+    fn a_test_titled_as_a_function_is_not_that_function() {
+        let src = "it('adds', () => {\n  adds(1);\n});\nfunction adds(n) {\n  return n + 1;\n}\nfunction other() {\n  adds(2);\n}\n";
+        let g = graph(&[("/p/a.test.js", src)]);
+        let id = g.id_of(Path::new("/p/a.test.js"), "adds").unwrap();
+        assert_eq!(g.node(id).kind, "function");
+        assert_eq!(
+            callers_named(&g, "/p/a.test.js", "adds", 0),
+            ["adds@1", "other@7"]
+        );
+        let keys = g.callee_keys();
+        let key = g.key_of(id).unwrap();
+        assert!(keys[&key].is_empty(), "{keys:?}");
+    }
+
+    /// An Elixir function's head (`add(a, b)` of `def add(a, b) do`, a
+    /// guarded one, a `defp`'s) defines it: no call. Every function called
+    /// itself, and listed itself among what it calls.
+    #[test]
+    fn an_elixir_functions_head_is_no_call_of_it() {
+        let src = "defmodule Cart do\n  def add(a, b), do: a + b\n  defp twice(x) when x > 0 do\n    add(x, x)\n  end\n  def count(n) do\n    count(n - 1)\n  end\nend\n";
+        let mut sites = calls_of(src, "elixir");
+        sites.sort_by_key(|c| c.line);
+        let calls: Vec<(Option<String>, String)> = sites
+            .into_iter()
+            .filter(|c| c.callee != "defmodule")
+            .map(|c| (c.caller, c.callee))
+            .collect();
+        assert_eq!(
+            calls,
+            [
+                (Some("twice".to_string()), "add".to_string()),
+                (Some("count".to_string()), "count".to_string()),
+            ],
+            "only the calls in the bodies, a recursion included"
+        );
+    }
+
+    /// `f(a)(b)` calls what `f(a)` returned: no function of a name. MUnit's
+    /// `test("adds") { … }` read as a call of `adds`, its title.
+    #[test]
+    fn a_call_of_what_a_call_returned_names_no_function() {
+        let calls = calls_of(
+            "class S extends munit.FunSuite {\n  test(\"adds\") {\n    run()\n  }\n}\n",
+            "scala",
+        );
+        assert!(!calls.iter().any(|c| c.callee == "adds"), "{calls:?}");
+        assert_eq!(
+            calls.iter().filter(|c| c.callee == "test").count(),
+            1,
+            "{calls:?}"
+        );
+        let js = calls_of("make(1)(2);\n", "javascript");
+        assert_eq!(
+            js.iter().map(|c| c.callee.as_str()).collect::<Vec<_>>(),
+            ["make"]
+        );
     }
 
     /// Who calls the `ordinal`th `name` of `file`, as `caller@line`.

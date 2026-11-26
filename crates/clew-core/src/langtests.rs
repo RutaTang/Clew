@@ -669,7 +669,12 @@ fn erlang_tests(rel: &str, lines: &[&str]) -> Vec<Runnable> {
 
 /// C and C++: GoogleTest's `TEST(Suite, Name)`, `TEST_F` and `TEST_P`
 /// (named `Suite.Name`, as `gtest_discover_tests` lists them), Catch2's
-/// and doctest's `TEST_CASE("name")`.
+/// and doctest's `TEST_CASE("name")`. The outline's tests too
+/// ([`crate::outline`]).
+pub(crate) fn c_tests(lines: &[&str]) -> Vec<Runnable> {
+    cpp_tests(lines)
+}
+
 fn cpp_tests(lines: &[&str]) -> Vec<Runnable> {
     let mut out = Vec::new();
     for (i, line) in lines.iter().enumerate() {
