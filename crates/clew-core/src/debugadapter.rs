@@ -935,12 +935,315 @@ fn build_zig_as(
     if !built.status.success() && said(&built).contains("LLVM") {
         built = build(false)?;
     }
+    // A file of a `build.zig` project that does not build alone — it
+    // imports a module the build declares, or a dependency, or links C the
+    // build adds — is built by the project's own build.
+    if !built.status.success()
+        && let Some(project) = zig_project_of(source)
+    {
+        return build_zig_project(zig, &project, source, test);
+    }
     if !built.status.success() {
         let said = said(&built);
         let tail: Vec<&str> = said.lines().rev().take(40).collect();
         let tail: Vec<&str> = tail.into_iter().rev().collect();
         return Err(format!(
             "zig could not build {}:\n{}",
+            source.display(),
+            tail.join("\n")
+        ));
+    }
+    Ok(binary)
+}
+
+/// The folder of the `build.zig` the Zig file `source` is built by: the
+/// nearest above it.
+fn zig_project_of(source: &Path) -> Option<PathBuf> {
+    source
+        .ancestors()
+        .skip(1)
+        .find(|dir| dir.join("build.zig").is_file())
+        .map(Path::to_path_buf)
+}
+
+/// The build Clew runs a `build.zig` project's program or tests through:
+/// the project as a dependency (`b.dependency`), so its `build.zig` runs as
+/// it is, untouched, with its own defaults (the wrapper declares none of its
+/// options); every compile step it makes is set to build through LLVM
+/// (`use_llvm`), whose debug information lldb reads — `zig build` has no
+/// flag for it, and Zig's own code generator, its Debug default on x86-64,
+/// leaves lldb no variables. What is built for `-Dclew-file` (the file, from
+/// the project's folder), Debug and not run, and installed as
+/// `bin/clew-debug`:
+///
+/// - the project's program (with `-Dclew-kind=test`, its test binary) whose
+///   root is that file;
+/// - else one made from the project's module rooted at that file;
+/// - else one rooted at the file itself, with the imports, target and C
+///   settings of the project's module that holds it (the nearest root
+///   folder above it): a file of a module sees that module's imports.
+///
+/// Tests keep the ones `-Dclew-filter` names. Paths are compared as text
+/// from the project's folder, so the wrapper needs nothing of the file
+/// system's API, which Zig 0.16 changed; it builds with Zig 0.14 to 0.17.
+const ZIG_WRAPPER_BUILD: &str = r#"const std = @import("std");
+const Compile = std.Build.Step.Compile;
+const Module = std.Build.Module;
+
+pub fn build(b: *std.Build) void {
+    const file = b.option([]const u8, "clew-file", "the file, from the project's folder") orelse return;
+    const root = b.option([]const u8, "clew-root", "the project's folder") orelse "";
+    const kind = b.option([]const u8, "clew-kind", "exe or test") orelse "exe";
+    const filter = b.option([]const u8, "clew-filter", "the tests to keep");
+    const dep = b.dependency("project", .{});
+    var search: Search = .{
+        .b = b,
+        .project = dep.builder,
+        .file = normal(b.allocator, file),
+        .root = root,
+        .tests = std.mem.eql(u8, kind, "test"),
+    };
+    var it = dep.builder.top_level_steps.iterator();
+    while (it.next()) |entry| search.step(&entry.value_ptr.*.step);
+    const compile = search.compile orelse made: {
+        const module = search.module orelse if (search.holder) |holder| search.moduleFor(holder) else {
+            std.debug.print("no module of the project's build.zig holds {s}\n", .{file});
+            std.process.exit(3);
+        };
+        const made = if (search.tests)
+            b.addTest(.{ .root_module = module })
+        else
+            b.addExecutable(.{ .name = "clew-debug", .root_module = module });
+        break :made made;
+    };
+    compile.use_llvm = true;
+    compile.root_module.optimize = .Debug;
+    if (filter) |f| compile.filters = b.allocator.dupe([]const u8, &.{f}) catch @panic("out of memory");
+    const install = b.addInstallArtifact(compile, .{ .dest_sub_path = "clew-debug" });
+    b.getInstallStep().dependOn(&install.step);
+}
+
+const Search = struct {
+    b: *std.Build,
+    project: *std.Build,
+    file: []const u8,
+    root: []const u8,
+    tests: bool,
+    compile: ?*Compile = null,
+    module: ?*Module = null,
+    holder: ?*Module = null,
+    holder_depth: usize = 0,
+    steps: std.AutoHashMapUnmanaged(*std.Build.Step, void) = .{},
+    modules: std.AutoHashMapUnmanaged(*Module, void) = .{},
+
+    fn step(s: *Search, st: *std.Build.Step) void {
+        if (s.steps.contains(st)) return;
+        s.steps.put(s.b.allocator, st, {}) catch return;
+        if (st.cast(Compile)) |c| {
+            c.use_llvm = true;
+            const wanted = if (s.tests) c.kind == .@"test" else c.kind == .exe;
+            if (wanted and s.compile == null) {
+                if (s.path(c.root_module.root_source_file)) |p| {
+                    if (std.mem.eql(u8, p, s.file)) s.compile = c;
+                }
+            }
+            s.walk(c.root_module);
+        }
+        for (st.dependencies.items) |d| s.step(d);
+    }
+
+    fn walk(s: *Search, m: *Module) void {
+        if (s.modules.contains(m)) return;
+        s.modules.put(s.b.allocator, m, {}) catch return;
+        if (s.path(m.root_source_file)) |p| {
+            if (std.mem.eql(u8, p, s.file)) {
+                if (s.module == null) s.module = m;
+            } else {
+                const dir = if (std.mem.lastIndexOfScalar(u8, p, '/')) |i| p[0..i] else "";
+                const inside = dir.len == 0 or (s.file.len > dir.len and
+                    std.mem.startsWith(u8, s.file, dir) and s.file[dir.len] == '/');
+                const depth = if (dir.len == 0) 1 else dir.len + 2;
+                if (inside and depth > s.holder_depth) {
+                    s.holder = m;
+                    s.holder_depth = depth;
+                }
+            }
+        }
+        var imports = m.import_table.iterator();
+        while (imports.next()) |entry| s.walk(entry.value_ptr.*);
+    }
+
+    /// A root source file of the project's, from its folder.
+    fn path(s: *Search, lazy: ?std.Build.LazyPath) ?[]const u8 {
+        const l = lazy orelse return null;
+        switch (l) {
+            .src_path => |sp| if (sp.owner == s.project) return normal(s.b.allocator, sp.sub_path),
+            .cwd_relative => |p| if (s.root.len > 0 and p.len > s.root.len and
+                std.mem.startsWith(u8, p, s.root) and p[s.root.len] == '/')
+                return normal(s.b.allocator, p[s.root.len + 1 ..]),
+            else => {},
+        }
+        return null;
+    }
+
+    fn moduleFor(s: *Search, holder: *Module) *Module {
+        const m = s.b.createModule(.{
+            .root_source_file = s.project.path(s.file),
+            .target = holder.resolved_target orelse s.b.graph.host,
+            .optimize = .Debug,
+            .link_libc = holder.link_libc,
+            .link_libcpp = holder.link_libcpp,
+        });
+        var imports = holder.import_table.iterator();
+        while (imports.next()) |entry| m.addImport(entry.key_ptr.*, entry.value_ptr.*);
+        const a = s.b.allocator;
+        m.link_objects.appendSlice(a, holder.link_objects.items) catch @panic("out of memory");
+        m.include_dirs.appendSlice(a, holder.include_dirs.items) catch @panic("out of memory");
+        m.c_macros.appendSlice(a, holder.c_macros.items) catch @panic("out of memory");
+        m.lib_paths.appendSlice(a, holder.lib_paths.items) catch @panic("out of memory");
+        m.rpaths.appendSlice(a, holder.rpaths.items) catch @panic("out of memory");
+        return m;
+    }
+};
+
+/// `./src//main.zig` as `src/main.zig`.
+fn normal(a: std.mem.Allocator, p: []const u8) []const u8 {
+    var parts: [128][]const u8 = undefined;
+    var n: usize = 0;
+    var it = std.mem.tokenizeAny(u8, p, "/\\");
+    while (it.next()) |part| {
+        if (std.mem.eql(u8, part, ".")) continue;
+        if (std.mem.eql(u8, part, "..")) {
+            if (n > 0) n -= 1;
+            continue;
+        }
+        if (n == parts.len) return p;
+        parts[n] = part;
+        n += 1;
+    }
+    return std.mem.join(a, "/", parts[0..n]) catch p;
+}
+"#;
+
+/// The wrapper's package name, and the fingerprint Zig (0.14 and later)
+/// asks of it: CRC-32 of the name above an id of its own.
+const ZIG_WRAPPER_NAME: &str = "clew_debug";
+const ZIG_WRAPPER_FINGERPRINT: &str = "0x8596ef575fe11909";
+
+/// `to` from `from` (both absolute): `../../work/shop`.
+fn relative_path(from: &Path, to: &Path) -> PathBuf {
+    let from: Vec<_> = from.components().collect();
+    let to: Vec<_> = to.components().collect();
+    let common = from.iter().zip(&to).take_while(|(a, b)| a == b).count();
+    let mut out = PathBuf::new();
+    for _ in common..from.len() {
+        out.push("..");
+    }
+    for part in &to[common..] {
+        out.push(part.as_os_str());
+    }
+    out
+}
+
+/// The manifest of the wrapper build in `dir`: the project at `project` its
+/// one dependency, by a relative path as Zig requires. Zig 0.14 and later
+/// name a package with an enum literal and a fingerprint; earlier ones with
+/// a string.
+fn zig_wrapper_manifest(dir: &Path, project: &Path, zig_version: &str) -> String {
+    let path = relative_path(dir, project)
+        .to_string_lossy()
+        .replace('\\', "/");
+    let mut parts = zig_version.trim().split(['.', '-']);
+    let major: u32 = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
+    let minor: u32 = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
+    let named = match (major, minor) {
+        (0, m) if m < 14 => format!(".name = \"{ZIG_WRAPPER_NAME}\","),
+        _ => format!(".name = .{ZIG_WRAPPER_NAME},\n    .fingerprint = {ZIG_WRAPPER_FINGERPRINT},"),
+    };
+    format!(
+        ".{{\n    {named}\n    .version = \"0.0.0\",\n    .dependencies = .{{ .project = .{{ .path = \"{path}\" }} }},\n    .paths = .{{\"\"}},\n}}\n"
+    )
+}
+
+/// Build the program (or tests) of `source`, a file of the `build.zig`
+/// project at `project`, through [`ZIG_WRAPPER_BUILD`]: in Clew's data
+/// directory, the project untouched.
+fn build_zig_project(
+    zig: &Path,
+    project: &Path,
+    source: &Path,
+    test: Option<Option<&str>>,
+) -> Result<PathBuf, String> {
+    use std::hash::{Hash, Hasher};
+    let project = project
+        .canonicalize()
+        .unwrap_or_else(|_| project.to_path_buf());
+    let source = source
+        .canonicalize()
+        .unwrap_or_else(|_| source.to_path_buf());
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    project.hash(&mut hasher);
+    let dir = store::data_root()
+        .ok_or("no data directory to build the Zig program in")?
+        .join("debug-builds")
+        .join("zig-project")
+        .join(format!("{:016x}", hasher.finish()));
+    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot make {}: {e}", dir.display()))?;
+    // Zig takes the dependency's path relative to the wrapper: both real
+    // paths, so a link on the way does not throw it off.
+    let dir = dir.canonicalize().unwrap_or(dir);
+    let mut version = crate::spawn::command(zig);
+    version.arg("version");
+    let version = store::run_bounded(version, Duration::from_secs(30))
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default();
+    let write = |name: &str, text: &str| {
+        std::fs::write(dir.join(name), text)
+            .map_err(|e| format!("cannot write {}: {e}", dir.join(name).display()))
+    };
+    write("build.zig", ZIG_WRAPPER_BUILD)?;
+    write(
+        "build.zig.zon",
+        &zig_wrapper_manifest(&dir, &project, &version),
+    )?;
+    let from_project = source
+        .strip_prefix(&project)
+        .map_err(|_| format!("{} is not in {}", source.display(), project.display()))?
+        .to_string_lossy()
+        .replace('\\', "/");
+    let prefix = dir.join("out");
+    let binary = prefix.join("bin").join(match cfg!(windows) {
+        true => "clew-debug.exe",
+        false => "clew-debug",
+    });
+    let _ = std::fs::remove_file(&binary);
+    let mut cmd = crate::spawn::command(zig);
+    cmd.arg("build")
+        .arg(format!("-Dclew-file={from_project}"))
+        .arg(format!("-Dclew-root={}", project.display()))
+        .arg("--prefix")
+        .arg(&prefix)
+        .arg("--cache-dir")
+        .arg(dir.join("cache"))
+        .current_dir(&dir);
+    match test {
+        None => {
+            cmd.arg("-Dclew-kind=exe");
+        }
+        Some(filter) => {
+            cmd.arg("-Dclew-kind=test");
+            if let Some(filter) = filter {
+                cmd.arg(format!("-Dclew-filter={filter}"));
+            }
+        }
+    }
+    let built = store::run_bounded(cmd, ZIG_BUILD_TIMEOUT)?;
+    if !built.status.success() || !binary.is_file() {
+        let said = String::from_utf8_lossy(&built.stderr);
+        let tail: Vec<&str> = said.lines().rev().take(40).collect();
+        let tail: Vec<&str> = tail.into_iter().rev().collect();
+        return Err(format!(
+            "zig could not build {} by its project's build.zig:\n{}",
             source.display(),
             tail.join("\n")
         ));
@@ -2648,6 +2951,208 @@ mod tests {
         info[12] = 9;
         assert_eq!(first_unit_language(&info, &abbrev), None);
         assert_eq!(first_unit_language(&info[..7], &abbrev), None);
+    }
+
+    /// A file of a `build.zig` project that does not build alone (it imports
+    /// a module the build declares) is built by the project's build, through
+    /// Clew's wrapper in its data directory: the project its dependency by a
+    /// relative path, the file named, an executable or the tests a filter
+    /// keeps; the binary installed as `clew-debug` is what is debugged, and
+    /// nothing is written into the project.
+    #[test]
+    #[cfg(unix)]
+    fn a_build_zig_projects_file_is_built_by_its_build_through_llvm() {
+        with_store("zig-project", |data| {
+            let dir = TempDir::new("debug-zig-project");
+            let bin = dir.join("bin");
+            script(&bin.join("lldb-dap"), "#!/bin/sh\n");
+            let (info, abbrev) = dwarf_unit(4, 0x0c, 0x05);
+            std::fs::write(dir.join("llvm.elf"), elf_with(&info, &abbrev)).unwrap();
+            let log = dir.join("zig.log");
+            script(
+                &bin.join("zig"),
+                &format!(
+                    "#!/bin/sh\ncase \"$1\" in\n  version) echo 0.15.2; exit 0 ;;\n  build-exe|test) echo \"error: no module named 'greet' available\" >&2; exit 1 ;;\nesac\necho \"$PWD $*\" >> '{log}'\nwhile [ $# -gt 0 ]; do [ \"$1\" = --prefix ] && prefix=\"$2\"; shift; done\n/bin/mkdir -p \"$prefix/bin\" && /bin/cp '{elf}' \"$prefix/bin/clew-debug\"\n",
+                    log = log.display(),
+                    elf = dir.join("llvm.elf").display()
+                ),
+            );
+            let _env = EnvVars::new().set("PATH", bin.as_os_str());
+            let project = dir.join("shop");
+            std::fs::create_dir_all(project.join("src")).unwrap();
+            std::fs::write(project.join("build.zig"), "// the project's\n").unwrap();
+            std::fs::write(
+                project.join("src/main.zig"),
+                "const greet = @import(\"greet\");\npub fn main() void {}\n",
+            )
+            .unwrap();
+            let spec = match resolve(
+                "native",
+                "src/main.zig",
+                &[],
+                &project,
+                &project,
+                &Default::default(),
+                None,
+            ) {
+                Ok(Resolution::Ready(spec)) => spec,
+                other => panic!("{other:?}"),
+            };
+            let built = PathBuf::from(spec.launch["program"].as_str().unwrap());
+            let wrapper = built.parent().unwrap().parent().unwrap().parent().unwrap();
+            assert!(
+                wrapper.starts_with(data.join("debug-builds/zig-project")),
+                "{built:?}"
+            );
+            assert_eq!(built.file_name().unwrap(), "clew-debug");
+            assert!(spec.launch.get(NOTICE).is_none(), "LLVM's: variables show");
+            let manifest = std::fs::read_to_string(wrapper.join("build.zig.zon")).unwrap();
+            let canonical = project.canonicalize().unwrap();
+            let relative = relative_path(&wrapper.canonicalize().unwrap(), &canonical);
+            assert!(
+                manifest.contains(&format!(".path = \"{}\"", relative.display()))
+                    && manifest.contains(".name = .clew_debug")
+                    && manifest.contains(ZIG_WRAPPER_FINGERPRINT),
+                "{manifest}"
+            );
+            assert!(wrapper.join(relative).join("build.zig").is_file());
+            assert_eq!(
+                std::fs::read_to_string(wrapper.join("build.zig")).unwrap(),
+                ZIG_WRAPPER_BUILD
+            );
+            let ran = std::fs::read_to_string(&log).unwrap();
+            let main = canonical.join("src/main.zig");
+            assert!(
+                ran.contains("-Dclew-file=src/main.zig")
+                    && ran.contains(&format!("-Dclew-root={}", canonical.display()))
+                    && ran.contains("-Dclew-kind=exe"),
+                "{ran}"
+            );
+            assert_eq!(
+                std::fs::read_dir(&project).unwrap().count(),
+                2,
+                "nothing written into the project"
+            );
+            // Its tests, by the filter.
+            let tests = build_zig_test(&bin.join("zig"), &main, Some("adds"), &project).unwrap();
+            assert!(tests.is_file());
+            let ran = std::fs::read_to_string(&log).unwrap();
+            assert!(
+                ran.contains("-Dclew-kind=test") && ran.contains("-Dclew-filter=adds"),
+                "{ran}"
+            );
+        });
+    }
+
+    /// The manifest names the wrapper as each Zig wants it, and the project
+    /// by a path relative to the wrapper.
+    #[test]
+    fn the_zig_wrapper_manifest_fits_its_zig() {
+        let dir = Path::new("/data/clew/debug-builds/zig-project/ab");
+        let project = Path::new("/home/me/shop");
+        let new = zig_wrapper_manifest(dir, project, "0.15.2\n");
+        assert!(
+            new.contains(".name = .clew_debug,")
+                && new.contains(".fingerprint = 0x8596ef575fe11909"),
+            "{new}"
+        );
+        assert!(
+            new.contains(".path = \"../../../../../home/me/shop\""),
+            "{new}"
+        );
+        let old = zig_wrapper_manifest(dir, project, "0.13.0");
+        assert!(
+            old.contains(".name = \"clew_debug\",") && !old.contains("fingerprint"),
+            "{old}"
+        );
+        assert_eq!(
+            relative_path(Path::new("/a/b/c"), Path::new("/a/x")),
+            PathBuf::from("../../x")
+        );
+    }
+
+    /// Live: a `build.zig` project whose program imports a module its build
+    /// declares, built by Zig and read by lldb — its variables there, as
+    /// Zig's own code generator leaves none: the program; a test of the
+    /// program's file, by its filter; and a test of a file that is no root
+    /// at all, built with the imports of the module that holds it. Needs
+    /// `zig` (0.14 to 0.17) and `lldb` on the PATH.
+    #[test]
+    #[ignore]
+    fn live_a_build_zig_projects_program_shows_its_variables() {
+        with_store("zig-project-live", |_| {
+            let dir = TempDir::new("debug-zig-live");
+            let project = dir.join("shop");
+            std::fs::create_dir_all(project.join("src")).unwrap();
+            std::fs::write(
+                project.join("build.zig"),
+                "const std = @import(\"std\");\npub fn build(b: *std.Build) void {\n    const target = b.standardTargetOptions(.{});\n    const optimize = b.standardOptimizeOption(.{});\n    const greet = b.createModule(.{ .root_source_file = b.path(\"src/greet.zig\") });\n    const exe = b.addExecutable(.{ .name = \"shop\", .root_module = b.createModule(.{ .root_source_file = b.path(\"src/main.zig\"), .target = target, .optimize = optimize, .imports = &.{.{ .name = \"greet\", .module = greet }} }) });\n    b.installArtifact(exe);\n    const tests = b.addTest(.{ .root_module = exe.root_module });\n    b.step(\"test\", \"Run the tests\").dependOn(&b.addRunArtifact(tests).step);\n}\n",
+            )
+            .unwrap();
+            std::fs::write(
+                project.join("src/greet.zig"),
+                "pub fn twice(n: u32) u32 {\n    return n * 2;\n}\n",
+            )
+            .unwrap();
+            std::fs::write(
+                project.join("src/main.zig"),
+                "const std = @import(\"std\");\nconst greet = @import(\"greet\");\npub fn main() void {\n    var total: u32 = 0;\n    total += greet.twice(21);\n    std.debug.print(\"{d}\\n\", .{total});\n}\ntest \"main adds\" {\n    var sum: u32 = 1;\n    sum += greet.twice(2);\n    try std.testing.expect(sum == 5);\n}\ntest \"main other\" {\n    try std.testing.expect(false);\n}\n",
+            )
+            .unwrap();
+            std::fs::write(
+                project.join("src/calc.zig"),
+                "const std = @import(\"std\");\nconst greet = @import(\"greet\");\npub fn quad(n: u32) u32 { return greet.twice(greet.twice(n)); }\ntest \"calc quads\" {\n    var got: u32 = 0;\n    got = quad(3);\n    try std.testing.expectEqual(@as(u32, 12), got);\n}\n",
+            )
+            .unwrap();
+            let lldb = |binary: &Path, at: &str, variable: &str| {
+                let commands = dir.join("lldb.txt");
+                std::fs::write(
+                    &commands,
+                    format!("breakpoint set --file {at}\nrun\nframe variable {variable}\nquit\n")
+                        .replacen(":", " --line ", 1),
+                )
+                .unwrap();
+                let out = std::process::Command::new("lldb")
+                    .arg("-b")
+                    .arg("-s")
+                    .arg(&commands)
+                    .arg(binary)
+                    .output()
+                    .unwrap();
+                String::from_utf8_lossy(&out.stdout).into_owned()
+            };
+            let zig = store::find_on_path_unresolved("zig").expect("zig on the PATH");
+            let binary = build_zig(&zig, &project.join("src/main.zig"), &project).unwrap();
+            assert_eq!(binary.file_name().unwrap(), "clew-debug");
+            assert_ne!(dwarf_language(&binary), Some(DW_LANG_ZIG), "built by LLVM");
+            let said = lldb(&binary, "main.zig:6", "total");
+            assert!(said.contains("total = 42"), "{said}");
+
+            let tests = build_zig_test(
+                &zig,
+                &project.join("src/main.zig"),
+                Some("main adds"),
+                &project,
+            )
+            .unwrap();
+            let said = lldb(&tests, "main.zig:11", "sum");
+            assert!(said.contains("sum = 5"), "{said}");
+            let ran = std::process::Command::new(&tests).output().unwrap();
+            assert!(
+                ran.status.success(),
+                "the filter keeps the failing test out"
+            );
+
+            let tests =
+                build_zig_test(&zig, &project.join("src/calc.zig"), None, &project).unwrap();
+            let said = lldb(&tests, "calc.zig:7", "got");
+            assert!(said.contains("got = 12"), "{said}");
+            assert_eq!(
+                std::fs::read_dir(&project).unwrap().count(),
+                2,
+                "the project untouched"
+            );
+        });
     }
 
     /// A `.zig` program is built for the session through LLVM — its cache
