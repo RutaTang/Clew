@@ -1266,10 +1266,18 @@ impl Resolver {
         // every file declaring it, where any is outside the folder found.
         let package_target = |segs: &[&str], dir: PathBuf| -> Target {
             let node = self.package_node(&segs.join("."));
+            // The files are sorted, so those under `dir` are one run: found
+            // by two binary searches, not a scan per import.
+            let outside = |files: &[PathBuf]| {
+                let start = files.partition_point(|f| f.as_path() < dir.as_path());
+                let end =
+                    files.partition_point(|f| f.as_path() < dir.as_path() || f.starts_with(&dir));
+                end - start != files.len()
+            };
             match declared
                 .namespaces
                 .and_then(|namespaces| namespaces.files(&node))
-                .is_some_and(|files| files.iter().any(|f| f.parent() != Some(dir.as_path())))
+                .is_some_and(outside)
             {
                 true => Target::Internal(node),
                 false => Target::Internal(dir),

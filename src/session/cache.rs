@@ -117,7 +117,9 @@ use crate::incremental::Version;
 /// `import`s are kept ([`CachedCalls::uses`], [`CachedCalls::imports`]), and
 /// a Scala call's qualifier ([`CachedCalls::qualifiers`]); an older entry has
 /// none of them.
-pub(crate) const CACHE_VERSION: u32 = 27;
+/// 28: a method of a class its grammar could not finish (Kotlin's, with a
+/// property named `where`) is still its class's ([`CachedCalls::owners`]).
+pub(crate) const CACHE_VERSION: u32 = 28;
 
 /// A cached symbol (the index entry minus the paths, which are reconstructed
 /// from the project root + relative path on load).

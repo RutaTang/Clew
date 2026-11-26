@@ -505,7 +505,13 @@ pub(crate) async fn run_task_async(task: Task<Message>) -> Vec<Message> {
             _ => None,
         }
     });
-    tokio::time::timeout(std::time::Duration::from_secs(30), outputs.collect())
+    // A large project read by the corpus harness takes longer than a unit
+    // test's task: `CLEW_TEST_TASK_SECS` raises the limit for it.
+    let secs = std::env::var("CLEW_TEST_TASK_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(30);
+    tokio::time::timeout(std::time::Duration::from_secs(secs), outputs.collect())
         .await
         .expect("the task did not finish")
 }

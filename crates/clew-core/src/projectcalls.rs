@@ -4200,11 +4200,47 @@ fn owner_from(node: Node, src: &str, lang: Lang) -> Option<String> {
                     return base_type_name(node_text(name, src));
                 }
             }
+            // A class the grammar could not finish (Kotlin's grammar takes
+            // a property named `where` for its keyword): its header is the
+            // error's first tokens, and its body's open brace still open.
+            "ERROR" => {
+                if let Some(name) = unfinished_class(n, node, src) {
+                    return Some(name);
+                }
+            }
             _ => {}
         }
         cur = n.parent();
     }
     None
+}
+
+/// The class whose header a parse error kept as its own tokens —
+/// `class Query (…) : Base {` — and whose body is still open where
+/// `inside` is: no `}` of the error's own closed it before.
+fn unfinished_class(error: Node, inside: Node, src: &str) -> Option<String> {
+    let mut cursor = error.walk();
+    let tokens: Vec<Node> = error.children(&mut cursor).collect();
+    let mut open: Option<String> = None;
+    let mut named: Option<String> = None;
+    for (i, token) in tokens.iter().enumerate() {
+        if token.start_byte() >= inside.start_byte() {
+            break;
+        }
+        match token.kind() {
+            "class" | "object" | "struct" | "enum" | "record" => {
+                named = tokens[i + 1..]
+                    .iter()
+                    .find(|t| t.is_named())
+                    .filter(|t| t.kind().ends_with("identifier"))
+                    .map(|t| node_text(*t, src).to_string());
+            }
+            "{" => open = named.take().or(open),
+            "}" => open = None,
+            _ => {}
+        }
+    }
+    open.and_then(|name| base_type_name(&name))
 }
 
 /// The Elixir module a definition at `node` is in, by its full name: each
@@ -7584,6 +7620,32 @@ def main():
             !e.iter()
                 .any(|(_, b)| b == "/p/contrib/lib/helpers.rb:mock_app"),
             "{e:?}"
+        );
+    }
+
+    /// A class the grammar could not finish still owns its methods: Kotlin's
+    /// grammar reads a property named `where` as its keyword, and the whole
+    /// class became an error, every method no class's — so `q.limit(1)` on a
+    /// value of no known type, a class's method, reached none.
+    #[test]
+    fn an_unfinished_class_still_owns_its_methods() {
+        let query = "package shop\n\nopen class Query(where: Int?) {\n    fun limit(n: Int): Query = this\n\n    fun where(predicate: Int): Query {\n        where?.let { error(\"twice\") }\n        where = predicate\n        return this\n    }\n}\n";
+        // The grammar's error, which the owner is recovered through.
+        let tree = crate::highlight::parse(query, Lang::Kotlin).unwrap();
+        assert!(tree.root_node().has_error());
+        let calls = FileCalls::read(Path::new("/p/src/Query.kt"), query).unwrap();
+        assert_eq!(calls.owners.get(&4).map(String::as_str), Some("Query"));
+        let g = graph(&[
+            ("/p/src/Query.kt", query),
+            (
+                "/p/src/Run.kt",
+                "package shop\n\nfun run() {\n    val q = open()\n    q.limit(1)\n}\n",
+            ),
+        ]);
+        assert!(
+            has(&g, "/p/src/Run.kt:run", "/p/src/Query.kt:limit"),
+            "{:?}",
+            edges(&g)
         );
     }
 
