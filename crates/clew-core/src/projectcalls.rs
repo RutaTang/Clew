@@ -162,6 +162,10 @@ pub struct FileContext {
     /// parameters, by its definition line ([`parameter_kinds`]): what
     /// arguments it can take, to tell its overloads of one arity apart.
     pub parameters: Vec<(usize, String)>,
+    /// A Go file's struct fields and their types (`("Context", "Request",
+    /// "http.Request")`), pointers and embedding read through: what a chain
+    /// of fields from a value is ([`THROUGH`]).
+    pub fields: Vec<(String, String, String)>,
 }
 
 /// The mark a receiver's type starts with when the receiver was assigned
@@ -169,6 +173,12 @@ pub struct FileContext {
 /// name, the type its definitions declare it returns, worked out once the
 /// whole project is read.
 pub const RETURNED: &str = "\u{2192}";
+
+/// The mark a receiver's type starts with when the receiver is a chain of
+/// fields from a value of a known type (Go's `c.Request.Header` with `c
+/// *Context`): `THROUGH`, the value's type, then each field, `|`-separated
+/// — the type of the last, worked out once every struct's fields are read.
+pub const THROUGH: &str = "\u{21a6}";
 
 /// The kinds of definition that are types another can extend or a value be
 /// declared as.
@@ -713,6 +723,62 @@ fn declared_arity(src: &str, l: &Located, lang: Lang) -> Option<(u8, u8)> {
     ))
 }
 
+/// A Go file's struct fields with their types ([`FileContext::fields`]):
+/// `Request *http.Request` is `Request` of type `http.Request`, `a, b int`
+/// two, an embedded `*Engine` the field `Engine`; a field of a map, slice,
+/// function or inline struct type is none this follows.
+fn go_struct_fields(src: &str, symbols: &[Located]) -> Vec<(String, String, String)> {
+    let mut out = Vec::new();
+    for l in symbols
+        .iter()
+        .filter(|l| is_type_kind(&l.symbol.kind, Lang::Go))
+    {
+        let Some(text) = src.get(l.declaration.0..l.declaration.1) else {
+            continue;
+        };
+        let Some(open) = text
+            .find("struct")
+            .and_then(|at| text[at..].find('{').map(|b| at + b))
+        else {
+            continue;
+        };
+        let mut depth = 0i32;
+        for line in text[open..].lines() {
+            let code = line.split("//").next().unwrap_or("");
+            let code = code.split('`').next().unwrap_or("").trim();
+            let at_top = depth == 1;
+            depth += code.matches('{').count() as i32 - code.matches('}').count() as i32;
+            if !at_top || code.is_empty() || code.contains(['{', '}', '(', '[']) {
+                continue;
+            }
+            let tokens: Vec<&str> = code.split_whitespace().collect();
+            let simple = |t: &str| {
+                let t = t.trim_start_matches('*');
+                !t.is_empty()
+                    && t.chars()
+                        .all(|c| c == '_' || c == '.' || c.is_alphanumeric())
+            };
+            match tokens.as_slice() {
+                [embedded] if simple(embedded) => {
+                    let ty = embedded.trim_start_matches('*');
+                    let name = ty.rsplit('.').next().unwrap_or(ty);
+                    out.push((l.symbol.name.clone(), name.to_string(), ty.to_string()));
+                }
+                [names @ .., ty] if !names.is_empty() && simple(ty) => {
+                    let ty = ty.trim_start_matches('*');
+                    for name in names.iter().flat_map(|n| n.split(',')) {
+                        if is_plain_name(name) {
+                            out.push((l.symbol.name.clone(), name.to_string(), ty.to_string()));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
 /// The names a Go file calls its imports by: an import's alias, else its
 /// path's last element — a major version's (`/v10`) or a `.vN` suffix
 /// passed over (`validator`, `yaml`). A blank or dot import names none.
@@ -914,6 +980,20 @@ pub fn context_in(src: &str, lang: Lang, symbols: &[Located]) -> FileContext {
             {
                 bases.extend(ruby_mixins(body));
             }
+            // A Kotlin class's name calls its companion object's members,
+            // those it inherits too (`User.new { … }` with `companion
+            // object : IntEntityClass<User>(Users)`).
+            if lang == Lang::Kotlin
+                && let Some(body) = src.get(l.declaration.0..l.declaration.1)
+            {
+                for (at, _) in body.match_indices("companion object") {
+                    let header = &body[at + "companion ".len()..];
+                    let header = &header[..header.find(['{', '\n']).unwrap_or(header.len())];
+                    if header.contains(':') {
+                        bases.extend(crate::heritage::inherited_names(header, Some(lang.key())));
+                    }
+                }
+            }
             bases.retain(|b| *b != l.symbol.name);
             bases.dedup();
             Some((l.symbol.name.clone(), bases))
@@ -1053,6 +1133,10 @@ pub fn context_in(src: &str, lang: Lang, symbols: &[Located]) -> FileContext {
         arities,
         returns,
         parameters,
+        fields: match lang {
+            Lang::Go => go_struct_fields(src, symbols),
+            _ => Vec::new(),
+        },
     }
 }
 
@@ -1989,6 +2073,53 @@ impl ProjectCallGraph {
             }
         }
         let declared = |ty: &str| declared_types.contains(ty);
+        // Every Go struct's fields, by the struct's name and the field's.
+        let field_types: HashMap<(&str, &str), &str> = files
+            .iter()
+            .flat_map(|f| {
+                f.context
+                    .fields
+                    .iter()
+                    .map(|(owner, field, ty)| ((owner.as_str(), field.as_str()), ty.as_str()))
+            })
+            .collect();
+        // The type a chain of fields ends in ([`THROUGH`]): `None` where a
+        // field is none this has read; the field of an embedded struct is
+        // its embedder's too.
+        let through = |chain: &str| -> Option<String> {
+            let mut parts = chain.split('|');
+            let mut ty: String = parts.next()?.to_string();
+            for field in parts {
+                // Another package's value: its fields are that package's.
+                if ty
+                    .split_once('.')
+                    .is_some_and(|(pkg, _)| !go_packages.contains_key(pkg))
+                {
+                    return Some(ty);
+                }
+                let mut level: Vec<String> = vec![ty.rsplit('.').next().unwrap_or(&ty).to_string()];
+                let mut next = None;
+                for _ in 0..4 {
+                    if let Some(found) = level
+                        .iter()
+                        .find_map(|t| field_types.get(&(t.as_str(), field)))
+                    {
+                        next = Some(found.to_string());
+                        break;
+                    }
+                    level = level
+                        .iter()
+                        .flat_map(|t| bases_of.get(t.as_str()).into_iter().flatten())
+                        .map(|b| b.to_string())
+                        .collect();
+                    if level.is_empty() {
+                        break;
+                    }
+                }
+                ty = next?;
+            }
+            Some(ty)
+        };
         // Play's templates, by the function each compiles to.
         let templates: HashMap<String, usize> = (0..nodes.len())
             .filter_map(|i| {
@@ -2103,35 +2234,65 @@ impl ProjectCallGraph {
                 let callee_key: &str = cs.callee.as_str();
                 let qualifier_key: Option<&str> = cs.qualifier.as_deref();
                 let typed_call: CallSite;
+                // Whether the receiver's type is a factory's guess.
+                let mut guessed = false;
                 let cs = match &cs.receiver {
                     Some(Receiver::Type(t) | Receiver::Declared(t)) if t.starts_with(RETURNED) => {
-                        let function = &t[RETURNED.len()..];
-                        let returned = returned_types
-                            .entry(function.to_string())
-                            .or_insert_with(|| {
-                                let name = logical_name(function, Some(fc.lang));
-                                let mut types = defs
-                                    .named
-                                    .get(name)
-                                    .into_iter()
-                                    .flat_map(|named| named.all.iter().copied())
-                                    .map(|i| node_returns[i].as_deref());
-                                let first = types.next().flatten()?;
-                                // A type the project declares: a library's
-                                // (`Future`, `String`) says less than the
-                                // value of no known type did.
-                                (types.all(|t| t == Some(first))
-                                    && (declared_types.contains(first)
-                                        || project_types.contains(first)))
-                                .then(|| first.to_string())
+                        // A factory's: the type it is called on, where the
+                        // function says nothing.
+                        let (function, fallback) = match t[RETURNED.len()..].split_once('|') {
+                            Some((function, fallback)) => (function, Some(fallback)),
+                            None => (&t[RETURNED.len()..], None),
+                        };
+                        let returned = (!function.is_empty())
+                            .then(|| {
+                                returned_types
+                                    .entry(function.to_string())
+                                    .or_insert_with(|| {
+                                        let name = logical_name(function, Some(fc.lang));
+                                        let mut types = defs
+                                            .named
+                                            .get(name)
+                                            .into_iter()
+                                            .flat_map(|named| named.all.iter().copied())
+                                            .map(|i| node_returns[i].as_deref());
+                                        let first = types.next().flatten()?;
+                                        // A type the project declares: a library's
+                                        // (`Future`, `String`) says less than the
+                                        // value of no known type did.
+                                        (types.all(|t| t == Some(first))
+                                            && (declared_types.contains(first)
+                                                || project_types.contains(first)))
+                                        .then(|| first.to_string())
+                                    })
+                                    .clone()
                             })
-                            .clone();
+                            .flatten();
+                        guessed = returned.is_none() && fallback.is_some();
+                        let returned = returned.or_else(|| fallback.map(str::to_string));
                         let exact = matches!(cs.receiver, Some(Receiver::Type(_)));
                         typed_call = CallSite {
                             receiver: returned.map(|ty| match exact {
                                 true => Receiver::Type(ty),
                                 false => Receiver::Declared(ty),
                             }),
+                            ..cs.clone()
+                        };
+                        &typed_call
+                    }
+                    // A chain of fields: its last field's type. Another
+                    // package's (`http.Header`) is a library's value, whose
+                    // methods are none of the project's.
+                    Some(Receiver::Type(t)) if t.starts_with(THROUGH) => {
+                        let ty = through(&t[THROUGH.len()..]);
+                        if ty.as_deref().is_some_and(|ty| {
+                            ty.split_once('.')
+                                .is_some_and(|(pkg, _)| !go_packages.contains_key(pkg))
+                        }) {
+                            continue;
+                        }
+                        typed_call = CallSite {
+                            receiver: ty.map(Receiver::Type),
                             ..cs.clone()
                         };
                         &typed_call
@@ -2355,7 +2516,7 @@ impl ProjectCallGraph {
                         // whose classes name every base: one it inherits from
                         // a library (`hashCode`, an `Activity`'s `onCreate`),
                         // or one the project extends it with.
-                        (true, true) if closed_hierarchy(fc.lang) => callees
+                        (true, true) if closed_hierarchy(fc.lang) && !guessed => callees
                             .iter()
                             .copied()
                             .filter(|c| extension_nodes.contains(c))
@@ -5331,6 +5492,28 @@ fn receiver_of(
         *unbound = Some(receiver.to_string());
         return None;
     }
+    // A Go chain of fields from a value of a known type (`c.Request.Header`
+    // with `c *Context`): the last field's type, once the structs are read.
+    if lang == Lang::Go
+        && let Some((root, path)) = receiver.split_once('.')
+        && is_plain_name(root)
+        && root.starts_with(char::is_lowercase)
+        && path.split('.').all(is_plain_name)
+    {
+        let places = scope.places;
+        let said = bindings
+            .entry((scope.from, root.to_string()))
+            .or_insert_with(|| Bindings::from(scope.from, places))
+            .said_before(call.start_byte(), root, scope, src, lang);
+        if let Said::Type(ty, _) = said
+            && !ty.starts_with(RETURNED)
+        {
+            return Some(Receiver::Type(format!(
+                "{THROUGH}{ty}|{}",
+                path.replace('.', "|")
+            )));
+        }
+    }
     if !is_plain_name(receiver) {
         // A chain on a value just built: `IO.pure(1).flatMap(…)`,
         // `new Cart().add(…)`, `Cart(items).total()`.
@@ -5338,8 +5521,13 @@ fn receiver_of(
             if let Some(ty) = constructed_type(receiver, lang) {
                 return Some(Receiver::Type(ty));
             }
-            if let Some(ty) = factory_type(receiver, lang) {
+            if lang == Lang::CSharp
+                && let Some(ty) = service_type(receiver)
+            {
                 return Some(Receiver::Declared(ty));
+            }
+            if let Some(ty) = factory_type(receiver, lang) {
+                return Some(Receiver::Declared(factory_guess(receiver, &ty, lang)));
             }
         }
         return None;
@@ -6010,6 +6198,14 @@ fn binding_at(head: &str, after: &str, lang: Lang) -> Binding {
             .collect();
         return Binding::Typed(format!("{pkg}.{name}"), true);
     }
+    // .NET's service provider hands out the `T` it is asked for:
+    // `sp.GetRequiredService<ApplicationDbContextInitialiser>()`.
+    if lang == Lang::CSharp
+        && let Some(rhs) = assigned
+        && let Some(ty) = service_type(rhs)
+    {
+        return Binding::Typed(ty, false);
+    }
     // `std::make_shared<logger>(…)`, `std::make_unique<ns::Cart>(…)`: a
     // smart pointer to a new `T`, whose methods its `->` calls.
     if lang == Lang::Cpp
@@ -6026,7 +6222,7 @@ fn binding_at(head: &str, after: &str, lang: Lang) -> Binding {
             None => match declared_type(head, lang) {
                 Some(ty) if declares(head, lang) => Binding::Typed(ty, false),
                 _ => match factory_type(rhs, lang) {
-                    Some(ty) => Binding::Typed(ty, false),
+                    Some(ty) => Binding::Typed(factory_guess(rhs, &ty, lang), false),
                     // A function's result: the type it declares, once the
                     // project is read.
                     None => match returned_call(rhs, lang) {
@@ -6090,14 +6286,32 @@ fn binding_at(head: &str, after: &str, lang: Lang) -> Binding {
     {
         return Binding::Typed(ty, true);
     }
-    // Go writes the type after the name: `(c *Cart)`, `var c Cart`.
+    // Go writes the type after the name: `(c *Cart)`, `var c Cart`, and
+    // another package's by its package (`w *httptest.ResponseRecorder`,
+    // whose methods are that package's).
     if lang == Lang::Go
         && (before.ends_with(['(', ',']) || ends_with_word("var"))
-        && let Some(ty) = leading_type(after, lang)
+        && let Some(ty) = go_type_path(after).or_else(|| leading_type(after, lang))
     {
         return Binding::Typed(ty, false);
     }
     Binding::Not
+}
+
+/// The package-qualified type a Go declaration names after a name — `
+/// *httptest.ResponseRecorder)` is `httptest.ResponseRecorder` — or `None`
+/// for a type of the file's own package, a slice, a map or a function.
+fn go_type_path(after: &str) -> Option<String> {
+    let t = after.trim_start().trim_start_matches('*');
+    let end = t
+        .find(|c: char| !(c == '_' || c == '.' || c.is_alphanumeric()))
+        .unwrap_or(t.len());
+    let (pkg, name) = t[..end].split_once('.')?;
+    (pkg.starts_with(char::is_lowercase)
+        && is_plain_name(pkg)
+        && name.starts_with(char::is_uppercase)
+        && is_plain_name(name))
+    .then(|| format!("{pkg}.{name}"))
 }
 
 /// Whether the occurrence between `head` and `after` declares a name of
@@ -6379,6 +6593,45 @@ fn constructed_type(rhs: &str, lang: Lang) -> Option<String> {
     whole_expression(rest).then(|| ty.to_string())
 }
 
+/// The `T` .NET's dependency injection resolves, the whole expression:
+/// `….GetRequiredService<T>()`, `GetService<T>()` and their keyed forms —
+/// `T`'s name, its own type arguments dropped (`RoleManager` for
+/// `RoleManager<IdentityRole>`).
+fn service_type(rhs: &str) -> Option<String> {
+    // The statement alone: what follows its `;` is no part of it.
+    let rhs = rhs.split(';').next().unwrap_or(rhs).trim();
+    let open = [
+        "GetRequiredService<",
+        "GetService<",
+        "GetRequiredKeyedService<",
+        "GetKeyedService<",
+    ]
+    .iter()
+    .filter_map(|f| rhs.find(f).map(|at| at + f.len()))
+    .min()?;
+    let inner = &rhs[open..];
+    let mut depth = 0usize;
+    let close = inner.char_indices().find_map(|(i, c)| match c {
+        '<' => {
+            depth += 1;
+            None
+        }
+        '>' if depth == 0 => Some(i),
+        '>' => {
+            depth -= 1;
+            None
+        }
+        _ => None,
+    })?;
+    let after = inner[close + 1..].trim_start();
+    if !after.starts_with('(') || !whole_expression(after) {
+        return None;
+    }
+    let ty = inner[..close].split('<').next()?.trim();
+    let ty = ty.rsplit('.').next().unwrap_or(ty);
+    type_like(ty, Lang::CSharp).then(|| ty.to_string())
+}
+
 /// The `T` a C++ smart-pointer factory builds, the whole expression:
 /// `std::make_shared<T>(…)`, `std::make_unique<ns::T>(…)`,
 /// `std::allocate_shared<T>(alloc, …)` — `T`'s last segment, its template
@@ -6417,6 +6670,15 @@ fn cpp_made_type(rhs: &str) -> Option<String> {
     (identifier && after.starts_with('(') && whole_expression(after)).then(|| ty.to_string())
 }
 
+/// A factory's value ([`factory_type`]) as a receiver's type: the type its
+/// function's definitions declare they return, once the project is read
+/// (`UserTable.selectAll()` is a `Query`, not a `UserTable`), else the type
+/// it is called on — a guess: `RETURNED`, the function, `|`, the type.
+fn factory_guess(rhs: &str, ty: &str, lang: Lang) -> String {
+    let function = returned_call(rhs, lang).unwrap_or_default();
+    format!("{RETURNED}{function}|{ty}")
+}
+
 /// The type a JVM, C# or Dart factory names, its value taken as of that
 /// type (or a subtype): Scala's `IO.pure(1)` and `IO.unit`, Kotlin's
 /// `Cart.create()`, Java's `List.of(…)`, C#'s `Cart.Create()` — a type's
@@ -6438,9 +6700,15 @@ fn factory_type(rhs: &str, lang: Lang) -> Option<String> {
         .find(|c: char| !(c == '_' || c == '.' || c.is_alphanumeric()))
         .unwrap_or(rhs.len());
     let segments: Vec<&str> = rhs[..path_len].split('.').collect();
-    let [.., ty, function] = segments.as_slice() else {
+    let [before @ .., ty, function] = segments.as_slice() else {
         return None;
     };
+    // C# names its properties in Pascal case as its types: after a value
+    // (`scope.ServiceProvider.GetRequiredService<T>()`) a name is its
+    // member, no type — a namespace is Pascal case too.
+    if lang == Lang::CSharp && before.iter().any(|s| s.starts_with(char::is_lowercase)) {
+        return None;
+    }
     let factory = match lang {
         // C# names its methods in Pascal case.
         Lang::CSharp => function.starts_with(char::is_alphabetic),
@@ -6993,7 +7261,15 @@ fn zig_container_of(node: Node, src: &str) -> Option<String> {
             return n
                 .named_children(&mut cursor)
                 .filter(|d| d.kind() == "variable_declaration")
-                .find(|d| node_text(*d, src).contains("@This()"))
+                // `const Analyser = @This();` itself — not a struct whose
+                // method takes `self: *@This()`.
+                .find(|d| {
+                    node_text(*d, src)
+                        .split_once('=')
+                        .is_some_and(|(_, value)| {
+                            value.trim().trim_end_matches(';').trim() == "@This()"
+                        })
+                })
                 .and_then(|d| {
                     let mut c = d.walk();
                     d.named_children(&mut c)
@@ -9379,16 +9655,20 @@ def main():
             ),
             declared
         );
-        // A value a type's factory makes, as that type: Scala's `IO.pure`,
-        // Kotlin's, Java's, C#'s; an annotation says otherwise first.
-        let io = Some(Receiver::Declared("IO".into()));
+        // A value a type's factory makes: what the factory's definitions
+        // say it returns, else (a guess) the type it is called on — Scala's
+        // `IO.pure`, Kotlin's, Java's, C#'s; an annotation says otherwise
+        // first.
+        let guess = |function: &str, ty: &str| {
+            Some(Receiver::Declared(format!("{RETURNED}{function}|{ty}")))
+        };
         assert_eq!(
             receiver(
                 "a.scala",
                 "def f() = {\n  val io = IO.pure(1)\n  io.flatMap(g)\n}\n",
                 "flatMap"
             ),
-            io
+            guess("pure", "IO")
         );
         assert_eq!(
             receiver(
@@ -9396,7 +9676,7 @@ def main():
                 "def f() = {\n  val io = IO.unit\n  io.flatMap(g)\n}\n",
                 "flatMap"
             ),
-            io
+            guess("", "IO")
         );
         assert_eq!(
             receiver(
@@ -9404,7 +9684,7 @@ def main():
                 "fun f() {\n  val c = Cart.create()\n  c.total()\n}\n",
                 "total"
             ),
-            declared
+            guess("create", "Cart")
         );
         assert_eq!(
             receiver(
@@ -9420,7 +9700,7 @@ def main():
                 "class A {\n  void F() {\n    var c = Cart.Create();\n    c.Total();\n  }\n}\n",
                 "Total"
             ),
-            declared
+            guess("Create", "Cart")
         );
         // A field, by what its class declares it as: Java's, Kotlin's
         // constructor property, TypeScript's parameter property; with
@@ -11040,7 +11320,11 @@ def main():
             ),
             (
                 "/p/src/t.zig",
-                "pub fn reset() void {}\npub const Context = struct {\n    pub fn reset(self: *Context) void {}\n    pub fn read(self: *Context) void {}\n};\n",
+                "pub fn reset() void {}\npub const Context = struct {\n    pub fn reset(self: *Context) void {}\n    pub fn read(self: *Context) void {}\n};\npub const Result = struct {\n    pub fn deinit(self: *@This()) void {}\n};\npub fn collect() Result {\n    return .{};\n}\n",
+            ),
+            (
+                "/p/src/sub/use.zig",
+                "const t = @import(\"../t.zig\");\ntest \"collects\" {\n    _ = t.collect();\n}\nfn go() void {\n    _ = t.collect();\n}\n",
             ),
             (
                 "/p/src/buffer.zig",
@@ -11057,6 +11341,9 @@ def main():
             "{:?}",
             edges(&g)
         );
+        // A file's own function after a struct whose method takes
+        // `self: *@This()`, imported from a folder below.
+        assert_eq!(reached(&g, "go"), ["collect:9"], "{:?}", edges(&g));
         // Dart.
         let dart = "class Temperature {\n  const Temperature({required this.value});\n  factory Temperature.fromJson(Map<String, dynamic> json) => Temperature(value: 0);\n  final int value;\n}\nclass BlocBase {\n  void onChange(int c) {}\n}\nmixin Hydrated on BlocBase {\n  void onChange(int c) {}\n}\nclass Bloc extends BlocBase {}\nclass HydratedBloc extends Bloc with Hydrated {}\nclass MyBloc extends HydratedBloc {}\nvoid a() {\n  Temperature(value: 1);\n}\nvoid b() {\n  MyBloc().onChange(1);\n}\n";
         let g = graph(&[("/p/lib/weather.dart", dart)]);
@@ -11093,6 +11380,95 @@ def main():
                 "~basic_memory_buffer"
             ],
             "the class, its constructor and its destructor"
+        );
+    }
+
+    /// A Go chain of fields from a typed value is of its last field's type:
+    /// `c.Request.Header.Set(…)` with `Request *http.Request` is the
+    /// library's `Header.Set`, never the project's `Context.Set`;
+    /// `c.engine.router.Handle(…)` is `Router`'s; a chain from a library's
+    /// value (`w.Body.String()`) is the library's.
+    #[test]
+    fn a_go_field_chain_has_its_last_fields_type() {
+        let src = "package gin\n\nimport (\n\t\"net/http\"\n\t\"net/http/httptest\"\n)\n\ntype Context struct {\n\tRequest *http.Request\n\tengine  *Engine\n\tKeys    map[string]any\n}\n\ntype Engine struct {\n\trouter *Router\n}\n\ntype Router struct{}\n\nfunc (r *Router) Handle(p string) {}\n\nfunc (c *Context) Set(k string, v any) {}\n\ntype Key string\n\nfunc (k Key) String() string { return \"\" }\n\nfunc (c *Context) Header() {\n\tc.Request.Header.Set(\"a\", \"b\")\n}\n\nfunc (c *Context) Route() {\n\tc.engine.router.Handle(\"/\")\n}\n\nfunc probe(w *httptest.ResponseRecorder) {\n\t_ = w.Body.String()\n}\n";
+        let g = graph(&[("/p/context.go", src)]);
+        let reached = |caller: &str| {
+            let at = (0..g.node_count())
+                .find(|&n| g.node(n).name == caller)
+                .unwrap();
+            let mut out: Vec<String> = g
+                .callees_of(at)
+                .iter()
+                .map(|&c| format!("{}:{}", g.node(c).name, g.node(c).line))
+                .collect();
+            out.sort();
+            out
+        };
+        assert_eq!(reached("Header"), Vec::<String>::new(), "{:?}", edges(&g));
+        assert_eq!(reached("Route"), ["Handle:20"], "{:?}", edges(&g));
+        assert_eq!(reached("probe"), Vec::<String>::new(), "{:?}", edges(&g));
+        let fc = FileCalls::read(Path::new("/p/context.go"), src).unwrap();
+        assert!(fc.context.fields.contains(&(
+            "Context".to_string(),
+            "Request".to_string(),
+            "http.Request".to_string()
+        )));
+        assert!(!fc.context.fields.iter().any(|(_, f, _)| f == "Keys"));
+    }
+
+    /// A Kotlin class's name calls its companion object's members, those it
+    /// inherits too; a factory's value is of the type its function returns
+    /// (`Users.selectAll()` is a `Query`), the type it is called on a guess
+    /// that never makes a method the library's.
+    #[test]
+    fn a_kotlin_companion_and_a_factorys_return() {
+        let src = "open class Query {\n    fun where(op: Int): Query = this\n}\nopen class Table {\n    fun selectAll(): Query = Query()\n}\nobject Users : Table()\nopen class EntityClass<T> {\n    fun new(init: Int): T = TODO()\n}\nopen class IntEntityClass<T> : EntityClass<T>()\nclass User {\n    companion object : IntEntityClass<User>()\n}\nfun a() {\n    Users.selectAll().where(1)\n}\nfun b() {\n    User.new(1)\n}\n";
+        let g = graph(&[("/p/src/Dao.kt", src)]);
+        let reached = |caller: &str| {
+            let at = (0..g.node_count())
+                .find(|&n| g.node(n).name == caller)
+                .unwrap();
+            let mut out: Vec<String> = g
+                .callees_of(at)
+                .iter()
+                .map(|&c| format!("{}:{}", g.node(c).name, g.node(c).line))
+                .collect();
+            out.sort();
+            out
+        };
+        assert_eq!(reached("a"), ["selectAll:5", "where:2"], "{:?}", edges(&g));
+        assert_eq!(reached("b"), ["new:9"], "{:?}", edges(&g));
+    }
+
+    /// .NET's service provider hands out the `T` asked for — a project
+    /// class's methods, or a library's (`RoleManager<IdentityRole>`); a C#
+    /// property in Pascal case after a value is no factory's type.
+    #[test]
+    fn a_csharp_service_is_the_type_asked_for() {
+        let src = "public class ApplicationDbContextInitialiser\n{\n    public Task InitialiseAsync() => Task.CompletedTask;\n}\npublic class DatabaseResetter\n{\n    public static Task<DatabaseResetter> CreateAsync(string c) => null;\n}\npublic static class Init\n{\n    public static async Task A(IServiceScope scope)\n    {\n        var initialiser = scope.ServiceProvider.GetRequiredService<ApplicationDbContextInitialiser>();\n        await initialiser.InitialiseAsync();\n    }\n    public static async Task B(IServiceScope scope)\n    {\n        var roleManager = scope.ServiceProvider.GetRequiredService<RoleManager<IdentityRole>>();\n        await roleManager.CreateAsync(new IdentityRole(\"x\"));\n    }\n    public static async Task C(IServiceProvider sp)\n    {\n        await sp.GetService<ApplicationDbContextInitialiser>().InitialiseAsync();\n    }\n}\n";
+        let g = graph(&[("/p/src/Init.cs", src)]);
+        let reached = |caller: &str| {
+            let at = (0..g.node_count())
+                .find(|&n| g.node(n).name == caller)
+                .unwrap();
+            let mut out: Vec<String> = g
+                .callees_of(at)
+                .iter()
+                .map(|&c| format!("{}:{}", g.node(c).name, g.node(c).line))
+                .collect();
+            out.sort();
+            out
+        };
+        assert_eq!(reached("A"), ["InitialiseAsync:3"], "{:?}", edges(&g));
+        assert_eq!(reached("B"), Vec::<String>::new(), "{:?}", edges(&g));
+        assert_eq!(reached("C"), ["InitialiseAsync:3"], "{:?}", edges(&g));
+        assert_eq!(
+            factory_type("scope.ServiceProvider.GetRequiredService()", Lang::CSharp),
+            None
+        );
+        assert_eq!(
+            factory_type("Cart.Create()", Lang::CSharp).as_deref(),
+            Some("Cart")
         );
     }
 

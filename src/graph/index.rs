@@ -336,6 +336,7 @@ fn to_cached_calls(calls: &FileCalls) -> CachedCalls {
             .collect(),
         returns: calls.context.returns.clone(),
         parameters: calls.context.parameters.clone(),
+        fields: calls.context.fields.clone(),
     }
 }
 
@@ -456,6 +457,7 @@ fn from_cached_calls(abs: &Path, cached: &CachedCalls) -> Option<FileCalls> {
                 .collect::<Option<Vec<_>>>()?,
             returns: cached.returns.clone(),
             parameters: cached.parameters.clone(),
+            fields: cached.fields.clone(),
         },
     })
 }

@@ -148,7 +148,11 @@ use crate::incremental::Version;
 /// declares is `~Name`; a Dart named constructor is its second name's and a
 /// mixin owns its methods; a C++ parameter list that shows a default gives
 /// its fewest arguments; Zig's file imports qualify their calls.
-pub(crate) const CACHE_VERSION: u32 = 38;
+/// 39: a Go file's struct fields ([`CachedCalls::fields`]), a chain of
+/// fields from a typed value as a receiver, and a Go parameter's package;
+/// a factory's value by its function's return; a Kotlin class's companion
+/// object's bases among its own.
+pub(crate) const CACHE_VERSION: u32 = 39;
 
 /// A cached symbol (the index entry minus the paths, which are reconstructed
 /// from the project root + relative path on load).
@@ -284,6 +288,10 @@ pub struct CachedCalls {
     /// (`clew_core::projectcalls::FileContext::parameters`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub parameters: Vec<(usize, String)>,
+    /// A Go file's struct fields and their types
+    /// (`clew_core::projectcalls::FileContext::fields`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fields: Vec<(String, String, String)>,
 }
 
 /// Everything cached about one file: how to confirm it is unchanged (mtime,
@@ -417,6 +425,7 @@ mod tests {
                 arities: vec![3, 1, 2],
                 returns: vec![(3, "Cart".into())],
                 parameters: vec![(3, "s,i".into())],
+                fields: vec![("Context".into(), "Request".into(), "http.Request".into())],
             }),
         }
     }
