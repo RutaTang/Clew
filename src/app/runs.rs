@@ -62,6 +62,7 @@ impl ParkedDebug {
             trace_cut: false,
             trace_program: None,
             pending_reason: String::new(),
+            step_from: None,
             said: None,
             ran_for: None,
             trail_fns: Default::default(),
@@ -103,6 +104,7 @@ impl App {
         swap(&mut self.debug.trace_cut, &mut p.trace_cut);
         swap(&mut self.debug.trace_program, &mut p.trace_program);
         swap(&mut self.debug.pending_reason, &mut p.pending_reason);
+        swap(&mut self.debug.step_from, &mut p.step_from);
         swap(&mut self.debug.said, &mut p.said);
         swap(&mut self.debug.ran_for, &mut p.ran_for);
         swap(&mut self.debug.trail_fns, &mut p.trail_fns);

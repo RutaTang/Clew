@@ -773,6 +773,54 @@ pub enum DebugCmd {
     StepOut,
 }
 
+/// Where a Step Over started: its frame (by name, file and depth), and the
+/// line and column it stood at. A debugger that stops at each of a line's
+/// positions (Dart's VM: `final sum = a + b;` twice) stops again further
+/// along the same line, which is no step to the reader — Step Over goes on
+/// until the line changes, `repeats` times at most. A loop on one line goes
+/// back to an earlier column, and stops there each time round.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StepFrom {
+    pub name: String,
+    pub path: Option<std::path::PathBuf>,
+    pub line: usize,
+    pub column: usize,
+    pub depth: usize,
+    pub repeats: u8,
+}
+
+impl StepFrom {
+    /// The most times one Step Over steps on along its line.
+    pub const MAX_REPEATS: u8 = 8;
+
+    /// Where a step from the innermost of `frames` starts.
+    pub fn of(frames: &[crate::dap::StackFrame]) -> Option<StepFrom> {
+        let top = frames.first()?;
+        Some(StepFrom {
+            name: top.name.clone(),
+            path: top.path.clone(),
+            line: top.line,
+            column: top.column,
+            depth: frames.len(),
+            repeats: 0,
+        })
+    }
+
+    /// Whether a step that stopped at `frames` stopped further along this
+    /// one's line, in its frame: no step to the reader, so it goes on.
+    pub fn steps_on(&self, frames: &[crate::dap::StackFrame]) -> bool {
+        let Some(top) = frames.first() else {
+            return false;
+        };
+        self.repeats < Self::MAX_REPEATS
+            && frames.len() == self.depth
+            && top.name == self.name
+            && top.path == self.path
+            && top.line == self.line
+            && top.column > self.column
+    }
+}
+
 /// One stop of a debug run as the trace keeps it: why the program stopped
 /// and the stack it stopped with, innermost frame first (see
 /// `DebugState::trace`).

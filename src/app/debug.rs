@@ -4672,6 +4672,25 @@ impl App {
         scopes: Vec<DebugScope>,
         record: bool,
     ) -> Task<Message> {
+        // A Step Over that stopped further along the line it started on, in
+        // its frame: no step to the reader — it steps on, nothing shown or
+        // kept of the stop between.
+        let from = self.debug.step_from.take();
+        if record
+            && self.debug.pending_reason == "step"
+            && let Some(mut from) = from.filter(|from| from.steps_on(&frames))
+        {
+            if let Some(session) = self.debug.session.as_mut() {
+                session.frames = frames;
+            }
+            let task = self.debug_control(DebugCmd::StepOver);
+            if let Some(top) = self.debug.step_from.as_ref() {
+                from.column = top.column;
+            }
+            from.repeats += 1;
+            self.debug.step_from = Some(from);
+            return task;
+        }
         // Jump to the innermost frame that has source, and highlight it.
         let local = !self.connection.is_remote();
         let (target, fname) = {
@@ -5150,6 +5169,10 @@ impl App {
         };
         session.status = DebugStatus::Running;
         let current = session.current.take();
+        self.debug.step_from = match cmd {
+            DebugCmd::StepOver => crate::app::model::StepFrom::of(&session.frames),
+            _ => None,
+        };
         // The user has left this stop (continue or step). Anything still being
         // fetched for it would otherwise land as a "paused here" that lies.
         self.bump_debug_stop();
@@ -5904,6 +5927,50 @@ mod tests {
     /// it — and is what the console shows; a body without one is untouched.
     /// The debuggers' words to a terminal's user are not the run's output;
     /// the program's own are, whatever they say.
+    /// Step Over goes on while it stops further along the line it started
+    /// on, in its frame (Dart's `final sum = a + b;` stopped twice); a
+    /// stop on another line, in another frame, or back at an earlier
+    /// column (a loop on one line, round again) is the reader's.
+    #[test]
+    fn a_step_further_along_its_own_line_steps_on() {
+        use crate::app::model::StepFrom;
+        let frame = |name: &str, line: usize, column: usize| dap::StackFrame {
+            id: 1,
+            name: name.into(),
+            path: Some(PathBuf::from("/p/lib/cart.dart")),
+            line,
+            column,
+        };
+        let caller = frame("main", 4, 3);
+        let from = StepFrom::of(&[frame("add", 2, 9), caller.clone()]).unwrap();
+        assert!(
+            from.steps_on(&[frame("add", 2, 13), caller.clone()]),
+            "further along"
+        );
+        assert!(
+            !from.steps_on(&[frame("add", 3, 3), caller.clone()]),
+            "the next line"
+        );
+        assert!(
+            !from.steps_on(&[frame("add", 2, 5), caller.clone()]),
+            "round a loop"
+        );
+        assert!(
+            !from.steps_on(&[frame("add", 2, 9), caller.clone()]),
+            "the same place"
+        );
+        assert!(
+            !from.steps_on(&[frame("main", 2, 13), caller.clone()]),
+            "another frame"
+        );
+        assert!(!from.steps_on(&[frame("add", 2, 13)]), "another depth");
+        let spent = StepFrom {
+            repeats: StepFrom::MAX_REPEATS,
+            ..from
+        };
+        assert!(!spent.steps_on(&[frame("add", 2, 13), caller]), "bounded");
+    }
+
     /// Dart's pauses at an isolate's start and exit are its own, resumed by
     /// it: no stop of the reader's — unless the launch asked to stop at the
     /// entry. A breakpoint's, a step's, an exception's are the reader's.

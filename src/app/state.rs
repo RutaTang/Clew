@@ -225,6 +225,10 @@ pub struct DebugState {
     /// Why the program last stopped (the adapter's reason), for the stop
     /// the trace records once its stack arrives.
     pub pending_reason: String,
+    /// Where the Step Over in flight started: a step that stops further
+    /// along the same line of the same frame steps on (see
+    /// [`crate::app::model::StepFrom`]).
+    pub step_from: Option<crate::app::model::StepFrom>,
     /// What the debugger last put on the status line about the run —
     /// "Debugger running…", "Paused: breakpoint" — taken down when the run
     /// ends: it went on saying "Debugger running…" over a program that had
@@ -334,6 +338,7 @@ pub struct ParkedDebug {
     pub trace_cut: bool,
     pub trace_program: Option<String>,
     pub pending_reason: String,
+    pub step_from: Option<crate::app::model::StepFrom>,
     pub said: Option<String>,
     pub ran_for: Option<String>,
     pub trail_fns: std::collections::HashSet<(std::path::PathBuf, String)>,
