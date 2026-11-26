@@ -88,6 +88,14 @@ use transport::send_bulk;
 pub use transport::{OutputBudget, serve, serve_stdio};
 use watch::{OpenCommit, Watcher, commit_open_project, watch_or_report};
 
+/// What a `DebugTask` set up for its debugger: a Rust program or test
+/// binary Cargo built, or another language's test or program as Debug Test
+/// and Debug set it up.
+enum DebugBuilt {
+    Rust(clew_core::tasks::Built),
+    Lang(clew_core::langtests::DebugTest),
+}
+
 /// The open project's scanned file list, tagged with the root it belongs to.
 /// Shared between the request loop and the watcher (which refreshes it after a
 /// structural change), so search / docs / agent turns always grep the current
@@ -1181,13 +1189,27 @@ impl Server {
                         (root.clone(), cancel.clone(), out.clone());
                     let built = tokio::task::spawn_blocking(move || {
                         let mut said = |text: &str, _stderr: bool| line(&said_out, text);
-                        clew_core::tasks::build_rust(
-                            &build_root,
-                            &task,
-                            &choices,
-                            &mut said,
-                            &build_cancel,
-                        )
+                        match &task {
+                            clew_protocol::ProjectTask::RustMain { .. }
+                            | clew_protocol::ProjectTask::RustTest { .. } => {
+                                clew_core::tasks::build_rust(
+                                    &build_root,
+                                    &task,
+                                    &choices,
+                                    &mut said,
+                                    &build_cancel,
+                                )
+                                .map(|built| built.map(DebugBuilt::Rust))
+                            }
+                            _ => clew_core::tasks::lang_debug(
+                                &build_root,
+                                &task,
+                                &choices,
+                                &mut said,
+                                &build_cancel,
+                            )
+                            .map(|set_up| set_up.map(DebugBuilt::Lang)),
+                        }
                         .map(|built| (built, choices))
                     })
                     .await
@@ -1226,26 +1248,41 @@ impl Server {
                             return;
                         }
                     };
-                    // lldb-dap on what was built, in the folder it runs in,
-                    // with the variables Cargo sets for it.
+                    // lldb-dap on what Cargo built, in the folder it runs
+                    // in, with the variables Cargo sets for it; another
+                    // language's test or program under its own debugger,
+                    // set up as Debug Test and Debug set it up.
                     let resolve_root = root.clone();
                     let resolved = tokio::task::spawn_blocking(move || {
                         let bridge = std::env::current_exe().ok();
-                        clew_core::debugadapter::resolve_stdio_in(
-                            "native",
-                            &target.program.to_string_lossy(),
-                            &target.args,
-                            &resolve_root,
-                            &target.cwd,
-                            &choices,
-                            bridge.as_deref(),
-                        )
-                        .and_then(|adapter| {
-                            let mut launch: serde_json::Value =
-                                serde_json::from_str(&adapter.launch).map_err(|e| e.to_string())?;
-                            clew_core::cargorun::with_cargo_env(&mut launch, &target.env);
-                            Ok((adapter, launch.to_string()))
-                        })
+                        match target {
+                            DebugBuilt::Rust(target) => clew_core::debugadapter::resolve_stdio_in(
+                                "native",
+                                &target.program.to_string_lossy(),
+                                &target.args,
+                                &resolve_root,
+                                &target.cwd,
+                                &choices,
+                                bridge.as_deref(),
+                            )
+                            .and_then(|adapter| {
+                                let mut launch: serde_json::Value =
+                                    serde_json::from_str(&adapter.launch)
+                                        .map_err(|e| e.to_string())?;
+                                clew_core::cargorun::with_cargo_env(&mut launch, &target.env);
+                                Ok((adapter, launch.to_string()))
+                            }),
+                            DebugBuilt::Lang(test) => clew_core::debugadapter::resolve_stdio_for(
+                                &test,
+                                &resolve_root,
+                                &choices,
+                                bridge.as_deref(),
+                            )
+                            .map(|adapter| {
+                                let launch = adapter.launch.clone();
+                                (adapter, launch)
+                            }),
+                        }
                     })
                     .await
                     .unwrap_or_else(|_| Err("resolving the native adapter failed".into()));

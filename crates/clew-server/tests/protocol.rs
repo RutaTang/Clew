@@ -1297,7 +1297,7 @@ async fn debug_task_refuses_what_is_no_rust_program() {
                     event: Event::Error { message, .. },
                     ..
                 } => {
-                    assert!(message.contains("Rust"), "{message}");
+                    assert!(message.contains("not debugged"), "{message}");
                     refused = true;
                     Some(())
                 }
@@ -1306,6 +1306,143 @@ async fn debug_task_refuses_what_is_no_rust_program() {
         )
         .await;
     }
+}
+
+/// A test the host's debuggers can't reach (a Common Test suite's: CT runs
+/// its cases its own way) is answered as such, in the words the client
+/// knows to run it without one instead — and both handles end.
+#[tokio::test]
+async fn debug_task_says_when_no_debugger_reaches_a_test() {
+    let (mut server, mut rx) = server();
+    let root = temp_project("debug-task-no-debugger");
+    std::fs::write(
+        root.join("cart_SUITE.erl"),
+        "-module(cart_SUITE).\n-export([all/0, adds/1]).\n\nall() -> [adds].\n\nadds(_Config) ->\n    3 = 1 + 2.\n",
+    )
+    .unwrap();
+    open_project(&mut server, &mut rx, 1, &root).await;
+    assert!(
+        server
+            .handle(
+                2,
+                Request::DebugTask {
+                    proc: 8,
+                    build: 9,
+                    task: clew_protocol::ProjectTask::Test {
+                        file: "cart_SUITE.erl".into(),
+                        line: 7,
+                    },
+                    choices: Default::default(),
+                },
+            )
+            .await
+            .is_none()
+    );
+    let (mut adapter, mut build, mut answered) = (false, false, false);
+    while !(adapter && build && answered) {
+        wait_for(&mut rx, "the answer and both ends", WAIT, |msg| match msg {
+            ServerMessage::Notification {
+                event:
+                    Event::ProcessExited {
+                        proc: 8,
+                        code: None,
+                    },
+                ..
+            } => {
+                adapter = true;
+                Some(())
+            }
+            ServerMessage::Notification {
+                event:
+                    Event::ProcessExited {
+                        proc: 9,
+                        code: None,
+                    },
+                ..
+            } => {
+                build = true;
+                Some(())
+            }
+            ServerMessage::Reply {
+                id: 2,
+                event: Event::Error { message, .. },
+                ..
+            } => {
+                assert_eq!(message, clew_core::tasks::NO_TEST_DEBUGGER);
+                answered = true;
+                Some(())
+            }
+            _ => None,
+        })
+        .await;
+    }
+}
+
+/// A Go test debugged where the project lives: Delve's test mode, named
+/// by the test's own `-test.run`, in its package's folder — set up on the
+/// host as Debug Test sets it up on the client's computer. Needs Go and
+/// Delve (`dlv` on the PATH).
+#[tokio::test]
+#[ignore = "starts Delve on a Go test (needs go and dlv); run explicitly"]
+async fn live_debug_task_starts_delve_on_a_go_test() {
+    let (mut server, mut rx) = server();
+    let root = temp_project("debug-task-go");
+    std::fs::write(root.join("go.mod"), "module shop\n\ngo 1.21\n").unwrap();
+    std::fs::write(
+        root.join("cart.go"),
+        "package shop\n\nfunc Total(items []int) int {\n\tsum := 0\n\tfor _, i := range items {\n\t\tsum += i\n\t}\n\treturn sum\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("cart_test.go"),
+        "package shop\n\nimport \"testing\"\n\nfunc TestTotal(t *testing.T) {\n\tif Total([]int{2, 3}) != 5 {\n\t\tt.Fatal(\"wrong\")\n\t}\n}\n",
+    )
+    .unwrap();
+    open_project(&mut server, &mut rx, 1, &root).await;
+    assert!(
+        server
+            .handle(
+                2,
+                Request::DebugTask {
+                    proc: 8,
+                    build: 9,
+                    task: clew_protocol::ProjectTask::Test {
+                        file: "cart_test.go".into(),
+                        line: 6,
+                    },
+                    choices: Default::default(),
+                },
+            )
+            .await
+            .is_none()
+    );
+    let mut set_up = None;
+    let launch = loop {
+        let msg = wait_for(&mut rx, "the adapter", Duration::from_secs(120), Some).await;
+        match msg {
+            ServerMessage::Notification {
+                event: Event::ProcessExited { proc: 9, code },
+                ..
+            } => set_up = Some(code),
+            ServerMessage::Reply {
+                id: 2,
+                event: Event::AdapterSpawned { proc: 8, launch },
+                ..
+            } => break launch,
+            ServerMessage::Reply { id: 2, event, .. } => panic!("{event:?}"),
+            _ => {}
+        }
+    };
+    assert_eq!(set_up, Some(Some(0)), "set up first");
+    let launch: serde_json::Value = serde_json::from_str(&launch).unwrap();
+    assert_eq!(launch["mode"], "test", "{launch}");
+    assert!(launch.to_string().contains("TestTotal"), "{launch}");
+    assert!(
+        server
+            .handle(3, Request::ProcessKill { proc: 8 })
+            .await
+            .is_none()
+    );
 }
 
 /// A Rust test debugged where the project lives: built by Cargo there,

@@ -4101,6 +4101,9 @@
  "This project's tests run by CTest from a CMake build: build it, then run the test again.": "このプロジェクトのテストは CMake のビルドから CTest で実行されます。ビルドしてから、もう一度テストを実行してください。",
  "These tests run without the debugger: {status}": "これらのテストはデバッガーなしで実行されます: {status}",
  "{rel} has no program to run": "{rel} に実行するプログラムはありません",
+ "{rel} has no program to debug": "{rel} にはデバッグするプログラムがありません",
+ "{rel} is built by its project's own build (make, Meson, Bazel): name its program in .clew/launch.json to run it.": "{rel} はプロジェクト独自のビルド（make、Meson、Bazel）でビルドされます。実行するには .clew/launch.json にそのプログラムを指定してください。",
+ "Only a program or a test is debugged here: this task is run, not debugged.": "ここでデバッグできるのはプログラムかテストだけです。このタスクはデバッグせずに実行されます。",
  "No {manifest} was found above {name}, so it has no build to run it.": "{name} より上に {manifest} が見つからないため、それを実行するビルドがありません。",
  "CTest lists no test of {name}: build the project again, then debug it.": "CTest の一覧に {name} のテストがありません。プロジェクトをもう一度ビルドしてから、デバッグしてください。",
  "CTest's list of tests could not be read.": "CTest のテスト一覧を読み取れませんでした。",
@@ -4121,7 +4124,6 @@
  "{target} was built, but its program wasn't found in {folder}.": "{target} はビルドされましたが、そのプログラムが {folder} に見つかりません。",
  "{file} did not compile (the compiler's output is above).": "{file} をコンパイルできませんでした（コンパイラの出力は上にあります）。",
  "The build was stopped.": "ビルドは停止されました。",
- "A remote project's programs run without the debugger: {status}": "リモートプロジェクトのプログラムはデバッガーなしで実行されます: {status}",
  "This program runs without the debugger: {status}": "このプログラムはデバッガーなしで実行されます: {status}",
  "Flutter found no device to run this app on.": "Flutter はこのアプリを実行できるデバイスを見つけられませんでした。"
 }

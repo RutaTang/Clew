@@ -27,6 +27,11 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("{rel} could not be read"),
     tr_noop!("{rel} has no tests to run"),
     tr_noop!("{rel} has no program to run"),
+    tr_noop!("{rel} has no program to debug"),
+    tr_noop!(
+        "{rel} is built by its project's own build (make, Meson, Bazel): name its program in .clew/launch.json to run it."
+    ),
+    tr_noop!("Only a program or a test is debugged here: this task is run, not debugged."),
     tr_noop!("No {manifest} was found above {name}, so it has no build to run it."),
     tr_noop!("No {manifest} was found above {name}, so its tests have no project to run in."),
     tr_noop!(

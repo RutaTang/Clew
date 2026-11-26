@@ -2222,12 +2222,6 @@ pub fn resolve_stdio_in(
     choices: &clew_protocol::LanguageChoices,
     bridge: Option<&Path>,
 ) -> Result<StdioAdapter, String> {
-    let tcp_refusal = || {
-        format!(
-            "the {lang} debug adapter speaks DAP over a TCP port on this host, \
-             which a remote client cannot reach"
-        )
-    };
     if lang == "node" {
         let server = bridge.ok_or_else(|| {
             "Node is debugged on a remote host by clew-server's own adapter, \
@@ -2253,22 +2247,66 @@ pub fn resolve_stdio_in(
             launch: spec.launch.to_string(),
         });
     }
+    stdio_adapter(lang, program, args, root, cwd, choices, bridge, None)
+}
+
+/// The debugger a test or program of a project on this host is debugged
+/// under, as [`resolve_stdio_in`] starts one for a remote client: its
+/// language's ([`crate::langtests::DebugTest::adapter`]), given what
+/// Debug Test or Debug worked out for it ([`set_up_for_test`]) before a
+/// TCP adapter is put behind `bridge` — its own command line, not the
+/// bridge's, is the one that test set-up changes.
+pub fn resolve_stdio_for(
+    test: &crate::langtests::DebugTest,
+    root: &Path,
+    choices: &clew_protocol::LanguageChoices,
+    bridge: Option<&Path>,
+) -> Result<StdioAdapter, String> {
+    stdio_adapter(
+        test.adapter,
+        &test.program.to_string_lossy(),
+        &test.args,
+        root,
+        &test.cwd,
+        choices,
+        bridge,
+        Some(test),
+    )
+}
+
+/// [`resolve_stdio_in`], and [`resolve_stdio_for`] given its `test`.
+#[allow(clippy::too_many_arguments)]
+fn stdio_adapter(
+    lang: &str,
+    program: &str,
+    args: &[String],
+    root: &Path,
+    cwd: &Path,
+    choices: &clew_protocol::LanguageChoices,
+    bridge: Option<&Path>,
+    test: Option<&crate::langtests::DebugTest>,
+) -> Result<StdioAdapter, String> {
+    let tcp_refusal = || {
+        format!(
+            "the {lang} debug adapter speaks DAP over a TCP port on this host, \
+             which a remote client cannot reach"
+        )
+    };
     match resolve(lang, program, args, root, cwd, choices, bridge)
         .map_err(|e| format!("on the remote host: {e}"))?
     {
-        Resolution::Ready(spec) => match (spec.transport, bridge) {
-            (AdapterTransport::Stdio, _) => Ok(StdioAdapter {
-                command: spec.command,
-                args: spec.args,
-                launch: spec.launch.to_string(),
-            }),
-            (transport, Some(bridge)) => Ok(StdioAdapter {
-                command: bridge.to_path_buf(),
-                args: bridge_args(transport, &spec.command, &spec.args),
-                launch: spec.launch.to_string(),
-            }),
-            (_, None) => Err(tcp_refusal()),
-        },
+        Resolution::Ready(mut spec) => {
+            if let Some(test) = test {
+                set_up_for_test(
+                    test,
+                    &mut spec.command,
+                    &mut spec.args,
+                    &mut spec.launch,
+                    bridge,
+                );
+            }
+            stdio_of(spec, bridge).ok_or_else(tcp_refusal)
+        }
         Resolution::NeedsInstall(AdapterInstall::Debugpy) => Err(
             "debugpy is not installed on the remote host. Install it there \
              (python3 -m pip install debugpy, or uv pip install debugpy)"
@@ -2284,6 +2322,24 @@ pub fn resolve_stdio_in(
             install.name(),
             install.describe()
         )),
+    }
+}
+
+/// An adapter as it is run over stdio: itself, when it speaks DAP there;
+/// a TCP one behind clew-server's `bridge` (`None` with no bridge).
+fn stdio_of(spec: AdapterSpec, bridge: Option<&Path>) -> Option<StdioAdapter> {
+    match (spec.transport, bridge) {
+        (AdapterTransport::Stdio, _) => Some(StdioAdapter {
+            command: spec.command,
+            args: spec.args,
+            launch: spec.launch.to_string(),
+        }),
+        (transport, Some(bridge)) => Some(StdioAdapter {
+            command: bridge.to_path_buf(),
+            args: bridge_args(transport, &spec.command, &spec.args),
+            launch: spec.launch.to_string(),
+        }),
+        (_, None) => None,
     }
 }
 
@@ -2833,6 +2889,55 @@ mod tests {
         let err =
             resolve_stdio("ruby", "app.rb", &[], &dir, &Default::default(), None).unwrap_err();
         assert!(err.contains("TCP"), "{err}");
+    }
+
+    /// A remote project's test is set up on its host as Debug Test sets it
+    /// up here, on the adapter's own command line before a TCP adapter goes
+    /// behind the bridge: rdbg told to run RSpec's command, not a script —
+    /// its `--command` among rdbg's words, not the bridge's — the test's
+    /// launch fields over the program's.
+    #[test]
+    #[cfg(unix)]
+    fn a_remote_test_is_set_up_before_its_adapter_goes_behind_the_bridge() {
+        let dir = TempDir::new("debug-bridge-test");
+        let bin = dir.join("bin");
+        let rdbg = script(&bin.join("rdbg"), "#!/bin/sh\n");
+        let _env = EnvVars::new().set("PATH", bin.as_os_str());
+        let bridge = Path::new("/opt/clew/clew-server");
+        let mut fields = serde_json::Map::new();
+        fields.insert("stopOnEntry".into(), false.into());
+        let test = crate::langtests::DebugTest {
+            adapter: "ruby",
+            program: PathBuf::from("bundle"),
+            args: vec!["exec".into(), "rspec".into(), "spec/cart_spec.rb:4".into()],
+            cwd: dir.to_path_buf(),
+            launch: fields,
+            start: crate::langtests::DebugStart::RubyCommand,
+        };
+        let ruby = resolve_stdio_for(&test, &dir, &Default::default(), Some(bridge)).unwrap();
+        assert_eq!(ruby.command, bridge);
+        let rdbg = rdbg.to_string_lossy().into_owned();
+        let at = ruby.args.iter().position(|a| *a == rdbg).unwrap();
+        assert_eq!(
+            ruby.args[..at],
+            ["dap-bridge", "--announce", "stderr", "--"]
+        );
+        let own = &ruby.args[at + 1..];
+        let command = own.iter().position(|a| a == "--command").unwrap();
+        let program = own.iter().position(|a| a == "--").unwrap();
+        assert!(command < program, "{own:?}");
+        assert!(
+            own.ends_with(&[
+                "--".into(),
+                "bundle".into(),
+                "exec".into(),
+                "rspec".into(),
+                "spec/cart_spec.rb:4".into()
+            ]),
+            "{own:?}"
+        );
+        let launch: Value = serde_json::from_str(&ruby.launch).unwrap();
+        assert_eq!(launch["stopOnEntry"], false);
     }
 
     /// F3: consent is given to the prompt's text, so every argument the

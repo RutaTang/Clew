@@ -2650,6 +2650,10 @@ pub(crate) fn omitted_note(omitted: usize) -> Option<String> {
     }
 }
 
+/// How wide the browser's path can be drawn: the dialog's content, less the
+/// "up" control beside it (its glyph and padding) and the gap between.
+const REMOTE_PATH_ROOM: f32 = DIALOG_W - 2.0 * MODAL_PAD - (14.0 + 2.0 * 10.0) - 8.0;
+
 /// The browsing stage: a path bar with an "up" control, the directory's contents
 /// (folders navigable, files dimmed for context), and "Open this folder".
 pub(crate) fn remote_browser_view(browser: &crate::RemoteBrowser) -> Element<'_, Message> {
@@ -2662,14 +2666,22 @@ pub(crate) fn remote_browser_view(browser: &crate::RemoteBrowser) -> Element<'_,
             Message::Connect(ConnectMsg::BrowseTo(parent.clone())),
         ));
     }
+    // Its end, where a long path is cut: the folder being looked in, not
+    // the start every folder there shares (the bar showed `/home/…/proj`
+    // cut off before the folder's own name).
     let path_bar = row![
         up,
         container(
-            text(browser.cwd.clone())
-                .size(ts::BODY)
-                .font(crate::fonts::CODE)
-                .color(theme::fg())
-                .wrapping(Wrapping::None)
+            text(super::steady::elide_start(
+                &browser.cwd,
+                ts::BODY,
+                crate::fonts::CODE,
+                REMOTE_PATH_ROOM
+            ))
+            .size(ts::BODY)
+            .font(crate::fonts::CODE)
+            .color(theme::fg())
+            .wrapping(Wrapping::None)
         )
         .width(Fill)
         .clip(true),
@@ -2756,11 +2768,13 @@ pub(crate) fn remote_browser_view(browser: &crate::RemoteBrowser) -> Element<'_,
             text(tr!("Open this folder as the project"))
                 .size(ts::SMALL)
                 .color(theme::dim()),
+            // Whole, as it is opened: a long path wraps beside Open — on
+            // one line, it ran under the button and out of the dialog.
             text(browser.cwd.clone())
                 .size(ts::BODY)
                 .font(crate::fonts::CODE)
                 .color(theme::fg())
-                .wrapping(Wrapping::None),
+                .wrapping(Wrapping::WordOrGlyph),
         ]
         .spacing(1)
         .width(Fill),

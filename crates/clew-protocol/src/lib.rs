@@ -168,7 +168,13 @@ pub use payload::*;
 /// Ruby, Zig, Erlang, Elixir, Haskell, C or C++, run by its project's own
 /// test command; [`ProjectTask::Main`]: a Kotlin, Scala or Elixir program,
 /// run by its project's build or the language's own runner.
-pub const PROTOCOL_VERSION: u32 = 35;
+///
+/// v36: [`Request::DebugTask`] debugs a [`ProjectTask::Test`] and a
+/// [`ProjectTask::Main`] too, not only a Rust task: the test, or the
+/// Kotlin, Scala, Elixir, C#, Zig, C or C++ program, under its language's
+/// debugger on the project's host, set up as Debug Test and Debug set it
+/// up for a project on the client's computer.
+pub const PROTOCOL_VERSION: u32 = 36;
 
 /// A hash of this crate's source as a token stream — comments and whitespace
 /// removed — computed at build time (see `build.rs`). Carried in `Hello` /
@@ -1039,15 +1045,18 @@ pub enum Request {
         task: ProjectTask,
         choices: LanguageChoices,
     },
-    /// Build a Rust task's program on this host and start the debugger on
-    /// it there — `RustMain`'s program, `RustTest`'s tests; any other task
-    /// is refused. Built as `RunTask` builds it: Cargo's lines come as
-    /// `ProcessOutput` under `build`, which ends in its `ProcessExited`
-    /// (code 0 once built). Then lldb-dap is spawned under `proc` and
-    /// proxied as `SpawnAdapter`'s is. Reply: `AdapterSpawned`, its launch
-    /// request built for the program — its arguments, the folder it runs
-    /// in, the variables Cargo sets for it — with this host's paths; a
-    /// failure replies `Error`, and `proc` ends in `ProcessExited`.
+    /// Set up a task's test or program on this host and start its
+    /// debugger on it there: `RustMain`'s program and `RustTest`'s tests,
+    /// built by Cargo, under lldb-dap; `Test`'s test and `Main`'s program
+    /// under their language's debugger, built first where they must be
+    /// (CMake, the compiler, `dotnet build`); any other task is refused, as
+    /// is a test or program its language's debugger can't reach. The build's
+    /// lines come as `ProcessOutput` under `build`, which ends in its
+    /// `ProcessExited` (code 0 once set up). Then the debugger is spawned
+    /// under `proc` and proxied as `SpawnAdapter`'s is. Reply:
+    /// `AdapterSpawned`, its launch request built for what runs — its
+    /// arguments, the folder it runs in, its variables — with this host's
+    /// paths; a failure replies `Error`, and `proc` ends in `ProcessExited`.
     DebugTask {
         proc: u64,
         build: u64,

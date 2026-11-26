@@ -6354,6 +6354,51 @@ fn debug_variables_open_into_their_children_for_the_stop() {
     assert!(app.debug.open_vars.is_empty() && app.debug.var_children.is_empty());
 }
 
+/// A remote project's Go test, debugged on its host, ends with its verdict:
+/// Delve says no exit code, and the runner's own last line (`PASS`) is
+/// read for it, as for a test debugged on this computer — it ended
+/// "terminated", its verdict unsaid.
+#[test]
+fn a_remote_test_debugged_ends_with_its_runners_verdict() {
+    let mut app = scanned_app("debug-remote-verdict");
+    app.debug.plan = Some(crate::app::runplan::RunPlan::Remote {
+        task: clew_protocol::ProjectTask::Test {
+            file: "shop/cart_test.go".into(),
+            line: 5,
+        },
+        name: "TestTotal".into(),
+        tests: Some(false),
+    });
+    app.debug.session = Some(DebugSession {
+        client: None,
+        status: DebugStatus::Running,
+        exit_code: None,
+        thread_id: None,
+        frames: Vec::new(),
+        scopes: Vec::new(),
+        watches: Vec::new(),
+        output: vec![
+            ("stdout".into(), "=== RUN   TestTotal\n".into()),
+            ("stdout".into(), "--- PASS: TestTotal (0.00s)\n".into()),
+            ("stdout".into(), "PASS\n".into()),
+        ],
+        current: None,
+        program: PathBuf::from("/srv/shop"),
+        args: Vec::new(),
+        cwd: PathBuf::from("/srv/shop"),
+        addr: None,
+        takes_input: false,
+    });
+    app.debug_run = 1;
+    let _ = app.update(Message::Debug(DebugMsg::DapEvent {
+        stamp: app.transport_stamp(),
+        run: 1,
+        event: dap::DapEvent::Terminated,
+    }));
+    assert_eq!(app.status, "Test TestTotal passed");
+    assert_eq!(app.debug.session.as_ref().unwrap().exit_code, Some(0));
+}
+
 /// The status line stops saying the debugger runs once the run is over:
 /// "Debugger running…" stayed under a program that had exited. What else
 /// was said since is left; and a run going on after a stop says so again.
@@ -24876,6 +24921,7 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
             run,
             install: crate::dap::AdapterInstall::JsDebug,
         }),
+        Message::Debug(DebugMsg::NoDebuggerThere { stamp: s(), run }),
         Message::Fake(crate::FakeMsg::Suggested {
             stamp: s(),
             seq: 1,
@@ -45160,6 +45206,213 @@ fn a_remote_projects_lean_and_rust_run_on_its_host() {
         app.debug.plan.as_ref().and_then(|p| p.verdict(0)),
         Some("Test adds passed".into())
     );
+}
+
+/// A remote project's tests and programs in the compiled, JVM and BEAM
+/// languages are debugged on its host, as Debug Test and Debug set them up
+/// for a project on this computer: a Go test and a Kotlin or C program by
+/// `DebugTask`, a Go program from its source under Delve there — no launch
+/// file read. Where the host's debuggers can't reach one, it runs without
+/// them, and the status line says so. They used to run without the
+/// debugger, always.
+#[test]
+fn a_remote_projects_tests_and_programs_are_debugged_on_its_host() {
+    use clew_protocol::{ProjectTask, Request};
+    let (mut app, root, mut rx) = remote_app("remote-lang-debug");
+    let open = |app: &mut App, rel: &str, lang: &'static str, source: &str| {
+        let lines = crate::highlight::plain_lines(source);
+        app.proj.panes[0] = Some(crate::viewer::Viewer::new(
+            root.join(rel),
+            rel.into(),
+            Some(lang),
+            Arc::new(source.to_string()),
+            lines,
+        ));
+        app.proj.active = 0;
+    };
+    #[derive(Debug, PartialEq)]
+    enum Asked {
+        Run(ProjectTask),
+        Debug(ProjectTask),
+        Adapter(String, String),
+    }
+    let asked = |rx: &mut tokio::sync::mpsc::Receiver<clew_protocol::ClientMessage>| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "nothing was asked of the host"
+            );
+            match rx.try_recv() {
+                Ok(msg) => match msg.request {
+                    Request::RunTask { task, .. } => break Asked::Run(task),
+                    Request::DebugTask { task, .. } => break Asked::Debug(task),
+                    Request::SpawnAdapter { lang, program, .. } => {
+                        break Asked::Adapter(lang, program);
+                    }
+                    Request::ReadState { rel, .. } if rel == "launch.json" => {
+                        panic!("no launch file is needed")
+                    }
+                    _ => {}
+                },
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(5)),
+            }
+        }
+    };
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let _guard = rt.enter();
+    // A session's own stream sends what it asks: run in the background.
+    let drive = |start: Task<Message>| {
+        rt.spawn(async move {
+            use iced::futures::StreamExt;
+            if let Some(actions) = iced_test::runtime::task::into_stream(start) {
+                actions.for_each(|_| std::future::ready(())).await;
+            }
+        })
+    };
+
+    open(
+        &mut app,
+        "shop/cart_test.go",
+        "go",
+        "package shop\n\nimport \"testing\"\n\nfunc TestTotal(t *testing.T) {\n}\n",
+    );
+    let session = drive(app.update(Message::Debug(DebugMsg::RunTest {
+        line: Some(5),
+        no_debug: false,
+    })));
+    let test = ProjectTask::Test {
+        file: "shop/cart_test.go".into(),
+        line: 5,
+    };
+    assert_eq!(asked(&mut rx), Asked::Debug(test.clone()), "debugged there");
+    session.abort();
+    assert!(!app.status.contains("without"), "{}", app.status);
+    // Out of the host's debuggers' reach: run instead, and said so.
+    let run = app.debug_run;
+    let _ = app.update(Message::Debug(DebugMsg::NoDebuggerThere {
+        stamp: app.transport_stamp(),
+        run,
+    }));
+    assert_eq!(asked(&mut rx), Asked::Run(test));
+    assert!(
+        app.status.contains("without the debugger"),
+        "{}",
+        app.status
+    );
+    // An older run's answer starts nothing.
+    let _ = app.update(Message::Debug(DebugMsg::NoDebuggerThere {
+        stamp: app.transport_stamp(),
+        run,
+    }));
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    while let Ok(msg) = rx.try_recv() {
+        assert!(
+            !matches!(
+                msg.request,
+                Request::RunTask { .. } | Request::DebugTask { .. }
+            ),
+            "a stale answer ran it again: {:?}",
+            msg.request
+        );
+    }
+
+    open(
+        &mut app,
+        "app/src/main/kotlin/Main.kt",
+        "kotlin",
+        "fun main() {\n    println(1)\n}\n",
+    );
+    let session = drive(app.update(Message::Debug(DebugMsg::RunMain {
+        line: 1,
+        no_debug: false,
+    })));
+    let kotlin = ProjectTask::Main {
+        file: "app/src/main/kotlin/Main.kt".into(),
+    };
+    assert_eq!(asked(&mut rx), Asked::Debug(kotlin));
+    session.abort();
+
+    // C's program: its ▶ is there; run and debugged by the host's Main task.
+    open(
+        &mut app,
+        "tools/main.c",
+        "c",
+        "#include <stdio.h>\n\nint main(void) {\n    return 0;\n}\n",
+    );
+    let pane = app.proj.active;
+    let v = app.proj.panes[pane].as_ref().unwrap();
+    assert!(app.run_marks(v).contains(&3), "main's ▶ is there");
+    let c = ProjectTask::Main {
+        file: "tools/main.c".into(),
+    };
+    let _ = app.update(Message::Debug(DebugMsg::RunMain {
+        line: 3,
+        no_debug: true,
+    }));
+    assert_eq!(asked(&mut rx), Asked::Run(c.clone()));
+    let session = drive(app.update(Message::Debug(DebugMsg::RunMain {
+        line: 3,
+        no_debug: false,
+    })));
+    assert_eq!(asked(&mut rx), Asked::Debug(c));
+    session.abort();
+
+    // Debug and Run on a Go file, with no launch file on the host: the
+    // file, from its source, under Delve there — as its ▶ debugs it.
+    open(
+        &mut app,
+        "cmd/tool/main.go",
+        "go",
+        "package main\n\nfunc main() {\n}\n",
+    );
+    let tool = root.join("cmd/tool/main.go").to_string_lossy().into_owned();
+    let session = drive(app.update(Message::Debug(DebugMsg::Start)));
+    assert_eq!(asked(&mut rx), Asked::Adapter("go".into(), tool.clone()));
+    session.abort();
+    let session = drive(app.update(Message::Debug(DebugMsg::Run)));
+    assert_eq!(asked(&mut rx), Asked::Adapter("go".into(), tool));
+    session.abort();
+
+    // A launch file of the project's, on its host, names what Debug runs:
+    // the file's own program is the margin ▶'s alone.
+    assert!(!app.has_launch_file());
+    if let Some(p) = app.proj.project.as_mut() {
+        let mut files = (*p.files).clone();
+        files.push(clew_core::fs_scan::FileEntry {
+            abs: root.join(".clew/launch.json"),
+            rel: ".clew/launch.json".into(),
+        });
+        p.files = Arc::new(files);
+    }
+    assert!(
+        app.has_launch_file(),
+        "the host's launch file, by its files"
+    );
+
+    // Go's program: from its source, under Delve on the host.
+    open(
+        &mut app,
+        "cmd/shop/main.go",
+        "go",
+        "package main\n\nfunc main() {\n}\n",
+    );
+    let session = drive(app.update(Message::Debug(DebugMsg::RunMain {
+        line: 3,
+        no_debug: false,
+    })));
+    assert_eq!(
+        asked(&mut rx),
+        Asked::Adapter(
+            "go".into(),
+            root.join("cmd/shop/main.go").to_string_lossy().into_owned()
+        )
+    );
+    session.abort();
 }
 
 /// What a remote task writes comes through its stream, line by line, and

@@ -749,10 +749,10 @@ struct RemoteDebug {
     launch: serde_json::Value,
 }
 
-/// Build a remote project's Rust program or test on its host and start
-/// lldb-dap on it there (`DebugTask`): Cargo's lines shown in the run as
-/// they come; `None` — said why — when it was stopped, or did not build or
-/// start.
+/// Build a remote project's program or test on its host and start its
+/// debugger there (`DebugTask`): the build's lines shown in the run as they
+/// come; `None` — said why — when it was stopped, or did not build or
+/// start, or the host has no debugger for it (`DebugMsg::NoDebuggerThere`).
 async fn remote_debug_task(
     output: &mut iced::futures::channel::mpsc::Sender<Message>,
     stamp: &Stamp,
@@ -845,6 +845,19 @@ async fn remote_debug_task(
                     None
                 }
             }
+        }
+        // Out of the host's debuggers' reach: run instead, without one.
+        Ok(clew_protocol::Event::Error { message, .. })
+            if message == clew_core::tasks::NO_TEST_DEBUGGER
+                || message == clew_core::tasks::NO_PROGRAM_DEBUGGER =>
+        {
+            let _ = output
+                .send(Message::Debug(DebugMsg::NoDebuggerThere {
+                    stamp: stamp.clone(),
+                    run,
+                }))
+                .await;
+            None
         }
         Ok(clew_protocol::Event::Error { message, .. }) => {
             let _ = output.send(failed(crate::i18n::message(&message))).await;
@@ -1223,23 +1236,43 @@ impl App {
             self.status = self.run_without_debugger_said();
             return task;
         }
+        if let Some(plan) = self.remote_script_plan() {
+            return self.start_session(false, Some(plan));
+        }
         self.start_session(false, None)
     }
 
-    /// What the status line says of a program Debug runs without the
-    /// debugger, by why — a remote project's — the run's own words after.
-    fn run_without_debugger_said(&self) -> String {
-        let running = self.status.clone();
-        match self.connection.is_remote() {
-            true => tr!(
-                "A remote project's programs run without the debugger: {status}",
-                status = running
-            ),
-            false => tr!(
-                "This program runs without the debugger: {status}",
-                status = running
-            ),
+    /// What Debug and Run run for a remote project's Go, Java, Dart,
+    /// Haskell, Erlang or Ruby file when its host has no launch file: the
+    /// file (or the project's one program start), from its source under
+    /// its debugger there — as on this computer, and as its margin ▶ does.
+    /// They asked for a launch file instead.
+    fn remote_script_plan(&self) -> Option<crate::app::runplan::RunPlan> {
+        if !self.connection.is_remote() || self.has_launch_file() {
+            return None;
         }
+        let file = self.debuggable_script()?;
+        matches!(
+            dap::Lang::detect(None, &file),
+            Some(
+                dap::Lang::Go
+                    | dap::Lang::Java
+                    | dap::Lang::Dart
+                    | dap::Lang::Haskell
+                    | dap::Lang::Erlang
+                    | dap::Lang::Ruby
+            )
+        )
+        .then_some(crate::app::runplan::RunPlan::Script { file })
+    }
+
+    /// What the status line says of a program Debug runs without the
+    /// debugger, the run's own words after.
+    fn run_without_debugger_said(&self) -> String {
+        tr!(
+            "This program runs without the debugger: {status}",
+            status = self.status
+        )
     }
 
     /// Run the program as Debug would, without the debugger: the same
@@ -1250,16 +1283,19 @@ impl App {
             return self.start_session(true, Some(plan));
         }
         // A C or C++ program: built as Debug builds it, run with the
-        // debugger off.
-        if let Some(plan) = self.lang_debug_main().filter(|p| {
-            matches!(
-                p,
-                crate::app::runplan::RunPlan::LangDebugMain {
-                    lang: "c" | "cpp",
-                    ..
-                }
-            )
+        // debugger off — on a remote project's host, by its `Main` task.
+        if let Some(plan) = self.lang_debug_main().filter(|p| match p {
+            crate::app::runplan::RunPlan::LangDebugMain { lang, .. } => {
+                matches!(*lang, "c" | "cpp")
+            }
+            crate::app::runplan::RunPlan::Remote { .. } => self
+                .active_viewer()
+                .is_some_and(|v| matches!(v.lang_key, Some("c" | "cpp"))),
+            _ => false,
         }) {
+            return self.start_session(true, Some(plan));
+        }
+        if let Some(plan) = self.remote_script_plan() {
             return self.start_session(true, Some(plan));
         }
         self.start_session(true, None)
@@ -1269,25 +1305,51 @@ impl App {
     /// on this computer that names nothing to run (no launch file): the
     /// program Run runs, under its language's debugger, where it can be.
     fn lang_debug_main(&self) -> Option<crate::app::runplan::RunPlan> {
-        let root = &self.proj.project.as_ref()?.root;
-        if crate::app::tasks::launch_file_path(root).is_some() {
+        if self.has_launch_file() {
             return None;
         }
         self.file_debug_main()
+    }
+
+    /// Whether the project names what Debug runs in a launch file: its
+    /// `.clew/launch.json` or `.vscode/launch.json` on this computer; a
+    /// remote project's `.clew/launch.json`, the one read on its host, by
+    /// the project's files (a path of the host's is none of this disk's).
+    pub(crate) fn has_launch_file(&self) -> bool {
+        let Some(project) = self.proj.project.as_ref() else {
+            return false;
+        };
+        match self.connection.is_remote() {
+            true => project.files.iter().any(|f| f.rel == ".clew/launch.json"),
+            false => crate::app::tasks::launch_file_path(&project.root).is_some(),
+        }
     }
 
     /// The active file's own program under its language's debugger,
     /// whatever a launch file names: [`Self::lang_debug_main`]'s, and the
     /// margin ▶'s on its `main`.
     fn file_debug_main(&self) -> Option<crate::app::runplan::RunPlan> {
-        if self.connection.is_remote() {
-            return None;
-        }
         let root = &self.proj.project.as_ref()?.root;
         let viewer = self.active_viewer()?;
         let lang = viewer
             .lang_key
             .filter(|l| clew_core::langtests::debugs_main(l))?;
+        // A remote project's, built and debugged on its host — or, out of
+        // the debuggers' reach there, run without one
+        // (`DebugMsg::NoDebuggerThere`).
+        if self.connection.is_remote() {
+            return Some(crate::app::runplan::RunPlan::Remote {
+                task: clew_protocol::ProjectTask::Main {
+                    file: self.project_rel(&viewer.abs)?,
+                },
+                name: viewer
+                    .abs
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                tests: None,
+            });
+        }
         let slug = clew_core::langtests::main_debugger(root, &viewer.abs, lang)?;
         Some(crate::app::runplan::RunPlan::LangDebugMain {
             file: viewer.abs.clone(),
@@ -1300,8 +1362,7 @@ impl App {
     /// what to run (no launch file): the file as a program, as its project
     /// runs one (`ProjectTask::Main`) — where the project is.
     fn lang_file_run(&self) -> Option<crate::app::runplan::RunPlan> {
-        let root = &self.proj.project.as_ref()?.root;
-        if crate::app::tasks::launch_file_path(root).is_some() {
+        if self.has_launch_file() {
             return None;
         }
         self.file_main_run()
@@ -1459,15 +1520,12 @@ impl App {
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned()),
             // Another language's program, by its file: on this computer,
-            // or one a remote project's host runs (`ProjectTask::Main`).
-            lang if marks_main(lang)
-                && (!self.connection.is_remote() || clew_core::langtests::handles_main(lang)) =>
-            {
-                viewer
-                    .abs
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-            }
+            // or on a remote project's host (`ProjectTask::Main`, or the
+            // file under its debugger there).
+            lang if marks_main(lang) => viewer
+                .abs
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned()),
             _ => None,
         }
     }
@@ -1490,14 +1548,7 @@ impl App {
             .filter(|r| match r.kind {
                 RunnableKind::Test => !r.name.contains('['),
                 RunnableKind::Tests => !r.name.is_empty(),
-                // Another language's program on a remote project runs on
-                // its host where Clew runs one there (`ProjectTask::Main`).
-                RunnableKind::Main => match v.lang_key {
-                    Some(lang) if marks_main(lang) && self.connection.is_remote() => {
-                        clew_core::langtests::handles_main(lang)
-                    }
-                    _ => true,
-                },
+                RunnableKind::Main => true,
                 RunnableKind::Doctest => true,
             })
             .map(|r| r.line)
@@ -1588,12 +1639,12 @@ impl App {
                 self.status = self.run_without_debugger_said();
                 task
             }
+            // Run from its source by its debugger (Go's, Java's, Dart's,
+            // Haskell's, Erlang's, Ruby's): on a remote project's host too.
             _ => match self.active_viewer().map(|v| v.abs.clone()) {
-                Some(file) if !self.connection.is_remote() => {
-                    self.start_session(no_debug, Some(RunPlan::Script { file }))
-                }
-                _ if no_debug => self.start_run(),
-                _ => self.start_debug(),
+                Some(file) => self.start_session(no_debug, Some(RunPlan::Script { file })),
+                None if no_debug => self.start_run(),
+                None => self.start_debug(),
             },
         }
     }
@@ -1755,14 +1806,18 @@ impl App {
                 };
                 return self.start_session(false, Some(plan));
             }
-            let task = self.start_session(
-                true,
-                Some(crate::app::runplan::RunPlan::Remote {
-                    task: clew_protocol::ProjectTask::Test { file: rel, line },
-                    name,
-                    tests,
-                }),
-            );
+            // A remote project's, debugged on its host, set up there as it
+            // is here — or, out of the debuggers' reach there, run without
+            // one, and said so (`DebugMsg::NoDebuggerThere`).
+            let plan = crate::app::runplan::RunPlan::Remote {
+                task: clew_protocol::ProjectTask::Test { file: rel, line },
+                name,
+                tests,
+            };
+            if !no_debug && self.connection.is_remote() {
+                return self.start_session(false, Some(plan));
+            }
+            let task = self.start_session(true, Some(plan));
             if !no_debug {
                 self.status = tr!(
                     "These tests run without the debugger: {status}",
@@ -1965,10 +2020,13 @@ impl App {
                 ),
                 true,
             ) => {
-                let (program, args, cwd, _) = plan.launch(&root);
+                // In the file's own language: a Go, Java or Ruby
+                // program's `main` is run from its source as a Python
+                // script is.
+                let (program, args, cwd, lang) = plan.launch(&root);
                 Some(
                     serde_json::json!({
-                        "type": "python",
+                        "type": lang.unwrap_or(dap::Lang::Python).slug(),
                         "program": program.to_string_lossy(),
                         "args": args,
                         "cwd": cwd.to_string_lossy(),
@@ -2299,16 +2357,19 @@ impl App {
         {
             self.say_debug_state(self.status.clone());
         }
-        // A remote project's Rust program or test, debugged: built on its
-        // host and debugged there (`DebugTask`), Cargo's lines under a
-        // handle of their own.
+        // A remote project's program or test, debugged: built on its host
+        // and debugged there (`DebugTask`) — a Rust one by Cargo, another
+        // language's as Debug and Debug Test set it up here — its build's
+        // lines under a handle of their own.
         let remote_debug = match &plan {
             Some(RunPlan::Remote {
                 task:
                     task @ (clew_protocol::ProjectTask::RustMain { .. }
-                    | clew_protocol::ProjectTask::RustTest { .. }),
+                    | clew_protocol::ProjectTask::RustTest { .. }
+                    | clew_protocol::ProjectTask::Test { .. }
+                    | clew_protocol::ProjectTask::Main { .. }),
                 ..
-            }) if !no_debug => {
+            }) if !no_debug && remote => {
                 let build = self.next_proc_id;
                 self.next_proc_id += 1;
                 Some((task.clone(), build))
@@ -3192,6 +3253,30 @@ impl App {
     /// from the Debug button: the user is asked first, through the same
     /// consent modal a language-server install uses, and only an approval runs
     /// the install ([`Self::on_debug_install_allowed`]).
+    /// The remote host has no debugger that reaches the test or program
+    /// this run debugs: it runs instead, without one, as a project's on this
+    /// computer does — and the status line says so.
+    pub(crate) fn on_no_debugger_there(&mut self, run: u64) -> Task<Message> {
+        if run != self.debug_run {
+            return Task::none();
+        }
+        let plan = self.debug.plan.clone();
+        let tests = matches!(
+            plan,
+            Some(crate::app::runplan::RunPlan::Remote { tests: Some(_), .. })
+        );
+        self.debug.session = None;
+        let task = self.start_session(true, plan);
+        self.status = match tests {
+            true => tr!(
+                "These tests run without the debugger: {status}",
+                status = self.status
+            ),
+            false => self.run_without_debugger_said(),
+        };
+        task
+    }
+
     pub(crate) fn on_debug_needs_install(
         &mut self,
         run: u64,
@@ -4163,6 +4248,12 @@ impl App {
                 // — the run ended "terminated", its verdict unsaid.
                 let tested = match &self.debug.plan {
                     Some(crate::app::runplan::RunPlan::LangDebugTest { lang, .. }) => Some(*lang),
+                    // A remote project's, debugged on its host: its
+                    // language by its file's name.
+                    Some(crate::app::runplan::RunPlan::Remote {
+                        task: clew_protocol::ProjectTask::Test { file, .. },
+                        ..
+                    }) => clew_core::highlight::detect(Path::new(file.as_str())),
                     _ => None,
                 };
                 let ended = match (tested, session.exit_code) {
@@ -5383,6 +5474,7 @@ impl App {
             DebugMsg::NeedsInstall { run, install, .. } => {
                 self.on_debug_needs_install(run, install)
             }
+            DebugMsg::NoDebuggerThere { run, .. } => self.on_no_debugger_there(run),
             DebugMsg::AdapterInstalled {
                 stamp,
                 install,

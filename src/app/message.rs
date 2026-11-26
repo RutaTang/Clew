@@ -2064,6 +2064,10 @@ pub enum DebugMsg {
         child: crate::app::state::DebugSessionId,
         error: String,
     },
+    /// A remote project's host has no debugger that reaches this run's test
+    /// or program (a C test with no CTest build, a Kotlin file `kotlinc`
+    /// runs): it is run instead, without one, and said so.
+    NoDebuggerThere { stamp: Stamp, run: u64 },
     /// The debug adapter this run needs must be installed first: raises the
     /// consent modal (nothing is installed without the user's approval).
     NeedsInstall {
@@ -3218,6 +3222,7 @@ impl DebugMsg {
             | DebugMsg::BuildFailed { run, .. }
             | DebugMsg::Failed { run, .. }
             | DebugMsg::ChildFailed { run, .. }
+            | DebugMsg::NoDebuggerThere { run, .. }
             | DebugMsg::NeedsInstall { run, .. } => Some(*run),
             _ => None,
         }
@@ -3260,6 +3265,7 @@ impl DebugMsg {
             | DebugMsg::BuildFailed { stamp, .. }
             | DebugMsg::Failed { stamp, .. }
             | DebugMsg::ChildFailed { stamp, .. }
+            | DebugMsg::NoDebuggerThere { stamp, .. }
             | DebugMsg::NeedsInstall { stamp, .. } => Some(Origin::Stamped(stamp)),
             DebugMsg::Start
             | DebugMsg::Run

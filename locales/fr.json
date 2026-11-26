@@ -4101,6 +4101,9 @@
  "This project's tests run by CTest from a CMake build: build it, then run the test again.": "Les tests de ce projet s’exécutent avec CTest depuis une build CMake : compilez-le, puis relancez le test.",
  "These tests run without the debugger: {status}": "Ces tests s’exécutent sans le débogueur : {status}",
  "{rel} has no program to run": "{rel} n’a aucun programme à exécuter",
+ "{rel} has no program to debug": "{rel} n’a pas de programme à déboguer",
+ "{rel} is built by its project's own build (make, Meson, Bazel): name its program in .clew/launch.json to run it.": "{rel} est construit par le système de build du projet (make, Meson, Bazel) : indiquez son programme dans .clew/launch.json pour l’exécuter.",
+ "Only a program or a test is debugged here: this task is run, not debugged.": "Seuls un programme ou un test sont débogués ici : cette tâche s’exécute, sans être déboguée.",
  "No {manifest} was found above {name}, so it has no build to run it.": "Aucun {manifest} n’a été trouvé au-dessus de {name} : aucune build ne peut l’exécuter.",
  "CTest lists no test of {name}: build the project again, then debug it.": "CTest ne liste aucun test de {name} : recompilez le projet, puis déboguez-le.",
  "CTest's list of tests could not be read.": "La liste des tests de CTest n’a pas pu être lue.",
@@ -4121,7 +4124,6 @@
  "{target} was built, but its program wasn't found in {folder}.": "{target} a été compilé, mais son programme est introuvable dans {folder}.",
  "{file} did not compile (the compiler's output is above).": "{file} n’a pas compilé (la sortie du compilateur est ci-dessus).",
  "The build was stopped.": "La compilation a été arrêtée.",
- "A remote project's programs run without the debugger: {status}": "Les programmes d’un projet distant s’exécutent sans le débogueur : {status}",
  "This program runs without the debugger: {status}": "Ce programme s’exécute sans le débogueur : {status}",
  "Flutter found no device to run this app on.": "Flutter n’a trouvé aucun appareil sur lequel exécuter cette application."
 }

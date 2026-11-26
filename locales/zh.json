@@ -4101,6 +4101,9 @@
  "This project's tests run by CTest from a CMake build: build it, then run the test again.": "这个项目的测试由 CTest 从 CMake 构建中运行：请先构建，然后重新运行测试。",
  "These tests run without the debugger: {status}": "这些测试在没有调试器的情况下运行：{status}",
  "{rel} has no program to run": "{rel} 中没有可运行的程序",
+ "{rel} has no program to debug": "{rel} 没有可调试的程序",
+ "{rel} is built by its project's own build (make, Meson, Bazel): name its program in .clew/launch.json to run it.": "{rel} 由项目自己的构建系统（make、Meson、Bazel）构建：请在 .clew/launch.json 中指明它的程序以运行它。",
+ "Only a program or a test is debugged here: this task is run, not debugged.": "这里只调试程序或测试：此任务只运行，不调试。",
  "No {manifest} was found above {name}, so it has no build to run it.": "在 {name} 之上没有找到 {manifest}，因此没有可以运行它的构建。",
  "CTest lists no test of {name}: build the project again, then debug it.": "CTest 中没有 {name} 的测试：请重新构建项目，然后再调试。",
  "CTest's list of tests could not be read.": "无法读取 CTest 的测试列表。",
@@ -4121,7 +4124,6 @@
  "{target} was built, but its program wasn't found in {folder}.": "{target} 已构建，但在 {folder} 中找不到它的程序。",
  "{file} did not compile (the compiler's output is above).": "{file} 编译失败（编译器的输出见上方）。",
  "The build was stopped.": "构建已停止。",
- "A remote project's programs run without the debugger: {status}": "远程项目的程序在不使用调试器的情况下运行：{status}",
  "This program runs without the debugger: {status}": "此程序在不使用调试器的情况下运行：{status}",
  "Flutter found no device to run this app on.": "Flutter 找不到可运行此应用的设备。"
 }

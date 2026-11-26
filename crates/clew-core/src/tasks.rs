@@ -108,9 +108,35 @@ fn run_with(
         ProjectTask::Main { .. } => {
             let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
             let lang = crate::highlight::detect(&file)
-                .filter(|l| crate::langtests::handles_main(l))
+                .filter(|l| crate::langtests::debugs_main(l))
                 .ok_or_else(|| format!("{rel} has no program to run"))?;
-            let command = crate::langtests::main_command(&root, &file, lang, search)?;
+            // A C or C++ program: built as Debug builds it (its CMake
+            // target, or the file alone by the compiler), then run.
+            let command = match lang {
+                "c" | "cpp" => {
+                    if crate::langtests::main_debugger(&root, &file, lang).is_none() {
+                        return Err(format!(
+                            "{rel} is built by its project's own build (make, Meson, Bazel): name its program in .clew/launch.json to run it."
+                        ));
+                    }
+                    let mut built = |line: &str| said(line, false);
+                    let debug = match crate::langtests::debug_main(
+                        &root, &file, lang, search, &mut built, cancel,
+                    ) {
+                        Err(_) if cancel.load(std::sync::atomic::Ordering::SeqCst) => {
+                            return Ok(RunEnd::Stopped);
+                        }
+                        built => built?,
+                    };
+                    crate::jsrun::JsCommand {
+                        program: debug.program,
+                        args: debug.args,
+                        cwd: debug.cwd,
+                        env: Vec::new(),
+                    }
+                }
+                _ => crate::langtests::main_command(&root, &file, lang, search)?,
+            };
             crate::jsrun::run(&command, said, cancel)
         }
         ProjectTask::PackageScript { script, .. } => {
@@ -192,6 +218,76 @@ pub fn build_rust(
                 return Err("A doc example is run by rustdoc, with no debugger.".to_string());
             }
             tests_built(&file, &source, line, choices, said, cancel)
+        }
+    }
+}
+
+/// What [`lang_debug`] answers for a test its language's debugger can't
+/// reach on this host: the asker runs it without one instead.
+pub const NO_TEST_DEBUGGER: &str =
+    "These tests run where the debugger can't reach them. Run them with Run Test.";
+
+/// What [`lang_debug`] answers for a program its language's debugger can't
+/// reach on this host: the asker runs it without one instead.
+pub const NO_PROGRAM_DEBUGGER: &str = "This program runs where the debugger can't reach it. Run it with Run, or name it in .clew/launch.json.";
+
+/// What a test or program of the project at `root` is debugged by, worked
+/// out here as Debug Test and Debug work it out for a project on the
+/// asker's own computer: `Test`'s test (or group, or file) at its line by
+/// [`crate::langtests::debug_test`], `Main`'s program by
+/// [`crate::langtests::debug_main`] — built first where it must be (CMake,
+/// the compiler, `dotnet build`), its build's lines said as they come.
+/// `None` when stopped while it built. `Err` for another task, or why this
+/// one has no debugger here.
+pub fn lang_debug(
+    root: &Path,
+    task: &ProjectTask,
+    choices: &LanguageChoices,
+    said: &mut dyn FnMut(&str, bool),
+    cancel: &AtomicBool,
+) -> Result<Option<crate::langtests::DebugTest>, String> {
+    use std::sync::atomic::Ordering;
+    let search = crate::linerpc::search_path().unwrap_or_default();
+    let rel = match task {
+        ProjectTask::Test { file, .. } | ProjectTask::Main { file } => file,
+        _ => {
+            return Err(
+                "Only a program or a test is debugged here: this task is run, not debugged."
+                    .to_string(),
+            );
+        }
+    };
+    let file = crate::confine::confine(root, rel).map_err(|e| format!("{rel}: {e}"))?;
+    let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    match task {
+        ProjectTask::Test { line, .. } => {
+            let source = crate::statefile::read_capped(&file, MAX_SOURCE_BYTES)
+                .ok_or_else(|| format!("{rel} could not be read"))?;
+            let lang = crate::highlight::detect(&file)
+                .filter(|l| crate::langtests::handles(l))
+                .ok_or_else(|| format!("{rel} has no tests to run"))?;
+            let found = crate::runnables::runnables_in(lang, rel.as_str(), &source);
+            let test = crate::runnables::runnable_at(&found, *line)
+                .filter(|r| r.kind != crate::runnables::RunnableKind::Main)
+                .ok_or_else(|| format!("{rel} has no tests to run"))?;
+            if crate::langtests::test_debugger(&root, &file, lang).is_none() {
+                return Err(NO_TEST_DEBUGGER.to_string());
+            }
+            crate::langtests::debug_test(&root, &file, lang, &source, test, &search, choices)
+                .map(Some)
+        }
+        _ => {
+            let lang = crate::highlight::detect(&file)
+                .filter(|l| crate::langtests::debugs_main(l))
+                .ok_or_else(|| format!("{rel} has no program to debug"))?;
+            if crate::langtests::main_debugger(&root, &file, lang).is_none() {
+                return Err(NO_PROGRAM_DEBUGGER.to_string());
+            }
+            let mut said = |line: &str| said(line, false);
+            match crate::langtests::debug_main(&root, &file, lang, &search, &mut said, cancel) {
+                Err(_) if cancel.load(Ordering::SeqCst) => Ok(None),
+                worked => worked.map(Some),
+            }
         }
     }
 }

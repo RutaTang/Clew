@@ -4101,6 +4101,9 @@
  "This project's tests run by CTest from a CMake build: build it, then run the test again.": "이 프로젝트의 테스트는 CMake 빌드에서 CTest로 실행됩니다. 빌드한 뒤 테스트를 다시 실행하세요.",
  "These tests run without the debugger: {status}": "이 테스트는 디버거 없이 실행됩니다: {status}",
  "{rel} has no program to run": "{rel}에는 실행할 프로그램이 없습니다",
+ "{rel} has no program to debug": "{rel}에는 디버그할 프로그램이 없습니다",
+ "{rel} is built by its project's own build (make, Meson, Bazel): name its program in .clew/launch.json to run it.": "{rel}은(는) 프로젝트 자체 빌드(make, Meson, Bazel)로 빌드됩니다. 실행하려면 .clew/launch.json에 해당 프로그램을 지정하세요.",
+ "Only a program or a test is debugged here: this task is run, not debugged.": "여기서는 프로그램이나 테스트만 디버그합니다. 이 작업은 디버그하지 않고 실행됩니다.",
  "No {manifest} was found above {name}, so it has no build to run it.": "{name} 위에서 {manifest}을(를) 찾지 못해 이를 실행할 빌드가 없습니다.",
  "CTest lists no test of {name}: build the project again, then debug it.": "CTest 목록에 {name}의 테스트가 없습니다. 프로젝트를 다시 빌드한 다음 디버그하세요.",
  "CTest's list of tests could not be read.": "CTest의 테스트 목록을 읽을 수 없습니다.",
@@ -4121,7 +4124,6 @@
  "{target} was built, but its program wasn't found in {folder}.": "{target}이(가) 빌드되었지만 {folder}에서 프로그램을 찾을 수 없습니다.",
  "{file} did not compile (the compiler's output is above).": "{file}을(를) 컴파일하지 못했습니다(컴파일러 출력은 위에 있습니다).",
  "The build was stopped.": "빌드가 중지되었습니다.",
- "A remote project's programs run without the debugger: {status}": "원격 프로젝트의 프로그램은 디버거 없이 실행됩니다: {status}",
  "This program runs without the debugger: {status}": "이 프로그램은 디버거 없이 실행됩니다: {status}",
  "Flutter found no device to run this app on.": "Flutter가 이 앱을 실행할 기기를 찾지 못했습니다."
 }
