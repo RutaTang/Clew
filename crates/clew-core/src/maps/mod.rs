@@ -302,7 +302,19 @@ pub fn build_from(corpus: &Corpus) -> Vec<ProjectMap> {
     ];
     extractors
         .iter()
-        .flat_map(|extract| extract(corpus))
+        .flat_map(|extract| {
+            // How long each took, for a reader of a live run
+            // (`CLEW_TEST_MAP_TIMES`).
+            #[cfg(test)]
+            let started = std::time::Instant::now();
+            let maps = extract(corpus);
+            #[cfg(test)]
+            if std::env::var_os("CLEW_TEST_MAP_TIMES").is_some() {
+                let ids: Vec<&str> = maps.iter().map(|m| m.id.as_str()).collect();
+                println!("{ids:?}: {:?}", started.elapsed());
+            }
+            maps
+        })
         .filter(|map| !map.nodes.is_empty())
         .collect()
 }

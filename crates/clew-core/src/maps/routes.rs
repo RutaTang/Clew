@@ -53,6 +53,7 @@ pub fn maps(corpus: &Corpus) -> Vec<ProjectMap> {
         corpus,
         mounts: python_mounts(corpus),
         js_mounts: js::Mounts::read(corpus),
+        dart_mounts: dart_mounts(corpus),
     };
     let next = corpus.files.iter().any(|s| {
         s.name().starts_with("next.config.")
@@ -86,8 +87,18 @@ pub fn maps(corpus: &Corpus) -> Vec<ProjectMap> {
             Some(Lang::Ruby) if source.rel.ends_with("config/routes.rb") => {
                 rails(&mut routes, source)
             }
+            Some(Lang::Ruby)
+                if source.text.contains("Sinatra")
+                    || source.text.contains("sinatra")
+                    || source.text.contains("Grape::API") =>
+            {
+                ruby_dsl(&mut routes, source)
+            }
             Some(Lang::Go) => go(&mut routes, source),
             Some(Lang::Kotlin) => kotlin(&mut routes, source),
+            Some(Lang::Elixir) if source.text.contains("use Plug.Router") => {
+                plug_router(&mut routes, source)
+            }
             Some(Lang::Elixir) if source.rel.ends_with("router.ex") => phoenix(&mut routes, source),
             Some(Lang::Dart) => dart(&mut routes, source),
             Some(Lang::Erlang) if source.text.contains("cowboy_router") => {
@@ -138,6 +149,9 @@ struct Routes<'c> {
     mounts: PyMounts,
     /// Where each JavaScript router is mounted ([`js::Mounts`]).
     js_mounts: js::Mounts,
+    /// The prefixes each Dart class's router is mounted at
+    /// ([`dart_mounts`]).
+    dart_mounts: HashMap<String, Vec<String>>,
 }
 
 impl Routes<'_> {
@@ -2288,22 +2302,268 @@ fn dart(routes: &mut Routes, source: &Source) {
             if !path.starts_with('/') {
                 continue;
             }
-            let handler = match plain.get(1) {
-                Some(h) if h.kind() == "identifier" => Handler::Named {
-                    name: text(*h, src).to_string(),
-                    class: None,
-                },
-                _ => Handler::Inline,
+            // Under each prefix its class's router is mounted at
+            // (`router.mount('/api/', Api().router)`), or as written.
+            let class = {
+                let mut up = call.parent();
+                let mut found = None;
+                while let Some(n) = up {
+                    if n.kind() == "class_definition" {
+                        found = n
+                            .child_by_field_name("name")
+                            .map(|c| text(c, src).to_string());
+                        break;
+                    }
+                    up = n.parent();
+                }
+                found
             };
-            routes.add(
-                "shelf_router",
-                method,
-                &path,
-                &source.rel,
-                line(call),
-                handler,
-            );
+            let prefixes: Vec<String> = class
+                .as_ref()
+                .and_then(|c| routes.dart_mounts.get(c))
+                .cloned()
+                .unwrap_or_default();
+            let paths: Vec<String> = match prefixes.is_empty() {
+                true => vec![path.clone()],
+                false => prefixes.iter().map(|p| join(p, &path)).collect(),
+            };
+            for path in paths {
+                let handler = match plain.get(1) {
+                    Some(h) if h.kind() == "identifier" => Handler::Named {
+                        name: text(*h, src).to_string(),
+                        class: class.clone(),
+                    },
+                    _ => Handler::Inline,
+                };
+                routes.add(
+                    "shelf_router",
+                    method,
+                    &path,
+                    &source.rel,
+                    line(call),
+                    handler,
+                );
+            }
         }
+    }
+}
+
+/// Where each Dart class's router is mounted, in any file: shelf_router's
+/// `router.mount('/api/', Api().router.call)` serves `Api`'s routes under
+/// `/api/` — by the class whose instance is mounted.
+fn dart_mounts(corpus: &Corpus) -> HashMap<String, Vec<String>> {
+    let mut out: HashMap<String, Vec<String>> = HashMap::new();
+    for source in corpus.in_langs(&[Lang::Dart]) {
+        let src = source.text.as_str();
+        if !src.contains(".mount(") {
+            continue;
+        }
+        let Some(tree) = source.tree() else {
+            continue;
+        };
+        for call in all_of(tree.root_node(), "method_invocation") {
+            let Some(function) = call.child_by_field_name("function") else {
+                continue;
+            };
+            if function.kind() != "unconditional_assignable_selector"
+                || !text(function, src).ends_with("mount")
+            {
+                continue;
+            }
+            let Some(list) = call.child_by_field_name("arguments").and_then(|p| {
+                p.named_children(&mut p.walk())
+                    .find(|c| c.kind() == "arguments")
+            }) else {
+                continue;
+            };
+            let plain: Vec<Node> = list
+                .named_children(&mut list.walk())
+                .filter(|a| a.kind() == "argument")
+                .filter_map(|a| a.named_child(0))
+                .collect();
+            let (Some(prefix), Some(mounted)) =
+                (plain.first().and_then(|p| string(*p, src)), plain.get(1))
+            else {
+                continue;
+            };
+            // `Api().router…`: the class built.
+            let mounted = text(*mounted, src).trim_start_matches("const ").trim();
+            let class: String = mounted
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            if class.starts_with(|c: char| c.is_uppercase())
+                && mounted[class.len()..].starts_with('(')
+            {
+                out.entry(class).or_default().push(prefix);
+            }
+        }
+    }
+    out
+}
+
+/// Ruby's DSL routers: Sinatra's `get '/hello' do … end` (in a
+/// `Sinatra::Base` class or a classic app), sinatra-contrib's `namespace
+/// '/api' do`, and Grape's `resource :users do get ':id' do`, under every
+/// `namespace`, `resource(s)`, `group`, `segment` and `route_param` around
+/// it and the API's `prefix`.
+fn ruby_dsl(routes: &mut Routes, source: &Source) {
+    let Some(tree) = source.tree() else {
+        return;
+    };
+    let src = source.text.as_str();
+    let grape = src.contains("Grape::API");
+    let framework = if grape { "grape" } else { "sinatra" };
+    // A literal path or name argument: `'/x'`, `"x"`, `:users`.
+    let value = |node: Node| -> Option<String> {
+        match node.kind() {
+            "string" => string(node, src),
+            "simple_symbol" => Some(text(node, src).trim_start_matches(':').to_string()),
+            _ => None,
+        }
+    };
+    let first_arg = |call: Node| -> Option<String> {
+        let list = call.child_by_field_name("arguments")?;
+        let first = list.named_children(&mut list.walk()).next()?;
+        value(first)
+    };
+    // The API's `prefix 'api'`.
+    let mut api_prefix = String::new();
+    for call in all_of(tree.root_node(), "call") {
+        if call.child_by_field_name("receiver").is_none()
+            && call
+                .child_by_field_name("method")
+                .is_some_and(|m| text(m, src) == "prefix")
+            && let Some(p) = first_arg(call)
+        {
+            api_prefix = p;
+        }
+    }
+    for call in all_of(tree.root_node(), "call") {
+        if call.child_by_field_name("receiver").is_some()
+            || call.child_by_field_name("block").is_none()
+        {
+            continue;
+        }
+        let Some(method) = call.child_by_field_name("method").map(|m| text(m, src)) else {
+            continue;
+        };
+        let verb = match method {
+            "get" => "GET",
+            "post" => "POST",
+            "put" => "PUT",
+            "patch" => "PATCH",
+            "delete" => "DELETE",
+            "head" => "HEAD",
+            "options" => "OPTIONS",
+            _ => continue,
+        };
+        // Grape's `get do` is its resource's own path.
+        let path = first_arg(call).unwrap_or_default();
+        if !grape && !path.starts_with('/') {
+            continue;
+        }
+        // The scopes around it, innermost first.
+        let mut parts: Vec<String> = vec![path];
+        let mut up = call.parent();
+        while let Some(n) = up {
+            if n.kind() == "call"
+                && n.child_by_field_name("receiver").is_none()
+                && n.child_by_field_name("block").is_some()
+                && let Some(scope) = n.child_by_field_name("method").map(|m| text(m, src))
+                && matches!(
+                    scope,
+                    "namespace" | "resource" | "resources" | "group" | "segment" | "route_param"
+                )
+                && let Some(name) = first_arg(n)
+            {
+                parts.push(match scope {
+                    "route_param" => format!(":{name}"),
+                    _ => name,
+                });
+            }
+            up = n.parent();
+        }
+        parts.push(api_prefix.clone());
+        let full = parts
+            .iter()
+            .rev()
+            .filter(|p| !p.is_empty())
+            .fold(String::new(), |acc, p| join(&acc, p));
+        let full = if full.is_empty() {
+            "/".to_string()
+        } else {
+            full
+        };
+        routes.add(
+            framework,
+            verb,
+            &full,
+            &source.rel,
+            line(call),
+            Handler::Inline,
+        );
+    }
+}
+
+/// Elixir's `Plug.Router`: `get "/hello" do … end` and its kin, `match`,
+/// and `forward "/api", to: Api.Router` — a route to the module it hands
+/// the request to.
+fn plug_router(routes: &mut Routes, source: &Source) {
+    let Some(tree) = source.tree() else {
+        return;
+    };
+    let src = source.text.as_str();
+    for call in all_of(tree.root_node(), "call") {
+        let Some(target) = call.child_by_field_name("target") else {
+            continue;
+        };
+        if target.kind() != "identifier" {
+            continue;
+        }
+        let verb = match text(target, src) {
+            "get" => "GET",
+            "post" => "POST",
+            "put" => "PUT",
+            "patch" => "PATCH",
+            "delete" => "DELETE",
+            "head" => "HEAD",
+            "options" => "OPTIONS",
+            "match" => "ANY",
+            "forward" => "FORWARD",
+            _ => continue,
+        };
+        let Some(arguments) = call
+            .named_children(&mut call.walk())
+            .find(|c| c.kind() == "arguments")
+        else {
+            continue;
+        };
+        let Some(path) = arguments
+            .named_child(0)
+            .filter(|p| p.kind() == "string")
+            .and_then(|p| string(p, src))
+        else {
+            continue;
+        };
+        if !path.starts_with('/') {
+            continue;
+        }
+        // `forward "/api", to: Api.Router`: the module.
+        let handler = all_of(arguments, "pair")
+            .into_iter()
+            .find(|p| {
+                p.child_by_field_name("key")
+                    .is_some_and(|k| text(k, src).trim().trim_end_matches(':') == "to")
+            })
+            .and_then(|p| p.child_by_field_name("value"))
+            .filter(|v| v.kind() == "alias")
+            .map(|v| Handler::Named {
+                name: text(v, src).to_string(),
+                class: None,
+            })
+            .unwrap_or(Handler::Inline);
+        routes.add("plug", verb, &path, &source.rel, line(call), handler);
     }
 }
 
@@ -2567,6 +2827,69 @@ mod tests {
     }
 
     /// `(route, handler label, handler place)` of every arrow.
+    /// Sinatra's routes, under a `namespace`; Grape's, under its `prefix`,
+    /// `resource`, `namespace` and `route_param`.
+    #[test]
+    fn sinatra_and_grape_routes_take_their_scopes() {
+        let got = route_labels(&[
+            (
+                "app.rb",
+                "require 'sinatra/base'\nrequire 'sinatra/namespace'\n\nclass Shop < Sinatra::Base\n  register Sinatra::Namespace\n\n  get '/' do\n    'hi'\n  end\n\n  post '/orders' do\n    create_order\n  end\n\n  namespace '/api' do\n    get '/items/:id' do\n      'item'\n    end\n  end\nend\n",
+            ),
+            (
+                "api.rb",
+                "class API < Grape::API\n  prefix 'api'\n\n  resource :users do\n    get do\n      User.all\n    end\n\n    route_param :id do\n      get do\n        User.find(params[:id])\n      end\n      delete 'avatar' do\n      end\n    end\n  end\nend\n",
+            ),
+        ]);
+        for want in [
+            "GET /",
+            "POST /orders",
+            "GET /api/items/:id",
+            "GET /api/users",
+            "GET /api/users/:id",
+            "DELETE /api/users/:id/avatar",
+        ] {
+            assert!(got.iter().any(|g| g == want), "{want} in {got:?}");
+        }
+    }
+
+    /// Elixir's `Plug.Router`: its routes, and a `forward` to the module that
+    /// takes the request.
+    #[test]
+    fn plug_router_routes_and_forwards() {
+        let files = [(
+            "lib/shop/router.ex",
+            "defmodule Shop.Router do\n  use Plug.Router\n\n  plug :match\n  plug :dispatch\n\n  get \"/hello\" do\n    send_resp(conn, 200, \"world\")\n  end\n\n  forward \"/api\", to: Shop.ApiRouter\n\n  match _ do\n    send_resp(conn, 404, \"oops\")\n  end\nend\n",
+        )];
+        let got = route_labels(&files);
+        assert!(got.iter().any(|g| g == "GET /hello"), "{got:?}");
+        assert!(
+            routes_of(&files)
+                .iter()
+                .any(|(r, h, _)| r == "FORWARD /api" && h == "Shop.ApiRouter"),
+            "{:?}",
+            routes_of(&files)
+        );
+    }
+
+    /// A shelf_router mounted at a prefix in another file serves its
+    /// class's routes under it.
+    #[test]
+    fn dart_mounted_routers_take_their_prefix() {
+        let got = route_labels(&[
+            (
+                "bin/server.dart",
+                "import 'package:shelf_router/shelf_router.dart';\nimport 'api.dart';\nvoid main() {\n  final app = Router();\n  app.get('/hello', (Request r) => Response.ok('hi'));\n  app.mount('/api/', Api().router.call);\n}\n",
+            ),
+            (
+                "bin/api.dart",
+                "import 'package:shelf_router/shelf_router.dart';\nclass Api {\n  Response _list(Request r) => Response.ok('[]');\n  Router get router {\n    final router = Router();\n    router.get('/messages', _list);\n    return router;\n  }\n}\n",
+            ),
+        ]);
+        assert!(got.iter().any(|g| g == "GET /hello"), "{got:?}");
+        assert!(got.iter().any(|g| g == "GET /api/messages"), "{got:?}");
+    }
+
     fn routes_of(files: &[(&str, &str)]) -> Vec<(String, String, String)> {
         let maps = maps(&Corpus::of(files));
         let Some(map) = maps.first() else {

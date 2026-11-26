@@ -176,8 +176,12 @@ fn overrides(corpus: &Corpus) -> Option<ProjectMap> {
             ) else {
                 continue;
             };
-            let bases = all_of(class, "base_class_clause")
-                .first()
+            // The class's own base clause, a child of its head — not one of
+            // a class nested in its body.
+            let bases = class
+                .named_children(&mut class.walk())
+                .find(|c| c.kind() == "base_class_clause")
+                .as_ref()
                 .map(|b| {
                     all_of(*b, "type_identifier")
                         .into_iter()
@@ -231,32 +235,47 @@ fn overrides(corpus: &Corpus) -> Option<ProjectMap> {
         "Virtual overrides",
         "each method that overrides a virtual method of a base class, with an arrow to the one it overrides",
     );
-    // The virtual `method` nearest up `class`'s bases.
+    // The virtual `method` nearest up `class`'s bases: breadth first, each
+    // class once — a template's specializations share its name, and one
+    // based on another (`formatter<T> : formatter<U>`) made a search that
+    // came back to the same classes again and again.
     fn find_virtual<'c>(
         class: &str,
         method: &str,
         classes: &'c BTreeMap<String, Class>,
-        depth: usize,
     ) -> Option<(&'c str, &'c Class, usize)> {
-        if depth > 16 {
-            return None;
-        }
-        let c = classes.get(class)?;
-        for base in &c.bases {
-            if let Some((name, b)) = classes.get_key_value(base.as_str()) {
-                if let Some((_, _, line)) = b.methods.iter().find(|(m, v, _)| m == method && *v) {
-                    return Some((name.as_str(), b, *line));
-                }
-                if let Some(found) = find_virtual(base, method, classes, depth + 1) {
-                    return Some(found);
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::from([class]);
+        let mut level: Vec<&str> = vec![class];
+        for _ in 0..16 {
+            let mut next: Vec<&str> = Vec::new();
+            for name in level {
+                let Some(c) = classes.get(name) else {
+                    continue;
+                };
+                for base in &c.bases {
+                    let Some((base_name, b)) = classes.get_key_value(base.as_str()) else {
+                        continue;
+                    };
+                    if !seen.insert(base_name.as_str()) {
+                        continue;
+                    }
+                    if let Some((_, _, line)) = b.methods.iter().find(|(m, v, _)| m == method && *v)
+                    {
+                        return Some((base_name.as_str(), b, *line));
+                    }
+                    next.push(base_name.as_str());
                 }
             }
+            if next.is_empty() {
+                return None;
+            }
+            level = next;
         }
         None
     }
     for (name, class) in &classes {
         for (method, _, line) in &class.methods {
-            let Some((base, b, base_line)) = find_virtual(name, method, &classes, 0) else {
+            let Some((base, b, base_line)) = find_virtual(name, method, &classes) else {
                 continue;
             };
             let from = map.node(
@@ -413,6 +432,33 @@ mod tests {
         let use_ = inc.nodes.iter().find(|n| n.label == "src/use.c").unwrap();
         assert_eq!(use_.detail, "pulls in 2 project files and 0 system headers");
         assert_eq!(normal("a/./b/../c"), "a/c");
+    }
+
+    /// A template's specializations share its name, and one based on another
+    /// — and on classes based on it — made the search for a method's virtual
+    /// go round them to its depth limit for every method: a C++ library
+    /// with fmt bundled took minutes. Each class is visited once.
+    #[test]
+    fn specializations_based_on_one_another_are_searched_once() {
+        let mut src = String::from(
+            "struct writer : formatter, buffer, stream {};\nstruct buffer : formatter, writer, stream {};\nstruct stream : formatter, buffer, writer {};\n",
+        );
+        src.push_str("template <typename T> struct formatter : formatter<int>, buffer, writer {\n");
+        for i in 0..40 {
+            src.push_str(&format!("  void method{i}();\n"));
+        }
+        src.push_str("};\n");
+        let started = std::time::Instant::now();
+        let maps = maps(&Corpus::of(&[("fmt.hpp", src.as_str())]));
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "{:?}",
+            started.elapsed()
+        );
+        assert!(
+            maps.iter().all(|m| m.id != "cpp.overrides"),
+            "no virtual: no override"
+        );
     }
 
     #[test]
