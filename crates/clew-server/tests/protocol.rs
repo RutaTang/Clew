@@ -1308,6 +1308,86 @@ async fn debug_task_refuses_what_is_no_rust_program() {
     }
 }
 
+/// What a project task writes, and why a debug task could not start, go
+/// out charged to the output budget, as every `ProcessOutput` does: the
+/// writer credits each one's bytes back once written. Sent uncharged, the
+/// credit wrapped the budget's count, and every producer that charges — the
+/// debugger started after a build that printed anything — waited for good.
+#[tokio::test]
+async fn a_tasks_lines_are_charged_to_the_output_budget() {
+    let (mut server, mut rx) = server();
+    let root = temp_project("task-lines-charged");
+    std::fs::write(root.join("Main.lean"), "def main : IO Unit := pure ()\n").unwrap();
+    open_project(&mut server, &mut rx, 1, &root).await;
+    let budget = server.output_budget();
+    let before = budget.in_flight();
+    // A task refused for the debugger: its reason under `build`.
+    assert!(
+        server
+            .handle(
+                2,
+                Request::DebugTask {
+                    proc: 8,
+                    build: 9,
+                    task: clew_protocol::ProjectTask::LeanMain {
+                        file: "Main.lean".into(),
+                    },
+                    choices: Default::default(),
+                },
+            )
+            .await
+            .is_none()
+    );
+    // A task that cannot run: its reason under its handle.
+    assert!(
+        server
+            .handle(
+                3,
+                Request::RunTask {
+                    proc: 10,
+                    task: clew_protocol::ProjectTask::Main {
+                        file: "missing.kt".into(),
+                    },
+                    choices: Default::default(),
+                },
+            )
+            .await
+            .is_none()
+    );
+    let (mut sent, mut ended) = (0usize, 0);
+    while ended < 3 {
+        wait_for(
+            &mut rx,
+            "the tasks' lines and ends",
+            WAIT,
+            |msg| match msg {
+                ServerMessage::Notification {
+                    event: Event::ProcessOutput { data, .. },
+                    ..
+                } => {
+                    sent += data.len();
+                    Some(())
+                }
+                ServerMessage::Notification {
+                    event: Event::ProcessExited { proc: 8..=10, .. },
+                    ..
+                } => {
+                    ended += 1;
+                    Some(())
+                }
+                _ => None,
+            },
+        )
+        .await;
+    }
+    assert!(sent > 0, "the reasons were said");
+    assert_eq!(
+        budget.in_flight() - before,
+        sent,
+        "each line charged as it was sent"
+    );
+}
+
 /// A test the host's debuggers can't reach (a Common Test suite's: CT runs
 /// its cases its own way) is answered as such, in the words the client
 /// knows to run it without one instead — and both handles end.

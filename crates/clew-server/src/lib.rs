@@ -88,6 +88,35 @@ use transport::send_bulk;
 pub use transport::{OutputBudget, serve, serve_stdio};
 use watch::{OpenCommit, Watcher, commit_open_project, watch_or_report};
 
+/// One line a project task wrote, as its handle's `ProcessOutput`: cut to
+/// one protocol chunk, its newline kept.
+fn task_line(proc: u64, text: &str) -> ServerMessage {
+    let mut data = text.as_bytes().to_vec();
+    data.truncate(clew_protocol::MAX_PROCESS_CHUNK - 1);
+    data.push(b'\n');
+    ServerMessage::Notification {
+        event: Event::ProcessOutput { proc, data },
+    }
+}
+
+/// Send `msg` from a task, charged to the output budget first — as every
+/// `ProcessOutput` must be: the writer credits each one's bytes back once
+/// written, and a task's lines sent uncharged wrapped the budget's count,
+/// after which every producer that charges (a debug adapter's output, a
+/// language server's) waited on it for good. A remote project's debugger
+/// started after a build that printed anything never answered.
+async fn send_charged(
+    out: &UnboundedSender<ServerMessage>,
+    budget: &OutputBudget,
+    msg: ServerMessage,
+) {
+    let weight = crate::transport::bulk_weight(&msg);
+    budget.charge(weight).await;
+    if out.send(msg).is_err() {
+        budget.release(weight);
+    }
+}
+
 /// What a `DebugTask` set up for its debugger: a Rust program or test
 /// binary Cargo built, or another language's test or program as Debug Test
 /// and Debug set it up.
@@ -1089,20 +1118,20 @@ impl Server {
                     old.store(true, Ordering::SeqCst);
                 }
                 let stops = self.task_stops.clone();
+                let budget = self.out_budget.clone();
                 let _ = out.send(ServerMessage::Notification {
                     event: Event::ProcessStarted { proc },
                 });
                 tokio::spawn(async move {
-                    let said_out = out.clone();
+                    let (said_out, said_budget) = (out.clone(), budget.clone());
                     let ran_cancel = cancel.clone();
                     let ran = tokio::task::spawn_blocking(move || {
                         let mut said = |line: &str, _stderr: bool| {
-                            let mut data = line.as_bytes().to_vec();
-                            data.truncate(clew_protocol::MAX_PROCESS_CHUNK - 1);
-                            data.push(b'\n');
-                            let _ = said_out.send(ServerMessage::Notification {
-                                event: Event::ProcessOutput { proc, data },
-                            });
+                            crate::transport::send_bulk(
+                                &said_out,
+                                &said_budget,
+                                task_line(proc, line),
+                            );
                         };
                         clew_core::tasks::run(&root, &task, &choices, &mut said, &ran_cancel)
                     })
@@ -1120,12 +1149,7 @@ impl Server {
                         }
                         Ok(clew_core::spawn::RunEnd::Stopped) => None,
                         Err(why) => {
-                            let mut data = why.into_bytes();
-                            data.truncate(clew_protocol::MAX_PROCESS_CHUNK - 1);
-                            data.push(b'\n');
-                            let _ = out.send(ServerMessage::Notification {
-                                event: Event::ProcessOutput { proc, data },
-                            });
+                            send_charged(&out, &budget, task_line(proc, &why)).await;
                             None
                         }
                     };
@@ -1177,18 +1201,16 @@ impl Server {
                     event: Event::ProcessStarted { proc: build },
                 });
                 tokio::spawn(async move {
-                    let line = move |out: &UnboundedSender<ServerMessage>, text: &str| {
-                        let mut data = text.as_bytes().to_vec();
-                        data.truncate(clew_protocol::MAX_PROCESS_CHUNK - 1);
-                        data.push(b'\n');
-                        let _ = out.send(ServerMessage::Notification {
-                            event: Event::ProcessOutput { proc: build, data },
-                        });
-                    };
-                    let (build_root, build_cancel, said_out) =
-                        (root.clone(), cancel.clone(), out.clone());
+                    let (build_root, build_cancel, said_out, said_budget) =
+                        (root.clone(), cancel.clone(), out.clone(), budget.clone());
                     let built = tokio::task::spawn_blocking(move || {
-                        let mut said = |text: &str, _stderr: bool| line(&said_out, text);
+                        let mut said = |text: &str, _stderr: bool| {
+                            crate::transport::send_bulk(
+                                &said_out,
+                                &said_budget,
+                                task_line(build, text),
+                            );
+                        };
                         match &task {
                             clew_protocol::ProjectTask::RustMain { .. }
                             | clew_protocol::ProjectTask::RustTest { .. } => {
@@ -1228,7 +1250,7 @@ impl Server {
                         Err(why) => (None, Some(why.clone())),
                     };
                     if let Some(why) = &failure {
-                        line(&out, why);
+                        send_charged(&out, &budget, task_line(build, why)).await;
                     }
                     if failed_spawn_is_ours(&procs, build, build_generation).await {
                         let _ = out.send(ServerMessage::Notification {

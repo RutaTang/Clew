@@ -95,6 +95,12 @@ impl OutputBudget {
         true
     }
 
+    /// The bulk bytes charged and not yet credited back: what is queued for
+    /// the transport.
+    pub fn in_flight(&self) -> usize {
+        self.bytes.load(Ordering::Acquire)
+    }
+
     /// Credit `n` bytes back once the message left the queue (was written to
     /// the transport, or dropped with it).
     pub fn release(&self, n: usize) {
