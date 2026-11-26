@@ -1107,7 +1107,7 @@ impl App {
                 // Recomputed whenever a PHP or Haskell file moved, so only a
                 // change re-resolves the project.
                 if let clew_protocol::Patch::Set(manifests) = manifests {
-                    let manifests = manifests.unwrap_or_default();
+                    let manifests = manifests.map(|m| *m).unwrap_or_default();
                     if manifests != self.proj.remote_manifests {
                         self.proj.remote_manifests = manifests;
                         meta_changed = true;

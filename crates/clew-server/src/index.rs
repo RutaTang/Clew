@@ -29,7 +29,7 @@ pub(crate) struct SymbolPayload {
     pub(crate) files: Vec<clew_protocol::FileSymbols>,
     pub(crate) go_module: clew_protocol::Patch<String>,
     pub(crate) dart_package: clew_protocol::Patch<String>,
-    pub(crate) manifests: clew_protocol::Patch<clew_protocol::SourceManifests>,
+    pub(crate) manifests: clew_protocol::Patch<Box<clew_protocol::SourceManifests>>,
     pub(crate) structure: clew_protocol::Patch<StructureIndex>,
 }
 
@@ -100,10 +100,10 @@ pub(crate) fn full_symbol_payload(root: &Path, files: &[FileEntry]) -> SymbolPay
 pub(crate) fn manifests_patch(
     root: &Path,
     files: &[FileEntry],
-) -> Patch<clew_protocol::SourceManifests> {
+) -> Patch<Box<clew_protocol::SourceManifests>> {
     let rels: Vec<&str> = files.iter().map(|f| f.rel.as_str()).collect();
     let manifests = clew_core::imports::source_manifests(root, &rels);
-    Patch::Set((!manifests.is_empty()).then_some(manifests))
+    Patch::Set((!manifests.is_empty()).then(|| Box::new(manifests)))
 }
 
 /// The type/trait structure index as a `ProjectSymbols` patch: always `Set`,

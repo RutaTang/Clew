@@ -177,6 +177,12 @@ pub struct Resolver {
     /// use one another's items through these. What the project's manifests
     /// say ([`Resolver::with_manifests`]); empty without them.
     rust_libs: HashMap<String, PathBuf>,
+    /// The modules each `build.zig` names, by the folder it is in (the
+    /// deepest first): a file `@import`s one its nearest build.zig names by
+    /// that name (`@import("greet")`), the module's root file — a nested
+    /// package sees its own build's names, not those of the build around it. What the project's
+    /// manifests say ([`Resolver::with_manifests`]); empty without them.
+    zig_modules: Vec<(PathBuf, HashMap<String, PathBuf>)>,
     /// The Python source roots the project's `pyproject.toml`s name
     /// (`src`, `lib`, maturin's `python`, pytest's `pythonpath`, …), that
     /// exist: where an absolute import is looked for after the project's
@@ -825,6 +831,22 @@ impl Resolver {
         roots.dedup();
         self.rust_crate_roots = roots;
         self.rust_libs = libs;
+        let mut zig: Vec<(PathBuf, HashMap<String, PathBuf>)> = Vec::new();
+        for (rel, modules) in &manifests.zig {
+            let Some(base) = self.root.join(rel).parent().map(Path::to_path_buf) else {
+                continue;
+            };
+            let named: HashMap<String, PathBuf> = modules
+                .iter()
+                .filter_map(|(name, path)| {
+                    let file = inside(&base, path).filter(|f| self.has_file(f))?;
+                    Some((name.clone(), file))
+                })
+                .collect();
+            zig.push((base, named));
+        }
+        zig.sort_by_key(|(dir, _)| std::cmp::Reverse(dir.components().count()));
+        self.zig_modules = zig;
         let mut python_roots: Vec<PathBuf> = Vec::new();
         for (rel, named) in &manifests.python {
             let Some(base) = self.root.join(rel).parent().map(Path::to_path_buf) else {
@@ -1021,6 +1043,7 @@ impl Resolver {
             php_psr4: Vec::new(),
             haskell_roots,
             rust_libs: HashMap::new(),
+            zig_modules: Vec::new(),
             python_roots: Vec::new(),
             erlang_modules,
             erlang_headers,
@@ -1590,13 +1613,23 @@ impl Resolver {
     // --- Zig ---
 
     /// A Zig `@import` of a path (`x.zig`, `../y.zig`, a `.zon`) is the file
-    /// relative to the importer; a bare name — `std`, `builtin`, `root`, a
-    /// `build.zig.zon` dependency — is a package.
+    /// relative to the importer; a bare name the importer's `build.zig`
+    /// gives one of the project's modules (`@import("greet")`) is that
+    /// module's root file; any other — `std`, `builtin`, `root`, a
+    /// `build.zig.zon` dependency's module — is a package.
     fn resolve_zig(&self, raw: &RawImport, from: &Path) -> Target {
         let spec = raw.module.as_str();
         let is_path = spec.contains('/') || spec.ends_with(".zig") || spec.ends_with(".zon");
         if !is_path {
-            return Target::External(spec.to_string());
+            let declared = self
+                .zig_modules
+                .iter()
+                .find(|(dir, _)| from.starts_with(dir))
+                .and_then(|(_, named)| named.get(spec));
+            return match declared {
+                Some(file) => Target::Internal(file.clone()),
+                None => Target::External(spec.to_string()),
+            };
         }
         let file = normalize(&from.parent().unwrap_or(&self.root).join(spec));
         if !spec.starts_with('/') && self.has_file(&file) {
@@ -2836,6 +2869,7 @@ fn ts_config_candidates(files: &[PathBuf]) -> Vec<&PathBuf> {
 /// go.mod, pubspec.yaml, a composer.json (PHP's PSR-4 map), a Haskell
 /// package description (`.cabal`, `package.yaml`), a Cargo.toml (a crate's
 /// library name and targets), a pyproject.toml (Python's source roots), a
+/// build.zig (the modules it names), a
 /// tsconfig/jsconfig or a base one extends by the usual naming
 /// (`tsconfig.base.json`) — so a change to it re-resolves every file against
 /// a resolver that reads it again.
@@ -2851,6 +2885,7 @@ pub fn is_resolution_metadata(path: &Path) -> bool {
             | "Cargo.toml"
             | "pyproject.toml"
             | "package.json"
+            | "build.zig"
     ) || clew_core::imports::is_haskell_manifest(name)
         || ((name.starts_with("tsconfig") || name.starts_with("jsconfig"))
             && name.ends_with(".json"))
@@ -5958,6 +5993,65 @@ mod tests {
             at("/p/build.zig"),
             Target::Unresolved("/p/build.zig".into())
         );
+    }
+
+    /// A name a project's `build.zig` gives one of its modules is that
+    /// module's root file, for the files under that build.zig (a nested
+    /// package's own first); a name it gives none, or a module out of the
+    /// project, stays a package.
+    #[test]
+    fn zig_imports_of_a_module_the_build_names_resolve_to_its_file() {
+        let root = Path::new("/p");
+        let r = resolver(
+            root,
+            &[
+                "build.zig",
+                "src/main.zig",
+                "src/greet.zig",
+                "lib/util.zig",
+                "pkg/build.zig",
+                "pkg/src/main.zig",
+                "pkg/src/greet.zig",
+            ],
+        )
+        .with_manifests(&clew_protocol::SourceManifests {
+            zig: vec![
+                (
+                    "build.zig".into(),
+                    vec![
+                        ("greet".into(), "src/greet.zig".into()),
+                        ("util".into(), "lib/util.zig".into()),
+                        ("gone".into(), "src/gone.zig".into()),
+                    ],
+                ),
+                (
+                    "pkg/build.zig".into(),
+                    vec![("greet".into(), "src/greet.zig".into())],
+                ),
+            ],
+            ..Default::default()
+        });
+        let at = |from: &str, spec: &str| r.resolve(&ri(spec), &root.join(from), "zig");
+        assert_eq!(
+            at("src/main.zig", "greet"),
+            Target::Internal(root.join("src/greet.zig"))
+        );
+        assert_eq!(
+            at("src/main.zig", "util"),
+            Target::Internal(root.join("lib/util.zig"))
+        );
+        assert_eq!(
+            at("pkg/src/main.zig", "greet"),
+            Target::Internal(root.join("pkg/src/greet.zig"))
+        );
+        assert_eq!(
+            at("pkg/src/main.zig", "util"),
+            Target::External("util".into()),
+            "a nested package sees its own build's names"
+        );
+        assert_eq!(at("src/main.zig", "gone"), Target::External("gone".into()));
+        assert_eq!(at("src/main.zig", "std"), Target::External("std".into()));
+        assert!(is_resolution_metadata(Path::new("pkg/build.zig")));
     }
 
     /// The manifests a local resolver reads for the whole project re-resolve

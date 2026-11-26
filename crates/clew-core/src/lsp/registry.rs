@@ -365,16 +365,20 @@ impl ServerSpec {
     /// command already used the effective version while the consent prompt
     /// used the pin, so the two could name different versions.
     ///
-    /// A download provision is available ONLY at the pinned version: its
-    /// SHA-256 digests are compiled in for that release alone, so any other
+    /// A download provision is available ONLY at a release whose digests
+    /// are compiled in — the pin, or one of [`OTHER_RELEASES`] — so any other
     /// version has nothing to verify against and is refused here rather than
     /// downloaded unverified.
     pub fn provision(&self, version: &str, platform: Platform) -> Option<Provision> {
         match &self.source {
             Source::Download(artifacts) => {
-                if version != self.version {
-                    return None;
-                }
+                let artifacts: &[Artifact] = match version == self.version {
+                    true => artifacts,
+                    false => OTHER_RELEASES
+                        .iter()
+                        .find(|(name, release, _)| *name == self.name && *release == version)
+                        .map(|(.., artifacts)| *artifacts)?,
+                };
                 let artifact = artifacts.iter().find(|a| a.platforms.contains(&platform))?;
                 Some(Provision::Download(Download {
                     url: artifact.url,
@@ -897,6 +901,209 @@ pub static SERVERS: &[ServerSpec] = &[
     },
 ];
 
+/// Releases of a downloaded server Clew verifies besides its pin, each with
+/// the digests of its own assets (from the release, each binary run to see
+/// it is that release): zls works with the one Zig release it was made for,
+/// so a project is served by the zls of its Zig ([`zls_release_for`]).
+pub static OTHER_RELEASES: &[(&str, &str, &[Artifact])] = &[
+    (
+        "zls",
+        "0.13.0",
+        &[
+            Artifact {
+                platforms: &[Platform::MacArm64],
+                url: "https://github.com/zigtools/zls/releases/download/0.13.0/zls-aarch64-macos.tar.xz",
+                sha256: Sha256::from_hex(
+                    "9848514524f5e5d33997ac280b7d92388407209d4b8d4be3866dc3cf30ca6ca8",
+                ),
+                archive: Archive::TarXz,
+                binary: "zls",
+            },
+            Artifact {
+                platforms: &[Platform::MacX64],
+                url: "https://github.com/zigtools/zls/releases/download/0.13.0/zls-x86_64-macos.tar.xz",
+                sha256: Sha256::from_hex(
+                    "4b63854d6b76810abd2563706e7d768efc7111e44dd8b371d49198e627697a13",
+                ),
+                archive: Archive::TarXz,
+                binary: "zls",
+            },
+            Artifact {
+                platforms: &[Platform::LinuxArm64],
+                url: "https://github.com/zigtools/zls/releases/download/0.13.0/zls-aarch64-linux.tar.xz",
+                sha256: Sha256::from_hex(
+                    "8e258711168c2e3e7e81d6074663cfe291309b779928aaa4c66aed1affeba1aa",
+                ),
+                archive: Archive::TarXz,
+                binary: "zls",
+            },
+            Artifact {
+                platforms: &[Platform::LinuxX64],
+                url: "https://github.com/zigtools/zls/releases/download/0.13.0/zls-x86_64-linux.tar.xz",
+                sha256: Sha256::from_hex(
+                    "ec4c1b45caf88e2bcb9ebb16c670603cc596e4f621b96184dfbe837b39cd8410",
+                ),
+                archive: Archive::TarXz,
+                binary: "zls",
+            },
+        ],
+    ),
+    (
+        "zls",
+        "0.14.0",
+        &[
+            Artifact {
+                platforms: &[Platform::MacArm64],
+                url: "https://github.com/zigtools/zls/releases/download/0.14.0/zls-aarch64-macos.tar.xz",
+                sha256: Sha256::from_hex(
+                    "dfb627e1f9603583678f552d8035a12dce878215c0a507b32d6f1b9d074d6c4d",
+                ),
+                archive: Archive::TarXz,
+                binary: "zls",
+            },
+            Artifact {
+                platforms: &[Platform::MacX64],
+                url: "https://github.com/zigtools/zls/releases/download/0.14.0/zls-x86_64-macos.tar.xz",
+                sha256: Sha256::from_hex(
+                    "baee69e4645deeccb42970b4a01f573592209dc1cf72e32893c59ca06af511dc",
+                ),
+                archive: Archive::TarXz,
+                binary: "zls",
+            },
+            Artifact {
+                platforms: &[Platform::LinuxArm64],
+                url: "https://github.com/zigtools/zls/releases/download/0.14.0/zls-aarch64-linux.tar.xz",
+                sha256: Sha256::from_hex(
+                    "d85f4679af3961db149ead8a355eab4652c3e738eecaad69174cab5f1a1196cc",
+                ),
+                archive: Archive::TarXz,
+                binary: "zls",
+            },
+            Artifact {
+                platforms: &[Platform::LinuxX64],
+                url: "https://github.com/zigtools/zls/releases/download/0.14.0/zls-x86_64-linux.tar.xz",
+                sha256: Sha256::from_hex(
+                    "661f8d402ba3dc9b04b6e9bc3026495be7b838d2f18d148db2bd98bd699c1360",
+                ),
+                archive: Archive::TarXz,
+                binary: "zls",
+            },
+        ],
+    ),
+    (
+        "zls",
+        "0.15.1",
+        &[
+            Artifact {
+                platforms: &[Platform::MacArm64],
+                url: "https://github.com/zigtools/zls/releases/download/0.15.1/zls-aarch64-macos.tar.xz",
+                sha256: Sha256::from_hex(
+                    "a6b3f1b10d77f37f3b9d962093f030334b083f48eb2607a4b3ccb72de2958133",
+                ),
+                archive: Archive::TarXz,
+                binary: "zls",
+            },
+            Artifact {
+                platforms: &[Platform::MacX64],
+                url: "https://github.com/zigtools/zls/releases/download/0.15.1/zls-x86_64-macos.tar.xz",
+                sha256: Sha256::from_hex(
+                    "b76aa724be3f69799f08063f84e93b8b5925f6bf6007f251a2fbea4f9fc244dd",
+                ),
+                archive: Archive::TarXz,
+                binary: "zls",
+            },
+            Artifact {
+                platforms: &[Platform::LinuxArm64],
+                url: "https://github.com/zigtools/zls/releases/download/0.15.1/zls-aarch64-linux.tar.xz",
+                sha256: Sha256::from_hex(
+                    "a2daa860a0e0cd1410491ff9703c6aaca96defd833b88af6a9811d6ff04fc13b",
+                ),
+                archive: Archive::TarXz,
+                binary: "zls",
+            },
+            Artifact {
+                platforms: &[Platform::LinuxX64],
+                url: "https://github.com/zigtools/zls/releases/download/0.15.1/zls-x86_64-linux.tar.xz",
+                sha256: Sha256::from_hex(
+                    "3bb38f522cb23213e8c075ac6b170273fe49b4274b8c12b034cc496407400067",
+                ),
+                archive: Archive::TarXz,
+                binary: "zls",
+            },
+        ],
+    ),
+    (
+        "zls",
+        "0.17.0",
+        &[
+            Artifact {
+                platforms: &[Platform::MacArm64],
+                url: "https://github.com/zigtools/zls/releases/download/0.17.0/zls-aarch64-macos.tar.xz",
+                sha256: Sha256::from_hex(
+                    "2e451358b4f7e2d4b1fccb65db177dbb321c5a98e95f67e09aa72d6ecfb39d20",
+                ),
+                archive: Archive::TarXz,
+                binary: "zls",
+            },
+            Artifact {
+                platforms: &[Platform::MacX64],
+                url: "https://github.com/zigtools/zls/releases/download/0.17.0/zls-x86_64-macos.tar.xz",
+                sha256: Sha256::from_hex(
+                    "0801481ebf0027620db6729968c069401c7b80f376d35f9f91f480d72c393523",
+                ),
+                archive: Archive::TarXz,
+                binary: "zls",
+            },
+            Artifact {
+                platforms: &[Platform::LinuxArm64],
+                url: "https://github.com/zigtools/zls/releases/download/0.17.0/zls-aarch64-linux.tar.xz",
+                sha256: Sha256::from_hex(
+                    "0d314f3cab30da770328e1b8c84ab89bb308e56dbc26a85ac82429ff02b44873",
+                ),
+                archive: Archive::TarXz,
+                binary: "zls",
+            },
+            Artifact {
+                platforms: &[Platform::LinuxX64],
+                url: "https://github.com/zigtools/zls/releases/download/0.17.0/zls-x86_64-linux.tar.xz",
+                sha256: Sha256::from_hex(
+                    "dfa4514e1868803fdf2ae56832c88b9d400094d70ea6bb136b57bcc91af10258",
+                ),
+                archive: Archive::TarXz,
+                binary: "zls",
+            },
+        ],
+    ),
+];
+
+/// The zls release made for the Zig of `zig_version`: the one Clew verifies
+/// of that minor version (Zig 0.15.2 is served by zls 0.15.1, a 0.16 build
+/// in development by zls 0.16.0); past the newest, the newest; before the
+/// oldest, the oldest. `None` for a version that is no Zig's.
+pub fn zls_release_for(zig_version: &str) -> Option<&'static str> {
+    fn minor(version: &str) -> Option<(u32, u32)> {
+        let mut parts = version.trim().split(['.', '-', '+']);
+        Some((parts.next()?.parse().ok()?, parts.next()?.parse().ok()?))
+    }
+    let wanted = minor(zig_version)?;
+    let mut releases: Vec<&'static str> = std::iter::once(by_name("zls")?.version)
+        .chain(
+            OTHER_RELEASES
+                .iter()
+                .filter(|(name, ..)| *name == "zls")
+                .map(|(_, version, _)| *version),
+        )
+        .collect();
+    releases.sort_by_key(|v| minor(v));
+    let (first, last) = (*releases.first()?, *releases.last()?);
+    releases
+        .iter()
+        .copied()
+        .find(|v| minor(v) == Some(wanted))
+        .or_else(|| (Some(wanted) > minor(last)).then_some(last))
+        .or_else(|| (Some(wanted) < minor(first)).then_some(first))
+}
+
 /// All servers clew knows how to provision.
 pub fn all() -> &'static [ServerSpec] {
     SERVERS
@@ -962,6 +1169,53 @@ pub fn by_name(name: &str) -> Option<&'static ServerSpec> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Each Zig release is served by the zls made for it; every other zls
+    /// release Clew verifies downloads from its own release, with its own
+    /// digests, on each platform the pin does; one it does not verify, none.
+    #[test]
+    fn a_zig_is_served_by_the_zls_made_for_it() {
+        assert_eq!(zls_release_for("0.15.2"), Some("0.15.1"));
+        assert_eq!(zls_release_for("0.14.1"), Some("0.14.0"));
+        assert_eq!(zls_release_for("0.16.0"), Some("0.16.0"));
+        assert_eq!(zls_release_for("0.17.1"), Some("0.17.0"));
+        assert_eq!(zls_release_for("0.13.0"), Some("0.13.0"));
+        assert_eq!(zls_release_for("0.16.0-dev.1484+d0ba6642b"), Some("0.16.0"));
+        assert_eq!(zls_release_for("0.19.0"), Some("0.17.0"));
+        assert_eq!(zls_release_for("0.11.0"), Some("0.13.0"));
+        assert_eq!(zls_release_for("zig"), None);
+        for (name, version, artifacts) in OTHER_RELEASES {
+            let spec = by_name(name).unwrap();
+            assert_ne!(*version, spec.version);
+            for artifact in *artifacts {
+                assert!(
+                    artifact.url.contains(&format!("/{version}/")),
+                    "{}",
+                    artifact.url
+                );
+            }
+            for platform in [
+                Platform::LinuxX64,
+                Platform::LinuxArm64,
+                Platform::MacArm64,
+                Platform::MacX64,
+            ] {
+                assert!(
+                    matches!(
+                        spec.provision(version, platform),
+                        Some(Provision::Download(d)) if d.url.contains(version)
+                    ),
+                    "{name} {version} on {platform:?}"
+                );
+            }
+            assert!(spec.provision(version, Platform::WindowsX64).is_none());
+        }
+        let zls = by_name("zls").unwrap();
+        assert!(
+            zls.provision("0.15.0", Platform::LinuxX64).is_none(),
+            "a release Clew does not verify"
+        );
+    }
 
     /// A project's `.ts`, `.tsx` and `.js` files are read by one server, as
     /// are its CSS, SCSS and Less — each file sent as the language it is.

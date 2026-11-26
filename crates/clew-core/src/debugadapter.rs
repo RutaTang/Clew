@@ -1208,7 +1208,13 @@ fn build_zig_project(
     )?;
     let from_project = source
         .strip_prefix(&project)
-        .map_err(|_| format!("{} is not in {}", source.display(), project.display()))?
+        .map_err(|_| {
+            format!(
+                "zig could not build {} by its project's build.zig:\n{}",
+                source.display(),
+                project.display()
+            )
+        })?
         .to_string_lossy()
         .replace('\\', "/");
     let prefix = dir.join("out");

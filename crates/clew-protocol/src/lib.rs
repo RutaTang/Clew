@@ -174,7 +174,11 @@ pub use payload::*;
 /// Kotlin, Scala, Elixir, C#, Zig, C or C++ program, under its language's
 /// debugger on the project's host, set up as Debug Test and Debug set it
 /// up for a project on the client's computer.
-pub const PROTOCOL_VERSION: u32 = 36;
+///
+/// v37: [`SourceManifests::zig`]: the modules a Zig project's `build.zig`
+/// names, so `@import("greet")` resolves to the file the build roots it at
+/// on a remote project too.
+pub const PROTOCOL_VERSION: u32 = 37;
 
 /// A hash of this crate's source as a token stream — comments and whitespace
 /// removed — computed at build time (see `build.rs`). Carried in `Hello` /
@@ -277,6 +281,10 @@ pub struct SourceManifests {
     /// its name and what it exports: a workspace's packages import one
     /// another by their names (`@acme/api`, `@acme/ui/button`).
     pub js: Vec<(Rel, JsPackage)>,
+    /// Each Zig `build.zig` (by rel) with the modules it gives a name code
+    /// `@import`s them by (`.imports`, `addImport`, `b.addModule`), each
+    /// with its root source file, relative to the build.zig's folder.
+    pub zig: Vec<(Rel, Vec<(String, String)>)>,
 }
 
 impl SourceManifests {
@@ -287,6 +295,7 @@ impl SourceManifests {
             && self.python.is_empty()
             && self.lean.is_empty()
             && self.js.is_empty()
+            && self.zig.is_empty()
     }
 }
 
@@ -1433,7 +1442,8 @@ pub enum Event {
         dart_package: Patch<String>,
         /// What the project's package manifests say of where its sources
         /// are: `composer.json`'s PSR-4 maps, Haskell's source directories.
-        manifests: Patch<SourceManifests>,
+        /// Boxed: it is most of the event's size, and rarely sent.
+        manifests: Patch<Box<SourceManifests>>,
         /// The Rust type/trait structure index — the hover peek's
         /// "implements / implementors" data, extracted where the files live.
         structure: Patch<StructureIndex>,

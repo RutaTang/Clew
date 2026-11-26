@@ -730,6 +730,7 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("x-mcp-header on `{arg1}`, which is not a string, integer or boolean"),
     tr_noop!("xz decode failed: {e}"),
     tr_noop!("zig could not build {arg1}:\n{arg2}"),
+    tr_noop!("zig could not build {arg1} by its project's build.zig:\n{arg2}"),
     tr_noop!(
         "{STEPS_LEFT_WARNING} exploration steps remain. Gather only what is still missing, then call `answer`."
     ),

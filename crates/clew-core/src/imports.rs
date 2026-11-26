@@ -252,6 +252,7 @@ pub fn bears_on_manifests(rel: &str) -> bool {
         || name == "package.json"
         || name == "Cargo.toml"
         || name == "pyproject.toml"
+        || name == "build.zig"
         || is_lakefile(name)
         || is_haskell_manifest(name)
         || [".php", ".hs", ".lhs", ".lean"]
@@ -263,7 +264,8 @@ pub fn bears_on_manifests(rel: &str) -> bool {
 /// where its sources are: each `composer.json`'s PSR-4 map when the project
 /// has PHP, each Haskell package description's source directories when it
 /// has Haskell — only then, as `package.yaml` is pnpm's file too; each Cargo
-/// package's targets, and each `pyproject.toml`'s Python source roots. The
+/// package's targets, each `pyproject.toml`'s Python source roots, and
+/// the modules each `build.zig` names ([`read_zig_modules`]). The
 /// shallowest [`MAX_MANIFESTS`] of each kind ([`MAX_CARGO_MANIFESTS`] of
 /// Cargo's: a workspace has one per crate), read bounded and plain-file-only,
 /// where the files live.
@@ -310,6 +312,12 @@ pub fn source_manifests<S: AsRef<str>>(root: &Path, rels: &[S]) -> clew_protocol
         if !roots.is_empty() {
             out.python.push((rel.to_string(), roots));
         }
+    }
+    // A build.zig is itself Zig: where there is one, there is Zig. Each is
+    // listed, naming modules or not: its files see its names alone.
+    for rel in picked(&|name| name == "build.zig") {
+        out.zig
+            .push((rel.to_string(), read_zig_modules(&root.join(rel))));
     }
     if has(&[".lean"]) {
         for rel in picked(&is_lakefile) {
@@ -436,6 +444,326 @@ pub fn read_lake_src_dirs(path: &Path) -> Vec<String> {
         }
     }
     dirs
+}
+
+/// The modules the `build.zig` at `path` names: each name code
+/// `@import`s a module by (`.imports = &.{ .{ .name = "greet", .module =
+/// greet } }`, `addImport("greet", greet)`, `b.addModule("greet", …)`,
+/// `addAnonymousImport`, Zig 0.11's `.dependencies` and `addModule`) with
+/// the module's root source file where the build gives one of the project's
+/// (`b.path("src/greet.zig")`, `.{ .path = "src/greet.zig" }`), relative to
+/// the build.zig's folder. A dependency's module (`dep.module("zap")`) or
+/// one the build generates (`addOptions`) has no file here: not listed.
+/// Read as text, bounded: a build.zig is a Zig program, not run.
+pub fn read_zig_modules(path: &Path) -> Vec<(String, String)> {
+    crate::statefile::read_capped(path, 256 * 1024)
+        .map(|text| zig_modules(&text))
+        .unwrap_or_default()
+}
+
+fn zig_modules(text: &str) -> Vec<(String, String)> {
+    let text = zig_without_comments(text);
+    let text = text.as_str();
+    // The modules bound to a name in the build (`const greet = b.createModule(…)`).
+    let mut vars: std::collections::HashMap<String, String> = Default::default();
+    let mut named: Vec<(String, String)> = Vec::new();
+    for keyword in ["const ", "var "] {
+        for (at, _) in text.match_indices(keyword) {
+            let before = text[..at].chars().next_back();
+            if before.is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '.') {
+                continue;
+            }
+            let rest = text[at + keyword.len()..].trim_start();
+            let end = rest
+                .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .unwrap_or(rest.len());
+            let (var, after) = rest.split_at(end);
+            // `const x: T = value;`: the value, to its `;`.
+            let Some(eq) = after
+                .find(['=', ';'])
+                .filter(|&i| after.as_bytes()[i] == b'=')
+            else {
+                continue;
+            };
+            let value = after[eq + 1..].trim_start();
+            let value = zig_statement(value);
+            if let Some(file) = zig_module_file(value, &vars) {
+                vars.insert(var.to_string(), file);
+            }
+        }
+    }
+    // Names given by a call: `addImport("greet", greet)`, `b.addModule("greet", .{ … })`.
+    for method in [
+        "addImport",
+        "addModule",
+        "addAnonymousImport",
+        "addAnonymousModule",
+    ] {
+        let call = format!(".{method}(");
+        for (at, _) in text.match_indices(&call) {
+            let Some(args) = zig_balanced(text, at + call.len() - 1) else {
+                continue;
+            };
+            let args = zig_split(args, b',');
+            let (Some(name), Some(module)) = (args.first(), args.get(1)) else {
+                continue;
+            };
+            let Some(name) = zig_string(name) else {
+                continue;
+            };
+            let module = module.trim();
+            let file = match zig_struct_body(module) {
+                Some(body) => zig_root_file(body),
+                None => zig_module_file(module, &vars),
+            };
+            if let Some(file) = file {
+                named.push((name, file));
+            }
+        }
+    }
+    // Names given in a struct: `.{ .name = "greet", .module = greet }`.
+    for (at, _) in text.match_indices(".{") {
+        let Some(body) = zig_balanced(text, at + 1) else {
+            continue;
+        };
+        let (Some(name), Some(module)) = (zig_field(body, "name"), zig_field(body, "module"))
+        else {
+            continue;
+        };
+        if let (Some(name), Some(file)) = (zig_string(name), zig_module_file(module, &vars)) {
+            named.push((name, file));
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    named.retain(|(name, _)| seen.insert(name.clone()));
+    named.sort();
+    named
+}
+
+/// The root file of the module `expr` is: a name bound to one, or a
+/// `createModule`/`addModule` call's.
+fn zig_module_file(expr: &str, vars: &std::collections::HashMap<String, String>) -> Option<String> {
+    let expr = expr.trim().trim_start_matches('&');
+    if expr.chars().all(|c| c.is_alphanumeric() || c == '_') {
+        return vars.get(expr).cloned();
+    }
+    for method in [".createModule(", ".addModule("] {
+        let Some(at) = expr.find(method) else {
+            continue;
+        };
+        // The call itself, not one somewhere in an argument.
+        if !expr[..at]
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '.')
+        {
+            continue;
+        }
+        let args = zig_balanced(expr, at + method.len() - 1)?;
+        let options = zig_split(args, b',').into_iter().last()?;
+        return zig_root_file(zig_struct_body(options)?);
+    }
+    None
+}
+
+/// A module's options' root source file, if one of the project's:
+/// `.root_source_file = b.path("src/x.zig")` (Zig 0.11's `.source_file`, a
+/// `.{ .path = "…" }`).
+fn zig_root_file(options: &str) -> Option<String> {
+    let value =
+        zig_field(options, "root_source_file").or_else(|| zig_field(options, "source_file"))?;
+    let value = value.trim();
+    let path = if let Some(body) = zig_struct_body(value) {
+        zig_string(zig_field(body, "path")?)?
+    } else {
+        let open = value.find(".path(")? + ".path(".len() - 1;
+        let prefix = &value[..open + 1 - ".path(".len()];
+        if !prefix
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '.')
+        {
+            return None;
+        }
+        zig_string(zig_balanced(value, open)?)?
+    };
+    let path = path.trim_start_matches("./");
+    (!path.is_empty() && !path.starts_with('/') && !path.split('/').any(|p| p == ".."))
+        .then(|| path.to_string())
+}
+
+/// A struct literal's body (`.{ … }`, without the braces).
+fn zig_struct_body(expr: &str) -> Option<&str> {
+    let expr = expr.trim();
+    let rest = expr.strip_prefix(".{")?;
+    let body = zig_balanced(expr, 1)?;
+    (rest.len() == body.len() + 1).then_some(body)
+}
+
+/// The value a struct literal's body gives `field` (`.field = value`), at
+/// its own level.
+fn zig_field<'a>(body: &'a str, field: &str) -> Option<&'a str> {
+    zig_split(body, b',').into_iter().find_map(|part| {
+        let rest = part.trim().strip_prefix('.')?.strip_prefix(field)?;
+        rest.trim_start().strip_prefix('=').map(str::trim)
+    })
+}
+
+/// A string literal's text (`"src/x.zig"`), when `expr` is one alone.
+fn zig_string(expr: &str) -> Option<String> {
+    let inner = expr.trim().strip_prefix('"')?.strip_suffix('"')?;
+    (!inner.contains('"') && !inner.contains('\\')).then(|| inner.to_string())
+}
+
+/// What the bracket at `open` (`(`, `{` or `[`) holds, up to its match;
+/// strings skipped.
+fn zig_balanced(text: &str, open: usize) -> Option<&str> {
+    let bytes = text.as_bytes();
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (i, &c) in bytes.iter().enumerate().skip(open) {
+        if in_string {
+            match (escaped, c) {
+                (true, _) => escaped = false,
+                (false, b'\\') => escaped = true,
+                (false, b'"') => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match c {
+            b'"' => in_string = true,
+            b'(' | b'{' | b'[' => depth += 1,
+            b')' | b'}' | b']' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return text.get(open + 1..i);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// `text` up to its statement's end: the first `;` outside brackets and
+/// strings, or the bracket closing around it.
+fn zig_statement(text: &str) -> &str {
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (i, &c) in text.as_bytes().iter().enumerate() {
+        if in_string {
+            match (escaped, c) {
+                (true, _) => escaped = false,
+                (false, b'\\') => escaped = true,
+                (false, b'"') => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match c {
+            b'"' => in_string = true,
+            b'(' | b'{' | b'[' => depth += 1,
+            b')' | b'}' | b']' if depth == 0 => return &text[..i],
+            b')' | b'}' | b']' => depth -= 1,
+            b';' if depth == 0 => return &text[..i],
+            _ => {}
+        }
+    }
+    text
+}
+
+/// `text` split at each `sep` outside brackets and strings.
+fn zig_split(text: &str, sep: u8) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut start = 0;
+    for (i, &c) in text.as_bytes().iter().enumerate() {
+        if in_string {
+            match (escaped, c) {
+                (true, _) => escaped = false,
+                (false, b'\\') => escaped = true,
+                (false, b'"') => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match c {
+            b'"' => in_string = true,
+            b'(' | b'{' | b'[' => depth += 1,
+            b')' | b'}' | b']' => depth -= 1,
+            c if c == sep && depth == 0 => {
+                parts.push(&text[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    if start < text.len() {
+        parts.push(&text[start..]);
+    }
+    parts.retain(|p| !p.trim().is_empty());
+    parts
+}
+
+/// Zig source without its `//` comments, nor its multiline string lines
+/// (`\\…`), nor character literals (`'"'`), so brackets and quotes count.
+fn zig_without_comments(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for line in text.lines() {
+        if line.trim_start().starts_with("\\\\") {
+            out.push('\n');
+            continue;
+        }
+        let bytes = line.as_bytes();
+        let mut in_string = false;
+        let mut escaped = false;
+        let mut i = 0;
+        while i < bytes.len() {
+            let c = bytes[i];
+            if in_string {
+                match (escaped, c) {
+                    (true, _) => escaped = false,
+                    (false, b'\\') => escaped = true,
+                    (false, b'"') => in_string = false,
+                    _ => {}
+                }
+                out.push(c as char);
+                i += 1;
+                continue;
+            }
+            match c {
+                b'/' if bytes.get(i + 1) == Some(&b'/') => break,
+                b'"' => in_string = true,
+                b'\'' => {
+                    // A character literal: skipped whole.
+                    let close = line[i + 1..]
+                        .char_indices()
+                        .skip(1)
+                        .find(|(_, ch)| *ch == '\'')
+                        .map(|(at, _)| i + 1 + at + 1);
+                    if let Some(close) = close {
+                        out.push_str("' '");
+                        i = close;
+                        continue;
+                    }
+                }
+                _ => {}
+            }
+            if c.is_ascii() {
+                out.push(c as char);
+                i += 1;
+            } else {
+                let ch = line[i..].chars().next().unwrap_or(' ');
+                out.push(ch);
+                i += ch.len_utf8();
+            }
+        }
+        out.push('\n');
+    }
+    out
 }
 
 /// Most `Cargo.toml`s [`source_manifests`] reads: more than of any other
@@ -2489,6 +2817,75 @@ mod extraction_tests {
 #[cfg(test)]
 mod metadata_tests {
     use super::*;
+
+    /// A build.zig's module names, as each Zig writes them: a module bound
+    /// to a name and given in `.imports`, by `addImport`, `b.addModule`,
+    /// inline, anonymously, Zig 0.11's `.dependencies` and `addModule`; a
+    /// dependency's or a generated module, a path out of the project, a
+    /// commented-out line: none.
+    #[test]
+    fn a_build_zig_names_its_modules_and_their_files() {
+        let build = r#"
+const std = @import("std");
+// const old = b.createModule(.{ .root_source_file = b.path("src/old.zig") });
+
+pub fn build(b: *std.Build) void {
+    const target = b.standardTargetOptions(.{});
+    const greet = b.createModule(.{
+        .root_source_file = b.path("src/greet.zig"),
+        .target = target,
+    });
+    const util: *std.Build.Module = b.addModule("shop-util", .{ .root_source_file = b.path("./lib/util.zig") });
+    const zap = b.dependency("zap", .{});
+    const options = b.addOptions();
+    const exe = b.addExecutable(.{
+        .name = "shop",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .imports = &.{
+                .{ .name = "greet", .module = greet },
+                .{ .name = "util", .module = util },
+                .{ .name = "zap", .module = zap.module("zap") },
+                .{ .name = "inline", .module = b.createModule(.{ .root_source_file = b.path("src/inline.zig") }) },
+            },
+        }),
+    });
+    exe.root_module.addImport("strings", b.createModule(.{ .root_source_file = b.path("src/strings.zig") }));
+    exe.root_module.addImport("again", greet);
+    exe.root_module.addOptions("config", options);
+    exe.root_module.addAnonymousImport("assets", .{ .root_source_file = b.path("assets/index.zig") });
+    exe.root_module.addImport("outside", b.createModule(.{ .root_source_file = b.path("../x.zig") }));
+    const sep = '"';
+    _ = sep;
+    // Zig 0.11
+    const old = b.createModule(.{ .source_file = .{ .path = "src/legacy.zig" } });
+    exe.addModule("legacy", old);
+    const lib = b.addStaticLibrary(.{ .name = "x", .root_source_file = .{ .path = "src/lib.zig" } });
+    _ = lib;
+    const dep_mod = b.createModule(.{ .source_file = .{ .path = "src/dep.zig" }, .dependencies = &.{ .{ .name = "legacy2", .module = old } } });
+    _ = dep_mod;
+}
+"#;
+        let got = zig_modules(build);
+        let want: Vec<(String, String)> = [
+            ("again", "src/greet.zig"),
+            ("assets", "assets/index.zig"),
+            ("greet", "src/greet.zig"),
+            ("inline", "src/inline.zig"),
+            ("legacy", "src/legacy.zig"),
+            ("legacy2", "src/legacy.zig"),
+            ("shop-util", "lib/util.zig"),
+            ("strings", "src/strings.zig"),
+            ("util", "lib/util.zig"),
+        ]
+        .iter()
+        .map(|(n, f)| (n.to_string(), f.to_string()))
+        .collect();
+        assert_eq!(got, want);
+        assert!(bears_on_manifests("pkg/build.zig"));
+        assert!(!bears_on_manifests("src/main.zig"));
+    }
 
     /// The manifests are read only for a project in their language —
     /// `package.yaml` is pnpm's too — the shallowest first, and

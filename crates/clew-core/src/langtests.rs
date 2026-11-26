@@ -1371,15 +1371,13 @@ pub fn main_debugger(root: &Path, file: &Path, lang: &str) -> Option<&'static st
         .map(|_| "java"),
         "scala" => Some("java"),
         "elixir" => Some("elixir"),
-        // A .NET program, built and run under netcoredbg; a Zig file on
-        // its own, built for the session under lldb (a build.zig's
-        // program is the build's to make: it runs).
+        // A .NET program, built and run under netcoredbg; a Zig file with
+        // a `main`, built for the session under lldb — alone, or by its
+        // project's build.zig where it does not build alone.
         "csharp" => dotnet_project(root, file)
             .filter(|(_, program)| *program)
             .map(|_| "csharp"),
-        "zig" => {
-            (above(root, file, &["build.zig"]).is_none() && has_zig_main(file)).then_some("native")
-        }
+        "zig" => has_zig_main(file).then_some("native"),
         // A CMake target's source, or a file with a `main` built alone; a
         // make, Meson or Bazel project's program is a launch file's to name.
         "c" | "cpp" => {
@@ -1543,8 +1541,10 @@ pub fn debug_main(
                 start: DebugStart::Program,
             })
         }
+        // Run where `zig build run` runs it: its build.zig's folder.
         "zig" => {
-            let dir = file.parent().unwrap_or(root).to_path_buf();
+            let dir = above(root, file, &["build.zig"])
+                .unwrap_or_else(|| file.parent().unwrap_or(root).to_path_buf());
             Ok(DebugTest {
                 adapter: "native",
                 program: file.to_path_buf(),
@@ -3904,7 +3904,10 @@ mod tests {
         assert!(main_command(&root, &only_tests, "zig", search).is_err());
         write("zb/build.zig", "");
         let built = write("zb/src/main.zig", "pub fn main() void {}\n");
-        assert_eq!(main_debugger(&root, &built, "zig"), None);
+        assert_eq!(main_debugger(&root, &built, "zig"), Some("native"));
+        let d = debug("zig", &built);
+        assert_eq!((d.adapter, &d.program), ("native", &built));
+        assert_eq!(d.cwd, root.join("zb"), "where `zig build run` runs it");
         assert_eq!(
             main_command(&root, &built, "zig", search).unwrap().args,
             ["build", "run"]

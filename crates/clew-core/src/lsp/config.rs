@@ -228,7 +228,10 @@ impl ProjectLspConfig {
         language: &str,
         choices: &LanguageChoices,
     ) -> Option<EffectiveServer> {
-        let resolved = self.resolve(language);
+        let resolved = self.resolve(language).map(|mut server| {
+            match_zls(&mut server, choices);
+            server
+        });
         let Some(choice) = choices
             .servers
             .as_ref()
@@ -257,6 +260,58 @@ impl ProjectLspConfig {
         server.chosen = Some(choice.command.trim().to_string());
         Some(server)
     }
+}
+
+/// zls is made for one Zig release: the project is served by the zls of
+/// its Zig — the one chosen for it, else the PATH's
+/// ([`registry::zls_release_for`]) — unless its `lsp.toml` names a version
+/// or a command of its own.
+fn match_zls(server: &mut EffectiveServer, choices: &LanguageChoices) {
+    if server.server_name != "zls" || server.command.is_some() {
+        return;
+    }
+    let Some(spec) = registry::by_name("zls") else {
+        return;
+    };
+    if server.version != spec.version {
+        return;
+    }
+    let zig = match choices.zig.as_deref().filter(|z| !z.trim().is_empty()) {
+        Some(chosen) => super::store::find_program(chosen).ok(),
+        None => crate::linerpc::spawn_path()
+            .and_then(|path| super::store::find_in_unresolved(&path, "zig")),
+    };
+    if let Some(release) = zig
+        .and_then(|zig| zig_version(&zig))
+        .and_then(|version| registry::zls_release_for(&version))
+    {
+        server.version = release.to_string();
+    }
+}
+
+/// What `zig version` says of the `zig` at `path`, asked once per program
+/// as it is (its path and modification time).
+fn zig_version(zig: &Path) -> Option<String> {
+    use std::sync::{Mutex, OnceLock};
+    type Key = (PathBuf, Option<std::time::SystemTime>);
+    static ASKED: OnceLock<Mutex<HashMap<Key, Option<String>>>> = OnceLock::new();
+    let key = (
+        zig.to_path_buf(),
+        std::fs::metadata(zig).and_then(|m| m.modified()).ok(),
+    );
+    let asked = ASKED.get_or_init(Default::default);
+    if let Some(known) = asked.lock().ok()?.get(&key) {
+        return known.clone();
+    }
+    let mut cmd = crate::spawn::command(zig);
+    cmd.arg("version");
+    let version = super::store::run_bounded(cmd, std::time::Duration::from_secs(10))
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+        .filter(|v| !v.is_empty());
+    asked.lock().ok()?.insert(key, version.clone());
+    version
 }
 
 /// The arguments a language server Clew knows by its program's name serves
@@ -446,6 +501,44 @@ mod tests {
         assert!(eff.command.is_none());
         assert!(eff.init_options.is_none());
         assert!(cfg.resolve("cobol").is_none());
+    }
+
+    /// A Zig project is served by the zls made for its Zig: the chosen
+    /// one's release, asked of it; a version the project's lsp.toml names
+    /// stands; and with no Zig found, the pinned zls.
+    #[test]
+    #[cfg(unix)]
+    fn a_zig_project_gets_the_zls_of_its_zig() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = crate::testutil::TempDir::new("zls-for-zig");
+        let zig = |name: &str, version: &str| {
+            let path = dir.join(name).join("zig");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, format!("#!/bin/sh\necho {version}\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            LanguageChoices {
+                zig: Some(path.to_string_lossy().into_owned()),
+                ..Default::default()
+            }
+        };
+        let cfg = ProjectLspConfig::default();
+        let zls = |choices: &LanguageChoices| cfg.resolve_with("zig", choices).unwrap().version;
+        assert_eq!(zls(&zig("a", "0.15.2")), "0.15.1");
+        assert_eq!(zls(&zig("b", "0.14.1")), "0.14.0");
+        assert_eq!(zls(&zig("c", "0.17.1")), "0.17.0");
+        let pinned = registry::by_name("zls").unwrap().version;
+        let missing = LanguageChoices {
+            zig: Some(dir.join("nowhere/zig").to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        assert_eq!(zls(&missing), pinned);
+        let cfg = parse("[zig]\nversion = \"0.13.0\"\n");
+        assert_eq!(
+            cfg.resolve_with("zig", &zig("a", "0.15.2"))
+                .unwrap()
+                .version,
+            "0.13.0"
+        );
     }
 
     #[test]

@@ -37686,7 +37686,7 @@ fn a_remote_projects_php_classes_resolve_by_the_hosts_composer_map() {
     publish(
         &mut app,
         1,
-        clew_protocol::Patch::Set(Some(map("App\\", "app/"))),
+        clew_protocol::Patch::Set(Some(Box::new(map("App\\", "app/")))),
     );
     let target = |app: &App| {
         app.proj
@@ -37704,7 +37704,7 @@ fn a_remote_projects_php_classes_resolve_by_the_hosts_composer_map() {
     publish(
         &mut app,
         2,
-        clew_protocol::Patch::Set(Some(map("App\\", "src/"))),
+        clew_protocol::Patch::Set(Some(Box::new(map("App\\", "src/")))),
     );
     assert_eq!(
         target(&app),

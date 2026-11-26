@@ -1004,7 +1004,7 @@ fn project_symbols(
         go_module,
         dart_package,
         manifests: match seq {
-            1 => Patch::Set(Some(SourceManifests {
+            1 => Patch::Set(Some(Box::new(SourceManifests {
                 psr4: vec![(
                     "composer.json".into(),
                     vec![("App\\".into(), vec!["src/".into()])],
@@ -1027,7 +1027,11 @@ fn project_symbols(
                         exports: vec![(".".into(), vec!["./src/index.ts".into()])],
                     },
                 )],
-            })),
+                zig: vec![(
+                    "build.zig".into(),
+                    vec![("greet".into(), "src/greet.zig".into())],
+                )],
+            }))),
             _ => Patch::Unchanged,
         },
         structure,
