@@ -199,6 +199,7 @@ fn live_a_projects_reading() {
                 clew_core::projectcalls::Receiver::Declared(ty)
                 | clew_core::projectcalls::Receiver::Type(ty),
             ) = &site.receiver
+                && !ty.starts_with(clew_core::projectcalls::RETURNED)
                 && !project_types.contains(ty.rsplit('.').next().unwrap_or(ty))
             {
                 library_calls += 1;

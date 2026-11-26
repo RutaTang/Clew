@@ -144,7 +144,17 @@ pub struct FileContext {
     /// leave one out). A BEAM function is its name and its arity: `f/1` is
     /// no call of `f/2`.
     pub arities: Vec<(usize, u8, u8)>,
+    /// Each function's declared return type, by its definition line, as
+    /// its methods' class is named (`JsonAdapter` for `fun adapter():
+    /// JsonAdapter<T>`): what a value assigned from a call of it is.
+    pub returns: Vec<(usize, String)>,
 }
+
+/// The mark a receiver's type starts with when the receiver was assigned
+/// from a call (`val a = moshi.adapter()`): `RETURNED` and the function's
+/// name, the type its definitions declare it returns, worked out once the
+/// whole project is read.
+pub const RETURNED: &str = "\u{2192}";
 
 /// The kinds of definition that are types another can extend or a value be
 /// declared as.
@@ -230,6 +240,377 @@ fn cpp_call_scope(call: Node, src: &str) -> Option<String> {
     let scope = scope.split('<').next().unwrap_or(scope);
     let last = scope.rsplit("::").next().unwrap_or(scope).trim();
     (!last.is_empty()).then(|| last.to_string())
+}
+
+/// Where a definition's parameter list is in its text ([`parameter_list`]).
+enum Parameters {
+    /// Its parentheses, open and close.
+    At(usize, usize),
+    /// None written (Scala's `def total: Int`): where its name ends.
+    None(usize),
+}
+
+/// The parameter list of the definition of `name` in `text`: the first
+/// parenthesis after the name (and past its generics, `<T>`, Scala's
+/// `[T]`), with the parenthesis that closes it.
+fn parameter_list(text: &str, name: &str, lang: Lang) -> Option<Parameters> {
+    let name = name.rsplit(['.', ':']).next().unwrap_or(name);
+    // An empty name (`Foo.`) is found everywhere and passes nothing.
+    if name.is_empty() {
+        return None;
+    }
+    let is_name = |c: char| c == '_' || c.is_alphanumeric();
+    let mut from = 0;
+    let open = loop {
+        let at = from + text[from..].find(name)?;
+        from = at + name.len();
+        if text[..at].ends_with(is_name) || text[from..].starts_with(is_name) {
+            continue;
+        }
+        let mut rest = text[from..].trim_start();
+        if let Some(first) = rest.chars().next()
+            && (first == '<' || (lang == Lang::Scala && first == '['))
+        {
+            let close = if first == '<' { '>' } else { ']' };
+            let mut depth = 0i32;
+            let end = rest.char_indices().find_map(|(i, c)| {
+                if c == first {
+                    depth += 1;
+                } else if c == close {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(i + 1);
+                    }
+                }
+                None
+            })?;
+            rest = rest[end..].trim_start();
+        }
+        if rest.starts_with('(') {
+            break text.len() - rest.len();
+        }
+        if lang == Lang::Scala && (rest.starts_with(':') || rest.starts_with('=')) {
+            return Some(Parameters::None(text.len() - rest.len()));
+        }
+    };
+    let mut depth = 0i32;
+    let close = text[open..].char_indices().find_map(|(i, c)| {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(open + i);
+                }
+            }
+            _ => {}
+        }
+        None
+    })?;
+    Some(Parameters::At(open, close))
+}
+
+/// The type a definition declares it returns, by the name its methods'
+/// class has: Kotlin's and Scala's `): Foo`, Go's and Zig's type after the
+/// parameters (`(*Foo, error)`, `!Foo`), Java's, C#'s, Dart's and C++'s
+/// before the name (`std::shared_ptr<logger> make()`, a C++ `-> T`). A
+/// pointer, a reference, an error union or Kotlin's `?` names its type; a
+/// C++ smart pointer the type it points to. `None` for no type, a
+/// primitive or a type parameter.
+fn declared_return(src: &str, l: &Located, lang: Lang) -> Option<String> {
+    let text = src.get(l.declaration.0..l.declaration.1)?;
+    let name = l
+        .symbol
+        .name
+        .rsplit(['.', ':'])
+        .next()
+        .unwrap_or(&l.symbol.name);
+    let span = parameter_list(text, &l.symbol.name, lang)?;
+    let after_params = match span {
+        Parameters::At(_, close) => close + 1,
+        Parameters::None(at) => at,
+    };
+    let raw: String = match lang {
+        Lang::Kotlin | Lang::Scala => {
+            let mut rest = &text[after_params..];
+            // Scala's further parameter lists: `def f(a: A)(b: B): C`.
+            while lang == Lang::Scala && rest.trim_start().starts_with('(') {
+                let t = rest.trim_start();
+                let mut depth = 0i32;
+                let end = t.char_indices().find_map(|(i, c)| {
+                    match c {
+                        '(' => depth += 1,
+                        ')' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                return Some(i + 1);
+                            }
+                        }
+                        _ => {}
+                    }
+                    None
+                })?;
+                rest = &t[end..];
+            }
+            let rest = rest.trim_start().strip_prefix(':')?;
+            let end = rest.find(['{', '=', '\n']).unwrap_or(rest.len());
+            rest[..end].trim().to_string()
+        }
+        Lang::Go | Lang::Zig => {
+            let rest = &text[after_params..];
+            let end = rest.find('{').unwrap_or(rest.len());
+            let ty = rest[..end].trim();
+            // Go's `(T, error)`: the first.
+            let ty = ty
+                .strip_prefix('(')
+                .and_then(|t| t.split(',').next())
+                .unwrap_or(ty);
+            // Zig's `callconv(.c)`, an error set's `E!T`.
+            let ty = ty.rsplit('!').next().unwrap_or(ty);
+            ty.trim().to_string()
+        }
+        Lang::Java | Lang::CSharp | Lang::Dart | Lang::Cpp => {
+            // C++'s trailing `auto f() -> T`.
+            let after = text[after_params..].trim_start();
+            if lang == Lang::Cpp
+                && let Some(t) = after
+                    .trim_start_matches(|c: char| c.is_alphabetic() || c == ' ')
+                    .strip_prefix("->")
+            {
+                let end = t.find(['{', ';']).unwrap_or(t.len());
+                t[..end].trim().to_string()
+            } else {
+                let open = match span {
+                    Parameters::At(open, _) => open,
+                    Parameters::None(at) => at,
+                };
+                let mut head = text[..open].trim_end().strip_suffix(name)?.trim_end();
+                // `Type Class::name`: the class is no part of the type.
+                if let Some(qualified) = head.strip_suffix("::") {
+                    head = qualified
+                        .trim_end_matches(|c: char| c == '_' || c.is_alphanumeric())
+                        .trim_end();
+                }
+                trailing_type_text(head)?.to_string()
+            }
+        }
+        _ => return None,
+    };
+    return_type_name(&raw, lang)
+}
+
+/// The type written last in `head`, whole: `std::shared_ptr<logger>`,
+/// `List<Cart>`, `const Cart&` — its template or generic arguments kept.
+fn trailing_type_text(head: &str) -> Option<&str> {
+    let head = head.trim_end().trim_end_matches(['*', '&', ' ', '?']);
+    let mut end = head.len();
+    let mut at = end;
+    if head.ends_with('>') {
+        let mut depth = 0i32;
+        at = head.char_indices().rev().find_map(|(i, c)| {
+            match c {
+                '>' => depth += 1,
+                '<' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(i);
+                    }
+                }
+                _ => {}
+            }
+            None
+        })?;
+    }
+    let start = head[..at]
+        .char_indices()
+        .rev()
+        .find(|&(_, c)| !(c == '_' || c == ':' || c == '.' || c.is_alphanumeric()))
+        .map_or(0, |(i, c)| i + c.len_utf8());
+    end = end.max(start);
+    let text = head[start..end].trim();
+    (!text.is_empty()).then_some(text)
+}
+
+/// The class a written return type names: past pointers, references,
+/// nullability and `const`, a C++ smart pointer's pointee, a generic's
+/// base (`List<Cart>` is `List`), a path's last part.
+fn return_type_name(raw: &str, lang: Lang) -> Option<String> {
+    let mut t = raw.trim();
+    loop {
+        let before = t;
+        for p in [
+            "const ", "*", "&", "?", "!", "[]", "mut ", "final ", "async ",
+        ] {
+            t = t.strip_prefix(p).unwrap_or(t).trim_start();
+        }
+        t = t.trim_end_matches(['?', '*', '&', ' ']);
+        if t == before {
+            break;
+        }
+    }
+    // A smart pointer hands on its pointee's methods; a future its value's,
+    // once awaited, as a call's result is where it is assigned.
+    for wrapper in [
+        "std::shared_ptr<",
+        "std::unique_ptr<",
+        "shared_ptr<",
+        "unique_ptr<",
+        "Future<",
+        "FutureOr<",
+        "Task<",
+        "ValueTask<",
+    ] {
+        if let Some(inner) = t.strip_prefix(wrapper).and_then(|i| i.strip_suffix('>')) {
+            return return_type_name(inner, lang);
+        }
+    }
+    let base_end = t.find(['<', '[', '(', ' ']).unwrap_or(t.len());
+    let base = &t[..base_end];
+    let last = base.rsplit(['.', ':']).next().unwrap_or(base).trim();
+    if last.chars().count() <= 1
+        || !last.starts_with(|c: char| c == '_' || c.is_alphabetic())
+        || !last.chars().all(|c| c == '_' || c.is_alphanumeric())
+    {
+        return None;
+    }
+    let primitive = matches!(
+        last,
+        "void"
+            | "auto"
+            | "var"
+            | "dynamic"
+            | "bool"
+            | "int"
+            | "long"
+            | "short"
+            | "char"
+            | "float"
+            | "double"
+            | "byte"
+            | "string"
+            | "object"
+            | "decimal"
+            | "uint"
+            | "usize"
+            | "isize"
+            | "u8"
+            | "u16"
+            | "u32"
+            | "u64"
+            | "i8"
+            | "i16"
+            | "i32"
+            | "i64"
+            | "f32"
+            | "f64"
+            | "error"
+            | "anytype"
+            | "noreturn"
+            | "type"
+            | "size_t"
+            | "unsigned"
+            | "signed"
+            | "boolean"
+            | "Unit"
+            | "Nothing"
+            | "Void"
+    );
+    // A lower-case name is a type only where types are written so.
+    let typed_lower = matches!(lang, Lang::Go | Lang::Cpp | Lang::C | Lang::Zig);
+    (!primitive && (typed_lower || last.starts_with(char::is_uppercase))).then(|| last.to_string())
+}
+
+/// The fewest and most arguments a function of a statically typed
+/// language takes, read from its parameter list: a default (`b: Int = 0`,
+/// `int b = 0`, Dart's `{…}` and `[…]`) may be left out, a variadic
+/// (`String...`, `vararg`, `params`, `xs: Int*`, `...T`) takes any number
+/// more; a C# extension's `this` and a Zig function's first parameter
+/// are passed by the dot of a method call. C's and C++'s fewest is none: their defaults
+/// are in the header's declaration, not in the definition the call reaches.
+/// `None` when no parameter list is found.
+fn declared_arity(src: &str, l: &Located, lang: Lang) -> Option<(u8, u8)> {
+    const ANY: u8 = u8::MAX;
+    let text = src.get(l.declaration.0..l.declaration.1)?;
+    let (open, close) = match parameter_list(text, &l.symbol.name, lang)? {
+        Parameters::At(open, close) => (open, close),
+        Parameters::None(_) => return Some((0, 0)),
+    };
+    let inner = text[open + 1..close].trim();
+    if inner.is_empty() || (matches!(lang, Lang::C | Lang::Cpp) && inner == "void") {
+        return Some((0, 0));
+    }
+    let (mut fewest, mut most) = (0u32, 0u32);
+    let mut variadic = false;
+    let mut passed_by_dot = false;
+    for (i, part) in split_top_level(inner).enumerate() {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        // Dart's named `{…}` and optional `[…]` parameters.
+        if lang == Lang::Dart && (part.starts_with('{') || part.starts_with('[')) {
+            let named = part.starts_with('{');
+            for p in split_top_level(&part[1..part.len().saturating_sub(1)]) {
+                let p = p.trim();
+                if p.is_empty() {
+                    continue;
+                }
+                most += 1;
+                if named && p.starts_with("required ") {
+                    fewest += 1;
+                }
+            }
+            continue;
+        }
+        let defaulted = {
+            let mut depth = 0i32;
+            part.char_indices().any(|(j, c)| {
+                match c {
+                    '(' | '[' | '{' | '<' => depth += 1,
+                    ')' | ']' | '}' | '>' => depth -= 1,
+                    '=' if depth <= 0 => {
+                        let next = part[j + 1..].chars().next();
+                        let prev = part[..j].chars().last();
+                        return !matches!(next, Some('=' | '>'))
+                            && !matches!(prev, Some('=' | '!' | '<' | '>'));
+                    }
+                    _ => {}
+                }
+                false
+            })
+        };
+        let spread = part.contains("...")
+            || part.starts_with("vararg ")
+            || part.starts_with("params ")
+            || (lang == Lang::Scala && part.trim_end().ends_with('*'));
+        if i == 0 && lang == Lang::CSharp && part.starts_with("this ") {
+            passed_by_dot = true;
+        }
+        // Zig passes a function's first argument by the dot of a method
+        // call, whatever it is named (`analyser: *Analyser`).
+        if i == 0 && lang == Lang::Zig {
+            passed_by_dot = true;
+        }
+        if spread {
+            variadic = true;
+            continue;
+        }
+        most += 1;
+        if !defaulted {
+            fewest += 1;
+        }
+    }
+    if passed_by_dot {
+        fewest = fewest.saturating_sub(1);
+    }
+    if matches!(lang, Lang::C | Lang::Cpp) {
+        fewest = 0;
+    }
+    let most = if variadic { u32::from(ANY) } else { most };
+    Some((
+        u8::try_from(fewest).unwrap_or(ANY),
+        u8::try_from(most).unwrap_or(ANY),
+    ))
 }
 
 /// The names a Go file calls its imports by: an import's alias, else its
@@ -423,6 +804,38 @@ pub fn context_in(src: &str, lang: Lang, symbols: &[Located]) -> FileContext {
                 Some((l.symbol.line, fewest, most))
             })
             .collect(),
+        // (Not C's: it has no overloads to choose among, and a C++ header
+        // read as C says nothing sure of its arguments.)
+        Lang::Java
+        | Lang::Kotlin
+        | Lang::Scala
+        | Lang::CSharp
+        | Lang::Dart
+        | Lang::Cpp
+        | Lang::Go
+        | Lang::Zig => symbols
+            .iter()
+            .filter(|l| is_callable(&l.symbol.kind))
+            .filter_map(|l| {
+                let (fewest, most) = declared_arity(src, l, lang)?;
+                Some((l.symbol.line, fewest, most))
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    let returns = match lang {
+        Lang::Java
+        | Lang::Kotlin
+        | Lang::Scala
+        | Lang::CSharp
+        | Lang::Dart
+        | Lang::Cpp
+        | Lang::Go
+        | Lang::Zig => symbols
+            .iter()
+            .filter(|l| is_callable(&l.symbol.kind))
+            .filter_map(|l| Some((l.symbol.line, declared_return(src, l, lang)?)))
+            .collect(),
         _ => Vec::new(),
     };
     FileContext {
@@ -432,6 +845,7 @@ pub fn context_in(src: &str, lang: Lang, symbols: &[Located]) -> FileContext {
         uses: modules_after("use "),
         imports: modules_after("import "),
         arities,
+        returns,
     }
 }
 
@@ -1300,6 +1714,25 @@ impl ProjectCallGraph {
                 .is_some_and(crate::weakspots::is_test_path)
         };
         let test_node: Vec<bool> = nodes.iter().map(|n| is_test_file(&n.file)).collect();
+        // Each function's declared return type ([`FileContext::returns`]).
+        let returns: HashMap<(&Path, usize), &str> = files
+            .iter()
+            .flat_map(|f| {
+                f.context
+                    .returns
+                    .iter()
+                    .map(|(line, ty)| ((f.file.as_path(), *line), ty.as_str()))
+            })
+            .collect();
+        let node_returns: Vec<Option<String>> = nodes
+            .iter()
+            .map(|n| {
+                returns
+                    .get(&(n.file.as_path(), n.line))
+                    .map(|t| t.to_string())
+            })
+            .collect();
+        let mut returned_types: HashMap<String, Option<String>> = HashMap::new();
         // A test class's methods (`StatusCodesTest.get`): the runner holds
         // its instance, so no other code calls them on a value.
         let test_method: Vec<bool> = (0..nodes.len())
@@ -1351,6 +1784,45 @@ impl ProjectCallGraph {
             // name and the call's shape only: worked out once per file.
             let mut resolved: HashMap<(&str, bool, Option<u8>), Vec<usize>> = HashMap::new();
             for cs in &fc.calls {
+                // A receiver assigned from a call is of the type the
+                // function's definitions declare, where they agree.
+                let callee_key: &str = cs.callee.as_str();
+                let typed_call: CallSite;
+                let cs = match &cs.receiver {
+                    Some(Receiver::Type(t) | Receiver::Declared(t)) if t.starts_with(RETURNED) => {
+                        let function = &t[RETURNED.len()..];
+                        let returned = returned_types
+                            .entry(function.to_string())
+                            .or_insert_with(|| {
+                                let name = logical_name(function, Some(fc.lang));
+                                let mut types = defs
+                                    .named
+                                    .get(name)
+                                    .into_iter()
+                                    .flat_map(|named| named.all.iter().copied())
+                                    .map(|i| node_returns[i].as_deref());
+                                let first = types.next().flatten()?;
+                                // A type the project declares: a library's
+                                // (`Future`, `String`) says less than the
+                                // value of no known type did.
+                                (types.all(|t| t == Some(first))
+                                    && (declared_types.contains(first)
+                                        || project_types.contains(first)))
+                                .then(|| first.to_string())
+                            })
+                            .clone();
+                        let exact = matches!(cs.receiver, Some(Receiver::Type(_)));
+                        typed_call = CallSite {
+                            receiver: returned.map(|ty| match exact {
+                                true => Receiver::Type(ty),
+                                false => Receiver::Declared(ty),
+                            }),
+                            ..cs.clone()
+                        };
+                        &typed_call
+                    }
+                    _ => cs,
+                };
                 // Bare calls to language builtins (`len(x)`, `make(...)`) are not
                 // project functions; skip them so they don't resolve to some
                 // same-named definition and inflate the graph.
@@ -1371,7 +1843,7 @@ impl ProjectCallGraph {
                     continue;
                 };
                 let callees = resolved
-                    .entry((cs.callee.as_str(), cs.method, cs.arity))
+                    .entry((callee_key, cs.method, cs.arity))
                     .or_insert_with(|| resolve_callees(&defs, &nodes, &facts, &owner, cs, &site));
                 // Scala's `pkg.member(…)`: the package's own function (a
                 // package object's) or its object's `apply` — and nothing
@@ -1505,6 +1977,11 @@ impl ProjectCallGraph {
                 let owned_by = |c: usize, ty: &str| match owner[c] {
                     Some(o) if matches!(fc.lang, Lang::Lean | Lang::Elixir) => {
                         o == ty || o.strip_suffix(ty).is_some_and(|o| o.ends_with('.'))
+                    }
+                    // A Go or Zig type named through its package or module
+                    // (`*httpz.Response`) is its struct's.
+                    Some(o) if matches!(fc.lang, Lang::Go | Lang::Zig) => {
+                        o == ty.rsplit('.').next().unwrap_or(ty)
                     }
                     o => o == Some(ty),
                 };
@@ -2720,6 +3197,71 @@ fn call_arity(call: Node, parent: Option<Node>, src: &str, lang: Lang) -> Option
             });
             n + usize::from(piped)
         }
+        // Kotlin's `h(3) { … }`: its arguments and its trailing lambda — and
+        // the lambda of a call around it (`h(3) { … }` is a call of the call).
+        (Lang::Kotlin, "call_expression") => {
+            let mut cursor = call.walk();
+            let children: Vec<Node> = call.named_children(&mut cursor).collect();
+            if children
+                .first()
+                .is_some_and(|f| f.kind() == "call_expression")
+            {
+                return None;
+            }
+            let mut n = 0;
+            for child in &children {
+                match child.kind() {
+                    "value_arguments" => n += count(*child),
+                    "call_suffix" => {
+                        let mut c = child.walk();
+                        for part in child.named_children(&mut c) {
+                            match part.kind() {
+                                "value_arguments" => n += count(part),
+                                "annotated_lambda" => n += 1,
+                                _ => {}
+                            }
+                        }
+                    }
+                    "annotated_lambda" => n += 1,
+                    _ => {}
+                }
+            }
+            let outer_lambda = parent.is_some_and(|p| {
+                p.kind() == "call_expression"
+                    && p.named_child(0).is_some_and(|f| f.id() == call.id())
+                    && p.named_children(&mut p.walk())
+                        .any(|c| c.kind() == "annotated_lambda")
+            });
+            n + usize::from(outer_lambda)
+        }
+        // Dart's `g(1, x: 2)`: its argument part's arguments.
+        (Lang::Dart, _) => {
+            let mut cursor = call.walk();
+            let part = call
+                .named_children(&mut cursor)
+                .find(|c| c.kind() == "argument_part")?;
+            let mut c = part.walk();
+            let args = part
+                .named_children(&mut c)
+                .find(|c| c.kind() == "arguments")?;
+            count(args)
+        }
+        // Zig passes its arguments after the function, unwrapped.
+        (Lang::Zig, "call_expression") => {
+            let function = call
+                .child_by_field_name("function")
+                .or_else(|| call.named_child(0))?;
+            call.named_children(&mut call.walk())
+                .filter(|c| c.id() != function.id() && c.kind() != "comment")
+                .count()
+        }
+        (Lang::Java | Lang::CSharp | Lang::Cpp | Lang::Go | Lang::Scala, _) => {
+            let args = call.child_by_field_name("arguments").or_else(|| {
+                call.named_children(&mut call.walk())
+                    .find(|c| matches!(c.kind(), "argument_list" | "arguments"))
+            })?;
+            count(args)
+        }
         _ => return None,
     };
     u8::try_from(n).ok()
@@ -3725,8 +4267,10 @@ fn receiver_of(
     }
     // Not bound in the function: a field of its class, used bare
     // (`owners.findById(…)` in Java, Kotlin, C#, Dart, C++).
+    // (C# names its properties and static fields in Pascal case, as its
+    // types: `DbResetter.DisposeAsync()` is the property's.)
     if implicit_self(lang)
-        && !receiver.starts_with(|c: char| c.is_uppercase())
+        && (lang == Lang::CSharp || !receiver.starts_with(|c: char| c.is_uppercase()))
         && let Some(ty) = class_field_type(call, receiver, src, lang, scope.places, fields)
     {
         return Some(Receiver::Declared(ty));
@@ -4192,6 +4736,19 @@ fn binding_at(head: &str, after: &str, lang: Lang) -> Binding {
     }
     let depth = i32::from(matches!(open.last(), Some('(' | '[')));
     let line_rest = &after[..after.find('\n').unwrap_or(after.len())];
+    // Go's `c, err := NewCart()`: the first name is the function's first
+    // result, of the type it declares first.
+    if lang == Lang::Go
+        && depth == 0
+        && after.starts_with(',')
+        && !before.ends_with(',')
+        && let Some(at) = line_rest.find(":=")
+    {
+        return match returned_call(&line_rest[at + 2..], lang) {
+            Some(function) => Binding::Typed(format!("{RETURNED}{function}"), false),
+            None => Binding::Unknown,
+        };
+    }
     let assigns = |text: &str| {
         let bytes = text.as_bytes();
         bytes.iter().enumerate().any(|(i, &b)| {
@@ -4340,7 +4897,12 @@ fn binding_at(head: &str, after: &str, lang: Lang) -> Binding {
                 Some(ty) if declares(head, lang) => Binding::Typed(ty, false),
                 _ => match factory_type(rhs, lang) {
                     Some(ty) => Binding::Typed(ty, false),
-                    None => Binding::Unknown,
+                    // A function's result: the type it declares, once the
+                    // project is read.
+                    None => match returned_call(rhs, lang) {
+                        Some(function) => Binding::Typed(format!("{RETURNED}{function}"), false),
+                        None => Binding::Unknown,
+                    },
                 },
             },
         };
@@ -4376,6 +4938,15 @@ fn binding_at(head: &str, after: &str, lang: Lang) -> Binding {
     }
     // A declaration names the type before the name: `Cart cart;`.
     if after.starts_with([';', ',', ')'])
+        && declares(head, lang)
+        && let Some(ty) = declared_type(head, lang)
+    {
+        return Binding::Typed(ty, false);
+    }
+    // A C# property: `Resetter DbResetter { get; set; }`, `Cart Current =>
+    // …;`.
+    if lang == Lang::CSharp
+        && (after.starts_with('{') || after.starts_with("=>"))
         && declares(head, lang)
         && let Some(ty) = declared_type(head, lang)
     {
@@ -4501,10 +5072,17 @@ fn cpp_trailing_type(head: &str) -> Option<String> {
 /// `Shape::Circle(c)` is a value of `Shape`, not a `Circle`.
 fn constructed_type(rhs: &str, lang: Lang) -> Option<String> {
     let mut rhs = rhs.trim_start();
+    let mut built_with_new = false;
     for prefix in ["new ", "&mut ", "&"] {
         if let Some(rest) = rhs.strip_prefix(prefix) {
             rhs = rest.trim_start();
+            built_with_new |= prefix == "new ";
         }
+    }
+    // Java and C# build only with `new`: C#'s `MakeCart()` is a method,
+    // named in Pascal case as a type is.
+    if matches!(lang, Lang::Java | Lang::CSharp) && !built_with_new {
+        return None;
     }
     let path_len = rhs
         .find(|c: char| !(c == '_' || c == ':' || c == '.' || c.is_alphanumeric()))
@@ -4566,6 +5144,99 @@ fn factory_type(rhs: &str, lang: Lang) -> Option<String> {
     let rest = rhs[path_len..].trim_start();
     let ends = rest.is_empty() || rest.starts_with([';', '\n', ')', ',', '}']);
     (type_like(ty, lang) && factory && (ends || whole_expression(rest))).then(|| ty.to_string())
+}
+
+/// The function whose result `rhs` is, when it is a call and no more:
+/// `adapter` for `moshi.adapter<T>()`, `stdout_color_mt` for
+/// `spdlog::stdout_color_mt("x")` — in a statically typed language whose
+/// definitions say what they return.
+fn returned_call(rhs: &str, lang: Lang) -> Option<String> {
+    if !matches!(
+        lang,
+        Lang::Java
+            | Lang::Kotlin
+            | Lang::Scala
+            | Lang::CSharp
+            | Lang::Dart
+            | Lang::Cpp
+            | Lang::Go
+            | Lang::Zig
+    ) {
+        return None;
+    }
+    let mut expr = rhs.trim_start();
+    for prefix in ["await ", "try "] {
+        expr = expr.strip_prefix(prefix).unwrap_or(expr).trim_start();
+    }
+    // The statement's end.
+    let mut depth = 0i32;
+    let mut end = expr.len();
+    for (i, c) in expr.char_indices() {
+        match c {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' if depth == 0 => {
+                end = i;
+                break;
+            }
+            ')' | ']' | '}' => depth -= 1,
+            ';' | '\n' if depth == 0 => {
+                end = i;
+                break;
+            }
+            _ => {}
+        }
+    }
+    let expr = expr[..end]
+        .trim_end()
+        .trim_end_matches(['!', '?'])
+        .trim_end();
+    let inner = expr.strip_suffix(')')?;
+    // Back to the parenthesis that opens the last call's arguments.
+    let mut depth = 1i32;
+    let open = inner.char_indices().rev().find_map(|(i, c)| {
+        match c {
+            ')' => depth += 1,
+            '(' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+        None
+    })?;
+    let mut callee = inner[..open].trim_end();
+    // Its generic arguments: `adapter<T>()`, Scala's `of[F]()`.
+    if let Some(last) = callee.chars().last()
+        && (last == '>' || last == ']')
+    {
+        let first = if last == '>' { '<' } else { '[' };
+        let mut depth = 0i32;
+        let cut = callee.char_indices().rev().find_map(|(i, c)| {
+            if c == last {
+                depth += 1;
+            } else if c == first {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            None
+        })?;
+        callee = callee[..cut].trim_end();
+    }
+    let start = callee
+        .char_indices()
+        .rev()
+        .find(|&(_, c)| !(c == '_' || c.is_alphanumeric()))
+        .map_or(0, |(i, c)| i + c.len_utf8());
+    let name = &callee[start..];
+    // A constructor's type is read where it is built.
+    let constructor = matches!(lang, Lang::Java | Lang::Kotlin | Lang::Scala | Lang::Dart)
+        && name.starts_with(char::is_uppercase);
+    (!name.is_empty() && !constructor && name.starts_with(|c: char| c == '_' || c.is_alphabetic()))
+        .then(|| name.to_string())
 }
 
 /// Whether what follows a constructor's name — its generic arguments, its
@@ -4743,7 +5414,8 @@ fn rust_field_type(call: Node, field: &str, src: &str) -> Option<String> {
 /// The type a declaration ends with before its name: `Cart`, `final Cart`,
 /// `Cart*`, `List<Cart>` → `List`.
 fn trailing_type(head: &str) -> Option<String> {
-    let mut head = head.trim_end().trim_end_matches(['*', '&', ' ']);
+    // A nullable `Cart?` (C#, Dart) is a `Cart`.
+    let mut head = head.trim_end().trim_end_matches(['*', '&', ' ', '?']);
     if head.ends_with('>') {
         let mut depth = 0usize;
         let mut cut = None;
@@ -7512,13 +8184,15 @@ def main():
             ),
             None
         );
+        // A function's result: of the type it declares, once the project
+        // is read.
         assert_eq!(
             receiver(
                 "a.go",
                 "package m\nfunc f() {\n\tc := newCart()\n\tc.Total()\n}\n",
                 "Total"
             ),
-            None
+            Some(Receiver::Type(format!("{RETURNED}newCart")))
         );
         // What a type's function other than `new` returns, a variant of an
         // enum, and what is called off a value built: of types of their own.
@@ -8673,6 +9347,192 @@ def main():
             .map(|c| g.node(c).line)
             .collect();
         assert_eq!(params_get, [3], "{e:?}");
+    }
+
+    /// A call reaches the overloads that take as many arguments as it
+    /// passes: a default may be left out, a variadic takes more, a trailing
+    /// lambda is one, a C# extension's `this` and a Zig method's `self` are
+    /// passed by the dot, and a C++ default lives in the header.
+    #[test]
+    fn a_call_reaches_the_overloads_of_its_argument_count() {
+        // Each file: its overloads (the lines the call may reach) and a
+        // caller `run`.
+        let cases: &[(&str, &str, &[usize])] = &[
+            (
+                "/p/src/W.java",
+                "class W {\n  void value(String s) {}\n  void value(String s, int n) {}\n  void spread(String... xs) {}\n  void run() { value(\"a\"); spread(\"a\", \"b\", \"c\"); }\n}\n",
+                &[2, 4],
+            ),
+            (
+                "/p/src/K.kt",
+                "fun root(w: Int, depth: Int = 0) = w\nfun root() = 0\nfun each(xs: Int, block: (Int) -> Unit) {}\nfun many(vararg xs: Int) {}\nfun run() {\n    root(1)\n    each(1) { it }\n    many(1, 2, 3)\n}\n",
+                &[1, 3, 4],
+            ),
+            (
+                "/p/src/E.cs",
+                "static class E\n{\n    public static int Twice(this int x) => x * 2;\n    public static int Twice(this int x, int y, int z) => x;\n    public static void Log(params string[] lines) {}\n    public static void Run(int a)\n    {\n        a.Twice();\n        Log(\"a\", \"b\");\n    }\n}\n",
+                &[3, 5],
+            ),
+            (
+                "/p/lib/d.dart",
+                "void show(int a, {required int b, int c = 0}) {}\nvoid show2(int a, [int? b]) {}\nvoid run() {\n  show(1, b: 2);\n  show2(1);\n}\n",
+                &[1, 2],
+            ),
+            (
+                "/p/src/g.go",
+                "package g\n\nfunc Join(sep string, parts ...string) string { return sep }\n\nfunc run() {\n\tJoin(\",\", \"a\", \"b\")\n}\n",
+                &[3],
+            ),
+            (
+                "/p/src/z.zig",
+                "const List = struct {\n    fn insert(self: *List, at: usize, v: u8) void {}\n};\nfn run(l: *List) void {\n    l.insert(0, 1);\n}\n",
+                &[2],
+            ),
+            (
+                "/p/src/S.scala",
+                "object S {\n  def make(a: Int, b: Int = 1): Int = a\n  def make(): Int = 0\n  def run(): Unit = { make(1) }\n}\n",
+                &[2],
+            ),
+        ];
+        for (file, src, lines) in cases {
+            let g = graph(&[(file, src)]);
+            let run = (0..g.node_count())
+                .find(|&n| g.node(n).name.eq_ignore_ascii_case("run"))
+                .unwrap();
+            let mut reached: Vec<usize> =
+                g.callees_of(run).iter().map(|&c| g.node(c).line).collect();
+            reached.sort_unstable();
+            reached.dedup();
+            assert_eq!(&reached, lines, "{file}: {:?}", edges(&g));
+        }
+        // C++: the header's declaration has the default; the call reaches
+        // the definition elsewhere all the same.
+        let header = "class Cart {\npublic:\n    int add(int a, int b = 1);\n};\n";
+        let source = "#include \"cart.hpp\"\nint Cart::add(int a, int b) { return a + b; }\nint run(Cart &c) { return c.add(1); }\n";
+        let g = graph(&[("/p/cart.hpp", header), ("/p/cart.cpp", source)]);
+        assert!(
+            has(&g, "/p/cart.cpp:run", "/p/cart.cpp:add"),
+            "{:?}",
+            edges(&g)
+        );
+    }
+
+    /// A value assigned from a call is of the type the function declares it
+    /// returns: `val adapter = moshi.adapter<T>()` then `adapter.fromJson`
+    /// is `JsonAdapter`'s, not another class's `fromJson`; a C++
+    /// `std::shared_ptr<logger>` hands on `logger`'s methods.
+    #[test]
+    fn a_value_from_a_call_has_its_declared_return_type() {
+        let cases: &[(&str, &str, &str, &str)] = &[
+            (
+                "/p/src/Moshi.kt",
+                "class JsonAdapter<T> {\n    fun fromJson(s: String): T? = null\n}\nclass Other {\n    fun fromJson(s: String): Int = 0\n}\nclass Moshi {\n    fun <T> adapter(): JsonAdapter<T> = JsonAdapter()\n}\nfun run(moshi: Moshi) {\n    val adapter = moshi.adapter<Int>()\n    adapter.fromJson(\"1\")\n}\n",
+                "fromJson",
+                "2",
+            ),
+            (
+                "/p/src/Shop.java",
+                "class Cart { int total() { return 0; } }\nclass Order { int total() { return 1; } }\nclass Shop {\n  static Cart cart() { return new Cart(); }\n  void run() {\n    var c = cart();\n    c.total();\n  }\n}\n",
+                "total",
+                "1",
+            ),
+            (
+                "/p/src/Shop.cs",
+                "class Cart { public int Total() => 0; }\nclass Order { public int Total() => 1; }\nclass Shop\n{\n    static Cart MakeCart() => new Cart();\n    void Run()\n    {\n        var c = MakeCart();\n        c.Total();\n    }\n}\n",
+                "Total",
+                "1",
+            ),
+            (
+                "/p/src/log.cpp",
+                "#include <memory>\nclass logger {\n public:\n  void set_pattern(int p) {}\n};\nclass formatter {\n public:\n  void set_pattern(int p) {}\n};\nstd::shared_ptr<logger> stdout_mt(int n) { return nullptr; }\nvoid run() {\n  auto l = stdout_mt(1);\n  l->set_pattern(2);\n}\n",
+                "set_pattern",
+                "4",
+            ),
+            (
+                "/p/src/shop.go",
+                "package shop\n\ntype Cart struct{}\n\nfunc (c *Cart) Total() int { return 0 }\n\ntype Order struct{}\n\nfunc (o *Order) Total() int { return 1 }\n\nfunc NewCart() (*Cart, error) { return &Cart{}, nil }\n\nfunc run() {\n\tc, _ := NewCart()\n\tc.Total()\n\tk := NewCart2()\n\tk.Total()\n}\n\nfunc NewCart2() *Cart { return &Cart{} }\n",
+                "Total",
+                "5",
+            ),
+            (
+                "/p/lib/shop.dart",
+                "class Cart {\n  int total() => 0;\n}\nclass Order {\n  int total() => 1;\n}\nCart makeCart() => Cart();\nvoid run() {\n  final c = makeCart();\n  c.total();\n}\n",
+                "total",
+                "2",
+            ),
+        ];
+        for (file, src, method, line) in cases {
+            let g = graph(&[(file, src)]);
+            let run = (0..g.node_count())
+                .find(|&n| g.node(n).name.eq_ignore_ascii_case("run"))
+                .unwrap();
+            let mut reached: Vec<String> = g
+                .callees_of(run)
+                .iter()
+                .filter(|&&c| g.node(c).name == *method)
+                .map(|&c| g.node(c).line.to_string())
+                .collect();
+            reached.sort();
+            reached.dedup();
+            assert_eq!(reached, [line.to_string()], "{file}: {:?}", edges(&g));
+        }
+        // Awaited, a future's value; a Zig type through its module; a C#
+        // property named in Pascal case.
+        let more: &[(&str, &str, &str, &str)] = &[
+            (
+                "/p/lib/fetch.dart",
+                "class Cart {\n  int total() => 0;\n}\nclass Order {\n  int total() => 1;\n}\nFuture<Cart> fetchCart() async => Cart();\nvoid run() async {\n  var c = await fetchCart();\n  c.total();\n}\n",
+                "total",
+                "2",
+            ),
+            (
+                "/p/src/basic.zig",
+                "pub const Response = struct {\n    pub fn writer(self: *Response) u8 { return 0; }\n};\npub const Other = struct {\n    pub fn writer(self: *Other) u8 { return 1; }\n};\nfn run(res: *httpz.Response) void {\n    _ = res.writer();\n}\n",
+                "writer",
+                "2",
+            ),
+            (
+                "/p/src/Setup.cs",
+                "class Resetter { public void DisposeAsync() {} }\nclass Other { public void DisposeAsync() {} }\nclass Setup\n{\n    internal static Resetter? DbResetter { get; private set; }\n    public void Run()\n    {\n        DbResetter.DisposeAsync();\n    }\n}\n",
+                "DisposeAsync",
+                "1",
+            ),
+        ];
+        for (file, src, method, line) in more {
+            let g = graph(&[(file, src)]);
+            let run = (0..g.node_count())
+                .find(|&n| g.node(n).name.eq_ignore_ascii_case("run"))
+                .unwrap();
+            let mut reached: Vec<String> = g
+                .callees_of(run)
+                .iter()
+                .filter(|&&c| g.node(c).name == *method)
+                .map(|&c| g.node(c).line.to_string())
+                .collect();
+            reached.sort();
+            reached.dedup();
+            assert_eq!(reached, [line.to_string()], "{file}: {:?}", edges(&g));
+        }
+        // Two functions of the name declaring different types: unknown, as
+        // before — every `total` there is.
+        let g = graph(&[(
+            "/p/src/Two.java",
+            "class Cart { int total() { return 0; } }\nclass Order { int total() { return 1; } }\nclass A { Cart make() { return null; } }\nclass B { Order make() { return null; } }\nclass Shop {\n  void run(A a) {\n    var c = a.make();\n    c.total();\n  }\n}\n",
+        )]);
+        let run = g.id_of(Path::new("/p/src/Two.java"), "run").unwrap();
+        let totals = g
+            .callees_of(run)
+            .iter()
+            .filter(|&&c| g.node(c).name == "total")
+            .count();
+        assert_eq!(totals, 2, "{:?}", edges(&g));
+    }
+
+    /// A definition whose name's last part is empty (`Foo.`) has no
+    /// parameter list to find — and finding none ends.
+    #[test]
+    fn an_empty_name_has_no_parameter_list() {
+        assert!(parameter_list("fun Foo.(x: Int) = x", "Foo.", Lang::Kotlin).is_none());
     }
 
     /// An Elixir file's `use`s and `import`s, the multi-alias form too.

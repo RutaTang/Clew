@@ -321,6 +321,7 @@ fn to_cached_calls(calls: &FileCalls) -> CachedCalls {
             .iter()
             .flat_map(|&(line, fewest, most)| [line, usize::from(fewest), usize::from(most)])
             .collect(),
+        returns: calls.context.returns.clone(),
     }
 }
 
@@ -431,6 +432,7 @@ fn from_cached_calls(abs: &Path, cached: &CachedCalls) -> Option<FileCalls> {
                 .chunks_exact(3)
                 .map(|t| Some((t[0], u8::try_from(t[1]).ok()?, u8::try_from(t[2]).ok()?)))
                 .collect::<Option<Vec<_>>>()?,
+            returns: cached.returns.clone(),
         },
     })
 }

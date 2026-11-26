@@ -129,7 +129,12 @@ use crate::incremental::Version;
 /// 32: a Go file's imported package names ([`CachedCalls::imports`]), a
 /// Zig function's container ([`CachedCalls::owners`]), and a C++ call's
 /// scope (`Cart` in `Cart::make()`, [`CachedCalls::qualifiers`]).
-pub(crate) const CACHE_VERSION: u32 = 32;
+/// 33: the arities of Java, Kotlin, Scala, C#, Dart, C, C++, Go and Zig
+/// functions and calls ([`CachedCalls::arities`],
+/// [`CachedCalls::call_arities`]).
+/// 34: each function's declared return type ([`CachedCalls::returns`]),
+/// and a value assigned from a call typed by it.
+pub(crate) const CACHE_VERSION: u32 = 34;
 
 /// A cached symbol (the index entry minus the paths, which are reconstructed
 /// from the project root + relative path on load).
@@ -247,6 +252,10 @@ pub struct CachedCalls {
     /// (`clew_core::projectcalls::FileContext::arities`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub arities: Vec<usize>,
+    /// Each function's declared return type, by its definition line
+    /// (`clew_core::projectcalls::FileContext::returns`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub returns: Vec<(usize, String)>,
 }
 
 /// Everything cached about one file: how to confirm it is unchanged (mtime,
@@ -376,6 +385,7 @@ mod tests {
                 uses: vec!["Shop.Context".into()],
                 imports: vec!["Ecto.Query".into()],
                 arities: vec![3, 1, 2],
+                returns: vec![(3, "Cart".into())],
             }),
         }
     }
