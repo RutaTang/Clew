@@ -17389,6 +17389,61 @@ fn a_cpp_method_defined_beside_its_header_has_its_callers() {
     assert_eq!(callers, ["main", "run_shop", "total"]);
 }
 
+/// An Elixir module is found where it is defined when Mix's convention does
+/// not place it (`HexpmWeb` in `lib/hexpm_web/web.ex`), and a module `use`d
+/// brings what its `__using__` imports: a controller's bare `audit_data(…)`
+/// reaches the helpers `use HexpmWeb, :controller` imports.
+#[test]
+fn an_elixir_use_brings_what_its_module_imports() {
+    let (mut app, root) = calls_project(
+        "calls-elixir-use",
+        &[
+            (
+                "lib/hexpm_web/web.ex",
+                "defmodule HexpmWeb do\n  def controller do\n    quote do\n      use Phoenix.Controller\n      import HexpmWeb.ControllerHelpers\n    end\n  end\n\n  defmacro __using__(which) when is_atom(which) do\n    apply(__MODULE__, which, [])\n  end\nend\n",
+            ),
+            (
+                "lib/hexpm_web/controllers/controller_helpers.ex",
+                "defmodule HexpmWeb.ControllerHelpers do\n  def audit_data(conn) do\n    {conn.assigns.current_user, conn.remote_ip}\n  end\nend\n",
+            ),
+            (
+                "lib/hexpm_web/controllers/key_controller.ex",
+                "defmodule HexpmWeb.KeyController do\n  use HexpmWeb, :controller\n\n  def create(conn, params) do\n    audit = audit_data(conn)\n    render(conn, :show, audit: audit, params: params)\n  end\nend\n",
+            ),
+        ],
+        true,
+    );
+    let controller = root.join("lib/hexpm_web/controllers/key_controller.ex");
+    assert!(
+        app.proj
+            .import_graph
+            .imports(&controller)
+            .iter()
+            .any(|e| e.target == imports::Target::Internal(root.join("lib/hexpm_web/web.ex"))),
+        "{:?}",
+        app.proj.import_graph.imports(&controller)
+    );
+    let build = app.update(Message::Graph(GraphMsg::OpenOverlay(Overlay::ProjectCalls)));
+    for msg in run_task(build) {
+        if matches!(msg, Message::Graph(GraphMsg::ProjectCallsBuilt { .. })) {
+            let _ = app.update(msg);
+        }
+    }
+    let g = &app.proj.project_calls.graph;
+    let helper = g
+        .id_of(
+            &root.join("lib/hexpm_web/controllers/controller_helpers.ex"),
+            "audit_data",
+        )
+        .expect("audit_data is a node");
+    let callers: Vec<String> = g
+        .callers_of(helper)
+        .iter()
+        .map(|&id| g.node(id).name.clone())
+        .collect();
+    assert_eq!(callers, ["create"]);
+}
+
 /// A project of `(rel, text)` files, scanned, and — when `index` is set —
 /// indexed with its imports resolved.
 fn calls_project(tag: &str, files: &[(&str, &str)], index: bool) -> (App, PathBuf) {
@@ -29848,6 +29903,7 @@ fn run_on_a_module_of_defs_runs_the_projects_main() {
                 callee: "print".into(),
                 method: false,
                 receiver: None,
+                qualifier: None,
                 line: 1,
             }],
             &[],
@@ -29881,6 +29937,7 @@ fn run_on_a_module_of_defs_runs_the_projects_main() {
                 callee: "Decimal".into(),
                 method: false,
                 receiver: None,
+                qualifier: None,
                 line: 2,
             }],
             &[],

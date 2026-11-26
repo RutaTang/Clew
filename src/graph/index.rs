@@ -243,6 +243,8 @@ fn to_cached_calls(calls: &FileCalls) -> CachedCalls {
     let mut seen = HashMap::new();
     let mut sites = Vec::with_capacity(calls.calls.len() * 3);
     let mut receivers = Vec::with_capacity(calls.calls.len());
+    let mut qualifiers = Vec::new();
+    let any_qualifier = calls.calls.iter().any(|site| site.qualifier.is_some());
     let mut previous = 0i64;
     for site in &calls.calls {
         let caller = match site.caller.as_deref() {
@@ -259,6 +261,12 @@ fn to_cached_calls(calls: &FileCalls) -> CachedCalls {
             Some(Receiver::Type(ty)) => intern(ty, &mut names, &mut seen) + 2,
             Some(Receiver::Declared(ty)) => -(intern(ty, &mut names, &mut seen) + 2),
         });
+        if any_qualifier {
+            qualifiers.push(match &site.qualifier {
+                None => 0,
+                Some(q) => intern(q, &mut names, &mut seen) + 1,
+            });
+        }
     }
     let mut owners: Vec<(usize, &str)> = calls
         .owners
@@ -292,12 +300,15 @@ fn to_cached_calls(calls: &FileCalls) -> CachedCalls {
             .flat_map(|(line, (first, last))| [line, first, last])
             .collect(),
         receivers,
+        qualifiers,
         owners,
         accessed,
         internal,
         package: calls.context.package.clone(),
         types: calls.context.types.clone(),
         extensions: calls.context.extensions.clone(),
+        uses: calls.context.uses.clone(),
+        imports: calls.context.imports.clone(),
     }
 }
 
@@ -316,9 +327,17 @@ fn from_cached_calls(abs: &Path, cached: &CachedCalls) -> Option<FileCalls> {
     if cached.receivers.len() != cached.sites.len() / 3 {
         return None;
     }
+    if !cached.qualifiers.is_empty() && cached.qualifiers.len() != cached.receivers.len() {
+        return None;
+    }
     let mut previous = 0i64;
     let mut calls = Vec::with_capacity(cached.sites.len() / 3);
-    for (site, &receiver) in cached.sites.chunks_exact(3).zip(&cached.receivers) {
+    for (at, (site, &receiver)) in cached
+        .sites
+        .chunks_exact(3)
+        .zip(&cached.receivers)
+        .enumerate()
+    {
         let &[caller, callee, delta] = site else {
             return None;
         };
@@ -339,6 +358,10 @@ fn from_cached_calls(abs: &Path, cached: &CachedCalls) -> Option<FileCalls> {
                 1 => Some(Receiver::Own),
                 n if n < 0 => Some(Receiver::Declared(name(-n - 2)?)),
                 n => Some(Receiver::Type(name(n - 2)?)),
+            },
+            qualifier: match cached.qualifiers.get(at).copied().unwrap_or(0) {
+                0 => None,
+                n => Some(name(n - 1)?),
             },
             line: usize::try_from(line).ok()?,
         });
@@ -379,6 +402,8 @@ fn from_cached_calls(abs: &Path, cached: &CachedCalls) -> Option<FileCalls> {
             package: cached.package.clone(),
             types: cached.types.clone(),
             extensions: cached.extensions.clone(),
+            uses: cached.uses.clone(),
+            imports: cached.imports.clone(),
         },
     })
 }
@@ -655,6 +680,24 @@ pub fn build(root: &Path, files: Arc<Vec<FileEntry>>) -> Vec<SymbolEntry> {
 mod tests {
     use super::*;
     use clew_core::outline::is_test_fn;
+
+    /// A Scala call's qualifier (`os` in `os.read(p)`) comes back from the
+    /// cache, and a qualifier list that does not match the sites is a damaged
+    /// entry.
+    #[test]
+    fn a_scala_calls_qualifier_survives_the_cache() {
+        let src = "package shop\n\nobject Main {\n  def run(): Unit = {\n    os.read(p)\n    Cart.total()\n  }\n}\n";
+        let abs = Path::new("/p/Main.scala");
+        let calls = FileCalls::read(abs, src).expect("scala has a call model");
+        let read = calls.calls.iter().find(|c| c.callee == "read").unwrap();
+        assert_eq!(read.qualifier.as_deref(), Some("os"));
+        let cached = to_cached_calls(&calls);
+        let back = from_cached_calls(abs, &cached).expect("a sound entry");
+        assert_eq!(back.calls, calls.calls);
+        let mut damaged = cached;
+        damaged.qualifiers.pop();
+        assert!(from_cached_calls(abs, &damaged).is_none());
+    }
 
     /// A file's call facts come back from the cache as they went in: each
     /// call's receiver and each method's class with them — read as unknown,

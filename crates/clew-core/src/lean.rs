@@ -1042,6 +1042,7 @@ pub(crate) fn calls(
                         callee: callee.to_string(),
                         method,
                         receiver,
+                        qualifier: None,
                         line,
                     });
                 }

@@ -14860,6 +14860,7 @@ fn the_raised_note_says_when_its_function_changed() {
         callee: callee.into(),
         method: false,
         receiver: None,
+        qualifier: None,
         line,
     };
     let lib = root.join("src/lib.rs");
@@ -14890,6 +14891,7 @@ fn the_raised_note_says_when_its_function_changed() {
         callee: callee.into(),
         method,
         receiver: None,
+        qualifier: None,
         line,
     };
     app.proj.calls_by_file.insert(

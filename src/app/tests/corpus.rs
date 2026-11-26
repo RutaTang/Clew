@@ -19,6 +19,12 @@ struct Tally {
     project_named: usize,
     linked: usize,
     missed: HashMap<String, Vec<String>>,
+    /// Unlinked calls by their shape, and by callee name.
+    shapes: HashMap<&'static str, usize>,
+    missed_names: HashMap<String, usize>,
+    /// Linked calls, each with the definitions it reached, for a reader to
+    /// judge (`CLEW_TEST_SAMPLE=n`).
+    linked_samples: Vec<String>,
 }
 
 /// The project at `CLEW_TEST_PROJECT`, read as Clew reads one: its files
@@ -52,11 +58,17 @@ fn live_a_projects_reading() {
     println!("call graph built in {:?}", started.elapsed());
     let calls = &app.proj.project_calls.graph;
     let mut by_name: HashMap<&str, Vec<usize>> = HashMap::new();
+    // What a call can reach: a test's title is no function's name.
+    let mut callable_by_name: HashMap<&str, Vec<usize>> = HashMap::new();
     for id in 0..calls.node_count() {
-        by_name
-            .entry(calls.node(id).name.as_str())
-            .or_default()
-            .push(id);
+        let node = calls.node(id);
+        by_name.entry(node.name.as_str()).or_default().push(id);
+        if !clew_core::projectcalls::calls_only(&node.kind) {
+            callable_by_name
+                .entry(node.name.as_str())
+                .or_default()
+                .push(id);
+        }
     }
     // `CLEW_TEST_SITE=rel:line`: that line's calls, and what they could reach.
     if let Ok(site) = std::env::var("CLEW_TEST_SITE")
@@ -153,9 +165,36 @@ fn live_a_projects_reading() {
         };
         for site in file_calls.calls.iter() {
             t.sites += 1;
-            let Some(defined) = by_name.get(site.callee.as_str()) else {
+            // The language's own, as the graph takes them.
+            if clew_core::projectcalls::is_library_call(file_calls.lang, site) {
+                library_calls += 1;
                 continue;
+            }
+            // Only a definition in a language the call can reach counts: a
+            // Kotlin call reaches Java and Scala, C reaches C++, and none
+            // reaches a minified script's `a`.
+            let family = |key: &str| match key {
+                "java" | "kotlin" | "scala" => 1,
+                "c" | "cpp" => 2,
+                "javascript" | "typescript" | "tsx" => 3,
+                _ => 0,
             };
+            let own = file_calls.lang.key();
+            let reaches = |id: &usize| {
+                highlight::detect(&calls.node(*id).file).is_some_and(|key| {
+                    key == own || (family(key) != 0 && family(key) == family(own))
+                })
+            };
+            let defined: Vec<usize> = callable_by_name
+                .get(site.callee.as_str())
+                .into_iter()
+                .flatten()
+                .copied()
+                .filter(reaches)
+                .collect();
+            if defined.is_empty() {
+                continue;
+            }
             if let Some(
                 clew_core::projectcalls::Receiver::Declared(ty)
                 | clew_core::projectcalls::Receiver::Type(ty),
@@ -186,7 +225,36 @@ fn live_a_projects_reading() {
                 .any(|&f| calls.callees_of(f).iter().any(|id| defined.contains(id)))
             {
                 t.linked += 1;
+                let targets: Vec<String> = from
+                    .iter()
+                    .flat_map(|&f| calls.callees_of(f))
+                    .filter(|id| defined.contains(id))
+                    .map(|&id| {
+                        let n = calls.node(id);
+                        format!("{}:{}", rel(&n.file), n.line)
+                    })
+                    .collect();
+                t.linked_samples.push(format!(
+                    "{}:{} {}{} [{:?}] -> {}",
+                    rel(&file.abs),
+                    site.line,
+                    if site.method { "." } else { "" },
+                    site.callee,
+                    site.receiver,
+                    targets.join(", ")
+                ));
             } else {
+                let shape = match (&site.receiver, site.method) {
+                    (_, false) => "bare",
+                    (None, true) => "method on an unknown value",
+                    (Some(clew_core::projectcalls::Receiver::Own), true) => "method on self",
+                    (Some(clew_core::projectcalls::Receiver::Type(_)), true) => "method on a type",
+                    (Some(clew_core::projectcalls::Receiver::Declared(_)), true) => {
+                        "method on a declared type"
+                    }
+                };
+                *t.shapes.entry(shape).or_default() += 1;
+                *t.missed_names.entry(site.callee.clone()).or_default() += 1;
                 let samples = t.missed.entry(site.callee.clone()).or_default();
                 if samples.len() < 3 {
                     let at: Vec<String> = defined
@@ -246,6 +314,30 @@ fn live_a_projects_reading() {
         let mut missed: Vec<_> = t.missed.iter().collect();
         missed.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then(a.0.cmp(b.0)));
         println!("  unlinked callee names: {}", missed.len());
+        let sample: usize = std::env::var("CLEW_TEST_SAMPLE")
+            .ok()
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(0);
+        if sample > 0 && !t.linked_samples.is_empty() {
+            let step = (t.linked_samples.len() / sample).max(1);
+            for s in t.linked_samples.iter().step_by(step).take(sample) {
+                println!("  linked {s}");
+            }
+        }
+        let mut shapes: Vec<_> = t.shapes.iter().collect();
+        shapes.sort_by(|a, b| b.1.cmp(a.1));
+        println!("  unlinked by shape: {shapes:?}");
+        let mut names: Vec<_> = t.missed_names.iter().collect();
+        names.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+        println!(
+            "  most unlinked: {}",
+            names
+                .iter()
+                .take(40)
+                .map(|(n, c)| format!("{n}×{c}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
         for (_, samples) in missed.iter().take(30) {
             for s in samples.iter().take(1) {
                 println!("  unlinked {s}");

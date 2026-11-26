@@ -546,7 +546,11 @@ impl Lang {
             // symbols. Use a source-oriented tags query instead.
             Lang::TypeScript | Lang::Tsx => &[TS_TAGS, ECMA_TAGS],
             Lang::Go => &[tree_sitter_go::TAGS_QUERY],
-            Lang::Dart => &[tree_sitter_dart_orchard::TAGS_QUERY, DART_TEST_TAGS],
+            Lang::Dart => &[
+                tree_sitter_dart_orchard::TAGS_QUERY,
+                DART_TEST_TAGS,
+                DART_CONSTRUCTOR_TAGS,
+            ],
             Lang::C => &[tree_sitter_c::TAGS_QUERY],
             Lang::Cpp => &[tree_sitter_cpp::TAGS_QUERY],
             Lang::Java => &[tree_sitter_java::TAGS_QUERY, JAVA_EXTRA_TAGS],
@@ -858,6 +862,16 @@ const RUBY_TEST_TAGS: &str = r#"
   arguments: (argument_list . [(string (string_content) @name) (constant) @name (scope_resolution) @name])
   block: [(do_block) (block)]
   (#any-of? @_fn "describe" "context" "feature")) @definition.suite
+"#;
+
+/// A Dart constructor written with no body — `CounterCubit() : super(0);`,
+/// `const BlocProvider({…});`, `factory Cart.empty() = _EmptyCart;` — which
+/// the grammar's outline leaves out: what `CounterCubit()` calls.
+const DART_CONSTRUCTOR_TAGS: &str = r#"
+(declaration (constructor_signature name: (identifier) @name)) @definition.method
+(declaration (constant_constructor_signature (identifier) @name)) @definition.method
+(declaration (factory_constructor_signature (identifier) @name)) @definition.method
+(declaration (redirecting_factory_constructor_signature (identifier) @name)) @definition.method
 "#;
 
 /// package:test's tests (`test('adds', () { … })`, Flutter's `testWidgets`)

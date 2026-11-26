@@ -88,6 +88,10 @@ pub struct CallSite {
     /// (`Cart c`, `c: Cart`), or the type itself (`Cart.create()`). `None`
     /// when unknown: the call then links to every method of the name.
     pub receiver: Option<Receiver>,
+    /// The name a Scala method call is made on where its receiver is
+    /// unknown: `os` in `os.read(p)` — a package, whose object `read` the
+    /// call applies, or a value of no known type.
+    pub qualifier: Option<String>,
     /// 1-based line of the call.
     pub line: usize,
 }
@@ -123,6 +127,14 @@ pub struct FileContext {
     /// `extension (x: T)` and implicit class's: a method a value of
     /// another type (a library's too) is called with.
     pub extensions: Vec<usize>,
+    /// The modules an Elixir file `use`s (`use Hexpm.Context`, `use
+    /// HexpmWeb, :controller`): what their `__using__` imports and aliases
+    /// the file has too.
+    pub uses: Vec<String>,
+    /// The modules an Elixir file `import`s (in a `quote` too, as a
+    /// `__using__` does): the only ones whose functions it calls bare — an
+    /// `alias` names a module, and brings none of its functions.
+    pub imports: Vec<String>,
 }
 
 /// The kinds of definition that are types another can extend or a value be
@@ -131,7 +143,68 @@ fn is_type_kind(kind: &str, lang: Lang) -> bool {
     matches!(
         kind,
         "class" | "interface" | "struct" | "trait" | "type" | "enum" | "object" | "record"
-    ) || (kind == "module" && lang == Lang::Ruby)
+    ) || (kind == "module" && matches!(lang, Lang::Ruby | Lang::Elixir))
+}
+
+/// The modules an Elixir file names after `keyword` (`use `, `import `) at
+/// the start of a line: `import Shop.Cart` and the multi-alias form
+/// `import Shop.{Cart, Order}` (over several lines too). A module computed
+/// at compile time (`import unquote(__MODULE__)`) names none.
+fn elixir_modules_after(src: &str, keyword: &str) -> Vec<String> {
+    let is_name = |c: char| c.is_alphanumeric() || matches!(c, '_' | '.');
+    let mut out = Vec::new();
+    for (at, line) in src.split('\n').scan(0usize, |offset, line| {
+        let at = *offset;
+        *offset += line.len() + 1;
+        Some((at, line))
+    }) {
+        let trimmed = line.trim_start();
+        let Some(rest) = trimmed.strip_prefix(keyword) else {
+            continue;
+        };
+        let rest = rest.trim_start();
+        let head: String = rest.chars().take_while(|&c| is_name(c)).collect();
+        if !head.starts_with(|c: char| c.is_uppercase()) {
+            continue;
+        }
+        let after = &rest[head.len()..];
+        if let Some(prefix) = head.strip_suffix('.')
+            && after.starts_with('{')
+        {
+            // `Shop.{Cart, Order}`: up to the closing brace, which may be
+            // lines below.
+            let start = at + (line.len() - trimmed.len()) + keyword.len();
+            let tail = &src[start..];
+            let Some(open) = tail.find('{') else { continue };
+            let Some(close) = tail[open..].find('}') else {
+                continue;
+            };
+            for part in tail[open + 1..open + close].split(',') {
+                let part = part.trim();
+                if part.starts_with(|c: char| c.is_uppercase()) && part.chars().all(is_name) {
+                    out.push(format!("{prefix}.{part}"));
+                }
+            }
+        } else if !head.ends_with('.') {
+            out.push(head);
+        }
+    }
+    out
+}
+
+/// Whether a class is named as a test class is: `CartTest`, `CartTests`,
+/// `CartSpec`, `CartSuite`, `CartIT`, `TestCart` (`Shop.CartTest` too).
+fn is_test_class_name(owner: &str) -> bool {
+    let name = owner.rsplit(['.', ':']).next().unwrap_or(owner);
+    let after_test = name.strip_prefix("Test").map(|rest| rest.chars().next());
+    matches!(after_test, Some(None)) // `Test` itself
+        || matches!(after_test, Some(Some(c)) if c.is_uppercase() || c == '_')
+        || ["Test", "Tests", "Spec", "Specs", "Suite"]
+            .iter()
+            .any(|suffix| name.len() > suffix.len() && name.ends_with(suffix))
+        || name
+            .strip_suffix("IT")
+            .is_some_and(|rest| rest.ends_with(|c: char| c.is_lowercase()))
 }
 
 /// The modules a Ruby class or module mixes in: its body's `include`,
@@ -179,7 +252,11 @@ pub fn context_in(src: &str, lang: Lang, symbols: &[Located]) -> FileContext {
                 Lang::Go => text.replace('\n', ";"),
                 _ => text.to_string(),
             };
-            let mut bases: Vec<String> = crate::heritage::inherited_names(&text, Some(lang.key()));
+            // An Elixir module inherits nothing: it is kept for its name.
+            let mut bases: Vec<String> = match lang {
+                Lang::Elixir => Vec::new(),
+                _ => crate::heritage::inherited_names(&text, Some(lang.key())),
+            };
             if lang == Lang::Ruby
                 && let Some(body) = src.get(l.declaration.0..l.declaration.1)
             {
@@ -237,10 +314,18 @@ pub fn context_in(src: &str, lang: Lang, symbols: &[Located]) -> FileContext {
         })
         .map(|l| l.symbol.line)
         .collect();
+    let modules_after = |keyword: &str| -> Vec<String> {
+        match lang {
+            Lang::Elixir => elixir_modules_after(src, keyword),
+            _ => Vec::new(),
+        }
+    };
     FileContext {
         package: package_of(src, lang),
         types,
         extensions,
+        uses: modules_after("use "),
+        imports: modules_after("import "),
     }
 }
 
@@ -837,6 +922,37 @@ impl ProjectCallGraph {
             }
             out
         };
+        // Whether the type `child` has `base` above it.
+        let descends = |child: &str, base: &str| -> bool {
+            let mut level: Vec<&str> = vec![child];
+            let mut seen: HashSet<&str> = HashSet::from([child]);
+            for _ in 0..12 {
+                let next: Vec<&str> = level
+                    .iter()
+                    .flat_map(|t| bases_of.get(t))
+                    .flatten()
+                    .copied()
+                    .filter(|b| seen.insert(b))
+                    .collect();
+                if next.contains(&base) {
+                    return true;
+                }
+                if next.is_empty() {
+                    return false;
+                }
+                level = next;
+            }
+            false
+        };
+        // The Elixir and Erlang modules the project defines, by each name a
+        // call may give one: `Shop.Cart`, and `Cart` as an alias says it.
+        let module_names: HashSet<&str> = owner
+            .iter()
+            .flatten()
+            .flat_map(|o| {
+                std::iter::once(*o).chain(o.match_indices('.').map(move |(at, _)| &o[at + 1..]))
+            })
+            .collect();
         // Each package's (namespace's) files: what a file of it reaches with
         // no import — Go's in its folder, the JVM languages' wherever they
         // are (a test beside its class under `src/test`), C#'s.
@@ -856,9 +972,162 @@ impl ProjectCallGraph {
                 packages.entry(key).or_default().insert(fc.file.clone());
             }
         }
+        // A Rails app's autoloaded code: every class under its `app/` and
+        // `lib/` (and its tests) is named anywhere with no `require`, as
+        // Zeitwerk loads it. By the app's root, where its
+        // `config/application.rb` is.
+        let rails_roots: Vec<&Path> = files
+            .iter()
+            .filter_map(|f| {
+                f.file
+                    .ends_with("config/application.rb")
+                    .then(|| f.file.parent()?.parent())
+                    .flatten()
+            })
+            .collect();
+        let rails_root_of = |file: &Path| -> Option<&Path> {
+            rails_roots.iter().copied().find(|root| {
+                ["app", "lib", "test", "spec"]
+                    .iter()
+                    .any(|d| file.starts_with(root.join(d)))
+            })
+        };
+        let mut rails: HashMap<&Path, HashSet<PathBuf>> = HashMap::new();
+        for fc in &files {
+            if fc.lang == Lang::Ruby
+                && let Some(root) = rails_root_of(&fc.file)
+            {
+                rails.entry(root).or_default().insert(fc.file.clone());
+            }
+        }
+        // An Elixir module's file, by the module's name: what a `use` or an
+        // `import` names — one with a `__using__` macro alone too.
+        let mut module_files: HashMap<&str, &Path> = HashMap::new();
+        for f in files.iter().copied() {
+            if f.lang == Lang::Elixir {
+                let declared = f.context.types.iter().map(|(name, _)| name);
+                for module in f.owners.values().chain(declared) {
+                    module_files
+                        .entry(module.as_str())
+                        .or_insert(f.file.as_path());
+                }
+            }
+        }
+        // What an Elixir file reaches with no alias of its own: what each
+        // module it `use`s injects — that module's own file (a `def` in its
+        // `__using__`), the modules it imports and aliases, and in turn what
+        // the modules it uses inject.
+        let context_of: HashMap<&Path, &FileContext> = files
+            .iter()
+            .map(|f| (f.file.as_path(), &f.context))
+            .collect();
+        // Its bare calls reach only its own file, the modules it imports,
+        // and the files the modules it uses inject.
+        let mut bare_scopes: HashMap<&Path, HashSet<&Path>> = HashMap::new();
+        let mut used_scopes: HashMap<&Path, HashSet<PathBuf>> = HashMap::new();
+        for fc in files.iter().copied() {
+            if fc.lang != Lang::Elixir {
+                continue;
+            }
+            let mut injected: HashSet<&Path> = HashSet::new();
+            let mut imported: Vec<&str> = fc.context.imports.iter().map(String::as_str).collect();
+            let mut pending: Vec<&str> = fc.context.uses.iter().map(String::as_str).collect();
+            let mut used: HashSet<&str> = HashSet::new();
+            while let Some(module) = pending.pop() {
+                if !used.insert(module) {
+                    continue;
+                }
+                let Some(&file) = module_files.get(module) else {
+                    continue;
+                };
+                injected.insert(file);
+                if let Some(ctx) = context_of.get(file) {
+                    imported.extend(ctx.imports.iter().map(String::as_str));
+                    pending.extend(ctx.uses.iter().map(String::as_str));
+                }
+            }
+            let mut reached = injected.clone();
+            reached.extend(
+                imported
+                    .into_iter()
+                    .filter_map(|m| module_files.get(m).copied()),
+            );
+            let mut seen: HashSet<PathBuf> = reached.iter().map(|f| f.to_path_buf()).collect();
+            for file in &injected {
+                seen.extend(scope.get(*file).into_iter().flatten().cloned());
+            }
+            seen.remove(&fc.file);
+            if !seen.is_empty() {
+                used_scopes.insert(fc.file.as_path(), seen);
+            }
+            bare_scopes.insert(fc.file.as_path(), reached);
+        }
+        // What RSpec loads before each spec under a `spec/` folder: its
+        // `spec_helper.rb` and `rails_helper.rb` (`.rspec`'s `--require`),
+        // and the `spec/support/` files they require by a glob.
+        let mut spec_roots: HashMap<&Path, HashSet<PathBuf>> = HashMap::new();
+        for f in files.iter().copied() {
+            if f.lang == Lang::Ruby
+                && matches!(
+                    f.file.file_name().and_then(|n| n.to_str()),
+                    Some("spec_helper.rb" | "rails_helper.rb")
+                )
+                && let Some(root) = f.file.parent()
+                && root.file_name().is_some_and(|n| n == "spec")
+            {
+                spec_roots.entry(root).or_default().insert(f.file.clone());
+            }
+        }
+        if !spec_roots.is_empty() {
+            for f in files.iter().copied() {
+                if f.lang != Lang::Ruby {
+                    continue;
+                }
+                for (root, loaded) in spec_roots.iter_mut() {
+                    if f.file.starts_with(root.join("support")) {
+                        loaded.insert(f.file.clone());
+                    }
+                }
+            }
+        }
+        // A Scala package's files by the package's last name (`os` for
+        // `package os`, and for `package object os`): what `os.read(p)`
+        // names.
+        let mut scala_packages: HashMap<&str, HashSet<&Path>> = HashMap::new();
+        for f in files.iter().copied() {
+            if f.lang == Lang::Scala
+                && let Some(package) = f.context.package.as_deref()
+            {
+                let last = package.rsplit('.').next().unwrap_or(package);
+                scala_packages
+                    .entry(last)
+                    .or_default()
+                    .insert(f.file.as_path());
+            }
+        }
+        // A Scala object's `apply`: what calling the object runs
+        // (`RelPath("a")`, `os.read(p)` for `object read`).
+        let applies_of = |object: &str| -> Vec<usize> {
+            by_owner
+                .get(&(object, "apply"))
+                .into_iter()
+                .flatten()
+                .copied()
+                .filter(|&i| facts[i].lang == Some(Lang::Scala))
+                .collect()
+        };
         let siblings_of = |fc: &FileCalls| -> Vec<&HashSet<PathBuf>> {
+            let mut extra: Vec<&HashSet<PathBuf>> = Vec::new();
+            if fc.lang == Lang::Ruby
+                && let Some(group) = rails_root_of(&fc.file).and_then(|root| rails.get(root))
+            {
+                extra.push(group);
+            }
+            if let Some(used) = used_scopes.get(fc.file.as_path()) {
+                extra.push(used);
+            }
             let Some(package) = fc.context.package.as_deref() else {
-                return Vec::new();
+                return extra;
             };
             // C# sees its enclosing namespaces' types too: `Shop.Cart`'s
             // code names `Shop`'s with no `using`.
@@ -870,15 +1139,45 @@ impl ProjectCallGraph {
                     rest = outer;
                 }
             }
-            names
-                .into_iter()
-                .filter_map(|name| packages.get(&package_key(fc, name)?))
-                .collect()
+            extra.extend(
+                names
+                    .into_iter()
+                    .filter_map(|name| packages.get(&package_key(fc, name)?)),
+            );
+            extra
         };
 
+        // Which files are tests', by their path under the files' common
+        // folder (the project's): a test calls the code, never the code a
+        // test — a helper a test file defines is no callee of the app's.
+        let common: PathBuf = {
+            let mut paths = nodes.iter().map(|n| n.file.as_path());
+            let mut common = paths
+                .next()
+                .and_then(Path::parent)
+                .map(Path::to_path_buf)
+                .unwrap_or_default();
+            for p in paths {
+                while !p.starts_with(&common) && common.pop() {}
+            }
+            common
+        };
+        let is_test_file = |file: &Path| {
+            file.strip_prefix(&common)
+                .ok()
+                .and_then(|rel| rel.to_str())
+                .is_some_and(crate::weakspots::is_test_path)
+        };
+        let test_node: Vec<bool> = nodes.iter().map(|n| is_test_file(&n.file)).collect();
+        // A test class's methods (`StatusCodesTest.get`): the runner holds
+        // its instance, so no other code calls them on a value.
+        let test_method: Vec<bool> = (0..nodes.len())
+            .map(|i| test_node[i] && owner[i].is_some_and(is_test_class_name))
+            .collect();
         let empty_scope: HashSet<PathBuf> = HashSet::new();
         let mut edges: HashSet<(usize, usize)> = HashSet::new();
         for fc in files {
+            let in_test = is_test_file(&fc.file);
             let direct = scope.get(&fc.file).unwrap_or(&empty_scope);
             // A C or C++ file sees what every header it includes includes,
             // as the preprocessor pastes them in: `main.cpp` includes
@@ -888,6 +1187,24 @@ impl ProjectCallGraph {
             // `require` loads a file once, for the whole program. And a Dart
             // library what the libraries it imports export — a package's
             // `shelf.dart` is its `src/` files re-exported.
+            // A spec sees what RSpec loaded before it, and what that requires.
+            let spec_loaded: Option<HashSet<PathBuf>> = (fc.lang == Lang::Ruby
+                && !fc.calls.is_empty())
+            .then(|| {
+                spec_roots
+                    .iter()
+                    .filter(|(root, _)| fc.file.starts_with(root))
+                    .flat_map(|(_, loaded)| loaded.iter())
+                    .filter(|f| **f != fc.file)
+                    .cloned()
+                    .collect::<HashSet<PathBuf>>()
+            })
+            .filter(|loaded| !loaded.is_empty())
+            .map(|mut loaded| {
+                loaded.extend(direct.iter().cloned());
+                loaded
+            });
+            let direct = spec_loaded.as_ref().unwrap_or(direct);
             let included = (matches!(fc.lang, Lang::C | Lang::Cpp | Lang::Ruby | Lang::Dart)
                 && !fc.calls.is_empty())
             .then(|| include_closure(&fc.file, direct, scope));
@@ -906,7 +1223,7 @@ impl ProjectCallGraph {
                 // Bare calls to language builtins (`len(x)`, `make(...)`) are not
                 // project functions; skip them so they don't resolve to some
                 // same-named definition and inflate the graph.
-                if !cs.method && is_builtin(fc.lang, &cs.callee) {
+                if is_library_call(fc.lang, cs) {
                     continue;
                 }
                 let Some(caller_name) = cs.caller.as_deref() else {
@@ -925,6 +1242,50 @@ impl ProjectCallGraph {
                 let callees = resolved
                     .entry((cs.callee.as_str(), cs.method))
                     .or_insert_with(|| resolve_callees(&defs, &nodes, &facts, &owner, cs, &site));
+                // Scala's `pkg.member(…)`: the package's own function (a
+                // package object's) or its object's `apply` — and nothing
+                // else, as the package names the member.
+                if fc.lang == Lang::Scala
+                    && let Some(package) = cs.qualifier.as_deref()
+                    && let Some(package_files) = scala_packages.get(package)
+                {
+                    let callee_name = logical_name(&cs.callee, Some(fc.lang));
+                    let in_package = |i: &usize| package_files.contains(nodes[*i].file.as_path());
+                    let mut found: Vec<usize> = defs
+                        .named
+                        .get(callee_name)
+                        .into_iter()
+                        .flat_map(|named| named.all.iter().copied())
+                        .filter(in_package)
+                        .filter(|&i| owner[i].is_none_or(|o| o.rsplit('.').next() == Some(package)))
+                        .collect();
+                    found.extend(applies_of(callee_name).into_iter().filter(in_package));
+                    if found.len() <= MAX_CANDIDATES {
+                        for callee in found {
+                            if edges.len() < MAX_EDGES && (in_test || !test_node[callee]) {
+                                edges.insert((caller, callee));
+                            }
+                        }
+                    }
+                    continue;
+                }
+                // A Scala object called as a function (`RelPath("a")`), where
+                // no function in scope has the name: its `apply`.
+                if fc.lang == Lang::Scala && !cs.method && callees.is_empty() {
+                    let callee_name = logical_name(&cs.callee, Some(fc.lang));
+                    let found: Vec<usize> = applies_of(callee_name)
+                        .into_iter()
+                        .filter(|&i| nodes[i].file == fc.file || site.sees(&nodes[i].file))
+                        .collect();
+                    if !found.is_empty() && found.len() <= MAX_CANDIDATES {
+                        for callee in found {
+                            if edges.len() < MAX_EDGES && (in_test || !test_node[callee]) {
+                                edges.insert((caller, callee));
+                            }
+                        }
+                        continue;
+                    }
+                }
                 // A receiver of a known type calls that type's method of the
                 // name: `cart.total()` after `cart = Cart()` is `Cart.total`,
                 // not every `total` there is. A type with no method of the
@@ -967,7 +1328,7 @@ impl ProjectCallGraph {
                         (true, _) => callees.clone(),
                     };
                     for callee in targets {
-                        if edges.len() < MAX_EDGES {
+                        if edges.len() < MAX_EDGES && (in_test || !test_node[callee]) {
                             edges.insert((caller, callee));
                         }
                     }
@@ -1053,7 +1414,7 @@ impl ProjectCallGraph {
                         found.clear();
                     }
                     for callee in found {
-                        if edges.len() < MAX_EDGES {
+                        if edges.len() < MAX_EDGES && (in_test || !test_node[callee]) {
                             edges.insert((caller, callee));
                         }
                     }
@@ -1076,6 +1437,11 @@ impl ProjectCallGraph {
                     (Some(Receiver::Type(ty)), Lang::JavaScript | Lang::TypeScript | Lang::Tsx) => {
                         JS_GLOBALS.contains(&ty.as_str()) && !project_types.contains(ty.as_str())
                     }
+                    // A module the project defines none of (`Map.put`,
+                    // `:crypto.hash`, `lists:map`): the library's.
+                    (Some(Receiver::Type(ty)), Lang::Elixir | Lang::Erlang) => {
+                        !module_names.contains(ty.as_str())
+                    }
                     _ => false,
                 };
                 let targets: &[usize] = if foreign {
@@ -1084,6 +1450,67 @@ impl ProjectCallGraph {
                     callees
                 } else {
                     &narrowed
+                };
+                // A method called on a value of no known type in Java,
+                // Kotlin, Scala or C# is some class's: never a top-level
+                // function, but for an extension of a type.
+                let methods_only = cs.method
+                    && cs.receiver.is_none()
+                    && matches!(
+                        fc.lang,
+                        Lang::Java | Lang::Kotlin | Lang::Scala | Lang::CSharp
+                    );
+                // A bare call in Dart, JavaScript, Python or PHP is a
+                // function's, or one of the caller's own class (or its
+                // bases): another class's method needs its object.
+                let own_or_free = !cs.method
+                    && matches!(
+                        fc.lang,
+                        Lang::Dart
+                            | Lang::JavaScript
+                            | Lang::TypeScript
+                            | Lang::Tsx
+                            | Lang::Python
+                            | Lang::Php
+                    );
+                // An Elixir bare call: a function of its own file, or of a
+                // module it imports.
+                let elixir_bare = !cs.method && fc.lang == Lang::Elixir;
+                let kept: Vec<usize>;
+                let targets: &[usize] = if elixir_bare {
+                    let reached = bare_scopes.get(fc.file.as_path());
+                    kept = targets
+                        .iter()
+                        .copied()
+                        .filter(|&c| {
+                            nodes[c].file == fc.file
+                                || reached.is_some_and(|r| r.contains(nodes[c].file.as_path()))
+                        })
+                        .collect();
+                    &kept
+                } else if methods_only || own_or_free {
+                    kept = targets
+                        .iter()
+                        .copied()
+                        .filter(|&c| match (methods_only, owner[c]) {
+                            (true, None) => extension_nodes.contains(&c),
+                            (true, Some(_)) => true,
+                            (false, None) => true,
+                            // A constructor (`CounterCubit()`) is called
+                            // bare from anywhere.
+                            (false, Some(o))
+                                if nodes[c].name == o.rsplit('.').next().unwrap_or(o) =>
+                            {
+                                true
+                            }
+                            (false, Some(o)) => {
+                                owner[caller].is_some_and(|own| own == o || descends(own, o))
+                            }
+                        })
+                        .collect();
+                    &kept
+                } else {
+                    targets
                 };
                 // A class called: its `__init__`, of a class this file
                 // defines or imports.
@@ -1095,8 +1522,16 @@ impl ProjectCallGraph {
                     .copied()
                     .filter(|&i| nodes[i].file == fc.file || imported.contains(&nodes[i].file));
                 for callee in targets.iter().copied().chain(constructed) {
+                    // `client.get(…)`: no value is a test class's.
+                    if cs.method
+                        && cs.receiver.is_none()
+                        && test_method[callee]
+                        && owner[callee] != owner[caller]
+                    {
+                        continue;
+                    }
                     // A self-call is kept as a callee only (see `finalize`).
-                    if edges.len() < MAX_EDGES {
+                    if edges.len() < MAX_EDGES && (in_test || !test_node[callee]) {
                         edges.insert((caller, callee));
                     }
                 }
@@ -1594,7 +2029,7 @@ fn lang_spec(lang: Lang) -> Option<LangSpec> {
         // an `apply`) a call.
         Lang::Scala => spec(
             &["function_definition"],
-            &["call_expression", "instance_expression"],
+            &["call_expression", "instance_expression", "field_expression"],
         ),
         // A `def` is a call to the grammar too: a `call` is a function's
         // scope when it defines one (see `fn_names`), and a call otherwise.
@@ -1792,6 +2227,8 @@ fn walk(
         if spec.call_kinds.contains(&kind)
             && let Some((callee, method)) = callee_name(node, parent, src, lang)
         {
+            // The receiver's name where nothing binds it (Scala's `os`).
+            let mut unbound: Option<String> = None;
             let receiver = match &current {
                 // `Cart.add(…)`, `cart:add(…)`: the module named.
                 _ if method && matches!(lang, Lang::Elixir | Lang::Erlang) => {
@@ -1802,7 +2239,16 @@ fn walk(
                         places: &places,
                         from: inner.unwrap_or(*from),
                     };
-                    receiver_of(node, &callee, &scope, src, lang, &mut bindings, &mut fields)
+                    receiver_of(
+                        node,
+                        &callee,
+                        &scope,
+                        src,
+                        lang,
+                        &mut bindings,
+                        &mut fields,
+                        &mut unbound,
+                    )
                 }
                 // In no function: in a test block (`test("adds") { … }`),
                 // whose calls are its own (`in_test_blocks`), its names
@@ -1812,16 +2258,27 @@ fn walk(
                         places: &places,
                         from: inner.unwrap_or(0),
                     };
-                    receiver_of(node, &callee, &scope, src, lang, &mut bindings, &mut fields)
+                    receiver_of(
+                        node,
+                        &callee,
+                        &scope,
+                        src,
+                        lang,
+                        &mut bindings,
+                        &mut fields,
+                        &mut unbound,
+                    )
                 }
                 _ if lang == Lang::Rust => rust_path_receiver(node, src),
                 _ => None,
             };
+            let qualifier = unbound.filter(|_| receiver.is_none());
             out.push(CallSite {
                 caller: current.as_ref().map(|(name, _)| name.to_string()),
                 callee,
                 method,
                 receiver,
+                qualifier,
                 line: node.start_position().row + 1,
             });
         }
@@ -1837,6 +2294,7 @@ fn walk(
                 callee: node_text(node, src).to_string(),
                 method: false,
                 receiver: None,
+                qualifier: None,
                 line: node.start_position().row + 1,
             });
         }
@@ -1955,6 +2413,7 @@ fn macro_calls(tree: Node, src: &str, caller: Option<&str>, out: &mut Vec<CallSi
             callee: node_text(*token, src).to_string(),
             method: prev == Some("."),
             receiver: None,
+            qualifier: None,
             line: token.start_position().row + 1,
         });
     }
@@ -2445,6 +2904,28 @@ fn callee_name(call: Node, parent: Option<Node>, src: &str, lang: Lang) -> Optio
             };
         }
         // `new Foo[T](…)`: the class it makes.
+        // Scala calls a method with no parameters without parentheses
+        // (`ref.get`, `io.void`): a member read that no call's parentheses
+        // follow, nor an assignment's left side. A field read so links to
+        // nothing, as no method has its name.
+        (Lang::Scala, "field_expression") => {
+            let called = parent.is_some_and(|p| {
+                (p.kind() == "call_expression"
+                    && p.child_by_field_name("function")
+                        .is_some_and(|f| f.id() == call.id()))
+                    || (p.kind() == "assignment_expression"
+                        && p.child_by_field_name("left")
+                            .is_some_and(|l| l.id() == call.id()))
+                    || p.kind() == "generic_function"
+            });
+            if called {
+                return None;
+            }
+            let field = call.child_by_field_name("field")?;
+            let name = node_text(field, src);
+            return (name.starts_with(char::is_lowercase) && field.kind() == "identifier")
+                .then(|| (name.to_string(), true));
+        }
         (Lang::Scala, "instance_expression") => {
             let mut cursor = call.walk();
             let ty = call
@@ -2467,7 +2948,16 @@ fn callee_name(call: Node, parent: Option<Node>, src: &str, lang: Lang) -> Optio
                 "identifier" => Some((node_text(target, src).to_string(), false)),
                 "dot" => {
                     let right = target.child_by_field_name("right")?;
-                    (right.kind() == "identifier")
+                    // `user.name` with no parentheses reads a map's or a
+                    // struct's field; only a module's function is called
+                    // so (`Cart.total`).
+                    let field = target
+                        .child_by_field_name("left")
+                        .is_some_and(|left| left.kind() != "alias")
+                        && !call
+                            .named_children(&mut call.walk())
+                            .any(|c| c.kind() == "arguments");
+                    (right.kind() == "identifier" && !field)
                         .then(|| (node_text(right, src).to_string(), true))
                 }
                 _ => None,
@@ -2638,6 +3128,7 @@ fn last_identifier(text: &str) -> Option<String> {
 /// the method called — so `self`, `this` and a declared or annotated
 /// receiver say nothing in a language with inheritance (Go and Rust have
 /// none, and a Rust trait's own methods have no owner to narrow to).
+#[allow(clippy::too_many_arguments)]
 fn receiver_of(
     call: Node,
     callee: &str,
@@ -2646,6 +3137,7 @@ fn receiver_of(
     lang: Lang,
     bindings: &mut HashMap<(usize, String), Bindings>,
     fields: &mut HashMap<(usize, String), Option<String>>,
+    unbound: &mut Option<String>,
 ) -> Option<Receiver> {
     let receiver = receiver_text(node_text(call, src), callee)?.trim();
     if matches!(
@@ -2681,6 +3173,16 @@ fn receiver_of(
             .map(Receiver::Type);
     }
     if !is_plain_name(receiver) {
+        // A chain on a value just built: `IO.pure(1).flatMap(…)`,
+        // `new Cart().add(…)`, `Cart(items).total()`.
+        if has_inheritance(lang) && lang != Lang::Go {
+            if let Some(ty) = constructed_type(receiver, lang) {
+                return Some(Receiver::Type(ty));
+            }
+            if let Some(ty) = factory_type(receiver, lang) {
+                return Some(Receiver::Declared(ty));
+            }
+        }
         return None;
     }
     let places = scope.places;
@@ -2726,6 +3228,11 @@ fn receiver_of(
         && let Some(ty) = class_field_type(call, receiver, src, lang, scope.places, fields)
     {
         return Some(Receiver::Declared(ty));
+    }
+    // Nor a field: in Scala, a package or an object (`os` in `os.read(p)`),
+    // or a member inherited from a trait.
+    if lang == Lang::Scala && !receiver.starts_with(|c: char| c.is_uppercase()) {
+        *unbound = Some(receiver.to_string());
     }
     // A JavaScript runtime's own object, not bound here (`console`,
     // `document`, `localStorage`): its methods are the runtime's.
@@ -3279,7 +3786,10 @@ fn binding_at(head: &str, after: &str, lang: Lang) -> Binding {
             // own: `Cart cart = make();`.
             None => match trailing_type(head) {
                 Some(ty) if declares(head, lang) => Binding::Typed(ty, false),
-                _ => Binding::Unknown,
+                _ => match factory_type(rhs, lang) {
+                    Some(ty) => Binding::Typed(ty, false),
+                    None => Binding::Unknown,
+                },
             },
         };
     }
@@ -3390,6 +3900,40 @@ fn constructed_type(rhs: &str, lang: Lang) -> Option<String> {
         _ => return None,
     };
     whole_expression(rest).then(|| ty.to_string())
+}
+
+/// The type a JVM, C# or Dart factory names, its value taken as of that
+/// type (or a subtype): Scala's `IO.pure(1)` and `IO.unit`, Kotlin's
+/// `Cart.create()`, Java's `List.of(…)`, C#'s `Cart.Create()` — a type's
+/// own function called on it, the whole expression. A guess, as a factory
+/// may return another type (a builder); so it is a declared type, whose
+/// method is the type's own or an override, never exact.
+fn factory_type(rhs: &str, lang: Lang) -> Option<String> {
+    if !matches!(
+        lang,
+        Lang::Scala | Lang::Kotlin | Lang::Java | Lang::CSharp | Lang::Dart
+    ) {
+        return None;
+    }
+    let rhs = rhs
+        .trim_start()
+        .strip_prefix("await ")
+        .unwrap_or(rhs.trim_start());
+    let path_len = rhs
+        .find(|c: char| !(c == '_' || c == '.' || c.is_alphanumeric()))
+        .unwrap_or(rhs.len());
+    let segments: Vec<&str> = rhs[..path_len].split('.').collect();
+    let [.., ty, function] = segments.as_slice() else {
+        return None;
+    };
+    let factory = match lang {
+        // C# names its methods in Pascal case.
+        Lang::CSharp => function.starts_with(char::is_alphabetic),
+        _ => function.starts_with(char::is_lowercase),
+    };
+    let rest = rhs[path_len..].trim_start();
+    let ends = rest.is_empty() || rest.starts_with([';', '\n', ')', ',', '}']);
+    (type_like(ty, lang) && factory && (ends || whole_expression(rest))).then(|| ty.to_string())
 }
 
 /// Whether what follows a constructor's name — its generic arguments, its
@@ -3712,6 +4256,11 @@ fn module_receiver(call: Node, parent: Option<Node>, src: &str, lang: Lang) -> O
         Lang::Elixir => {
             let target = call.child_by_field_name("target")?;
             let left = target.child_by_field_name("left")?;
+            // `:crypto.hash(…)`: an Erlang module, by its atom.
+            if target.kind() == "dot" && left.kind() == "atom" {
+                let name = node_text(left, src).trim_start_matches(':');
+                return Some(Receiver::Type(name.to_string()));
+            }
             (target.kind() == "dot" && left.kind() == "alias").then_some(left)?
         }
         // `fun cart:add/2` names its module itself.
@@ -3919,6 +4468,11 @@ fn resolve_callees(
     // can be reached from the call site's. Otherwise a Go `Foo()` would resolve
     // to a JS function named `Foo`, a spurious cross-language edge.
     if !call.method
+        // An Elixir or Erlang name is called bare only where it is defined
+        // or imported: one the file reaches neither way is a library's
+        // macro (Ecto's `execute`, ExMachina's `insert`), not the
+        // project's one function of the name.
+        && !matches!(site.lang, Lang::Elixir | Lang::Erlang)
         && let [only] = cands
         && !facts[*only].internal
         && facts[*only]
@@ -3968,6 +4522,174 @@ fn implicit_self(lang: Lang) -> bool {
             | Lang::Ruby
     )
 }
+
+/// Whether `call` is the language's own, never one of the project's: a
+/// bare call of a builtin (`len(x)`, `make(…)`, ExUnit's `test`), or a Ruby
+/// value of no known type called with a core method (`items.each`,
+/// `user.save`, `scope.where`) — the core library's or Rails', not a
+/// project method that happens to share the name.
+pub fn is_library_call(lang: Lang, call: &CallSite) -> bool {
+    (!call.method && is_builtin(lang, &call.callee))
+        || (call.method
+            && call.receiver.is_none()
+            && lang == Lang::Ruby
+            && RUBY_CORE_METHODS.contains(&call.callee.as_str()))
+        // Every object's own (`x.toString()`, `x.Equals(y)`) on a value
+        // of no known type: whichever class it is, not one the reader can
+        // pick.
+        || (call.method
+            && call.receiver.is_none()
+            && matches!(
+                lang,
+                Lang::Java | Lang::Kotlin | Lang::Scala | Lang::CSharp | Lang::Dart
+            )
+            && matches!(
+                call.callee.as_str(),
+                "toString"
+                    | "equals"
+                    | "hashCode"
+                    | "getClass"
+                    | "compareTo"
+                    | "ToString"
+                    | "Equals"
+                    | "GetHashCode"
+                    | "GetType"
+                    | "CompareTo"
+                    | "noSuchMethod"
+            ))
+}
+
+/// The methods Ruby's core classes and Rails' models give every value: a
+/// call of one on a value whose type is not known is theirs.
+const RUBY_CORE_METHODS: &[&str] = &[
+    "each",
+    "each_with_index",
+    "each_with_object",
+    "each_pair",
+    "each_key",
+    "each_value",
+    "map",
+    "flat_map",
+    "collect",
+    "select",
+    "filter",
+    "filter_map",
+    "reject",
+    "find",
+    "detect",
+    "find_index",
+    "count",
+    "size",
+    "length",
+    "first",
+    "last",
+    "empty?",
+    "any?",
+    "all?",
+    "none?",
+    "include?",
+    "member?",
+    "key?",
+    "has_key?",
+    "merge",
+    "merge!",
+    "keys",
+    "values",
+    "to_s",
+    "to_h",
+    "to_a",
+    "to_i",
+    "to_f",
+    "to_sym",
+    "to_json",
+    "as_json",
+    "inspect",
+    "join",
+    "split",
+    "strip",
+    "chomp",
+    "gsub",
+    "sub",
+    "push",
+    "pop",
+    "shift",
+    "unshift",
+    "delete",
+    "delete_if",
+    "fetch",
+    "dig",
+    "sort",
+    "sort_by",
+    "uniq",
+    "compact",
+    "flatten",
+    "reverse",
+    "min",
+    "max",
+    "sum",
+    "inject",
+    "reduce",
+    "group_by",
+    "partition",
+    "zip",
+    "take",
+    "drop",
+    "slice",
+    "tap",
+    "then",
+    "freeze",
+    "dup",
+    "clone",
+    "nil?",
+    "present?",
+    "blank?",
+    "presence",
+    "try",
+    "send",
+    "public_send",
+    "respond_to?",
+    "is_a?",
+    "kind_of?",
+    "instance_of?",
+    "equal?",
+    "eql?",
+    "hash",
+    "where",
+    "find_by",
+    "find_each",
+    "order",
+    "limit",
+    "offset",
+    "pluck",
+    "includes",
+    "joins",
+    "group",
+    "exists?",
+    "update",
+    "update!",
+    "save",
+    "save!",
+    "destroy",
+    "destroy!",
+    "reload",
+    "touch",
+    "valid?",
+    "errors",
+    "attributes",
+    "assign_attributes",
+    "new_record?",
+    "persisted?",
+    "changed?",
+    "increment!",
+    "decrement!",
+    "deliver_now",
+    "deliver_later",
+    "perform_later",
+    "perform_now",
+    // `.new` runs `initialize`: never a method of the name (a Rails
+    // controller's `new` action).
+    "new",
+];
 
 /// Bare-name calls to language builtins are not project functions. Without this
 /// they resolve to any same-named definition — even one in another language
@@ -4218,6 +4940,41 @@ fn is_builtin(lang: Lang, name: &str) -> bool {
         ),
         // Elixir's special forms and Kernel macros, ExUnit's too: what a
         // module is written with, never a call of the project's.
+        // dart:core's top-level functions, and package:test's (with
+        // flutter_test's and bloc_test's) runner and its distinctive
+        // matchers: a test's `expect(…)` is the library's.
+        Lang::Dart => matches!(
+            name,
+            "print"
+                | "identical"
+                | "identityHashCode"
+                | "expect"
+                | "expectLater"
+                | "expectAsync0"
+                | "expectAsync1"
+                | "expectAsync2"
+                | "test"
+                | "group"
+                | "setUp"
+                | "setUpAll"
+                | "tearDown"
+                | "tearDownAll"
+                | "addTearDown"
+                | "fail"
+                | "markTestSkipped"
+                | "printOnFailure"
+                | "testWidgets"
+                | "blocTest"
+                | "isA"
+                | "throwsA"
+                | "completion"
+                | "emits"
+                | "emitsInOrder"
+                | "emitsDone"
+                | "emitsError"
+                | "emitsThrough"
+                | "neverEmits"
+        ),
         Lang::Elixir => matches!(
             name,
             "alias"
@@ -4258,9 +5015,54 @@ fn is_builtin(lang: Lang, name: &str) -> bool {
                 | "hd"
                 | "tl"
                 | "map_size"
+                | "setup_all"
+                | "assert_raise"
+                | "assert_receive"
+                | "assert_received"
+                | "refute_receive"
+                | "refute_received"
+                | "assert_in_delta"
+                | "catch_error"
+                | "catch_exit"
+                | "catch_throw"
+                | "flunk"
+                | "doctest"
+                | "on_exit"
+                | "start_supervised"
+                | "start_supervised!"
+                | "is_atom"
+                | "is_binary"
+                | "is_list"
+                | "is_map"
+                | "is_integer"
+                | "is_function"
+                | "is_struct"
+                | "is_tuple"
+                | "is_boolean"
+                | "is_float"
+                | "is_number"
+                | "is_pid"
+                | "apply"
+                | "spawn"
+                | "spawn_link"
+                | "self"
+                | "struct"
+                | "struct!"
+                | "get_in"
+                | "put_in"
+                | "update_in"
+                | "pop_in"
+                | "then"
+                | "tap"
+                | "dbg"
+                | "put_elem"
+                | "tuple_size"
+                | "byte_size"
+                | "div"
+                | "rem"
+                | "defguard"
         ),
         Lang::Rust
-        | Lang::Dart
         | Lang::C
         | Lang::Cpp
         | Lang::Java
@@ -5728,6 +6530,49 @@ def main():
             ),
             declared
         );
+        // A value a type's factory makes, as that type: Scala's `IO.pure`,
+        // Kotlin's, Java's, C#'s; an annotation says otherwise first.
+        let io = Some(Receiver::Declared("IO".into()));
+        assert_eq!(
+            receiver(
+                "a.scala",
+                "def f() = {\n  val io = IO.pure(1)\n  io.flatMap(g)\n}\n",
+                "flatMap"
+            ),
+            io
+        );
+        assert_eq!(
+            receiver(
+                "a.scala",
+                "def f() = {\n  val io = IO.unit\n  io.flatMap(g)\n}\n",
+                "flatMap"
+            ),
+            io
+        );
+        assert_eq!(
+            receiver(
+                "a.kt",
+                "fun f() {\n  val c = Cart.create()\n  c.total()\n}\n",
+                "total"
+            ),
+            declared
+        );
+        assert_eq!(
+            receiver(
+                "a.kt",
+                "fun f() {\n  val c: Order = Cart.create()\n  c.total()\n}\n",
+                "total"
+            ),
+            Some(Receiver::Declared("Order".into()))
+        );
+        assert_eq!(
+            receiver(
+                "A.cs",
+                "class A {\n  void F() {\n    var c = Cart.Create();\n    c.Total();\n  }\n}\n",
+                "Total"
+            ),
+            declared
+        );
         // A field, by what its class declares it as: Java's, Kotlin's
         // constructor property, TypeScript's parameter property; with
         // `this.` or bare.
@@ -6365,6 +7210,443 @@ def main():
             "/p/owner/Owner.java:label",
             "/p/model/Person.java:getLastName"
         ));
+    }
+
+    /// A Dart constructor is a definition, with a body or none, plain,
+    /// `const`, named or `factory`: `CounterCubit()` calls it, from a file
+    /// that imports its class's.
+    #[test]
+    fn dart_constructors_are_called() {
+        let src = "class Cart {\n  const Cart({this.items = const []});\n  Cart.named() : items = const [];\n  factory Cart.empty() = _EmptyCart;\n  final List<int> items;\n}\nclass CounterCubit extends Cubit<int> {\n  CounterCubit() : super(0);\n}\n";
+        let names: Vec<String> = crate::outline::extract(src, "dart")
+            .into_iter()
+            .filter(|s| s.kind == "method")
+            .map(|s| format!("{}@{}", s.name, s.line))
+            .collect();
+        assert!(names.contains(&"Cart@2".to_string()), "{names:?}");
+        assert!(names.contains(&"named@3".to_string()), "{names:?}");
+        assert!(names.contains(&"empty@4".to_string()), "{names:?}");
+        assert!(names.contains(&"CounterCubit@8".to_string()), "{names:?}");
+        let g = graph(&[
+            ("/p/lib/counter_cubit.dart", src),
+            (
+                "/p/lib/page.dart",
+                "import 'counter_cubit.dart';\nWidget build() {\n  final c = CounterCubit();\n  return Cart.named();\n}\n",
+            ),
+        ]);
+        assert!(
+            has(
+                &g,
+                "/p/lib/page.dart:build",
+                "/p/lib/counter_cubit.dart:CounterCubit"
+            ),
+            "{:?}",
+            edges(&g)
+        );
+        assert!(has(
+            &g,
+            "/p/lib/page.dart:build",
+            "/p/lib/counter_cubit.dart:named"
+        ));
+    }
+
+    /// Scala calls a method with no parameters without parentheses
+    /// (`ref.get`), and a chain on a value a factory just made is that
+    /// type's (`IO.pure(1).flatMap(…)`); a field read so links to nothing.
+    #[test]
+    fn scala_parameterless_calls_and_factory_chains_link() {
+        let g = graph(&[
+            (
+                "/p/Ref.scala",
+                "package fx\n\nclass Ref[A](var value: A) {\n  def get: A = value\n}\n\nclass IO[A] {\n  def flatMap[B](f: A => IO[B]): IO[B] = ???\n}\nobject IO {\n  def pure[A](a: A): IO[A] = ???\n}\n",
+            ),
+            (
+                "/p/Use.scala",
+                "package fx\n\nobject Use {\n  def run(ref: Ref[Int]): Int = {\n    val now = ref.get\n    IO.pure(now).flatMap(n => IO.pure(n))\n    ref.value\n  }\n}\n",
+            ),
+        ]);
+        assert!(
+            has(&g, "/p/Use.scala:run", "/p/Ref.scala:get"),
+            "{:?}",
+            edges(&g)
+        );
+        assert!(has(&g, "/p/Use.scala:run", "/p/Ref.scala:flatMap"));
+        assert!(has(&g, "/p/Use.scala:run", "/p/Ref.scala:pure"));
+        let reads = FileCalls::read(
+            Path::new("/p/Use.scala"),
+            "object Use {\n  def run(ref: Ref[Int]) = {\n    ref.get\n    f(ref.value)\n  }\n}\n",
+        )
+        .unwrap();
+        assert!(reads.calls.iter().any(|c| c.callee == "get" && c.method));
+        assert!(
+            !reads.calls.iter().any(|c| c.callee == "f" && c.method),
+            "a call's own function is no member read"
+        );
+    }
+
+    /// A test calls the code; the code never calls a test's helpers: an
+    /// app's call reaches the app's method of the name, not a test file's,
+    /// while a test's call reaches both.
+    #[test]
+    fn app_code_does_not_call_into_tests() {
+        let files = [
+            (
+                "/p/app/models/user.rb",
+                "class User\n  def email_time\n    1\n  end\nend\n",
+            ),
+            (
+                "/p/app/jobs/mailer_job.rb",
+                "class MailerJob\n  def perform(user)\n    user.email_time\n  end\nend\n",
+            ),
+            (
+                "/p/test/support/helpers.rb",
+                "module Helpers\n  def email_time\n    2\n  end\nend\n",
+            ),
+            (
+                "/p/test/mailer_job_test.rb",
+                "class MailerJobTest\n  def test_it\n    email_time\n  end\nend\n",
+            ),
+        ];
+        let sources: Vec<(PathBuf, String)> = files
+            .iter()
+            .map(|(f, s)| (PathBuf::from(f), s.to_string()))
+            .collect();
+        let scope: HashMap<PathBuf, HashSet<PathBuf>> = [
+            (
+                PathBuf::from("/p/app/jobs/mailer_job.rb"),
+                HashSet::from([
+                    PathBuf::from("/p/app/models/user.rb"),
+                    PathBuf::from("/p/test/support/helpers.rb"),
+                ]),
+            ),
+            (
+                PathBuf::from("/p/test/mailer_job_test.rb"),
+                HashSet::from([PathBuf::from("/p/test/support/helpers.rb")]),
+            ),
+        ]
+        .into_iter()
+        .collect();
+        let g = ProjectCallGraph::build(defs_of(&files), &sources, &scope);
+        let perform = "/p/app/jobs/mailer_job.rb:perform";
+        assert!(
+            !has(&g, perform, "/p/test/support/helpers.rb:email_time"),
+            "{:?}",
+            edges(&g)
+        );
+        assert!(has(
+            &g,
+            "/p/test/mailer_job_test.rb:test_it",
+            "/p/test/support/helpers.rb:email_time"
+        ));
+    }
+
+    /// What a call cannot be, by each language's rules: an Elixir bare name
+    /// neither defined nor imported is a library macro's, not the project's
+    /// one function of the name; an Erlang module (`:crypto.hash`) or one the
+    /// project defines none of (`Map.put`) calls none of its functions; a
+    /// Kotlin method on a value of no known type is no top-level function,
+    /// nor is `x.toString()` some class's override; a Dart bare call is no
+    /// other class's method.
+    #[test]
+    fn calls_reach_only_what_their_language_lets_them() {
+        let g = graph(&[
+            (
+                "/p/lib/limits.ex",
+                "defmodule Shop.Limits do\n  def sum(xs), do: Enum.sum(xs)\n  def hash(x), do: x\n  def put(m, k, v), do: m\nend\n",
+            ),
+            (
+                "/p/lib/metrics.ex",
+                "defmodule Shop.Metrics do\n  def metrics do\n    sum(\"bytes\")\n    :crypto.hash(:sha256, \"x\")\n    Map.put(%{}, :a, 1)\n  end\nend\n",
+            ),
+            (
+                "/p/src/Helpers.kt",
+                "package shop\n\nfun get(path: String): String = path\n\nclass Model {\n  override fun toString(): String = \"m\"\n}\n",
+            ),
+            (
+                "/p/src/Client.kt",
+                "package shop\n\nfun fetch(client: Any) {\n  client.get(\"/x\")\n  client.toString()\n  get(\"/y\")\n}\n",
+            ),
+            (
+                "/p/lib/cache.dart",
+                "class Cache {\n  bool contains(String key) => false;\n}\n",
+            ),
+            (
+                "/p/lib/test_it.dart",
+                "import 'cache.dart';\nvoid main() {\n  expect(1, contains(1));\n}\n",
+            ),
+        ]);
+        let metrics = "/p/lib/metrics.ex:metrics";
+        for to in ["sum", "hash", "put"] {
+            assert!(
+                !has(&g, metrics, &format!("/p/lib/limits.ex:{to}")),
+                "{to}: {:?}",
+                edges(&g)
+            );
+        }
+        let fetch = "/p/src/Client.kt:fetch";
+        assert!(
+            has(&g, fetch, "/p/src/Helpers.kt:get"),
+            "the bare call: {:?}",
+            edges(&g)
+        );
+        let calls_get = g
+            .callees_of(g.id_of(Path::new("/p/src/Client.kt"), "fetch").unwrap())
+            .iter()
+            .filter(|&&c| g.node(c).name == "get")
+            .count();
+        assert_eq!(calls_get, 1, "only the bare call reaches `get`");
+        assert!(!has(&g, fetch, "/p/src/Helpers.kt:toString"));
+        assert!(!has(
+            &g,
+            "/p/lib/test_it.dart:main",
+            "/p/lib/cache.dart:contains"
+        ));
+    }
+
+    /// A test class's method is the runner's to call: `client.get(…)` in
+    /// one test class is no call of another's `get` test, while a test
+    /// helper class's method still is.
+    #[test]
+    fn a_test_classs_methods_are_no_value_s() {
+        let g = graph(&[
+            (
+                "/p/src/main/kotlin/shop/Server.kt",
+                "package shop\n\nfun module() {}\n",
+            ),
+            (
+                "/p/src/test/kotlin/shop/StatusCodesTest.kt",
+                "package shop\n\nclass StatusCodesTest {\n    @Test\n    fun get() {\n        module()\n    }\n}\n",
+            ),
+            (
+                "/p/src/test/kotlin/shop/FakeClient.kt",
+                "package shop\n\nclass FakeClient {\n    fun post(path: String) {}\n}\n",
+            ),
+            (
+                "/p/src/test/kotlin/shop/RedirectsTest.kt",
+                "package shop\n\nclass RedirectsTest {\n    @Test\n    fun follows() {\n        client.get(\"/x\")\n        client.post(\"/y\")\n    }\n}\n",
+            ),
+            (
+                "/p/test/cart_test.exs",
+                "defmodule Shop.CartTest do\n  test \"adds\" do\n    make_cart()\n  end\n\n  defp make_cart, do: %{}\nend\n",
+            ),
+        ]);
+        // A test's own helper, called bare from the test's block.
+        assert!(
+            has(
+                &g,
+                "/p/test/cart_test.exs:adds",
+                "/p/test/cart_test.exs:make_cart"
+            ),
+            "{:?}",
+            edges(&g)
+        );
+        let follows = "/p/src/test/kotlin/shop/RedirectsTest.kt:follows";
+        assert!(
+            !has(
+                &g,
+                follows,
+                "/p/src/test/kotlin/shop/StatusCodesTest.kt:get"
+            ),
+            "{:?}",
+            edges(&g)
+        );
+        assert!(
+            has(&g, follows, "/p/src/test/kotlin/shop/FakeClient.kt:post"),
+            "{:?}",
+            edges(&g)
+        );
+        for name in [
+            "CartTest",
+            "Shop.CartTests",
+            "CartSpec",
+            "CartIT",
+            "TestCart",
+            "Test",
+        ] {
+            assert!(is_test_class_name(name), "{name}");
+        }
+        for name in ["Contest", "Latest", "Testimony", "AUDIT", "Spec"] {
+            assert!(!is_test_class_name(name), "{name}");
+        }
+    }
+
+    /// A Scala class calls, bare, a method of a trait it mixes in, the
+    /// trait mixed in through another trait (`with DequeueTests`, which
+    /// `extends QueueTests[Dequeue]`), each in its own file.
+    #[test]
+    fn a_scala_bare_call_reaches_a_mixed_in_traits_method() {
+        let g = graph(&[
+            (
+                "/p/tests/src/test/scala/shop/QueueSuite.scala",
+                "package shop\n\ntrait QueueTests[Q[_[_], _]] { self: BaseSuite =>\n  def batchTests(name: String): Unit = ()\n}\n",
+            ),
+            (
+                "/p/tests/src/test/scala/shop/DequeueSuite.scala",
+                "package shop\n\nclass BoundedDequeueSuite extends BaseSuite with DequeueTests {\n  private def boundedTests(name: String) = {\n    batchTests(name)\n  }\n}\n\ntrait DequeueTests extends QueueTests[Dequeue] { self: BaseSuite =>\n  def reverse(name: String) = ()\n}\n",
+            ),
+        ]);
+        assert!(
+            has(
+                &g,
+                "/p/tests/src/test/scala/shop/DequeueSuite.scala:boundedTests",
+                "/p/tests/src/test/scala/shop/QueueSuite.scala:batchTests"
+            ),
+            "{:?}",
+            edges(&g)
+        );
+    }
+
+    /// A Scala package's member is called through the package: `os.read(p)`
+    /// is `object read`'s `apply`, `os.pwd` the package object's `pwd` —
+    /// never another class's `read`; and an object called as a function
+    /// (`RelPath("a")`) runs its `apply`. A local value of the package's
+    /// name is the value, not the package.
+    #[test]
+    fn a_scala_package_member_and_an_objects_apply_are_called() {
+        let g = graph(&[
+            (
+                "/p/os/src/package.scala",
+                "package object os {\n  def pwd: Path = ???\n}\n",
+            ),
+            (
+                "/p/os/src/ReadWriteOps.scala",
+                "package os\n\nobject read extends Function1[Path, String] {\n  def apply(p: Path): String = \"\"\n}\n",
+            ),
+            (
+                "/p/os/src/Model.scala",
+                "package os\n\nobject RelPath {\n  def apply(s: String): RelPath = ???\n}\n\nclass Reader {\n  def read(): Int = 0\n  def close(): Unit = ()\n}\n",
+            ),
+            (
+                "/p/os/src/Use.scala",
+                "package os\n\nobject Use {\n  def go() = RelPath(\"a\")\n}\n",
+            ),
+            (
+                "/p/app/src/Conn.scala",
+                "package app\n\nclass Conn {\n  def close(): Unit = ()\n}\n",
+            ),
+            (
+                "/p/app/src/Main.scala",
+                "package app\n\nobject Main {\n  def run(): Unit = {\n    os.read(p)\n    os.pwd\n  }\n  def shut(): Unit = {\n    val os = open()\n    os.close()\n  }\n}\n",
+            ),
+        ]);
+        let run = "/p/app/src/Main.scala:run";
+        let e = edges(&g);
+        assert!(has(&g, run, "/p/os/src/ReadWriteOps.scala:apply"), "{e:?}");
+        assert!(has(&g, run, "/p/os/src/package.scala:pwd"), "{e:?}");
+        assert!(!has(&g, run, "/p/os/src/Model.scala:read"), "{e:?}");
+        assert!(
+            has(&g, "/p/os/src/Use.scala:go", "/p/os/src/Model.scala:apply"),
+            "{e:?}"
+        );
+        // `os` bound here is a value: its `close` is a method's, as before.
+        assert!(
+            has(
+                &g,
+                "/p/app/src/Main.scala:shut",
+                "/p/app/src/Conn.scala:close"
+            ),
+            "{e:?}"
+        );
+    }
+
+    /// A spec sees what RSpec loads before it: `spec_helper.rb` (which
+    /// `.rspec` requires), what that requires, and `spec/support/`'s files
+    /// (required by a glob) — a helper `config.include`s, called bare.
+    #[test]
+    fn a_spec_sees_what_rspec_loads_before_it() {
+        let g = graph(&[
+            (
+                "/p/spec/spec_helper.rb",
+                "require 'shop'\nRSpec.configure do |config|\n  config.include SpecHelpers\nend\n",
+            ),
+            (
+                "/p/spec/support/spec_helpers.rb",
+                "module SpecHelpers\n  def mock_app(app)\n    app\n  end\nend\n",
+            ),
+            (
+                "/p/spec/lib/app_spec.rb",
+                "describe 'app' do\n  it 'serves' do\n    mock_app(1)\n  end\nend\n",
+            ),
+            // Another `mock_app`, which nothing loads.
+            (
+                "/p/contrib/lib/helpers.rb",
+                "module Contrib\n  def mock_app(app)\n    app\n  end\nend\n",
+            ),
+        ]);
+        let e = edges(&g);
+        assert!(
+            e.iter()
+                .any(|(a, b)| a.starts_with("/p/spec/lib/app_spec.rb:")
+                    && b == "/p/spec/support/spec_helpers.rb:mock_app"),
+            "{e:?}"
+        );
+        assert!(
+            !e.iter()
+                .any(|(_, b)| b == "/p/contrib/lib/helpers.rb:mock_app"),
+            "{e:?}"
+        );
+    }
+
+    /// An Elixir file's `use`s and `import`s, the multi-alias form too.
+    #[test]
+    fn elixir_imports_are_read_in_every_form() {
+        let src = "defmodule Shop.Case do\n  use ExUnit.CaseTemplate\n  quote do\n    import Ecto.Query, only: [from: 2]\n    import Shop.{Factory, TestHelpers}\n    import Shop.Web.{\n      Auth,\n      Forms\n    }\n    import unquote(__MODULE__)\n  end\nend\n";
+        assert_eq!(elixir_modules_after(src, "use "), ["ExUnit.CaseTemplate"]);
+        assert_eq!(
+            elixir_modules_after(src, "import "),
+            [
+                "Ecto.Query",
+                "Shop.Factory",
+                "Shop.TestHelpers",
+                "Shop.Web.Auth",
+                "Shop.Web.Forms"
+            ]
+        );
+    }
+
+    /// An Elixir bare call reaches its own module, the modules it imports,
+    /// and what a `use`d module's `__using__` injects (its quoted imports,
+    /// its own `def`s, and through the modules it uses in turn) — never
+    /// another module's function that only shares the name.
+    #[test]
+    fn an_elixir_bare_call_reaches_only_what_is_imported() {
+        let g = graph(&[
+            (
+                "/p/lib/invites.ex",
+                "defmodule Shop.Invites do\n  def insert(org, user), do: {org, user}\n  def get(id), do: id\nend\n",
+            ),
+            (
+                "/p/test/support/factory.ex",
+                "defmodule Shop.Factory do\n  def insert(kind), do: kind\nend\n",
+            ),
+            (
+                "/p/test/support/helpers.ex",
+                "defmodule Shop.Helpers do\n  def login(conn), do: conn\nend\n",
+            ),
+            (
+                "/p/test/support/data_case.ex",
+                "defmodule Shop.DataCase do\n  defmacro __using__(_) do\n    quote do\n      import Shop.Factory\n      def fixture, do: 1\n    end\n  end\nend\n",
+            ),
+            (
+                "/p/test/support/conn_case.ex",
+                "defmodule Shop.ConnCase do\n  defmacro __using__(_) do\n    quote do\n      use Shop.DataCase\n      import Shop.{\n        Helpers,\n        Missing\n      }\n    end\n  end\nend\n",
+            ),
+            (
+                "/p/test/invite_test.exs",
+                "defmodule Shop.InviteTest do\n  use Shop.ConnCase\n  test \"invites\" do\n    insert(:user)\n    login(conn)\n    fixture()\n    get(1)\n  end\nend\n",
+            ),
+        ]);
+        let edges = edges(&g);
+        let from = |to: &str| {
+            edges
+                .iter()
+                .any(|(a, b)| a.starts_with("/p/test/invite_test.exs:") && b == to)
+        };
+        assert!(from("/p/test/support/factory.ex:insert"), "{edges:?}");
+        assert!(from("/p/test/support/helpers.ex:login"), "{edges:?}");
+        assert!(from("/p/test/support/data_case.ex:fixture"), "{edges:?}");
+        assert!(!from("/p/lib/invites.ex:insert"), "{edges:?}");
+        assert!(!from("/p/lib/invites.ex:get"), "{edges:?}");
     }
 
     /// An extension method is called on a value of the type it extends,

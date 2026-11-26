@@ -1123,7 +1123,7 @@ impl Resolver {
             "lean" => self.resolve_lean(raw, from),
             // Kotlin's and Scala's packages and classes are Java's.
             "java" | "kotlin" | "scala" => self.resolve_java(raw, from, declared),
-            "elixir" => self.resolve_elixir(raw),
+            "elixir" => self.resolve_elixir(raw, declared),
             "csharp" => self.resolve_csharp(raw, from, declared.namespaces),
             "php" => self.resolve_php(raw, from),
             "ruby" => self.resolve_ruby(raw, from),
@@ -1260,6 +1260,21 @@ impl Resolver {
         }
         let own = self.java_own_root(from, package);
         let roots = self.java_roots_for(from, own.as_ref());
+        // A package filed under one root may have files under others too —
+        // `src/main/kotlin` and `src/test/kotlin`, another module's — so a
+        // star import or a top-level member reaches the package's node,
+        // every file declaring it, where any is outside the folder found.
+        let package_target = |segs: &[&str], dir: PathBuf| -> Target {
+            let node = self.package_node(&segs.join("."));
+            match declared
+                .namespaces
+                .and_then(|namespaces| namespaces.files(&node))
+                .is_some_and(|files| files.iter().any(|f| f.parent() != Some(dir.as_path())))
+            {
+                true => Target::Internal(node),
+                false => Target::Internal(dir),
+            }
+        };
         for root in &roots {
             // A root without the name's first package is passed over in one
             // lookup: most imports are a library's, tried under every root.
@@ -1269,7 +1284,7 @@ impl Resolver {
             if star {
                 let dir = join_all(root, &segs);
                 if self.packages.contains_key(&dir) {
-                    return Target::Internal(dir);
+                    return package_target(&segs, dir);
                 }
             }
             // The importer's own class (a static import of its own members)
@@ -1294,7 +1309,7 @@ impl Resolver {
             {
                 let dir = join_all(root, &segs[..segs.len() - 1]);
                 if self.packages.contains_key(&dir) {
-                    return Target::Internal(dir);
+                    return package_target(&segs[..segs.len() - 1], dir);
                 }
             }
         }
@@ -1544,7 +1559,7 @@ impl Resolver {
     /// `shop/pricing/tax.ex` under a `lib/` — the project's, or an umbrella
     /// app's — or `test/support/`; a module found in none is its library's
     /// (`Ecto.Query` is Ecto's, `GenServer` Elixir's own).
-    fn resolve_elixir(&self, raw: &RawImport) -> Target {
+    fn resolve_elixir(&self, raw: &RawImport, declared: &Declared<'_>) -> Target {
         let spec = raw.module.as_str();
         let parts: Vec<String> = spec.split('.').map(snake_case).collect();
         if parts.iter().any(|p| p.is_empty()) {
@@ -1561,6 +1576,16 @@ impl Resolver {
             .into_iter()
             .map(|root| root.join(&rel))
             .find(|file| self.has_file(file))
+            // Not where Mix's convention puts it (`HexpmWeb` in
+            // `lib/hexpm_web/web.ex`, `Hexpm.OAuth` under `oauth/`): the
+            // file that defines it.
+            .or_else(|| {
+                declared
+                    .namespaces?
+                    .files(&self.package_node(spec))?
+                    .first()
+                    .cloned()
+            })
             .map(Target::Internal)
             .unwrap_or_else(|| Target::External(spec.split('.').next().unwrap_or(spec).to_string()))
     }
@@ -3830,6 +3855,13 @@ impl ImportGraph {
                     .filter(|r| r.is_mod_decl)
                     .map(|r| resolver.package_node(&r.module))
                     .collect(),
+                // Each module an Elixir file defines, wherever it is.
+                Some("elixir") => queued
+                    .raw
+                    .iter()
+                    .filter(|r| r.is_mod_decl)
+                    .map(|r| resolver.package_node(&r.module))
+                    .collect(),
                 _ => Vec::new(),
             };
             namespaces_changed.extend(self.namespaces.set(file, declares));
@@ -3942,6 +3974,10 @@ impl ImportGraph {
                     .filter(|r| !r.is_mod_decl)
                     .flat_map(packages)
                     .any(|name| changed.contains(&resolver.package_node(name))),
+                Some("elixir") => raws
+                    .iter()
+                    .filter(|r| !r.is_mod_decl)
+                    .any(|r| changed.contains(&resolver.package_node(&r.module))),
                 _ => false,
             })
             .map(|(file, _)| file.clone())
@@ -9099,9 +9135,20 @@ mod resolution_tests {
         let model = "app/src/main/java/com/acme/model/User.java";
         let order = "app/src/main/scala/com/acme/model/Order.scala";
         let shop = "shop/src/main/scala/com/acme/shop/Shop.scala";
+        // A package in two roots: a test importing a helper `src/main`
+        // defines, its package's folder under `src/test` too.
+        let assert = "app/src/main/kotlin/com/acme/shared/Assert.kt";
+        let fixtures = "app/src/test/kotlin/com/acme/shared/Fixtures.kt";
+        let cache_test = "app/src/test/kotlin/com/acme/h2/CacheTest.kt";
         let g = graph_with(
             root,
             &[
+                (assert, "package com.acme.shared\nfun assertSame() = 1\n"),
+                (fixtures, "package com.acme.shared\nobject Fixtures\n"),
+                (
+                    cache_test,
+                    "package com.acme.h2\n\nimport com.acme.shared.assertSame\n",
+                ),
                 (
                     app,
                     "package com.acme.app\n\nimport com.acme.util.Strings\nimport com.acme.util.formatPrice\n\
@@ -9128,9 +9175,14 @@ mod resolution_tests {
                 Target::Internal(at(util)),
                 Target::Internal(at("app/src/main/kotlin/com/acme/util")),
                 Target::Internal(at(model)),
-                Target::Internal(at("app/src/main/java/com/acme/model")),
+                // The package's Scala file is under another root.
+                Target::Internal(at("package com.acme.model")),
                 Target::External("kotlinx.coroutines".into()),
             ]
+        );
+        assert_eq!(
+            targets(&g, &at(cache_test)),
+            [Target::Internal(at("package com.acme.shared"))]
         );
         assert_eq!(
             targets(&g, &at(shop)),

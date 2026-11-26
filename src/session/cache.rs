@@ -112,7 +112,12 @@ use crate::incremental::Version;
 /// ([`CachedCalls::package`], [`CachedCalls::types`]) — what a call is
 /// resolved through to the type's method, inherited or overridden, and to
 /// another file of its package; an older entry has none of them.
-pub(crate) const CACHE_VERSION: u32 = 26;
+/// 27: a Dart constructor with no body (`CounterCubit() : super(0);`,
+/// `const BlocProvider({…});`) is a symbol, and an Elixir file's `use`s and
+/// `import`s are kept ([`CachedCalls::uses`], [`CachedCalls::imports`]), and
+/// a Scala call's qualifier ([`CachedCalls::qualifiers`]); an older entry has
+/// none of them.
+pub(crate) const CACHE_VERSION: u32 = 27;
 
 /// A cached symbol (the index entry minus the paths, which are reconstructed
 /// from the project root + relative path on load).
@@ -181,6 +186,12 @@ pub struct CachedCalls {
     /// two; a type it is declared as, that index plus two, negated.
     #[serde(default)]
     pub receivers: Vec<i64>,
+    /// One number per call site, in `sites`' order, where any site has one:
+    /// the name a Scala call is made on
+    /// (`clew_core::projectcalls::CallSite::qualifier`) — `0` none, else
+    /// its index in `names` plus one. Empty when no site has one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub qualifiers: Vec<i64>,
     /// Two numbers per method whose class is known
     /// (`clew_core::projectcalls::FileCalls::owners`): its definition line,
     /// then the class's index in `names`.
@@ -205,6 +216,14 @@ pub struct CachedCalls {
     /// (`clew_core::projectcalls::FileContext::extensions`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extensions: Vec<usize>,
+    /// The modules an Elixir file `use`s
+    /// (`clew_core::projectcalls::FileContext::uses`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub uses: Vec<String>,
+    /// The modules an Elixir file `import`s
+    /// (`clew_core::projectcalls::FileContext::imports`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub imports: Vec<String>,
 }
 
 /// Everything cached about one file: how to confirm it is unchanged (mtime,
@@ -323,12 +342,15 @@ mod tests {
                 declarations: Vec::new(),
                 bodies: vec![3, 3, 9],
                 receivers: vec![1],
+                qualifiers: vec![2],
                 owners: vec![3, 1],
                 accessed: vec![3],
                 internal: vec![9],
                 package: Some("shop".into()),
                 types: vec![("Cart".into(), vec!["Base".into()])],
                 extensions: vec![3],
+                uses: vec!["Shop.Context".into()],
+                imports: vec!["Ecto.Query".into()],
             }),
         }
     }
