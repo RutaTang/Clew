@@ -245,6 +245,8 @@ fn to_cached_calls(calls: &FileCalls) -> CachedCalls {
     let mut receivers = Vec::with_capacity(calls.calls.len());
     let mut qualifiers = Vec::new();
     let any_qualifier = calls.calls.iter().any(|site| site.qualifier.is_some());
+    let mut call_arities = Vec::new();
+    let any_arity = calls.calls.iter().any(|site| site.arity.is_some());
     let mut previous = 0i64;
     for site in &calls.calls {
         let caller = match site.caller.as_deref() {
@@ -266,6 +268,9 @@ fn to_cached_calls(calls: &FileCalls) -> CachedCalls {
                 None => 0,
                 Some(q) => intern(q, &mut names, &mut seen) + 1,
             });
+        }
+        if any_arity {
+            call_arities.push(site.arity.map_or(0, |n| i64::from(n) + 1));
         }
     }
     let mut owners: Vec<(usize, &str)> = calls
@@ -301,6 +306,7 @@ fn to_cached_calls(calls: &FileCalls) -> CachedCalls {
             .collect(),
         receivers,
         qualifiers,
+        call_arities,
         owners,
         accessed,
         internal,
@@ -309,6 +315,12 @@ fn to_cached_calls(calls: &FileCalls) -> CachedCalls {
         extensions: calls.context.extensions.clone(),
         uses: calls.context.uses.clone(),
         imports: calls.context.imports.clone(),
+        arities: calls
+            .context
+            .arities
+            .iter()
+            .flat_map(|&(line, fewest, most)| [line, usize::from(fewest), usize::from(most)])
+            .collect(),
     }
 }
 
@@ -328,6 +340,12 @@ fn from_cached_calls(abs: &Path, cached: &CachedCalls) -> Option<FileCalls> {
         return None;
     }
     if !cached.qualifiers.is_empty() && cached.qualifiers.len() != cached.receivers.len() {
+        return None;
+    }
+    if !cached.call_arities.is_empty() && cached.call_arities.len() != cached.receivers.len() {
+        return None;
+    }
+    if !cached.arities.len().is_multiple_of(3) {
         return None;
     }
     let mut previous = 0i64;
@@ -362,6 +380,10 @@ fn from_cached_calls(abs: &Path, cached: &CachedCalls) -> Option<FileCalls> {
             qualifier: match cached.qualifiers.get(at).copied().unwrap_or(0) {
                 0 => None,
                 n => Some(name(n - 1)?),
+            },
+            arity: match cached.call_arities.get(at).copied().unwrap_or(0) {
+                0 => None,
+                n => Some(u8::try_from(n - 1).ok()?),
             },
             line: usize::try_from(line).ok()?,
         });
@@ -404,6 +426,11 @@ fn from_cached_calls(abs: &Path, cached: &CachedCalls) -> Option<FileCalls> {
             extensions: cached.extensions.clone(),
             uses: cached.uses.clone(),
             imports: cached.imports.clone(),
+            arities: cached
+                .arities
+                .chunks_exact(3)
+                .map(|t| Some((t[0], u8::try_from(t[1]).ok()?, u8::try_from(t[2]).ok()?)))
+                .collect::<Option<Vec<_>>>()?,
         },
     })
 }
@@ -680,6 +707,21 @@ pub fn build(root: &Path, files: Arc<Vec<FileEntry>>) -> Vec<SymbolEntry> {
 mod tests {
     use super::*;
     use clew_core::outline::is_test_fn;
+
+    /// An Erlang or Elixir call's arity, and each function's, come back from
+    /// the cache.
+    #[test]
+    fn beam_arities_survive_the_cache() {
+        let src = "defmodule Cart do\n  def price(item, qty \\\\ 1), do: {item, qty}\n  def run(items), do: items |> price()\nend\n";
+        let abs = Path::new("/p/lib/cart.ex");
+        let calls = FileCalls::read(abs, src).expect("elixir has a call model");
+        assert!(calls.calls.iter().any(|c| c.arity == Some(1)));
+        assert!(calls.context.arities.contains(&(2, 1, 2)));
+        let cached = to_cached_calls(&calls);
+        let back = from_cached_calls(abs, &cached).expect("a sound entry");
+        assert_eq!(back.calls, calls.calls);
+        assert_eq!(back.context.arities, calls.context.arities);
+    }
 
     /// A Scala call's qualifier (`os` in `os.read(p)`) comes back from the
     /// cache, and a qualifier list that does not match the sites is a damaged

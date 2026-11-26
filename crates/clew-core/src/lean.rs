@@ -1043,6 +1043,7 @@ pub(crate) fn calls(
                         method,
                         receiver,
                         qualifier: None,
+                        arity: None,
                         line,
                     });
                 }

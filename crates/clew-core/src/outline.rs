@@ -554,67 +554,157 @@ fn merge_clauses(items: Vec<Located>, source: &str, lang: Lang) -> Vec<Located> 
     out
 }
 
-/// How many arguments an Erlang clause's head takes — top-level commas of
-/// its first parenthesized list (`price(A, B)`: 2).
-/// An Elixir clause's arity: its head's arguments (`def f(a, b)` two, a
-/// bare `def f` none), read from the name on — never from its body, whose
-/// calls have parentheses of their own.
-fn elixir_arity(source: &str, item: &Located) -> Option<usize> {
-    let text = source
-        .get(item.declaration.0..item.declaration.1)?
-        .trim_start();
-    let (_, rest) = text.split_once(char::is_whitespace)?;
-    let rest = rest.trim_start();
-    let name_end = rest
-        .find(|c: char| !(c.is_alphanumeric() || matches!(c, '_' | '?' | '!')))
-        .unwrap_or(rest.len());
-    let Some(args) = rest[name_end..].strip_prefix('(') else {
-        return Some(0);
-    };
-    let (mut depth, mut count, mut empty) = (0usize, 0usize, true);
-    for c in args.chars() {
-        match c {
-            '(' | '[' | '{' => depth += 1,
-            ')' | ']' | '}' if depth == 0 => break,
-            ')' | ']' | '}' => depth -= 1,
-            ',' if depth == 0 => count += 1,
-            c if !c.is_whitespace() => empty = false,
-            _ => {}
-        }
-    }
-    Some(if empty { 0 } else { count + 1 })
+/// How many arguments an Erlang clause's head takes — its name's
+/// parenthesized list (`price(A, B)`: 2).
+pub(crate) fn clause_arity(source: &str, item: &Located) -> Option<usize> {
+    let text = source.get(item.declaration.0..item.declaration.1)?;
+    // From the clause's own name: a `-spec` or a comment before it says
+    // nothing of its head.
+    let at = head_of(text, &item.symbol.name, &[""])?;
+    Some(head_arguments(&text[at..])?.0)
 }
 
-fn clause_arity(source: &str, item: &Located) -> Option<usize> {
+/// An Elixir clause's arity: its head's arguments (`def f(a, b)` two, a
+/// bare `def f` none), read from the name on — never from its body, whose
+/// calls have parentheses of their own, nor from a `@doc` before it.
+pub(crate) fn elixir_arity(source: &str, item: &Located) -> Option<usize> {
     let text = source.get(item.declaration.0..item.declaration.1)?;
-    let head = text.split("->").next()?;
-    let open = head.find('(')?;
-    let mut depth = 0usize;
-    let mut args = 0usize;
-    let mut empty = true;
-    for c in head[open..].chars() {
-        match c {
-            '(' | '[' | '{' => {
-                depth += 1;
-                if depth == 1 {
-                    continue;
-                }
-            }
-            ')' | ']' | '}' => {
-                depth = depth.saturating_sub(1);
-                if depth == 0 {
-                    break;
-                }
-            }
-            ',' if depth == 1 => args += 1,
-            c if !c.is_whitespace() => {}
-            _ => continue,
+    let at = head_of(text, &item.symbol.name, ELIXIR_DEFINES)?;
+    Some(head_arguments(&text[at..]).map_or(0, |(n, _)| n))
+}
+
+/// How many of an Elixir clause's arguments have a default (`b \\ 1`): a
+/// call may leave each out, so `def f(a, b \\ 1)` is `f/1` and `f/2`.
+pub(crate) fn elixir_defaults(source: &str, item: &Located) -> usize {
+    let Some(text) = source.get(item.declaration.0..item.declaration.1) else {
+        return 0;
+    };
+    head_of(text, &item.symbol.name, ELIXIR_DEFINES)
+        .and_then(|at| head_arguments(&text[at..]))
+        .map_or(0, |(_, defaults)| defaults)
+}
+
+/// The keywords an Elixir function or macro is defined by.
+const ELIXIR_DEFINES: &[&str] = &[
+    "def",
+    "defp",
+    "defmacro",
+    "defmacrop",
+    "defguard",
+    "defguardp",
+    "defdelegate",
+    "defn",
+    "defnp",
+];
+
+/// Where in `text` the head of the definition of `name` starts: `name`
+/// right after one of `keywords` (an Elixir `def`), or at a line's start
+/// (an Erlang clause, `keywords` `[""]`) — and followed by its arguments'
+/// parenthesis or by none.
+fn head_of(text: &str, name: &str, keywords: &[&str]) -> Option<usize> {
+    let is_name = |c: char| c.is_alphanumeric() || matches!(c, '_' | '?' | '!');
+    let mut from = 0;
+    while let Some(i) = text[from..].find(name) {
+        let at = from + i;
+        from = at + name.len().max(1);
+        let after = &text[at + name.len()..];
+        if after.starts_with(is_name) {
+            continue;
         }
-        if depth >= 1 {
-            empty = false;
+        let before = &text[..at];
+        let line = &before[before.rfind('\n').map_or(0, |i| i + 1)..];
+        let defined = keywords.iter().any(|k| {
+            if k.is_empty() {
+                line.trim().is_empty()
+            } else {
+                line.trim_end().strip_suffix(k).is_some_and(|rest| {
+                    rest.trim().is_empty() && line.len() > line.trim_end().len()
+                })
+            }
+        });
+        if defined {
+            return Some(at + name.len());
         }
     }
-    Some(if empty { 0 } else { args + 1 })
+    None
+}
+
+/// The arguments of the head starting at `text` (just past the name): how
+/// many, and how many have an Elixir default — counted at the top level of
+/// the parenthesis, past brackets, binaries (`<<A:8, B/binary>>`), strings
+/// and character literals. `None` when no parenthesis follows.
+fn head_arguments(text: &str) -> Option<(usize, usize)> {
+    let rest = text.strip_prefix('(')?;
+    let bytes = rest.as_bytes();
+    let (mut depth, mut args, mut defaults) = (0usize, 0usize, 0usize);
+    let (mut empty, mut defaulted) = (true, false);
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        match c {
+            b'"' | b'\'' => {
+                // A string (a charlist, a quoted atom): to its close.
+                i += 1;
+                while i < bytes.len() && bytes[i] != c {
+                    i += if bytes[i] == b'\\' { 2 } else { 1 };
+                }
+                empty = false;
+            }
+            // Erlang's character literal: `$,` is no comma.
+            b'$' => {
+                i += 1;
+                empty = false;
+            }
+            b'<' if bytes.get(i + 1) == Some(&b'<') => {
+                depth += 1;
+                i += 1;
+                empty = false;
+            }
+            // An anonymous function in a default (`fn a, b -> a end`): its
+            // commas are its own.
+            b'f' | b'e'
+                if !(i > 0 && (bytes[i - 1] == b'_' || bytes[i - 1].is_ascii_alphanumeric())) =>
+            {
+                let word_end = rest[i..]
+                    .find(|c: char| !(c == '_' || c.is_ascii_alphanumeric()))
+                    .map_or(bytes.len(), |n| i + n);
+                match &rest[i..word_end] {
+                    "fn" | "fun" => depth += 1,
+                    "end" => depth = depth.saturating_sub(1),
+                    _ => {}
+                }
+                i = word_end;
+                empty = false;
+                continue;
+            }
+            b'>' if bytes.get(i + 1) == Some(&b'>') && depth > 0 => {
+                depth -= 1;
+                i += 1;
+            }
+            b'(' | b'[' | b'{' => {
+                depth += 1;
+                empty = false;
+            }
+            b')' | b']' | b'}' if depth == 0 => break,
+            b')' | b']' | b'}' => depth -= 1,
+            b',' if depth == 0 => {
+                args += 1;
+                defaults += usize::from(defaulted);
+                defaulted = false;
+            }
+            b'\\' if depth == 0 && bytes.get(i + 1) == Some(&b'\\') => {
+                defaulted = true;
+                i += 1;
+            }
+            c if !c.is_ascii_whitespace() => empty = false,
+            _ => {}
+        }
+        i += 1;
+    }
+    if empty {
+        return Some((0, 0));
+    }
+    Some((args + 1, defaults + usize::from(defaulted)))
 }
 
 /// A Lean file's outline: each command parsed on its own

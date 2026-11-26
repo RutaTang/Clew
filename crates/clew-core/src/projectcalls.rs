@@ -92,6 +92,10 @@ pub struct CallSite {
     /// unknown: `os` in `os.read(p)` — a package, whose object `read` the
     /// call applies, or a value of no known type.
     pub qualifier: Option<String>,
+    /// How many arguments an Erlang or Elixir call passes (`f(a, b)` two;
+    /// `x |> f(a)` two; `&f/2`, `fun f/2` two): which of the name's
+    /// functions it is. `None` elsewhere.
+    pub arity: Option<u8>,
     /// 1-based line of the call.
     pub line: usize,
 }
@@ -135,6 +139,11 @@ pub struct FileContext {
     /// `__using__` does): the only ones whose functions it calls bare — an
     /// `alias` names a module, and brings none of its functions.
     pub imports: Vec<String>,
+    /// Each Erlang or Elixir function's arities, by its definition line:
+    /// fewest and most arguments it takes (an Elixir default lets a call
+    /// leave one out). A BEAM function is its name and its arity: `f/1` is
+    /// no call of `f/2`.
+    pub arities: Vec<(usize, u8, u8)>,
 }
 
 /// The kinds of definition that are types another can extend or a value be
@@ -321,12 +330,33 @@ pub fn context_in(src: &str, lang: Lang, symbols: &[Located]) -> FileContext {
             _ => Vec::new(),
         }
     };
+    let arities = match lang {
+        Lang::Erlang | Lang::Elixir => symbols
+            .iter()
+            .filter(|l| is_callable(&l.symbol.kind))
+            .filter_map(|l| {
+                let most = match lang {
+                    Lang::Erlang => crate::outline::clause_arity(src, l)?,
+                    _ => crate::outline::elixir_arity(src, l)?,
+                };
+                let defaults = match lang {
+                    Lang::Elixir => crate::outline::elixir_defaults(src, l),
+                    _ => 0,
+                };
+                let most = u8::try_from(most).ok()?;
+                let fewest = most.saturating_sub(u8::try_from(defaults).unwrap_or(0));
+                Some((l.symbol.line, fewest, most))
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
     FileContext {
         package: package_of(src, lang),
         types,
         extensions,
         uses: modules_after("use "),
         imports: modules_after("import "),
+        arities,
     }
 }
 
@@ -749,9 +779,19 @@ impl ProjectCallGraph {
             .iter()
             .map(|f| (f.file.as_path(), (&f.declarations, &f.internal)))
             .collect();
+        let arities: HashMap<(&Path, usize), (u8, u8)> = files
+            .iter()
+            .flat_map(|f| {
+                f.context
+                    .arities
+                    .iter()
+                    .map(|&(line, fewest, most)| ((f.file.as_path(), line), (fewest, most)))
+            })
+            .collect();
         let facts: Vec<NodeFacts> = nodes
             .iter()
             .map(|n| NodeFacts {
+                arity: arities.get(&(n.file.as_path(), n.line)).copied(),
                 bodyless: declarations
                     .get(n.file.as_path())
                     .is_some_and(|(d, _)| d.contains(&n.line)),
@@ -1222,7 +1262,7 @@ impl ProjectCallGraph {
             };
             // What a name called from this file resolves to depends on the
             // name and the call's shape only: worked out once per file.
-            let mut resolved: HashMap<(&str, bool), Vec<usize>> = HashMap::new();
+            let mut resolved: HashMap<(&str, bool, Option<u8>), Vec<usize>> = HashMap::new();
             for cs in &fc.calls {
                 // Bare calls to language builtins (`len(x)`, `make(...)`) are not
                 // project functions; skip them so they don't resolve to some
@@ -1244,7 +1284,7 @@ impl ProjectCallGraph {
                     continue;
                 };
                 let callees = resolved
-                    .entry((cs.callee.as_str(), cs.method))
+                    .entry((cs.callee.as_str(), cs.method, cs.arity))
                     .or_insert_with(|| resolve_callees(&defs, &nodes, &facts, &owner, cs, &site));
                 // Scala's `pkg.member(…)`: the package's own function (a
                 // package object's) or its object's `apply` — and nothing
@@ -1391,7 +1431,7 @@ impl ProjectCallGraph {
                         .into_iter()
                         .flatten()
                         .copied()
-                        .filter(|&c| owned_by(c, ty))
+                        .filter(|&c| owned_by(c, ty) && facts[c].takes(cs.arity))
                         .collect();
                 }
                 // An exact type with no method of the name: the one it
@@ -1551,6 +1591,10 @@ impl ProjectCallGraph {
                     .copied()
                     .filter(|&i| nodes[i].file == fc.file || imported.contains(&nodes[i].file));
                 for callee in targets.iter().copied().chain(constructed) {
+                    // `f(a)` is `f/1`: no call of `f/2`.
+                    if !facts[callee].takes(cs.arity) {
+                        continue;
+                    }
                     // `client.get(…)`: no value is a test class's, its own
                     // class's methods called on another value included.
                     if cs.method && cs.receiver.is_none() && test_method[callee] {
@@ -1876,6 +1920,19 @@ struct NodeFacts {
     internal: bool,
     /// The language of the node's file, by extension.
     lang: Option<Lang>,
+    /// An Erlang or Elixir function's arities ([`FileContext::arities`]).
+    arity: Option<(u8, u8)>,
+}
+
+impl NodeFacts {
+    /// Whether a call passing `passed` arguments can be of this function:
+    /// of a BEAM function, one of its arities; of any other, yes.
+    fn takes(&self, passed: Option<u8>) -> bool {
+        match (passed, self.arity) {
+            (Some(n), Some((fewest, most))) => (fewest..=most).contains(&n),
+            _ => true,
+        }
+    }
 }
 
 /// The project's definitions, by name (see `ProjectCallGraph::build`).
@@ -2304,12 +2361,14 @@ fn walk(
                 _ => None,
             };
             let qualifier = unbound.filter(|_| receiver.is_none());
+            let arity = call_arity(node, parent, src, lang);
             out.push(CallSite {
                 caller: current.as_ref().map(|(name, _)| name.to_string()),
                 callee,
                 method,
                 receiver,
                 qualifier,
+                arity,
                 line: node.start_position().row + 1,
             });
         }
@@ -2326,6 +2385,7 @@ fn walk(
                 method: false,
                 receiver: None,
                 qualifier: None,
+                arity: None,
                 line: node.start_position().row + 1,
             });
         }
@@ -2445,9 +2505,76 @@ fn macro_calls(tree: Node, src: &str, caller: Option<&str>, out: &mut Vec<CallSi
             method: prev == Some("."),
             receiver: None,
             qualifier: None,
+            arity: None,
             line: token.start_position().row + 1,
         });
     }
+}
+
+/// How many arguments an Erlang or Elixir call passes ([`CallSite::arity`]).
+fn call_arity(call: Node, parent: Option<Node>, src: &str, lang: Lang) -> Option<u8> {
+    let count = |args: Node| {
+        args.named_children(&mut args.walk())
+            .filter(|a| a.kind() != "comment")
+            .count()
+    };
+    let n = match (lang, call.kind()) {
+        // `fun f/2`, `fun m:f/2`.
+        (Lang::Erlang, "internal_fun" | "external_fun") => {
+            node_text(call.child_by_field_name("arity")?, src)
+                .trim()
+                .trim_start_matches('/')
+                .trim()
+                .parse()
+                .ok()?
+        }
+        (Lang::Erlang, "call") => count(call.child_by_field_name("args")?),
+        // `&f/2`, `&Cart.add/2`.
+        (Lang::Elixir, "unary_operator") => {
+            let operand = call.child_by_field_name("operand")?;
+            node_text(operand.child_by_field_name("right")?, src)
+                .trim()
+                .parse()
+                .ok()?
+        }
+        (Lang::Elixir, "call") => {
+            // `&Cart.add/2`: the capture's arity, not the name's none.
+            if let Some(p) = parent
+                && p.kind() == "binary_operator"
+                && p.child_by_field_name("left")
+                    .is_some_and(|l| l.id() == call.id())
+                && p.child_by_field_name("operator")
+                    .is_some_and(|o| node_text(o, src) == "/")
+                && p.parent().is_some_and(|g| g.kind() == "unary_operator")
+            {
+                return node_text(p.child_by_field_name("right")?, src)
+                    .trim()
+                    .parse()
+                    .ok();
+            }
+            let mut cursor = call.walk();
+            let mut n = 0;
+            for child in call.named_children(&mut cursor) {
+                match child.kind() {
+                    "arguments" => n += count(child),
+                    // `with_tx do … end`: the block is its last argument.
+                    "do_block" => n += 1,
+                    _ => {}
+                }
+            }
+            // `x |> f(a)`: `x` is the first.
+            let piped = parent.is_some_and(|p| {
+                p.kind() == "binary_operator"
+                    && p.child_by_field_name("right")
+                        .is_some_and(|r| r.id() == call.id())
+                    && p.child_by_field_name("operator")
+                        .is_some_and(|o| node_text(o, src) == "|>")
+            });
+            n + usize::from(piped)
+        }
+        _ => return None,
+    };
+    u8::try_from(n).ok()
 }
 
 /// Whether the bare call `call` of `callee` calls a parameter of a function
@@ -4752,26 +4879,28 @@ fn resolve_callees(
     } else {
         &named.all
     };
-    // The candidates in `file`, with a body when any definition has one.
+    // The candidates in `file`, with a body when any definition has one —
+    // and, a BEAM function's, of the call's arity.
     fn in_file<'d>(
         defs: &'d Defs<'d>,
         facts: &'d [NodeFacts],
         file: &'d Path,
         name: &'d str,
         with_body: bool,
+        arity: Option<u8>,
     ) -> impl Iterator<Item = usize> + 'd {
         defs.in_file
             .get(&(file, name))
             .into_iter()
             .flatten()
             .copied()
-            .filter(move |&i| !with_body || !facts[i].bodyless)
+            .filter(move |&i| (!with_body || !facts[i].bodyless) && facts[i].takes(arity))
     }
     // A name defined more often than any real overload set is ambiguous: it
     // resolves to none of them. Linking every one made a file of N
     // same-named definitions calling each other N² edges — tens of GB from
     // one generated file within the index's size cap.
-    let local: Vec<usize> = in_file(defs, facts, site.file, name, with_body)
+    let local: Vec<usize> = in_file(defs, facts, site.file, name, with_body, call.arity)
         .take(MAX_CANDIDATES + 1)
         .collect();
     if local.len() > MAX_CANDIDATES {
@@ -4785,13 +4914,13 @@ fn resolve_callees(
         true => cands
             .iter()
             .copied()
-            .filter(|&i| site.sees(&nodes[i].file))
+            .filter(|&i| facts[i].takes(call.arity) && site.sees(&nodes[i].file))
             .take(MAX_CANDIDATES + 1)
             .collect(),
         false => {
             let mut seen: HashSet<usize> = HashSet::new();
             site.scope()
-                .flat_map(|file| in_file(defs, facts, file, name, with_body))
+                .flat_map(|file| in_file(defs, facts, file, name, with_body, call.arity))
                 .filter(|&i| seen.insert(i))
                 .take(MAX_CANDIDATES + 1)
                 .collect()
@@ -8134,6 +8263,75 @@ def main():
             .collect();
         assert_eq!(formats.len(), 1, "{e:?}");
         assert_eq!(g.node(formats[0]).line, 4, "{e:?}");
+    }
+
+    /// A BEAM function is its name and its arity: `parse(A, B)` is
+    /// `parse/2`, never `parse/5` — nor is `x |> parse(y)` (two, the piped
+    /// value first), `&parse/2` or `fun parse/2`; an Elixir default lets a
+    /// call leave its argument out.
+    #[test]
+    fn a_beam_call_reaches_the_function_of_its_arity() {
+        let g = graph(&[
+            (
+                "/p/src/getopt.erl",
+                "-module(getopt).\n-export([run/1]).\n\nparse(A, B) -> parse(A, B, [], [], []).\n\nparse(A, B, C, D, E) -> {A, B, C, D, E}.\n\nrun(X) -> parse(X, 1), F = fun parse/2, F.\n",
+            ),
+            (
+                "/p/lib/cart.ex",
+                "defmodule Cart do\n  def total(items), do: items\n  def total(items, tax), do: {items, tax}\n  def price(item, qty \\\\ 1), do: {item, qty}\n  def run(items) do\n    items |> total(0.2)\n    price(:a)\n    Enum.map(items, &total/1)\n  end\nend\n",
+            ),
+            (
+                "/p/lib/checkout.ex",
+                "defmodule Checkout do\n  def go(items), do: Enum.map(items, &Cart.total/2)\nend\n",
+            ),
+        ]);
+        let e = edges(&g);
+        let calls = |from: &str, to_line: usize| {
+            let from = g.id_of(
+                Path::new(from.split(':').next().unwrap()),
+                from.split(':').nth(1).unwrap(),
+            );
+            from.is_some_and(|f| g.callees_of(f).iter().any(|&c| g.node(c).line == to_line))
+        };
+        // `parse/2` calls `parse/5`; `run` calls `parse/2` only.
+        assert!(calls("/p/src/getopt.erl:run", 4), "{e:?}");
+        assert!(!calls("/p/src/getopt.erl:run", 6), "{e:?}");
+        // The pipe passes two: `total/2`, and the capture `total/1`.
+        assert!(calls("/p/lib/cart.ex:run", 3), "{e:?}");
+        assert!(calls("/p/lib/cart.ex:run", 2), "{e:?}");
+        // `price(:a)` leaves the default out.
+        assert!(calls("/p/lib/cart.ex:run", 4), "{e:?}");
+        // `&Cart.total/2` is `total/2`, not `total/1`.
+        assert!(calls("/p/lib/checkout.ex:go", 3), "{e:?}");
+        assert!(!calls("/p/lib/checkout.ex:go", 2), "{e:?}");
+        let calls_line = |line: usize| {
+            let run = g.id_of(Path::new("/p/src/getopt.erl"), "parse").unwrap();
+            g.callees_of(run).iter().any(|&c| g.node(c).line == line)
+        };
+        assert!(calls_line(6), "{e:?}");
+    }
+
+    /// A function's arity is read from its own head: past a binary
+    /// pattern's commas (`<<1:1, X:7, Tl/binary>>`), past the `@doc` before
+    /// it, and with every default of a head written over several lines.
+    #[test]
+    fn beam_arities_are_read_from_the_head() {
+        let erl = "-module(pb).\n\n-spec read_gr_b(binary(), integer()) -> integer().\n%% read (a, b, c)\nread_gr_b(<<1:1, X:7, Tl/binary>>, N)\n  when N < (32-7) ->\n    read_gr_b(Tl, N + X);\nread_gr_b(<<0:1, _:7, _/binary>>, $,) -> 0.\n";
+        let fc = FileCalls::read(Path::new("/p/src/pb.erl"), erl).unwrap();
+        assert_eq!(fc.context.arities, [(5, 2, 2)], "{:?}", fc.context.arities);
+        let ex = "defmodule Plug.Conn.Query do\n  @doc \"\"\"\n  Decodes (a query), with defaults.\n  \"\"\"\n  def decode(\n        query,\n        initial \\\\ [],\n        invalid \\\\ Plug.Conn.InvalidQueryError,\n        validate_utf8 \\\\ true\n      ) do\n    {query, initial, invalid, validate_utf8}\n  end\nend\n";
+        let fc = FileCalls::read(Path::new("/p/lib/query.ex"), ex).unwrap();
+        let decode = fc.context.arities.iter().find(|a| a.2 == 4);
+        assert_eq!(
+            decode.map(|a| (a.1, a.2)),
+            Some((1, 4)),
+            "{:?}",
+            fc.context.arities
+        );
+        // A default that is an anonymous function: its commas are its own.
+        let stub = "defmodule SsoTest do\n  defp stub_uri(\n         assertion \\\\ fn _c, _t, _r, _s -> :ok end\n       ) do\n    assertion\n  end\nend\n";
+        let fc = FileCalls::read(Path::new("/p/test/sso_test.exs"), stub).unwrap();
+        assert_eq!(fc.context.arities, [(2, 0, 1)], "{:?}", fc.context.arities);
     }
 
     /// An Elixir file's `use`s and `import`s, the multi-alias form too.

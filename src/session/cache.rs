@@ -121,7 +121,9 @@ use crate::incremental::Version;
 /// property named `where`) is still its class's ([`CachedCalls::owners`]).
 /// 29: a file saved with a byte-order mark is in its package or namespace
 /// ([`CachedCalls::package`]).
-pub(crate) const CACHE_VERSION: u32 = 29;
+/// 30: an Erlang or Elixir function's arities and a call's
+/// ([`CachedCalls::arities`], [`CachedCalls::call_arities`]).
+pub(crate) const CACHE_VERSION: u32 = 30;
 
 /// A cached symbol (the index entry minus the paths, which are reconstructed
 /// from the project root + relative path on load).
@@ -196,6 +198,12 @@ pub struct CachedCalls {
     /// its index in `names` plus one. Empty when no site has one.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub qualifiers: Vec<i64>,
+    /// One number per call site, in `sites`' order, where any site has one:
+    /// how many arguments an Erlang or Elixir call passes
+    /// (`clew_core::projectcalls::CallSite::arity`) — `0` unknown, else the
+    /// count plus one. Empty when no site has one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub call_arities: Vec<i64>,
     /// Two numbers per method whose class is known
     /// (`clew_core::projectcalls::FileCalls::owners`): its definition line,
     /// then the class's index in `names`.
@@ -228,6 +236,11 @@ pub struct CachedCalls {
     /// (`clew_core::projectcalls::FileContext::imports`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub imports: Vec<String>,
+    /// Three numbers per Erlang or Elixir function: its definition line,
+    /// and the fewest and most arguments it takes
+    /// (`clew_core::projectcalls::FileContext::arities`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub arities: Vec<usize>,
 }
 
 /// Everything cached about one file: how to confirm it is unchanged (mtime,
@@ -347,6 +360,7 @@ mod tests {
                 bodies: vec![3, 3, 9],
                 receivers: vec![1],
                 qualifiers: vec![2],
+                call_arities: vec![3],
                 owners: vec![3, 1],
                 accessed: vec![3],
                 internal: vec![9],
@@ -355,6 +369,7 @@ mod tests {
                 extensions: vec![3],
                 uses: vec!["Shop.Context".into()],
                 imports: vec!["Ecto.Query".into()],
+                arities: vec![3, 1, 2],
             }),
         }
     }
