@@ -1044,6 +1044,7 @@ pub(crate) fn calls(
                         receiver,
                         qualifier: None,
                         arity: None,
+                        arguments: None,
                         line,
                     });
                 }

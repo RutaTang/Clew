@@ -94,8 +94,13 @@ fn live_a_projects_reading() {
                 for id in 0..calls.node_count() {
                     let n = calls.node(id);
                     if n.name == c.callee {
+                        let owner = app
+                            .proj
+                            .calls_by_file
+                            .get(&n.file)
+                            .and_then(|f| f.owners.get(&n.line));
                         println!(
-                            "  candidate {}:{} {} in scope: {}",
+                            "  candidate {}:{} {} owner {owner:?} in scope: {}",
                             n.file.strip_prefix(&root).unwrap_or(&n.file).display(),
                             n.line,
                             n.kind,

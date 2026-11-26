@@ -96,6 +96,12 @@ pub struct CallSite {
     /// `x |> f(a)` two; `&f/2`, `fun f/2` two): which of the name's
     /// functions it is. `None` elsewhere.
     pub arity: Option<u8>,
+    /// What a Java, Kotlin, Scala, C# or C++ call passes, argument by
+    /// argument, where any says ([`argument_kind`]): a literal's kind or a
+    /// typed value's type, comma-separated — `s,i` for `put("a", 1)`,
+    /// `TCart` for `add(cart)` with `Cart cart`. Which of same-arity
+    /// overloads it can call. `None` elsewhere, or with an argument named.
+    pub arguments: Option<String>,
     /// 1-based line of the call.
     pub line: usize,
 }
@@ -125,6 +131,10 @@ pub enum Receiver {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FileContext {
     pub package: Option<String>,
+    /// The packages a Scala file's chained package clauses open before its
+    /// own (`cats.effect` for `package cats.effect` / `package example`):
+    /// their members are in scope with no import, as its own package's are.
+    pub enclosing: Vec<String>,
     pub types: Vec<(String, Vec<String>)>,
     /// Definition lines of extension methods — C#'s `this` parameter's,
     /// Kotlin's `fun Type.name`, Dart's `extension … on`, Scala's
@@ -148,6 +158,10 @@ pub struct FileContext {
     /// its methods' class is named (`JsonAdapter` for `fun adapter():
     /// JsonAdapter<T>`): what a value assigned from a call of it is.
     pub returns: Vec<(usize, String)>,
+    /// The kinds of each Java, Kotlin, Scala, C# and C++ function's
+    /// parameters, by its definition line ([`parameter_kinds`]): what
+    /// arguments it can take, to tell its overloads of one arity apart.
+    pub parameters: Vec<(usize, String)>,
 }
 
 /// The mark a receiver's type starts with when the receiver was assigned
@@ -693,6 +707,101 @@ fn ruby_mixins(body: &str) -> Vec<String> {
 }
 
 /// A file's [`FileContext`], read off its source and outline.
+/// A file's types with its type aliases among them, each an alias of the
+/// type it names as its one base: `using daily_file_sink_st =
+/// daily_file_sink<null_mutex>;` (or its `typedef`), Kotlin's `typealias`,
+/// Scala's `type`, Go's `type X = Y`. A value declared as the alias calls
+/// the aliased type's methods, as a subtype calls its base's.
+fn with_aliases(
+    mut types: Vec<(String, Vec<String>)>,
+    src: &str,
+    lang: Lang,
+) -> Vec<(String, Vec<String>)> {
+    for (name, target) in type_aliases(src, lang) {
+        match types.iter_mut().find(|(t, _)| *t == name) {
+            Some((_, bases)) if !bases.contains(&target) => bases.push(target),
+            Some(_) => {}
+            None => types.push((name, vec![target])),
+        }
+    }
+    types
+}
+
+/// The type aliases a file declares, one per line: each alias's name and
+/// the last segment of the type it names, its type arguments dropped.
+/// Function types (`typealias Handler = (Int) -> Unit`), a C function
+/// pointer's `typedef` and Scala's `opaque type` name no type whose methods
+/// the alias has.
+fn type_aliases(src: &str, lang: Lang) -> Vec<(String, String)> {
+    if !matches!(lang, Lang::Cpp | Lang::Kotlin | Lang::Scala | Lang::Go) {
+        return Vec::new();
+    }
+    let identifier = |s: &str| {
+        s.starts_with(|c: char| c == '_' || c.is_alphabetic())
+            && s.chars().all(|c| c == '_' || c.is_alphanumeric())
+    };
+    let base_of = |target: &str| -> Option<String> {
+        let mut target = target.trim();
+        for prefix in ["typename ", "const ", "struct ", "class ", "*", "&"] {
+            target = target.strip_prefix(prefix).unwrap_or(target).trim_start();
+        }
+        let path = target
+            .split(['<', '[', '(', ' ', '*', '&', '?'])
+            .next()
+            .unwrap_or("");
+        let last = path.rsplit([':', '.']).next().unwrap_or("");
+        identifier(last).then(|| last.to_string())
+    };
+    let mut out = Vec::new();
+    for line in src.lines() {
+        let mut line = line.trim();
+        for modifier in [
+            "export ",
+            "public ",
+            "private ",
+            "internal ",
+            "protected ",
+            "actual ",
+        ] {
+            line = line.strip_prefix(modifier).unwrap_or(line).trim_start();
+        }
+        let alias = match lang {
+            Lang::Cpp if line.ends_with(';') => {
+                let line = line.trim_end_matches(';').trim_end();
+                if let Some(rest) = line.strip_prefix("using ") {
+                    rest.split_once('=')
+                } else if let Some(rest) = line.strip_prefix("typedef ") {
+                    if rest.contains(['(', '{', ',']) {
+                        continue;
+                    }
+                    rest.rsplit_once([' ', '*', '&'])
+                        .map(|(target, name)| (name, target))
+                } else {
+                    None
+                }
+            }
+            Lang::Kotlin => line
+                .strip_prefix("typealias ")
+                .and_then(|r| r.split_once('=')),
+            Lang::Scala => line.strip_prefix("type ").and_then(|r| r.split_once('=')),
+            Lang::Go => line.strip_prefix("type ").and_then(|r| r.split_once('=')),
+            _ => None,
+        };
+        let Some((name, target)) = alias else {
+            continue;
+        };
+        // Its own type parameters: `typealias Box<T> = …`, `type F[A] = …`.
+        let name = name.split(['<', '[']).next().unwrap_or("").trim();
+        if !identifier(name) || target.trim_start().starts_with('(') {
+            continue;
+        }
+        if let Some(base) = base_of(target).filter(|b| b != name) {
+            out.push((name.to_string(), base));
+        }
+    }
+    out
+}
+
 pub fn context_in(src: &str, lang: Lang, symbols: &[Located]) -> FileContext {
     let types = symbols
         .iter()
@@ -724,6 +833,7 @@ pub fn context_in(src: &str, lang: Lang, symbols: &[Located]) -> FileContext {
             Some((l.symbol.name.clone(), bases))
         })
         .collect();
+    let types = with_aliases(types, src, lang);
     // The types whose methods extend another: Dart's `extension … on`,
     // Scala's `implicit class`.
     let extension_spans: Vec<(usize, usize)> = symbols
@@ -823,6 +933,15 @@ pub fn context_in(src: &str, lang: Lang, symbols: &[Located]) -> FileContext {
             .collect(),
         _ => Vec::new(),
     };
+    // (Not Dart's, Go's or Zig's: they have no overloads.)
+    let parameters = match lang {
+        Lang::Java | Lang::Kotlin | Lang::Scala | Lang::CSharp | Lang::Cpp => symbols
+            .iter()
+            .filter(|l| is_callable(&l.symbol.kind))
+            .filter_map(|l| Some((l.symbol.line, parameter_kinds(src, l, lang)?)))
+            .collect(),
+        _ => Vec::new(),
+    };
     let returns = match lang {
         Lang::Java
         | Lang::Kotlin
@@ -840,12 +959,14 @@ pub fn context_in(src: &str, lang: Lang, symbols: &[Located]) -> FileContext {
     };
     FileContext {
         package: package_of(src, lang),
+        enclosing: enclosing_packages(src, lang),
         types,
         extensions,
         uses: modules_after("use "),
         imports: modules_after("import "),
         arities,
         returns,
+        parameters,
     }
 }
 
@@ -853,10 +974,28 @@ pub fn context_in(src: &str, lang: Lang, symbols: &[Located]) -> FileContext {
 /// Kotlin's and Scala's `package shop.cart` (Scala's chained clauses
 /// joined), C#'s `namespace Shop.Cart` (block or file-scoped).
 fn package_of(src: &str, lang: Lang) -> Option<String> {
+    let parts = package_clauses(src, lang);
+    (!parts.is_empty()).then(|| parts.join("."))
+}
+
+/// The packages a Scala file's chained package clauses open before its
+/// own: `cats.effect` for `package cats.effect` then `package example`,
+/// whose members the file sees with no import ([`FileContext::enclosing`]).
+fn enclosing_packages(src: &str, lang: Lang) -> Vec<String> {
+    if lang != Lang::Scala {
+        return Vec::new();
+    }
+    let parts = package_clauses(src, lang);
+    (1..parts.len()).map(|n| parts[..n].join(".")).collect()
+}
+
+/// The names a file's package clauses give, in order: one (Go, Java,
+/// Kotlin, C#'s namespace), or Scala's chained `package a.b` / `package c`.
+fn package_clauses(src: &str, lang: Lang) -> Vec<String> {
     let keyword = match lang {
         Lang::Go | Lang::Java | Lang::Kotlin | Lang::Scala => "package",
         Lang::CSharp => "namespace",
-        _ => return None,
+        _ => return Vec::new(),
     };
     // A byte-order mark before the first line (Visual Studio writes one)
     // is no part of its text: `\u{feff}using System;` is a `using`.
@@ -905,7 +1044,7 @@ fn package_of(src: &str, lang: Lang) -> Option<String> {
             break;
         }
     }
-    (!parts.is_empty()).then(|| parts.join("."))
+    parts
 }
 
 /// A node in the project call graph: one function/method definition plus the
@@ -1675,8 +1814,10 @@ impl ProjectCallGraph {
                 return extra;
             };
             // C# sees its enclosing namespaces' types too: `Shop.Cart`'s
-            // code names `Shop`'s with no `using`.
+            // code names `Shop`'s with no `using`; Scala those its chained
+            // package clauses open.
             let mut names = vec![package];
+            names.extend(fc.context.enclosing.iter().map(String::as_str));
             if fc.lang == Lang::CSharp {
                 let mut rest = package;
                 while let Some((outer, _)) = rest.rsplit_once('.') {
@@ -1733,6 +1874,64 @@ impl ProjectCallGraph {
             })
             .collect();
         let mut returned_types: HashMap<String, Option<String>> = HashMap::new();
+        // Each function's parameter kinds ([`FileContext::parameters`]), and
+        // its overloads: the definitions of its name and owner (for a free
+        // function, its file), whichever take kinds.
+        let parameters: HashMap<(&Path, usize), &str> = files
+            .iter()
+            .flat_map(|f| {
+                f.context
+                    .parameters
+                    .iter()
+                    .map(|(line, kinds)| ((f.file.as_path(), *line), kinds.as_str()))
+            })
+            .collect();
+        let node_parameters: Vec<Option<&str>> = nodes
+            .iter()
+            .map(|n| parameters.get(&(n.file.as_path(), n.line)).copied())
+            .collect();
+        // (The name, its owner, and a free function's file.)
+        type Family<'k> = (&'k str, Option<&'k str>, Option<&'k Path>);
+        let mut overloads: HashMap<Family, Vec<usize>> = HashMap::new();
+        for (i, n) in nodes.iter().enumerate() {
+            if node_parameters[i].is_some() {
+                let file = owner[i].is_none().then_some(n.file.as_path());
+                overloads
+                    .entry((n.name.as_str(), owner[i], file))
+                    .or_default()
+                    .push(i);
+            }
+        }
+        let declared = |ty: &str| declared_types.contains(ty);
+        // Whether what `cs` passes fits `callee`'s parameters — or, if not,
+        // no overload of it fits either (the kinds then say nothing).
+        let fits_arguments = |callee: usize, cs: &CallSite, lang: Lang| -> bool {
+            let (Some(arguments), Some(_)) = (cs.arguments.as_deref(), node_parameters[callee])
+            else {
+                return true;
+            };
+            let fits = |i: usize| {
+                node_parameters[i].is_none_or(|params| {
+                    arguments
+                        .split(',')
+                        .zip(params.split(','))
+                        .all(|(a, p)| passes(a, p, lang, &declared, &descends))
+                })
+            };
+            if fits(callee) {
+                return true;
+            }
+            let file = owner[callee]
+                .is_none()
+                .then_some(nodes[callee].file.as_path());
+            !overloads
+                .get(&(nodes[callee].name.as_str(), owner[callee], file))
+                .is_some_and(|family| {
+                    family
+                        .iter()
+                        .any(|&i| i != callee && facts[i].takes(cs.arity) && fits(i))
+                })
+        };
         // A test class's methods (`StatusCodesTest.get`): the runner holds
         // its instance, so no other code calls them on a value.
         let test_method: Vec<bool> = (0..nodes.len())
@@ -1782,11 +1981,15 @@ impl ProjectCallGraph {
             };
             // What a name called from this file resolves to depends on the
             // name and the call's shape only: worked out once per file.
-            let mut resolved: HashMap<(&str, bool, Option<u8>), Vec<usize>> = HashMap::new();
+            // (The name, whether it is a method call and with no receiver
+            // known, the arguments it passes, and the scope it names.)
+            type Shape<'k> = (&'k str, bool, bool, Option<u8>, Option<&'k str>);
+            let mut resolved: HashMap<Shape, Vec<usize>> = HashMap::new();
             for cs in &fc.calls {
                 // A receiver assigned from a call is of the type the
                 // function's definitions declare, where they agree.
                 let callee_key: &str = cs.callee.as_str();
+                let qualifier_key: Option<&str> = cs.qualifier.as_deref();
                 let typed_call: CallSite;
                 let cs = match &cs.receiver {
                     Some(Receiver::Type(t) | Receiver::Declared(t)) if t.starts_with(RETURNED) => {
@@ -1842,8 +2045,15 @@ impl ProjectCallGraph {
                 ) else {
                     continue;
                 };
+                let shape = (
+                    callee_key,
+                    cs.method,
+                    cs.receiver.is_none(),
+                    cs.arity,
+                    qualifier_key,
+                );
                 let callees = resolved
-                    .entry((callee_key, cs.method, cs.arity))
+                    .entry(shape)
                     .or_insert_with(|| resolve_callees(&defs, &nodes, &facts, &owner, cs, &site));
                 // Scala's `pkg.member(…)`: the package's own function (a
                 // package object's) or its object's `apply` — and nothing
@@ -1868,6 +2078,7 @@ impl ProjectCallGraph {
                             if edges.len() < MAX_EDGES
                                 && (in_test || !test_node[callee])
                                 && facts[callee].takes(cs.arity)
+                                && fits_arguments(callee, cs, fc.lang)
                             {
                                 edges.insert((caller, callee));
                             }
@@ -1904,6 +2115,7 @@ impl ProjectCallGraph {
                             if edges.len() < MAX_EDGES
                                 && (in_test || !test_node[callee])
                                 && facts[callee].takes(cs.arity)
+                                && fits_arguments(callee, cs, fc.lang)
                             {
                                 edges.insert((caller, callee));
                             }
@@ -1924,6 +2136,7 @@ impl ProjectCallGraph {
                             if edges.len() < MAX_EDGES
                                 && (in_test || !test_node[callee])
                                 && facts[callee].takes(cs.arity)
+                                && fits_arguments(callee, cs, fc.lang)
                             {
                                 edges.insert((caller, callee));
                             }
@@ -1976,6 +2189,7 @@ impl ProjectCallGraph {
                         if edges.len() < MAX_EDGES
                             && (in_test || !test_node[callee])
                             && facts[callee].takes(cs.arity)
+                            && fits_arguments(callee, cs, fc.lang)
                         {
                             edges.insert((caller, callee));
                         }
@@ -2041,7 +2255,11 @@ impl ProjectCallGraph {
                         .into_iter()
                         .flatten()
                         .copied()
-                        .filter(|&c| owned_by(c, ty) && facts[c].takes(cs.arity))
+                        .filter(|&c| {
+                            owned_by(c, ty)
+                                && facts[c].takes(cs.arity)
+                                && fits_arguments(c, cs, fc.lang)
+                        })
                         .collect();
                 }
                 // An exact type with no method of the name: the one it
@@ -2071,6 +2289,7 @@ impl ProjectCallGraph {
                         if edges.len() < MAX_EDGES
                             && (in_test || !test_node[callee])
                             && facts[callee].takes(cs.arity)
+                            && fits_arguments(callee, cs, fc.lang)
                         {
                             edges.insert((caller, callee));
                         }
@@ -2166,8 +2385,47 @@ impl ProjectCallGraph {
                 // An Elixir bare call: a function of its own file, or of a
                 // module it imports.
                 let elixir_bare = !cs.method && fc.lang == Lang::Elixir;
+                // A C++ call through `.` or `->` is a member's: among
+                // candidates that hold some class's member, a free function
+                // of the same name (`spdlog::info` for `logger->info(…)`) is
+                // not one. With no member in sight, the free ones stay: the
+                // member may be one no outline sees (a macro's).
+                let cpp_member = cs.method
+                    && fc.lang == Lang::Cpp
+                    && targets.iter().any(|&c| owner[c].is_some())
+                    && targets.iter().any(|&c| owner[c].is_none());
+                // A C++ call that names its scope (`spdlog::info(…)`,
+                // `Cart::make(…)`, `Base::draw()`): a member of that class or
+                // of one of its bases; a free function only when the scope is
+                // no class of the project's (a namespace).
+                let cpp_scoped = (!cs.method && fc.lang == Lang::Cpp)
+                    .then_some(cs.qualifier.as_deref())
+                    .flatten();
                 let kept: Vec<usize>;
-                let targets: &[usize] = if elixir_bare {
+                let targets: &[usize] = if cpp_member {
+                    kept = targets
+                        .iter()
+                        .copied()
+                        .filter(|&c| owner[c].is_some())
+                        .collect();
+                    &kept
+                } else if let Some(scope) = cpp_scoped {
+                    let a_class = declared_types.contains(scope);
+                    kept = targets
+                        .iter()
+                        .copied()
+                        .filter(|&c| match owner[c] {
+                            None => !a_class,
+                            // `fmt::rgb(…)`: a constructor, its class named
+                            // in the scope's.
+                            Some(o) => {
+                                let o = o.rsplit(['.', ':']).next().unwrap_or(o);
+                                o == scope || descends(scope, o) || nodes[c].name == o
+                            }
+                        })
+                        .collect();
+                    &kept
+                } else if elixir_bare {
                     let reached = bare_scopes.get(fc.file.as_path());
                     kept = targets
                         .iter()
@@ -2221,7 +2479,7 @@ impl ProjectCallGraph {
                     .filter(|&i| nodes[i].file == fc.file || imported.contains(&nodes[i].file));
                 for callee in targets.iter().copied().chain(constructed) {
                     // `f(a)` is `f/1`: no call of `f/2`.
-                    if !facts[callee].takes(cs.arity) {
+                    if !facts[callee].takes(cs.arity) || !fits_arguments(callee, cs, fc.lang) {
                         continue;
                     }
                     // `client.get(…)`: no value is a test class's, its own
@@ -2239,6 +2497,7 @@ impl ProjectCallGraph {
                     if edges.len() < MAX_EDGES
                         && (in_test || !test_node[callee])
                         && facts[callee].takes(cs.arity)
+                        && fits_arguments(callee, cs, fc.lang)
                     {
                         edges.insert((caller, callee));
                     }
@@ -2830,7 +3089,48 @@ pub fn calls_in(tree: &Tree, source: &str, lang: Lang, symbols: &[Located]) -> V
         &mut out,
     );
     in_test_blocks(&mut out, symbols);
+    if lang == Lang::Zig {
+        zig_std_aliases(&mut out, source);
+    }
     out
+}
+
+/// A Zig file's names for the standard library's declarations (`const Ast
+/// = std.zig.Ast;`, `const Allocator = std.mem.Allocator;`): a receiver of
+/// such a type is the library's — `tree.render(…)` with `tree: Ast` calls
+/// `std.zig.Ast.render`, no project function — named by its path in full.
+fn zig_std_aliases(calls: &mut [CallSite], source: &str) {
+    let aliases: HashMap<&str, &str> = source
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim_start();
+            let line = line.strip_prefix("pub ").unwrap_or(line);
+            let (name, value) = line.strip_prefix("const ")?.split_once('=')?;
+            let name = name.trim();
+            let value = value.trim().strip_suffix(';')?.trim_end();
+            let std_path = value == "std"
+                || (value.starts_with("std.")
+                    && value
+                        .chars()
+                        .all(|c| c == '_' || c == '.' || c.is_alphanumeric()));
+            (std_path && name != "std" && is_plain_name(name)).then_some((name, value))
+        })
+        .collect();
+    if aliases.is_empty() {
+        return;
+    }
+    for call in calls {
+        if let Some(Receiver::Type(ty) | Receiver::Declared(ty)) = &mut call.receiver {
+            let (first, rest) = ty.split_once('.').unwrap_or((ty.as_str(), ""));
+            if let Some(path) = aliases.get(first) {
+                *ty = if rest.is_empty() {
+                    path.to_string()
+                } else {
+                    format!("{path}.{rest}")
+                };
+            }
+        }
+    }
 }
 
 /// Each call made inside a test or a group of tests (`it "adds" do … end`,
@@ -3005,6 +3305,20 @@ fn walk(
                     .flatten()
             });
             let arity = call_arity(node, parent, src, lang);
+            let arguments = matches!(
+                lang,
+                Lang::Java | Lang::Kotlin | Lang::Scala | Lang::CSharp | Lang::Cpp
+            )
+            .then(|| {
+                let scope = Scope {
+                    places: &places,
+                    from: inner
+                        .or(current.as_ref().map(|(_, from)| *from))
+                        .unwrap_or(0),
+                };
+                argument_kinds(node, &scope, src, lang, &mut bindings)
+            })
+            .flatten();
             out.push(CallSite {
                 caller: current.as_ref().map(|(name, _)| name.to_string()),
                 callee,
@@ -3012,6 +3326,7 @@ fn walk(
                 receiver,
                 qualifier,
                 arity,
+                arguments,
                 line: node.start_position().row + 1,
             });
         }
@@ -3029,6 +3344,7 @@ fn walk(
                 receiver: None,
                 qualifier: None,
                 arity: None,
+                arguments: None,
                 line: node.start_position().row + 1,
             });
         }
@@ -3149,6 +3465,7 @@ fn macro_calls(tree: Node, src: &str, caller: Option<&str>, out: &mut Vec<CallSi
             receiver: None,
             qualifier: None,
             arity: None,
+            arguments: None,
             line: token.start_position().row + 1,
         });
     }
@@ -3283,6 +3600,503 @@ fn call_arity(call: Node, parent: Option<Node>, src: &str, lang: Lang) -> Option
         _ => return None,
     };
     u8::try_from(n).ok()
+}
+
+/// The kinds of what `call` passes, argument by argument
+/// ([`CallSite::arguments`]): `None` where it passes none, names one
+/// (`f(x = 1)`, C#'s `f(x: 1)`), or the grammar gives no argument list.
+fn argument_kinds(
+    call: Node,
+    scope: &Scope,
+    src: &str,
+    lang: Lang,
+    bindings: &mut HashMap<(usize, String), Bindings>,
+) -> Option<String> {
+    let mut lists: Vec<Node> = Vec::new();
+    let mut trailing_lambdas = 0;
+    match lang {
+        // `f(a)`, `f(a) { … }`: its value arguments, then its lambda.
+        Lang::Kotlin => {
+            let mut cursor = call.walk();
+            for child in call.named_children(&mut cursor) {
+                match child.kind() {
+                    "value_arguments" => lists.push(child),
+                    "annotated_lambda" => trailing_lambdas += 1,
+                    "call_suffix" => {
+                        let mut c = child.walk();
+                        for part in child.named_children(&mut c) {
+                            match part.kind() {
+                                "value_arguments" => lists.push(part),
+                                "annotated_lambda" => trailing_lambdas += 1,
+                                _ => {}
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        _ => lists.push(call.child_by_field_name("arguments").or_else(|| {
+            call.named_children(&mut call.walk())
+                .find(|c| matches!(c.kind(), "argument_list" | "arguments"))
+        })?),
+    }
+    let mut kinds: Vec<String> = Vec::new();
+    for list in lists {
+        let mut cursor = list.walk();
+        for argument in list.named_children(&mut cursor) {
+            if argument.kind() == "comment" {
+                continue;
+            }
+            let text = node_text(argument, src).trim();
+            // A named argument: `x = 1` (Kotlin, Scala), `x: 1` (C#).
+            let named = matches!(lang, Lang::Kotlin | Lang::Scala | Lang::CSharp)
+                && text.find(['=', ':']).is_some_and(|at| {
+                    let (name, rest) = (text[..at].trim(), &text[at..]);
+                    is_plain_name(name) && !rest.starts_with("==") && !rest.starts_with("::")
+                });
+            if named {
+                return None;
+            }
+            kinds.push(argument_kind(text, call, scope, src, lang, bindings));
+        }
+    }
+    kinds.extend(std::iter::repeat_n("?".to_string(), trailing_lambdas));
+    (!kinds.is_empty()).then(|| kinds.join(","))
+}
+
+/// What one argument is, as far as its text says: a literal's kind — `s` a
+/// string, `c` a character, `i` an integer (`0` the integer zero), `f` a
+/// floating-point number, `b` a boolean, `n` null — a value's type as
+/// [`type_kind`] names it (`TCart` for `new Cart()`, or a name declared
+/// `Cart cart`, `i` for one declared `int n`), or `?`.
+fn argument_kind(
+    text: &str,
+    call: Node,
+    scope: &Scope,
+    src: &str,
+    lang: Lang,
+    bindings: &mut HashMap<(usize, String), Bindings>,
+) -> String {
+    let t = text.trim();
+    // C#'s `ref x`, `out var y`: passed by reference, of the type it names.
+    if lang == Lang::CSharp && ["ref ", "out ", "in "].iter().any(|m| t.starts_with(m)) {
+        return "?".to_string();
+    }
+    if let Some(kind) = literal_kind(t, lang) {
+        return kind.to_string();
+    }
+    if let Some(ty) = constructed_type(t, lang) {
+        return type_kind(&ty, lang);
+    }
+    if is_plain_name(t) {
+        let places = scope.places;
+        let said = bindings
+            .entry((scope.from, t.to_string()))
+            .or_insert_with(|| Bindings::from(scope.from, places))
+            .said_before(call.start_byte(), t, scope, src, lang);
+        if let Said::Type(ty, _) = said
+            && !ty.starts_with(RETURNED)
+        {
+            return type_kind(&ty, lang);
+        }
+    }
+    "?".to_string()
+}
+
+/// The kind of a literal ([`argument_kind`]), or `None` for no literal.
+fn literal_kind(t: &str, lang: Lang) -> Option<&'static str> {
+    let unquoted = |q: char| t.len() >= 2 && t.ends_with(q);
+    // A string, prefixed or not: C#'s `@"…"`, `$"…"`; C++'s `L"…"`,
+    // `u8"…"`, `R"(…)"`; Scala's `s"…"`, `f"…"`, `raw"…"`.
+    let prefix_end = t.find(['"', '\'']).unwrap_or(0);
+    let prefix = &t[..prefix_end];
+    let string_prefix = match lang {
+        Lang::CSharp => matches!(prefix, "" | "@" | "$" | "$@" | "@$"),
+        Lang::Cpp => matches!(
+            prefix,
+            "" | "L" | "u8" | "u" | "U" | "R" | "LR" | "u8R" | "uR" | "UR"
+        ),
+        Lang::Scala => prefix.is_empty() || is_plain_name(prefix),
+        _ => prefix.is_empty(),
+    };
+    if string_prefix && t[prefix_end..].starts_with('"') && unquoted('"') {
+        return Some("s");
+    }
+    let char_prefix =
+        prefix.is_empty() || (lang == Lang::Cpp && matches!(prefix, "L" | "u8" | "u" | "U"));
+    if char_prefix && t[prefix_end..].starts_with('\'') && unquoted('\'') && t.len() <= 12 {
+        return Some("c");
+    }
+    match t {
+        "true" | "false" => return Some("b"),
+        "null" if lang != Lang::Cpp => return Some("n"),
+        "nullptr" if lang == Lang::Cpp => return Some("n"),
+        // C's `NULL` is `0`.
+        "NULL" if lang == Lang::Cpp => return Some("0"),
+        _ => {}
+    }
+    let digits = t.strip_prefix(['-', '+']).unwrap_or(t);
+    if !digits.starts_with(|c: char| c.is_ascii_digit()) {
+        return None;
+    }
+    let hex = digits.starts_with("0x") || digits.starts_with("0X");
+    let body = digits
+        .trim_end_matches(|c: char| c.is_ascii_alphabetic() && !(hex && c.is_ascii_hexdigit()));
+    let suffix = &digits[body.len()..];
+    if !body
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '\'' | '+' | '-'))
+    {
+        return None;
+    }
+    let float = !hex
+        && (body.contains('.')
+            || body.contains(['e', 'E'])
+            || suffix.eq_ignore_ascii_case("f")
+            || suffix.eq_ignore_ascii_case("d")
+            || suffix.eq_ignore_ascii_case("m"));
+    Some(if float {
+        "f"
+    } else if body.trim_start_matches('0').is_empty() && !hex {
+        "0"
+    } else {
+        "i"
+    })
+}
+
+/// The kinds of the parameters of the function `l` declares in `src`
+/// ([`FileContext::parameters`]): one per parameter by [`type_kind`], `v`
+/// for a variadic one (and any after), comma-separated. `None` where its
+/// parameter list cannot be read, or it takes none.
+fn parameter_kinds(src: &str, l: &Located, lang: Lang) -> Option<String> {
+    let text = src.get(l.declaration.0..l.declaration.1)?;
+    let Parameters::At(open, close) = parameter_list(text, &l.symbol.name, lang)? else {
+        return None;
+    };
+    let inner = text[open + 1..close].trim();
+    if inner.is_empty() || (lang == Lang::Cpp && inner == "void") {
+        return None;
+    }
+    let mut kinds: Vec<String> = Vec::new();
+    for (i, part) in split_top_level(inner).enumerate() {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let Some(ty) = parameter_type(part, lang) else {
+            // C#'s extension `this`: passed by the dot, not in the list.
+            if i == 0 && lang == Lang::CSharp && part.starts_with("this ") {
+                continue;
+            }
+            kinds.push("?".to_string());
+            continue;
+        };
+        if ty == "..." {
+            kinds.push("v".to_string());
+            break;
+        }
+        kinds.push(type_kind(ty, lang));
+    }
+    (!kinds.is_empty()).then(|| kinds.join(","))
+}
+
+/// The type a parameter's text declares — `...` for a variadic one — or
+/// `None`, where it names none this can read (C#'s `this` receiver).
+fn parameter_type(part: &str, lang: Lang) -> Option<&str> {
+    let mut p = part.trim();
+    // Annotations and attributes: `@NonNull String s`, `[FromBody] Cart c`.
+    loop {
+        let before = p;
+        if p.starts_with('@') {
+            let end = p
+                .char_indices()
+                .skip(1)
+                .find(|&(_, c)| !(c == '_' || c == '.' || c == ':' || c.is_alphanumeric()))
+                .map_or(p.len(), |(i, _)| i);
+            p = p[end..].trim_start();
+            if p.starts_with('(') {
+                let close = p.find(')')?;
+                p = p[close + 1..].trim_start();
+            }
+        }
+        if lang == Lang::CSharp && p.starts_with('[') {
+            p = p[p.find(']')? + 1..].trim_start();
+        }
+        for modifier in [
+            "final ",
+            "const ",
+            "ref ",
+            "out ",
+            "in ",
+            "scoped ",
+            "readonly ",
+            "val ",
+            "var ",
+            "crossinline ",
+            "noinline ",
+            "implicit ",
+            "using ",
+        ] {
+            if lang != Lang::Cpp || modifier == "const " {
+                p = p.strip_prefix(modifier).unwrap_or(p).trim_start();
+            }
+        }
+        if p == before {
+            break;
+        }
+    }
+    if (lang == Lang::CSharp && p.starts_with("this ")) || p.is_empty() {
+        return None;
+    }
+    if p.starts_with("vararg ") || p.starts_with("params ") || p.contains("...") {
+        return Some("...");
+    }
+    // The default value is no part of the type.
+    let p = split_top_level_at(p, '=').trim_end();
+    match lang {
+        // `name: Type`, Scala's by-name `name: => Type`, its repeated `T*`.
+        Lang::Kotlin | Lang::Scala => {
+            let (_, ty) = p.split_once(':')?;
+            let ty = ty.trim().trim_start_matches("=>").trim();
+            if lang == Lang::Scala && ty.ends_with('*') {
+                return Some("...");
+            }
+            Some(ty)
+        }
+        // `Type name`: the name is the last word, unless the type is all
+        // there is (C++'s `int`, `const std::string&`).
+        _ => {
+            let name_start = p
+                .char_indices()
+                .rev()
+                .find(|&(_, c)| !(c == '_' || c.is_alphanumeric()))
+                .map_or(0, |(i, c)| i + c.len_utf8());
+            let (ty, name) = (p[..name_start].trim_end(), &p[name_start..]);
+            let unnamed = ty.is_empty()
+                || ty.ends_with("::")
+                || (lang == Lang::Cpp
+                    && CPP_NOT_TYPES.contains(&name)
+                    && !ty.ends_with(['*', '&']));
+            Some(if unnamed { p } else { ty })
+        }
+    }
+}
+
+/// `text` up to the first `sep` outside brackets, quotes aside (a default
+/// value's `=` after a parameter's type).
+fn split_top_level_at(text: &str, sep: char) -> &str {
+    let mut depth = 0i32;
+    for (i, c) in text.char_indices() {
+        match c {
+            '(' | '[' | '{' | '<' => depth += 1,
+            ')' | ']' | '}' | '>' => depth -= 1,
+            c if c == sep && depth <= 0 => {
+                // `=>` (Scala's by-name, a lambda's type) is no default.
+                if text[i + 1..].starts_with('>') || text[..i].ends_with(['=', '!', '<']) {
+                    continue;
+                }
+                return &text[..i];
+            }
+            _ => {}
+        }
+    }
+    text
+}
+
+/// The kind of value a type is, as argument and parameter kinds name it: `s`
+/// a string, `i` an integer, `f` a floating-point number, `b` a boolean,
+/// `c` a character, `p` a C or C++ character pointer, `a` an array, `?` one
+/// that takes anything (`Object`, `Any`, a type parameter, a pointer, a
+/// template's `auto`), else `T` and the class's name (`TCart`). A nullable
+/// type (`String?`, C#'s `int?`) ends with `?`.
+fn type_kind(ty: &str, lang: Lang) -> String {
+    let mut t = ty.trim();
+    let nullable = matches!(lang, Lang::Kotlin | Lang::CSharp) && t.ends_with('?');
+    t = t.trim_end_matches('?').trim_end();
+    if lang == Lang::Cpp {
+        for word in [
+            "const ",
+            "volatile ",
+            "constexpr ",
+            "struct ",
+            "class ",
+            "typename ",
+        ] {
+            t = t.strip_prefix(word).unwrap_or(t).trim_start();
+        }
+        t = t
+            .trim_end_matches(['&', ' '])
+            .trim_end_matches(" const")
+            .trim_end();
+        if let Some(base) = t.strip_suffix('*') {
+            let base = base.trim_end().trim_start_matches("const ").trim();
+            let base = base.trim_end_matches(" const").trim();
+            return if matches!(
+                base,
+                "char" | "wchar_t" | "char8_t" | "char16_t" | "char32_t" | "Char"
+            ) {
+                "p".to_string()
+            } else {
+                "?".to_string()
+            };
+        }
+    }
+    if t.contains("[]") || (lang == Lang::Kotlin && t.ends_with("Array") && t != "Array") {
+        return "a".to_string();
+    }
+    let path = t.split(['<', '[', '(']).next().unwrap_or(t).trim();
+    let last = path.rsplit([':', '.']).next().unwrap_or(path).trim();
+    let words: Vec<&str> = path.split_whitespace().collect();
+    let all = |set: &[&str]| !words.is_empty() && words.iter().all(|w| set.contains(w));
+    let kind = match lang {
+        Lang::Java => match last {
+            "String" | "CharSequence" => "s",
+            "int" | "long" | "short" | "byte" | "Integer" | "Long" | "Short" | "Byte" => "i",
+            "float" | "double" | "Float" | "Double" => "f",
+            "boolean" | "Boolean" => "b",
+            "char" | "Character" => "c",
+            "Object" => "?",
+            _ => "",
+        },
+        Lang::Kotlin | Lang::Scala => match last {
+            "String" | "CharSequence" => "s",
+            "Int" | "Long" | "Short" | "Byte" | "UInt" | "ULong" | "UShort" | "UByte" => "i",
+            "Float" | "Double" => "f",
+            "Boolean" => "b",
+            "Char" => "c",
+            "Any" | "AnyRef" | "AnyVal" => "?",
+            _ => "",
+        },
+        Lang::CSharp => match last {
+            "string" | "String" => "s",
+            "int" | "long" | "short" | "byte" | "sbyte" | "uint" | "ulong" | "ushort" | "nint"
+            | "nuint" | "Int32" | "Int64" | "Int16" | "UInt32" | "UInt64" | "UInt16" | "Byte"
+            | "SByte" => "i",
+            "float" | "double" | "decimal" | "Single" | "Double" | "Decimal" => "f",
+            "bool" | "Boolean" => "b",
+            "char" | "Char" => "c",
+            "object" | "Object" | "dynamic" | "var" => "?",
+            _ => "",
+        },
+        Lang::Cpp => {
+            if all(&["int", "long", "short", "unsigned", "signed"])
+                || matches!(
+                    last,
+                    "size_t" | "ssize_t" | "ptrdiff_t" | "intptr_t" | "uintptr_t"
+                )
+                || ((last.starts_with("int") || last.starts_with("uint")) && last.ends_with("_t"))
+            {
+                "i"
+            } else if all(&["float", "double", "long"]) {
+                "f"
+            } else if last == "bool" {
+                "b"
+            } else if matches!(
+                last,
+                "char" | "wchar_t" | "char8_t" | "char16_t" | "char32_t"
+            ) {
+                "c"
+            } else if matches!(
+                last,
+                "string"
+                    | "basic_string"
+                    | "string_view"
+                    | "basic_string_view"
+                    | "wstring"
+                    | "wstring_view"
+                    | "u8string"
+                    | "u16string"
+                    | "u32string"
+            ) {
+                "s"
+            } else if matches!(last, "auto" | "decltype") {
+                "?"
+            } else {
+                ""
+            }
+        }
+        _ => "?",
+    };
+    let kind = match kind {
+        // A class, by name; a type parameter (`T`, `TValue`) takes anything.
+        "" if last.starts_with(|c: char| c.is_alphabetic() || c == '_')
+            && last.chars().all(|c| c == '_' || c.is_alphanumeric())
+            && !(last.len() <= 2 && last.starts_with(char::is_uppercase))
+            && !(lang == Lang::CSharp
+                && last.len() > 1
+                && last.starts_with('T')
+                && last[1..].starts_with(char::is_uppercase)) =>
+        {
+            format!("T{last}")
+        }
+        "" => "?".to_string(),
+        k => k.to_string(),
+    };
+    if nullable && kind != "?" {
+        format!("{kind}?")
+    } else {
+        kind
+    }
+}
+
+/// Whether an argument of kind `arg` can be passed for a parameter of kind
+/// `param` in `lang` ([`argument_kind`], [`type_kind`]): `false` only where
+/// the language refuses it — a string for a number, a number for a string,
+/// null for a primitive (in Kotlin, for any type not nullable) — or, in
+/// Java, Kotlin and C#, a project class for a primitive, a string or
+/// another project class it is not one of (`declared`, `descends`), and in
+/// Java and Kotlin a literal for a project class. C++'s conversions, and
+/// Scala's implicit ones, refuse less.
+fn passes(
+    arg: &str,
+    param: &str,
+    lang: Lang,
+    declared: &dyn Fn(&str) -> bool,
+    descends: &dyn Fn(&str, &str) -> bool,
+) -> bool {
+    if arg == "?" || param == "?" || param == "v" {
+        return true;
+    }
+    let nullable = param.ends_with('?');
+    let p = param.trim_end_matches('?');
+    let a = arg.trim_end_matches('?');
+    let primitive = |k: &str| matches!(k, "i" | "f" | "b" | "c");
+    if lang == Lang::Cpp {
+        return !matches!(
+            (a, p),
+            ("s", "i" | "f" | "c" | "a")
+                | ("i" | "f" | "b" | "c", "s" | "p")
+                | ("n", "i" | "f" | "c")
+        );
+    }
+    let strict = matches!(lang, Lang::Java | Lang::Kotlin | Lang::CSharp);
+    // A literal for a project class: Java and Kotlin convert none to one
+    // (C# and Scala may, by a conversion the class declares).
+    if matches!(lang, Lang::Java | Lang::Kotlin)
+        && matches!(a, "s" | "c" | "i" | "0" | "f" | "b")
+        && p.strip_prefix('T').is_some_and(declared)
+    {
+        return false;
+    }
+    match (a, p) {
+        ("s", k) => !primitive(k) && k != "a",
+        ("c", "s" | "b" | "a") => false,
+        ("c", "i" | "f") => lang != Lang::Kotlin,
+        ("i" | "0", "s" | "b" | "a") => false,
+        ("i" | "0", "c") => lang == Lang::Scala,
+        ("i" | "0", "f") => lang != Lang::Kotlin,
+        ("f", "i" | "b" | "c" | "s" | "a") => false,
+        ("b", "i" | "f" | "c" | "s" | "a") => false,
+        ("n", k) => nullable || (lang != Lang::Kotlin && !primitive(k)),
+        // A project class: no primitive or string, and none of another
+        // project class it does not extend or implement.
+        (a, p) if a.starts_with('T') && strict && declared(&a[1..]) => match p.strip_prefix('T') {
+            Some(class) => !declared(class) || class == &a[1..] || descends(&a[1..], class),
+            None => !(primitive(p) || p == "s"),
+        },
+        _ => true,
+    }
 }
 
 /// Whether the bare call `call` of `callee` calls a parameter of a function
@@ -4201,10 +5015,13 @@ fn receiver_of(
     unbound: &mut Option<String>,
 ) -> Option<Receiver> {
     let receiver = receiver_text(node_text(call, src), callee)?.trim();
-    if matches!(
-        receiver,
-        "self" | "this" | "$this" | "Self" | "cls" | "static"
-    ) {
+    // Zig's `self` is a parameter like any, its type annotated.
+    if lang != Lang::Zig
+        && matches!(
+            receiver,
+            "self" | "this" | "$this" | "Self" | "cls" | "static"
+        )
+    {
         // The caller's class — its method, inherited or overridden, in a
         // language with inheritance (Go names its receiver).
         return (lang == Lang::Rust || (has_inheritance(lang) && lang != Lang::Go))
@@ -4272,6 +5089,9 @@ fn receiver_of(
         (from, now) = (outer, before);
     }
     match now {
+        // Zig's `self: *Self` (`const Self = @This();`): the container
+        // the function is in.
+        Said::Type(ty, _) if lang == Lang::Zig && ty == "Self" => return Some(Receiver::Own),
         Said::Type(ty, exact) => {
             // Go, Rust and Zig have no subtypes: a declared type is exact.
             if exact || matches!(lang, Lang::Go | Lang::Rust | Lang::Zig) {
@@ -4906,6 +5726,14 @@ fn binding_at(head: &str, after: &str, lang: Lang) -> Binding {
             .collect();
         return Binding::Typed(format!("{pkg}.{name}"), true);
     }
+    // `std::make_shared<logger>(…)`, `std::make_unique<ns::Cart>(…)`: a
+    // smart pointer to a new `T`, whose methods its `->` calls.
+    if lang == Lang::Cpp
+        && let Some(rhs) = assigned
+        && let Some(ty) = cpp_made_type(rhs)
+    {
+        return Binding::Typed(ty, true);
+    }
     if let Some(rhs) = assigned {
         return match constructed_type(rhs, lang) {
             Some(ty) => Binding::Typed(ty, true),
@@ -5025,15 +5853,38 @@ fn declares(head: &str, lang: Lang) -> bool {
 fn declared_type(head: &str, lang: Lang) -> Option<String> {
     trailing_type(head).or_else(|| match lang {
         Lang::Cpp => cpp_trailing_type(head),
+        Lang::Java | Lang::CSharp => built_in_type(head, lang),
         _ => None,
     })
 }
 
+/// A Java or C# built-in type before a declared name, which neither writes
+/// as a class: `int count`, C#'s `string name`.
+fn built_in_type(head: &str, lang: Lang) -> Option<String> {
+    let head = head.trim_end();
+    let start = head
+        .rfind(|c: char| !(c == '_' || c.is_alphanumeric()))
+        .map_or(0, |i| i + 1);
+    let word = &head[start..];
+    let built_in: &[&str] = match lang {
+        Lang::Java => &[
+            "int", "long", "short", "byte", "char", "boolean", "float", "double",
+        ],
+        _ => &[
+            "int", "long", "short", "byte", "sbyte", "uint", "ulong", "ushort", "char", "bool",
+            "float", "double", "decimal", "string",
+        ],
+    };
+    built_in.contains(&word).then(|| word.to_string())
+}
+
 /// A C++ type before a declared name, written in lower case: qualified by
-/// a namespace or given template arguments, so no keyword or variable —
-/// `std::vector<basic_format_arg<Context>>` (`vector`), `const
-/// fmt::memory_buffer&` (`memory_buffer`).
+/// a namespace or given template arguments — `std::vector<basic_format_arg<
+/// Context>>` (`vector`), `const fmt::memory_buffer&` (`memory_buffer`) —
+/// or a plain name where a declaration starts and written as one (`logger
+/// &l`, `(sink *s,`), no keyword or built-in type.
 fn cpp_trailing_type(head: &str) -> Option<String> {
+    let original = head;
     let mut head = head.trim_end().trim_end_matches(['*', '&', ' ']);
     let templated = head.ends_with('>');
     if templated {
@@ -5079,8 +5930,122 @@ fn cpp_trailing_type(head: &str) -> Option<String> {
                 | "template"
         );
     // Named by its last segment, as its methods' class is.
-    (named && (qualified.contains("::") || templated)).then(|| last.to_string())
+    if named && (qualified.contains("::") || templated) {
+        return Some(last.to_string());
+    }
+    // A plain lower-case name (`logger &l`, `const sink *s`, `(buffer
+    // buf,`) is a type where a declaration starts — a statement's or a
+    // parameter's — and is written as one: `x * y` and `a&b` are sums.
+    let declaration_start = {
+        let mut before = head[..start].trim_end();
+        while let Some(rest) = CPP_QUALIFIERS.iter().find_map(|q| {
+            before
+                .strip_suffix(q)
+                .filter(|r| !r.ends_with(|c: char| c == '_' || c.is_alphanumeric()))
+        }) {
+            before = rest.trim_end();
+        }
+        before.is_empty() || before.ends_with(['(', ',', '{', ';', '}'])
+    };
+    let separator = &original[head.len()..];
+    let spaced = |side: &str| side.starts_with(char::is_whitespace);
+    let declarator_style = match separator.trim_end().find(['*', '&']) {
+        // `T a`
+        None => separator.starts_with(char::is_whitespace),
+        // `T &a`, `T& a`, not `T * a` or `T*a`.
+        Some(at) => {
+            let symbols_end = separator[at..]
+                .find(|c: char| c != '*' && c != '&')
+                .map_or(separator.len(), |i| at + i);
+            spaced(separator) != spaced(&separator[symbols_end..])
+        }
+    };
+    (named
+        && declaration_start
+        && declarator_style
+        && qualified == last
+        && !CPP_NOT_TYPES.contains(&last))
+    .then(|| last.to_string())
 }
+
+/// Words that qualify a C++ declaration's type, before it.
+const CPP_QUALIFIERS: &[&str] = &[
+    "const",
+    "static",
+    "volatile",
+    "mutable",
+    "constexpr",
+    "thread_local",
+    "register",
+    "extern",
+    "inline",
+    "virtual",
+    "explicit",
+    "friend",
+];
+
+/// C++ keywords and built-in types: never a class whose methods a value
+/// declared as it calls.
+const CPP_NOT_TYPES: &[&str] = &[
+    "auto",
+    "decltype",
+    "void",
+    "bool",
+    "char",
+    "wchar_t",
+    "char8_t",
+    "char16_t",
+    "char32_t",
+    "short",
+    "int",
+    "long",
+    "float",
+    "double",
+    "signed",
+    "unsigned",
+    "using",
+    "namespace",
+    "class",
+    "struct",
+    "union",
+    "enum",
+    "typedef",
+    "operator",
+    "public",
+    "private",
+    "protected",
+    "if",
+    "else",
+    "for",
+    "while",
+    "do",
+    "switch",
+    "case",
+    "default",
+    "break",
+    "continue",
+    "this",
+    "true",
+    "false",
+    "nullptr",
+    "and",
+    "or",
+    "not",
+    "co_await",
+    "static_assert",
+    "const",
+    "static",
+    "volatile",
+    "mutable",
+    "constexpr",
+    "thread_local",
+    "register",
+    "extern",
+    "inline",
+    "virtual",
+    "explicit",
+    "friend",
+];
 
 /// The type a constructor expression builds: `Cart(…)`, `Cart { … }`,
 /// `Cart::new(…)`, `new Cart(…)`, `&Cart{…}`, `Cart.new`, `Cart<T>(…)`,
@@ -5128,6 +6093,44 @@ fn constructed_type(rhs: &str, lang: Lang) -> Option<String> {
         _ => return None,
     };
     whole_expression(rest).then(|| ty.to_string())
+}
+
+/// The `T` a C++ smart-pointer factory builds, the whole expression:
+/// `std::make_shared<T>(…)`, `std::make_unique<ns::T>(…)`,
+/// `std::allocate_shared<T>(alloc, …)` — `T`'s last segment, its template
+/// arguments dropped.
+fn cpp_made_type(rhs: &str) -> Option<String> {
+    let rhs = rhs.trim_start();
+    let rest = ["make_shared", "make_unique", "allocate_shared"]
+        .iter()
+        .find_map(|f| {
+            rhs.strip_prefix("std::")
+                .unwrap_or(rhs)
+                .strip_prefix(f)
+                .filter(|r| r.trim_start().starts_with('<'))
+        })?
+        .trim_start();
+    let inner = &rest[1..];
+    let mut depth = 0usize;
+    let close = inner.char_indices().find_map(|(i, c)| match c {
+        '<' => {
+            depth += 1;
+            None
+        }
+        '>' if depth == 0 => Some(i),
+        '>' => {
+            depth -= 1;
+            None
+        }
+        _ => None,
+    })?;
+    let arg = inner[..close].trim();
+    let path = arg.split('<').next().unwrap_or(arg).trim();
+    let ty = path.rsplit("::").next().unwrap_or(path).trim();
+    let identifier = ty.starts_with(|c: char| c == '_' || c.is_alphabetic())
+        && ty.chars().all(|c| c == '_' || c.is_alphanumeric());
+    let after = inner[close + 1..].trim_start();
+    (identifier && after.starts_with('(') && whole_expression(after)).then(|| ty.to_string())
 }
 
 /// The type a JVM, C# or Dart factory names, its value taken as of that
@@ -5553,7 +6556,15 @@ fn owner_from(node: Node, src: &str, lang: Lang) -> Option<String> {
                 }
             }
             kind if CLASS_KINDS.contains(&kind) => {
-                if let Some(name) = n.child_by_field_name("name") {
+                // A C or C++ class whose node a macro stretched past its
+                // `};` (`FMT_BEGIN_NAMESPACE` leaves the grammar guessing):
+                // what comes after its body's close is not its own.
+                let closed = matches!(lang, Lang::C | Lang::Cpp)
+                    && n.child_by_field_name("body").is_some_and(|body| {
+                        src.get(body.start_byte()..node.start_byte())
+                            .is_some_and(|text| !still_open(text))
+                    });
+                if !closed && let Some(name) = n.child_by_field_name("name") {
                     return base_type_name(node_text(name, src));
                 }
             }
@@ -5578,7 +6589,7 @@ fn owner_from(node: Node, src: &str, lang: Lang) -> Option<String> {
 fn unfinished_class(error: Node, inside: Node, src: &str) -> Option<String> {
     let mut cursor = error.walk();
     let tokens: Vec<Node> = error.children(&mut cursor).collect();
-    let mut open: Option<String> = None;
+    let mut open: Option<(String, usize)> = None;
     let mut named: Option<String> = None;
     for (i, token) in tokens.iter().enumerate() {
         if token.start_byte() >= inside.start_byte() {
@@ -5592,14 +6603,62 @@ fn unfinished_class(error: Node, inside: Node, src: &str) -> Option<String> {
                     .filter(|t| t.kind().ends_with("identifier"))
                     .map(|t| node_text(*t, src).to_string());
             }
-            "{" => open = named.take().or(open),
+            "{" => {
+                open = named.take().map(|name| (name, token.start_byte())).or(open);
+            }
             "}" => open = None,
             // `struct formatter;`: a declaration, no body opened.
             ";" => named = None,
             _ => {}
         }
     }
-    open.and_then(|name| base_type_name(&name))
+    // Its body's `}` may be no token of the error's own (the grammar read
+    // part of the body as a node of its own): the text says whether the
+    // body is still open where `inside` is.
+    let (name, brace) = open?;
+    still_open(src.get(brace..inside.start_byte())?)
+        .then(|| base_type_name(&name))
+        .flatten()
+}
+
+/// Whether the brace `text` starts with is still open at its end: no `}`
+/// closes it, those in strings, character literals and comments aside.
+fn still_open(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let mut depth = 0usize;
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'{' => depth += 1,
+            b'}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return false;
+                }
+            }
+            quote @ (b'"' | b'\'') => {
+                i += 1;
+                while i < bytes.len() && bytes[i] != quote && bytes[i] != b'\n' {
+                    i += if bytes[i] == b'\\' { 2 } else { 1 };
+                }
+            }
+            b'/' if bytes.get(i + 1) == Some(&b'/') => {
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            b'/' if bytes.get(i + 1) == Some(&b'*') => {
+                i += 2;
+                while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                    i += 1;
+                }
+                i += 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    depth > 0
 }
 
 /// The Zig container a function at `node` is in: the struct (union, enum)
@@ -5867,11 +6926,20 @@ fn resolve_callees(
             && call.receiver.is_none()
             && matches!(
                 site.lang,
-                Lang::Java | Lang::Kotlin | Lang::Scala | Lang::CSharp
+                Lang::Java | Lang::Kotlin | Lang::Scala | Lang::CSharp | Lang::Cpp
             );
+        // C++'s `fmt::format(…)` or `Cart::make(…)`: a member of the class
+        // it names (or one it inherits, which the graph looks for further).
+        let cpp_scope = (site.lang == Lang::Cpp && !call.method)
+            .then_some(call.qualifier.as_deref())
+            .flatten();
         match owner[i] {
             None => !method,
-            Some(o) => !bare || nodes[i].name == o.rsplit(['.', ':']).next().unwrap_or(o),
+            Some(o) => {
+                let last = o.rsplit(['.', ':']).next().unwrap_or(o);
+                let constructor = nodes[i].name == last;
+                constructor || (!bare && cpp_scope.is_none_or(|q| q == last))
+            }
         }
     };
     let look_further = !local.is_empty() && !local.iter().any(|&i| shape_fits(i));
@@ -9441,6 +10509,340 @@ def main():
     /// returns: `val adapter = moshi.adapter<T>()` then `adapter.fromJson`
     /// is `JsonAdapter`'s, not another class's `fromJson`; a C++
     /// `std::shared_ptr<logger>` hands on `logger`'s methods.
+    /// Of overloads that take as many arguments, a call reaches those its
+    /// arguments can be passed to — a literal's kind, a value's declared or
+    /// built type — and all of them where the arguments say nothing.
+    #[test]
+    fn a_call_reaches_the_overloads_its_arguments_fit() {
+        // (file, source, caller → the lines of `put` it reaches)
+        type Reaches<'c> = &'c [(&'c str, &'c [usize])];
+        let cases: &[(&str, &str, Reaches)] = &[
+            (
+                "/p/src/Shop.java",
+                "class Cart {}\nclass Order {}\nclass Shop {\n  void put(String k) {}\n  void put(int n) {}\n  void put(Cart c) {}\n  void put(Order o) {}\n  void a() { put(\"x\"); }\n  void b() { put(1); }\n  void c(Cart cart) { put(cart); }\n  void d() { put(new Order()); }\n  void e(Thing t) { put(t.get()); }\n  void f() { put(null); }\n}\n",
+                &[
+                    ("a", &[4]),
+                    ("b", &[5]),
+                    ("c", &[6]),
+                    ("d", &[7]),
+                    ("e", &[4, 5, 6, 7]),
+                    ("f", &[4, 6, 7]),
+                ],
+            ),
+            (
+                "/p/src/Shop.kt",
+                "class Shop {\n    fun put(k: String) {}\n    fun put(n: Int) {}\n    fun put(d: Double?) {}\n    fun a() { put(\"x\") }\n    fun b() { put(1) }\n    fun c() { put(null) }\n    fun d() { put(2.5) }\n}\n",
+                &[("a", &[2]), ("b", &[3]), ("c", &[4]), ("d", &[4])],
+            ),
+            (
+                "/p/src/Shop.cs",
+                "class Shop\n{\n    void Put(string k) {}\n    void Put(int n) {}\n    void A() { Put(\"x\"); }\n    void B() { Put(1); }\n    void C(int count) { Put(count); }\n}\n",
+                &[("A", &[3]), ("B", &[4]), ("C", &[4])],
+            ),
+            (
+                "/p/src/shop.cpp",
+                "#include <string>\nvoid put(const std::string& s) {}\nvoid put(int n) {}\nvoid a() { put(\"x\"); }\nvoid b() { put(1); }\nvoid c(std::string s) { put(s); }\nvoid d(Thing t) { put(t); }\n",
+                &[("a", &[2]), ("b", &[3]), ("c", &[2]), ("d", &[2, 3])],
+            ),
+            (
+                "/p/src/Shop.scala",
+                "object Shop {\n  def put(k: String): Unit = ()\n  def put(n: Int): Unit = ()\n  def a(): Unit = put(\"x\")\n  def b(): Unit = put(1)\n}\n",
+                &[("a", &[2]), ("b", &[3])],
+            ),
+        ];
+        for (file, src, expected) in cases {
+            let g = graph(&[(file, src)]);
+            for (caller, lines) in expected.iter() {
+                let at = (0..g.node_count())
+                    .find(|&n| g.node(n).name == *caller)
+                    .unwrap_or_else(|| panic!("{file}: no {caller}"));
+                let mut reached: Vec<usize> = g
+                    .callees_of(at)
+                    .iter()
+                    .filter(|&&c| g.node(c).name.eq_ignore_ascii_case("put"))
+                    .map(|&c| g.node(c).line)
+                    .collect();
+                reached.sort_unstable();
+                assert_eq!(reached, *lines, "{file} {caller}: {:?}", edges(&g));
+            }
+        }
+        // The kinds read off the text.
+        for (text, lang, kind) in [
+            ("\"a\"", Lang::Java, Some("s")),
+            ("@\"a\"", Lang::CSharp, Some("s")),
+            ("s\"a$b\"", Lang::Scala, Some("s")),
+            ("u8\"a\"", Lang::Cpp, Some("s")),
+            ("'a'", Lang::Java, Some("c")),
+            ("42L", Lang::Kotlin, Some("i")),
+            ("0", Lang::Java, Some("0")),
+            ("0x1F", Lang::Cpp, Some("i")),
+            ("1.5f", Lang::Java, Some("f")),
+            ("1e9", Lang::CSharp, Some("f")),
+            ("NULL", Lang::Cpp, Some("0")),
+            ("nullptr", Lang::Cpp, Some("n")),
+            ("\"a\" + b", Lang::Java, None),
+            ("a * 2", Lang::Java, None),
+        ] {
+            assert_eq!(literal_kind(text, lang), kind, "{text}");
+        }
+        for (ty, lang, kind) in [
+            ("const std::string&", Lang::Cpp, "s"),
+            ("const char*", Lang::Cpp, "p"),
+            ("unsigned long", Lang::Cpp, "i"),
+            ("T&&", Lang::Cpp, "?"),
+            ("String?", Lang::Kotlin, "s?"),
+            ("int?", Lang::CSharp, "i?"),
+            ("TValue", Lang::CSharp, "?"),
+            ("List<String>", Lang::Java, "TList"),
+            ("int[]", Lang::Java, "a"),
+            ("IntArray", Lang::Kotlin, "a"),
+        ] {
+            assert_eq!(type_kind(ty, lang), kind, "{ty}");
+        }
+    }
+
+    /// Scala's chained package clauses (`package cats.effect` then `package
+    /// example`) put the outer package's members in scope, as its own
+    /// package's are; one clause naming the whole package does not.
+    #[test]
+    fn a_scala_chained_package_clause_sees_the_outer_package() {
+        let io = "package cats.effect\nsealed abstract class IO[+A] {\n  def as[B](b: B): IO[B] = ???\n  def replicateA_(n: Int): IO[Unit] = ???\n}\n";
+        let chained = "package cats.effect\npackage example\n\nobject Example {\n  def run(io: Thing): Unit =\n    (io.step()).as(ExitCode(2))\n}\n";
+        let single = "package cats.effect.example\n\nobject Other {\n  def run(io: Thing): Unit =\n    (io.step()).as(ExitCode(2))\n}\n";
+        let g = graph(&[
+            ("/p/core/IO.scala", io),
+            ("/p/example/Example.scala", chained),
+            ("/p/example/Other.scala", single),
+        ]);
+        let edges = edges(&g);
+        assert!(
+            edges.contains(&(
+                "/p/example/Example.scala:run".to_string(),
+                "/p/core/IO.scala:as".to_string()
+            )),
+            "{edges:?}"
+        );
+        assert!(
+            !edges
+                .iter()
+                .any(|(from, _)| from.starts_with("/p/example/Other.scala")),
+            "{edges:?}"
+        );
+        assert_eq!(
+            enclosing_packages("package cats\npackage effect\npackage std\n", Lang::Scala),
+            ["cats", "cats.effect"]
+        );
+    }
+
+    /// A class's body is open where its braces say, those in strings,
+    /// character literals and comments aside: what follows its `};` is not
+    /// its own, however the grammar nested it.
+    #[test]
+    fn a_class_body_is_open_until_its_brace_closes() {
+        for (text, open) in [
+            ("{ int a; }", false),
+            ("{ void f() { g(); }\n  int x;\n", true),
+            ("{ auto s = \"}\"; char c = '}';\n", true),
+            ("{ // }\n /* } */ int x;\n", true),
+            ("{ };\ninline auto runtime() -> int { return 0; }\n", false),
+        ] {
+            assert_eq!(still_open(text), open, "{text:?}");
+        }
+    }
+
+    /// Zig's `self` is the parameter its annotation types: `self:
+    /// *NonBlocking` calls `NonBlocking`'s method, `self: *Self` the
+    /// container's own. A file's name for a standard-library type (`const
+    /// Ast = std.zig.Ast;`) makes its values the library's.
+    #[test]
+    fn a_zig_self_is_its_annotated_type() {
+        let src = "const std = @import(\"std\");\nconst Ast = std.zig.Ast;\npub const NonBlocking = struct {\n    pub fn release(self: *NonBlocking) void {\n        _ = self;\n    }\n    pub fn run(self: *NonBlocking) void {\n        self.release();\n    }\n};\npub const Blocking = struct {\n    const Self = @This();\n    pub fn release(self: *Self) void {\n        _ = self;\n    }\n    pub fn render(self: *Self) void {\n        _ = self;\n    }\n    pub fn go(self: *Self) void {\n        self.release();\n    }\n};\nfn show(tree: Ast) void {\n    tree.render();\n}\n";
+        let g = graph(&[("/p/src/pool.zig", src)]);
+        let reached = |name: &str| {
+            let at = (0..g.node_count())
+                .find(|&n| g.node(n).name == name)
+                .unwrap_or_else(|| panic!("no {name}: {:?}", edges(&g)));
+            let mut lines: Vec<usize> = g.callees_of(at).iter().map(|&c| g.node(c).line).collect();
+            lines.sort_unstable();
+            lines
+        };
+        assert_eq!(reached("run"), [4], "{:?}", edges(&g));
+        assert_eq!(reached("go"), [13], "{:?}", edges(&g));
+        assert_eq!(reached("show"), Vec::<usize>::new(), "{:?}", edges(&g));
+    }
+
+    /// A value declared as a type alias calls the aliased type's methods:
+    /// C++'s `using` and `typedef`, Kotlin's `typealias`, Scala's `type`,
+    /// Go's `type X = Y`.
+    #[test]
+    fn a_type_alias_reaches_the_aliased_type() {
+        let cases: &[(&str, &str, &str, &str)] = &[
+            (
+                "/p/src/sink.cpp",
+                "template <typename M> class daily_sink {\n public:\n  void flush() {}\n};\nclass other {\n public:\n  void flush() {}\n};\nusing daily_sink_st = daily_sink<int>;\ntypedef daily_sink<long> daily_sink_mt;\nvoid run(daily_sink_st &a, daily_sink_mt *b) {\n  a.flush();\n  b->flush();\n}\n",
+                "flush",
+                "3",
+            ),
+            (
+                "/p/src/Cart.kt",
+                "class Cart {\n    fun total(): Int = 0\n}\nclass Order {\n    fun total(): Int = 1\n}\ntypealias Basket = Cart\nfun run(b: Basket) {\n    b.total()\n}\n",
+                "total",
+                "2",
+            ),
+            (
+                "/p/src/Cart.scala",
+                "class Cart {\n  def total(): Int = 0\n}\nclass Order {\n  def total(): Int = 1\n}\nobject Shop {\n  type Basket = Cart\n  def run(b: Basket): Int = b.total()\n}\n",
+                "total",
+                "2",
+            ),
+            (
+                "/p/src/cart.go",
+                "package shop\n\ntype Cart struct{}\n\nfunc (c *Cart) Total() int { return 0 }\n\ntype Order struct{}\n\nfunc (o *Order) Total() int { return 1 }\n\ntype Basket = Cart\n\nfunc run(b *Basket) {\n\tb.Total()\n}\n",
+                "Total",
+                "5",
+            ),
+        ];
+        for (file, src, method, line) in cases {
+            let g = graph(&[(file, src)]);
+            let run = (0..g.node_count())
+                .find(|&n| g.node(n).name == "run")
+                .unwrap();
+            let mut reached: Vec<String> = g
+                .callees_of(run)
+                .iter()
+                .filter(|&&c| g.node(c).name == *method)
+                .map(|&c| g.node(c).line.to_string())
+                .collect();
+            reached.sort();
+            reached.dedup();
+            assert_eq!(reached, [line.to_string()], "{file}: {:?}", edges(&g));
+        }
+        assert_eq!(
+            type_aliases(
+                "typedef void (*cb)(int);\nusing namespace std;\nusing Base::Base;\n",
+                Lang::Cpp
+            ),
+            []
+        );
+        // A plain lower-case C++ type, where a declaration starts and
+        // written as one; never a product, a keyword or a built-in type.
+        for (head, want) in [
+            ("void run(logger &", Some("logger")),
+            ("void run(int n, logger& ", Some("logger")),
+            ("{\n  const sink *", Some("sink")),
+            ("{\n  static registry ", Some("registry")),
+            ("{\n  x = y * ", None),
+            ("{\n  f(a & ", None),
+            ("{\n  f(a*", None),
+            ("{\n  return ", None),
+            ("{\n  auto ", None),
+            ("{\n  unsigned ", None),
+            ("{\n  else ", None),
+        ] {
+            assert_eq!(cpp_trailing_type(head).as_deref(), want, "{head:?}");
+        }
+        assert_eq!(
+            type_aliases(
+                "typealias Handler = (Int) -> Unit\ntypealias Box<T> = List<T>\n",
+                Lang::Kotlin
+            ),
+            [("Box".to_string(), "List".to_string())]
+        );
+    }
+
+    /// `std::make_shared<T>(…)` and `std::make_unique<T>(…)` build a `T`:
+    /// its `->` calls reach `T`'s methods, not a same-name method of another
+    /// class; a statement in a body that reads as a declarator (`emit
+    /// finished();`) is no function for a call to reach.
+    #[test]
+    fn a_cpp_smart_pointer_factory_builds_its_type() {
+        let src = "#include <memory>\nclass logger {\n public:\n  void flush() {}\n};\nclass sink {\n public:\n  void flush() {}\n};\nnamespace ns { class cart { public: void flush() {} }; }\nvoid run() {\n  auto l = std::make_shared<logger>(\"x\", 1);\n  l->flush();\n  auto c = std::make_unique<ns::cart>();\n  c->flush();\n}\nvoid tick() {\n  emit finished();\n}\nvoid done() {\n  finished();\n}\n";
+        let g = graph(&[("/p/src/log.cpp", src)]);
+        let node = |name: &str| {
+            (0..g.node_count())
+                .find(|&n| g.node(n).name == name)
+                .unwrap_or_else(|| panic!("no {name}: {:?}", edges(&g)))
+        };
+        let mut reached: Vec<usize> = g
+            .callees_of(node("run"))
+            .iter()
+            .map(|&c| g.node(c).line)
+            .collect();
+        reached.sort_unstable();
+        assert_eq!(reached, [4, 10], "{:?}", edges(&g));
+        assert!(
+            (0..g.node_count()).all(|n| g.node(n).name != "finished"),
+            "{:?}",
+            edges(&g)
+        );
+        // A member call on a value of no known type: a class's `info`, not
+        // the free `info` of a namespace; with no member of the name, the
+        // free one stays.
+        let src = "namespace spdlog {\nvoid info(int m) {}\nvoid warn(int m) {}\nclass logger {\n public:\n  void info(int m) {}\n};\n}\nvoid use(Thing t) {\n  t.get()->info(1);\n  t.get()->warn(2);\n}\nvoid plain() {\n  spdlog::info(3);\n}\n";
+        let g = graph(&[("/p/src/use.cpp", src)]);
+        let reached = |name: &str| {
+            let at = (0..g.node_count())
+                .find(|&n| g.node(n).name == name)
+                .unwrap();
+            let mut reached: Vec<(String, usize)> = g
+                .callees_of(at)
+                .iter()
+                .map(|&c| (g.node(c).name.clone(), g.node(c).line))
+                .collect();
+            reached.sort();
+            reached
+        };
+        assert_eq!(
+            reached("use"),
+            [("info".to_string(), 6), ("warn".to_string(), 3)],
+            "{:?}",
+            edges(&g)
+        );
+        assert_eq!(
+            reached("plain"),
+            [("info".to_string(), 2)],
+            "{:?}",
+            edges(&g)
+        );
+
+        // `fmt::format(…)` in a file whose own `format`s are a formatter's
+        // members: the namespace's function in the header it includes.
+        let header = "namespace fmt {\ntemplate <typename... T>\nauto format(const char* f, T&&... args) -> int { return 0; }\n}\n";
+        let test = "#include \"fmt/format.h\"\ntemplate <> struct formatter<point> {\n  auto format(point p, int& ctx) const -> int { return 0; }\n};\nvoid check() {\n  fmt::format(\"{}\", 1);\n}\n";
+        let files = [
+            ("/p/include/fmt/format.h", header),
+            ("/p/test/format-test.cc", test),
+        ];
+        let sources: Vec<(PathBuf, String)> = files
+            .iter()
+            .map(|(f, s)| (PathBuf::from(f), s.to_string()))
+            .collect();
+        let scope: HashMap<PathBuf, HashSet<PathBuf>> = HashMap::from([(
+            PathBuf::from("/p/test/format-test.cc"),
+            HashSet::from([PathBuf::from("/p/include/fmt/format.h")]),
+        )]);
+        let g = ProjectCallGraph::build(defs_of(&files), &sources, &scope);
+        let check = (0..g.node_count())
+            .find(|&n| g.node(n).name == "check")
+            .unwrap();
+        let reached: Vec<String> = g
+            .callees_of(check)
+            .iter()
+            .map(|&c| format!("{}:{}", g.node(c).file.display(), g.node(c).line))
+            .collect();
+        assert_eq!(reached, ["/p/include/fmt/format.h:3"], "{:?}", edges(&g));
+        assert_eq!(
+            cpp_made_type("std::make_shared<logger>(\"x\")").as_deref(),
+            Some("logger")
+        );
+        assert_eq!(
+            cpp_made_type("make_unique<ns::Box<int>>()").as_deref(),
+            Some("Box")
+        );
+        assert_eq!(cpp_made_type("std::make_shared<logger>(a)->clone()"), None);
+        assert_eq!(cpp_made_type("std::make_pair(a, b)"), None);
+    }
+
     #[test]
     fn a_value_from_a_call_has_its_declared_return_type() {
         let cases: &[(&str, &str, &str, &str)] = &[

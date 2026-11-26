@@ -247,6 +247,8 @@ fn to_cached_calls(calls: &FileCalls) -> CachedCalls {
     let any_qualifier = calls.calls.iter().any(|site| site.qualifier.is_some());
     let mut call_arities = Vec::new();
     let any_arity = calls.calls.iter().any(|site| site.arity.is_some());
+    let mut call_arguments = Vec::new();
+    let any_arguments = calls.calls.iter().any(|site| site.arguments.is_some());
     let mut previous = 0i64;
     for site in &calls.calls {
         let caller = match site.caller.as_deref() {
@@ -271,6 +273,12 @@ fn to_cached_calls(calls: &FileCalls) -> CachedCalls {
         }
         if any_arity {
             call_arities.push(site.arity.map_or(0, |n| i64::from(n) + 1));
+        }
+        if any_arguments {
+            call_arguments.push(match &site.arguments {
+                None => 0,
+                Some(kinds) => intern(kinds, &mut names, &mut seen) + 1,
+            });
         }
     }
     let mut owners: Vec<(usize, &str)> = calls
@@ -307,10 +315,12 @@ fn to_cached_calls(calls: &FileCalls) -> CachedCalls {
         receivers,
         qualifiers,
         call_arities,
+        call_arguments,
         owners,
         accessed,
         internal,
         package: calls.context.package.clone(),
+        enclosing: calls.context.enclosing.clone(),
         types: calls.context.types.clone(),
         extensions: calls.context.extensions.clone(),
         uses: calls.context.uses.clone(),
@@ -322,6 +332,7 @@ fn to_cached_calls(calls: &FileCalls) -> CachedCalls {
             .flat_map(|&(line, fewest, most)| [line, usize::from(fewest), usize::from(most)])
             .collect(),
         returns: calls.context.returns.clone(),
+        parameters: calls.context.parameters.clone(),
     }
 }
 
@@ -344,6 +355,9 @@ fn from_cached_calls(abs: &Path, cached: &CachedCalls) -> Option<FileCalls> {
         return None;
     }
     if !cached.call_arities.is_empty() && cached.call_arities.len() != cached.receivers.len() {
+        return None;
+    }
+    if !cached.call_arguments.is_empty() && cached.call_arguments.len() != cached.receivers.len() {
         return None;
     }
     if !cached.arities.len().is_multiple_of(3) {
@@ -386,6 +400,10 @@ fn from_cached_calls(abs: &Path, cached: &CachedCalls) -> Option<FileCalls> {
                 0 => None,
                 n => Some(u8::try_from(n - 1).ok()?),
             },
+            arguments: match cached.call_arguments.get(at).copied().unwrap_or(0) {
+                0 => None,
+                n => Some(name(n - 1)?),
+            },
             line: usize::try_from(line).ok()?,
         });
     }
@@ -423,6 +441,7 @@ fn from_cached_calls(abs: &Path, cached: &CachedCalls) -> Option<FileCalls> {
         internal: cached.internal.iter().copied().collect(),
         context: clew_core::projectcalls::FileContext {
             package: cached.package.clone(),
+            enclosing: cached.enclosing.clone(),
             types: cached.types.clone(),
             extensions: cached.extensions.clone(),
             uses: cached.uses.clone(),
@@ -433,6 +452,7 @@ fn from_cached_calls(abs: &Path, cached: &CachedCalls) -> Option<FileCalls> {
                 .map(|t| Some((t[0], u8::try_from(t[1]).ok()?, u8::try_from(t[2]).ok()?)))
                 .collect::<Option<Vec<_>>>()?,
             returns: cached.returns.clone(),
+            parameters: cached.parameters.clone(),
         },
     })
 }
@@ -723,6 +743,29 @@ mod tests {
         let back = from_cached_calls(abs, &cached).expect("a sound entry");
         assert_eq!(back.calls, calls.calls);
         assert_eq!(back.context.arities, calls.context.arities);
+    }
+
+    /// What a call passes and what each overload takes come back from the
+    /// cache, so a reopened project tells same-arity overloads apart.
+    #[test]
+    fn argument_and_parameter_kinds_survive_the_cache() {
+        let src = "class Shop {\n  void put(String k) {}\n  void put(int n) {}\n  void run() { put(\"x\"); put(1); }\n}\n";
+        let abs = Path::new("/p/src/Shop.java");
+        let calls = FileCalls::read(abs, src).expect("java has a call model");
+        assert!(
+            calls
+                .calls
+                .iter()
+                .any(|c| c.arguments.as_deref() == Some("s"))
+        );
+        assert!(calls.context.parameters.contains(&(2, "s".to_string())));
+        let cached = to_cached_calls(&calls);
+        let back = from_cached_calls(abs, &cached).expect("a sound entry");
+        assert_eq!(back.calls, calls.calls);
+        assert_eq!(back.context.parameters, calls.context.parameters);
+        let mut damaged = cached.clone();
+        damaged.call_arguments.push(1);
+        assert!(from_cached_calls(abs, &damaged).is_none());
     }
 
     /// A Scala call's qualifier (`os` in `os.read(p)`) comes back from the

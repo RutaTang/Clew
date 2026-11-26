@@ -240,6 +240,44 @@ fn file_local(def: Node, lang: Lang, source: &str) -> bool {
             .any(|n| n.kind() == "namespace_definition" && n.child_by_field_name("name").is_none())
 }
 
+/// Whether the C++ function declarator `def` belongs to a statement inside
+/// a function body. `std::string s(path);` builds a value, `emit
+/// finished();` (a Qt signal) runs one, and a prototype written there only
+/// names a function defined elsewhere: none is a function of the project,
+/// and outlining them gave a call to `finished()` a definition to reach.
+fn declared_in_a_body(def: Node, lang: Lang) -> bool {
+    // (Not in a file read as C: a C++ header read so has its classes'
+    // bodies taken for functions', their members' prototypes in them.)
+    if lang != Lang::Cpp || def.kind() != "function_declarator" {
+        return false;
+    }
+    std::iter::successors(def.parent(), |n| n.parent())
+        .find(|n| !n.kind().ends_with("_declarator"))
+        .filter(|n| n.kind() == "declaration")
+        .and_then(|n| n.parent())
+        .is_some_and(|p| p.kind() == "compound_statement")
+}
+
+/// Whether the C++ function declarator `def` is a conversion operator's
+/// type the grammar took for a function's name: a macro before it
+/// (`FMT_CONSTEXPR operator fmt::string_view() const`) leaves `operator` a
+/// type and `string_view()` a declarator. A call to `string_view(…)` is
+/// not one to it; nor is a conversion operator outlined where it parses.
+fn conversion_operator(def: Node, lang: Lang, source: &str) -> bool {
+    if lang != Lang::Cpp || def.kind() != "function_declarator" {
+        return false;
+    }
+    let word = |c: char| c == '_' || c.is_alphanumeric();
+    let mut before = source.get(..def.start_byte()).unwrap_or("").trim_end();
+    // The type's path, when only its last name is the declarator's.
+    while let Some(rest) = before.strip_suffix("::") {
+        before = rest.trim_end_matches(word).trim_end();
+    }
+    before
+        .strip_suffix("operator")
+        .is_some_and(|rest| !rest.ends_with(word))
+}
+
 /// Where a definition is declared, to tell same-name definitions of
 /// DIFFERENT owners apart (see [`Owner::same_as`]): overloads share an owner;
 /// `A::draw` and `B::draw`, or the `run` entries of two object literals, do
@@ -1117,6 +1155,9 @@ fn located_in_tree(tree: &Tree, source: &str, lang: Lang) -> Vec<Located> {
         let (Some(kind), Some(name), Some(def)) = (kind, name, def) else {
             continue;
         };
+        if declared_in_a_body(def, lang) || conversion_operator(def, lang, source) {
+            continue;
+        }
         let name: std::borrow::Cow<str> = match lang {
             Lang::Lean => lean_name(def, source).unwrap_or(name).into(),
             Lang::Sql => crate::apidoc::unquote_sql(name).into(),
@@ -4984,6 +5025,39 @@ fn build_inner() -> B { B }
         };
         assert!(!owner("run", 1).same_as(&owner("run", 2)));
         assert!(owner("f", 4).same_as(&owner("g", 5)));
+    }
+
+    /// A statement in a function body that reads like a declarator — a
+    /// value built with arguments, a Qt `emit`, a local prototype — is not a
+    /// function of the file; a prototype at file scope or in a class is.
+    #[test]
+    fn a_declarator_inside_a_function_body_is_no_function() {
+        let src = "void run();\nstruct W { void tick(); };\nvoid go() {\n  std::string s(path);\n  emit finished();\n  int helper(int);\n}\n";
+        let names: Vec<String> = extract_located(src, "cpp")
+            .into_iter()
+            .filter(|l| is_callable(&l.symbol.kind))
+            .map(|l| l.symbol.name)
+            .collect();
+        for local in ["s", "finished", "helper"] {
+            assert!(!names.contains(&local.to_string()), "{names:?}");
+        }
+        assert!(names.contains(&"run".to_string()), "{names:?}");
+        assert!(names.contains(&"go".to_string()), "{names:?}");
+        let names: Vec<String> = extract_located(src, "cpp")
+            .into_iter()
+            .map(|l| l.symbol.name)
+            .collect();
+        assert!(names.contains(&"tick".to_string()), "{names:?}");
+
+        // A conversion operator a macro hid from the grammar names no
+        // function `string_view` or `S`; the constructor beside it stays.
+        let src = "template <typename Char> class basic_string_view {\n public:\n  FMT_CONSTEXPR basic_string_view(const Char* s) {}\n  FMT_CONSTEXPR operator fmt::string_view() const noexcept { return {}; }\n  template <typename S> FMT_CONSTEXPR operator S() const { return {}; }\n};\n";
+        let names: Vec<String> = extract_located(src, "cpp")
+            .into_iter()
+            .filter(|l| is_callable(&l.symbol.kind))
+            .map(|l| l.symbol.name)
+            .collect();
+        assert_eq!(names, ["basic_string_view"], "{names:?}");
     }
 
     #[test]

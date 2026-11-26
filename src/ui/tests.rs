@@ -14862,6 +14862,7 @@ fn the_raised_note_says_when_its_function_changed() {
         receiver: None,
         qualifier: None,
         arity: None,
+        arguments: None,
         line,
     };
     let lib = root.join("src/lib.rs");
@@ -14894,6 +14895,7 @@ fn the_raised_note_says_when_its_function_changed() {
         receiver: None,
         qualifier: None,
         arity: None,
+        arguments: None,
         line,
     };
     app.proj.calls_by_file.insert(

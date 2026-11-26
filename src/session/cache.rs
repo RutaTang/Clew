@@ -135,7 +135,16 @@ use crate::incremental::Version;
 /// 34: each function's declared return type ([`CachedCalls::returns`]),
 /// and a value assigned from a call typed by it.
 /// 35: an interface's methods are its own ([`CachedCalls::owners`]).
-pub(crate) const CACHE_VERSION: u32 = 35;
+/// 36: a type alias is a type whose base is the type it names; C++
+/// declarators in a function body, and conversion operators a macro hid,
+/// are no functions; C++ plain lower-case types, smart-pointer factories,
+/// and Zig's `self` and standard-library aliases type receivers; a C or C++
+/// class owns nothing past its body's close.
+/// 37: what each call passes and each function takes
+/// ([`CachedCalls::call_arguments`], [`CachedCalls::parameters`]), Java's
+/// and C#'s built-in types bind, and a Scala file's chained package clauses
+/// open their packages ([`CachedCalls::enclosing`]).
+pub(crate) const CACHE_VERSION: u32 = 37;
 
 /// A cached symbol (the index entry minus the paths, which are reconstructed
 /// from the project root + relative path on load).
@@ -216,6 +225,12 @@ pub struct CachedCalls {
     /// count plus one. Empty when no site has one.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub call_arities: Vec<i64>,
+    /// One number per call site, in `sites`' order, where any site has one:
+    /// the kinds of the arguments it passes
+    /// (`clew_core::projectcalls::CallSite::arguments`) — `0` unknown, else
+    /// their index in `names` plus one. Empty when no site has one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub call_arguments: Vec<i64>,
     /// Two numbers per method whose class is known
     /// (`clew_core::projectcalls::FileCalls::owners`): its definition line,
     /// then the class's index in `names`.
@@ -232,6 +247,10 @@ pub struct CachedCalls {
     /// The file's package (`clew_core::projectcalls::FileContext::package`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub package: Option<String>,
+    /// The packages a Scala file's chained package clauses open
+    /// (`clew_core::projectcalls::FileContext::enclosing`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub enclosing: Vec<String>,
     /// The types the file declares with their bases
     /// (`clew_core::projectcalls::FileContext::types`), only those with any.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -257,6 +276,10 @@ pub struct CachedCalls {
     /// (`clew_core::projectcalls::FileContext::returns`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub returns: Vec<(usize, String)>,
+    /// The kinds of each function's parameters, by its definition line
+    /// (`clew_core::projectcalls::FileContext::parameters`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parameters: Vec<(usize, String)>,
 }
 
 /// Everything cached about one file: how to confirm it is unchanged (mtime,
@@ -377,16 +400,19 @@ mod tests {
                 receivers: vec![1],
                 qualifiers: vec![2],
                 call_arities: vec![3],
+                call_arguments: vec![1],
                 owners: vec![3, 1],
                 accessed: vec![3],
                 internal: vec![9],
                 package: Some("shop".into()),
+                enclosing: vec!["shop".into()],
                 types: vec![("Cart".into(), vec!["Base".into()])],
                 extensions: vec![3],
                 uses: vec!["Shop.Context".into()],
                 imports: vec!["Ecto.Query".into()],
                 arities: vec![3, 1, 2],
                 returns: vec![(3, "Cart".into())],
+                parameters: vec![(3, "s,i".into())],
             }),
         }
     }
