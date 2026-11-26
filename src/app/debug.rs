@@ -240,6 +240,30 @@ fn is_debugger_chatter(category: &str, text: &str) -> bool {
     }
 }
 
+/// Whether a launch asks the debugger to stop the program at its entry:
+/// `stopOnEntry` (netcoredbg's `stopAtEntry`), a debugging choice of a
+/// launch file's.
+fn asks_to_stop_at_entry(launch: &serde_json::Value) -> bool {
+    ["stopOnEntry", "stopAtEntry"]
+        .iter()
+        .any(|key| launch.get(key).and_then(serde_json::Value::as_bool) == Some(true))
+}
+
+/// Whether a stop is the adapter's own pause, not one of the reader's: at
+/// the program's entry when the launch asked for none — Dart's adapter
+/// pauses each isolate as it starts, says so, and resumes it itself once
+/// breakpoints are set — and at its exit, which Dart's holds only to send
+/// the program's last output, then lets go. Shown, they were stops in the
+/// SDK's own code (`isolate_patch.dart`), the editor taken there before the
+/// program's first line and again after its last, each in the run's trail.
+fn adapters_own_pause(reason: &str, asked_entry: bool) -> bool {
+    match reason {
+        "entry" => !asked_entry,
+        "exit" => true,
+        _ => false,
+    }
+}
+
 /// The exit code Delve says a Go program ended with ("Process 4211 has
 /// exited with status 0"), which it sends no `exited` event for.
 fn delve_exit(category: &str, text: &str) -> Option<i64> {
@@ -3178,6 +3202,7 @@ impl App {
                         }))
                         .await;
                 }
+                let asked_entry = asks_to_stop_at_entry(&launch);
                 let launched = client.launch(launch);
                 tokio::pin!(launched);
                 let mut launch_answered = false;
@@ -3217,6 +3242,11 @@ impl App {
                         // launched.
                         let _ = client.disconnect().await;
                         return; // stopped: no final Terminated for a dead run
+                    }
+                    if let dap::DapEvent::Stopped(stop) = &ev
+                        && adapters_own_pause(&stop.reason, asked_entry)
+                    {
+                        continue;
                     }
                     if output
                         .send(Message::Debug(DebugMsg::DapEvent {
@@ -5874,6 +5904,37 @@ mod tests {
     /// it — and is what the console shows; a body without one is untouched.
     /// The debuggers' words to a terminal's user are not the run's output;
     /// the program's own are, whatever they say.
+    /// Dart's pauses at an isolate's start and exit are its own, resumed by
+    /// it: no stop of the reader's — unless the launch asked to stop at the
+    /// entry. A breakpoint's, a step's, an exception's are the reader's.
+    #[test]
+    fn an_adapters_own_pauses_are_no_stops() {
+        assert!(adapters_own_pause("entry", false));
+        assert!(adapters_own_pause("exit", false));
+        assert!(!adapters_own_pause("entry", true));
+        for reason in [
+            "breakpoint",
+            "step",
+            "exception",
+            "pause",
+            "function breakpoint",
+        ] {
+            assert!(!adapters_own_pause(reason, false), "{reason}");
+        }
+        assert!(asks_to_stop_at_entry(
+            &serde_json::json!({ "stopOnEntry": true })
+        ));
+        assert!(asks_to_stop_at_entry(
+            &serde_json::json!({ "stopAtEntry": true })
+        ));
+        assert!(!asks_to_stop_at_entry(
+            &serde_json::json!({ "stopOnEntry": false })
+        ));
+        assert!(!asks_to_stop_at_entry(
+            &serde_json::json!({ "program": "bin/shop.dart" })
+        ));
+    }
+
     #[test]
     fn a_debuggers_chatter_is_not_the_runs_output() {
         assert!(is_debugger_chatter(
