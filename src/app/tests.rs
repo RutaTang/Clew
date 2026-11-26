@@ -8651,7 +8651,9 @@ fn debug_stop_while_launching_cancels_the_startup() {
 /// and its adapter spawn (with `spawned(proc)`), and the adapter behind the
 /// server answers each DAP request the run sends it over the proxied stdio
 /// with `respond(command)`. The reader presses Stop once the adapter is
-/// asked `stop_at` ("" never).
+/// asked `stop_at` ("" never); a `stop_at` of "terminated after <command>"
+/// instead has the adapter say the session is over once it has answered
+/// that command, and the reader press nothing.
 ///
 /// Returns what the server saw, in order — each DAP command the adapter was
 /// asked, `stop` where the reader pressed Stop, `kill` for each
@@ -8745,7 +8747,15 @@ fn remote_debug_run(
                             proc,
                             data: clew_core::framing::encode(&response),
                         });
-                        if command == stop_at {
+                        if stop_at.strip_prefix("terminated after ") == Some(command.as_str()) {
+                            let over = serde_json::json!({
+                                "seq": 2000, "type": "event", "event": "terminated",
+                            });
+                            let _ = app.handle_server_event(Event::ProcessOutput {
+                                proc,
+                                data: clew_core::framing::encode(&over),
+                            });
+                        } else if command == stop_at {
                             seen.push("stop".into());
                             let _ = app.update(Message::Debug(DebugMsg::Stop));
                         }
@@ -8818,6 +8828,18 @@ fn a_remote_debug_adapter_is_killed_once_however_the_run_ends() {
     // to end the debuggee, and killed.
     let (seen, _) = remote_debug_run("dap-remote-up", spawned, answers, "launch");
     assert_eq!(seen, ["initialize", "launch", "stop", "disconnect", "kill"]);
+
+    // The adapter said the session is over: a moment later it is let go,
+    // as DAP's clients do, no Stop pressed. It waited for a `disconnect`
+    // that came only with the next run or the tab's close, keeping what it
+    // ran (an Erlang node, lldb) until then.
+    let (seen, _) = remote_debug_run(
+        "dap-remote-ended",
+        spawned,
+        answers,
+        "terminated after launch",
+    );
+    assert_eq!(seen, ["initialize", "launch", "disconnect", "kill"]);
 
     let refuses_initialize = |command: &str| match command {
         "initialize" => Err("unsupported".into()),

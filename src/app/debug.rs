@@ -18,6 +18,15 @@ const DEBUG_OUTPUT_MAX_CHUNKS: usize = 500;
 /// a Vec entry each and bog the layout down at a trivial memory cost.
 const DEBUG_OUTPUT_MAX_BYTES: usize = 2 * 1024 * 1024;
 
+/// How long a run's adapter is kept once it said the session is over
+/// (`terminated`) before it is disconnected: what the program printed last
+/// can follow that event (a remote host's bridge sends it once the program
+/// has flushed it).
+#[cfg(not(test))]
+const ENDED_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
+#[cfg(test)]
+const ENDED_GRACE: std::time::Duration = std::time::Duration::from_millis(300);
+
 /// Append one chunk to a session's retained output, trimming oldest-first
 /// until both caps hold. The total is recomputed per push rather than kept in
 /// the session: this runs once per output event over a few hundred short
@@ -82,9 +91,13 @@ fn take_notice(mut launch: serde_json::Value) -> (serde_json::Value, Option<Stri
 /// marks expensive too: an ES module's `const` and `let` (a Deno program's,
 /// a page's module, Node's ESM) live in its Module scope, a classic script's
 /// in its Script scope, and skipped, a program's own variables were nowhere
-/// in the panel.
+/// in the panel. lldb's Registers are not shown however lldb-dap marks
+/// them: some versions do not mark them expensive, and the CPU's register
+/// banks sat under a C program's locals.
 fn shows_scope(name: &str, expensive: bool, variables_reference: i64) -> bool {
-    variables_reference != 0 && (!expensive || matches!(name, "Module" | "Script"))
+    variables_reference != 0
+        && name != "Registers"
+        && (!expensive || matches!(name, "Module" | "Script"))
 }
 
 /// Whether the margin marks a program's start in `lang` beyond Rust's,
@@ -109,13 +122,25 @@ fn marks_main(lang: &str) -> bool {
 /// Whether a variable of a stop's scope is shown: in lldb's Globals, not
 /// the C or C++ library's own — a name of the implementation's (`__x`,
 /// `_X`, as `std::__detail::__integer_to_chars_is_unsigned`), or one lldb
-/// cannot read (`<error: …>`), which say nothing of the program.
-fn shows_variable(scope: &str, var: &crate::dap::proto::Variable) -> bool {
+/// cannot read (`<error: …>`), which say nothing of the program. At a Zig
+/// frame, `zig_own` holds the namespaces of the project's own Zig files
+/// ([`zig_namespaces`]), and a global is shown only in one of them: lldb
+/// names each after its file's (`cart.total` of `cart.zig`), and the
+/// standard library's (`debug.*`, `heap.*`, `Thread.*`) filled the panel.
+fn shows_variable(
+    scope: &str,
+    var: &crate::dap::proto::Variable,
+    zig_own: Option<&std::collections::HashSet<String>>,
+) -> bool {
     if scope != "Globals" {
         return true;
     }
     // lldb names a global `name @ file:line` where two share a name.
     let name = var.name.split(" @ ").next().unwrap_or(&var.name);
+    if let Some(own) = zig_own {
+        let first = name.split('.').next().unwrap_or(name);
+        return own.contains(first) && !var.value.starts_with("<error");
+    }
     let reserved = name.split("::").any(|part| {
         let mut chars = part.chars();
         chars.next() == Some('_')
@@ -124,6 +149,21 @@ fn shows_variable(scope: &str, var: &crate::dap::proto::Variable) -> bool {
                 .is_some_and(|c| c == '_' || c.is_ascii_uppercase())
     });
     !reserved && !var.value.starts_with("<error")
+}
+
+/// The namespaces a Zig program's own globals are named in: each of the
+/// project's Zig files and the folders they are in, by name (`cart` for
+/// `cart.zig`, `util` and `math` for `util/math.zig`) — as Zig names a
+/// file's namespace from its path in its module (`util.math`).
+fn zig_namespaces(files: &[clew_core::fs_scan::FileEntry]) -> std::collections::HashSet<String> {
+    let mut spaces = std::collections::HashSet::new();
+    for file in files {
+        let Some(path) = file.rel.strip_suffix(".zig") else {
+            continue;
+        };
+        spaces.extend(path.split('/').map(str::to_string));
+    }
+    spaces
 }
 
 /// A `launch` body without the exception filters Clew asks for in it (see
@@ -3206,12 +3246,24 @@ impl App {
                 let launched = client.launch(launch);
                 tokio::pin!(launched);
                 let mut launch_answered = false;
+                // When the adapter said the session is over: it is let go
+                // `ENDED_GRACE` later, as DAP's clients do. It waited for a
+                // `disconnect` that came only with the next run or the tab's
+                // close, and kept what it runs until then: an Erlang node,
+                // lldb, a test's JVM.
+                let mut ended: Option<tokio::time::Instant> = None;
                 loop {
                     // Race the adapter against the Stop flag: checking only on
                     // the next event meant a silent adapter left the debuggee
                     // running indefinitely after Stop.
                     let ev = tokio::select! {
                         ev = events.recv() => ev,
+                        // What the program printed last has come by now.
+                        () = tokio::time::sleep_until(ended.unwrap_or_else(tokio::time::Instant::now)),
+                            if ended.is_some() => {
+                            let _ = client.disconnect().await;
+                            return;
+                        }
                         // The adapter refused the launch: nothing will run, and
                         // this is the one place it says why. A failed run is
                         // torn down by the App, which stops it here in turn.
@@ -3247,6 +3299,9 @@ impl App {
                         && adapters_own_pause(&stop.reason, asked_entry)
                     {
                         continue;
+                    }
+                    if matches!(ev, dap::DapEvent::Terminated) && ended.is_none() {
+                        ended = Some(tokio::time::Instant::now() + ENDED_GRACE);
                     }
                     if output
                         .send(Message::Debug(DebugMsg::DapEvent {
@@ -3927,6 +3982,12 @@ impl App {
         self.bump_debug_stop();
         let stop = self.debug_stop;
         let local = !self.connection.is_remote();
+        let zig_own = self
+            .proj
+            .project
+            .as_ref()
+            .map(|p| zig_namespaces(&p.files))
+            .unwrap_or_default();
         Task::perform(
             async move {
                 let frames = client.stack_trace(tid).await.unwrap_or_default();
@@ -3937,6 +3998,10 @@ impl App {
                 if let Some(shown) = shown_frame(&frames, local).and_then(|i| frames.get(i))
                     && let Ok(scs) = client.scopes(shown.id).await
                 {
+                    let zig = shown
+                        .path
+                        .as_deref()
+                        .is_some_and(|p| p.extension().is_some_and(|e| e == "zig"));
                     for sc in scs {
                         if !shows_scope(&sc.name, sc.expensive, sc.variables_reference) {
                             continue; // skip Registers etc. by default
@@ -3946,7 +4011,7 @@ impl App {
                             .await
                             .unwrap_or_default();
                         let all = vars.len();
-                        vars.retain(|v| shows_variable(&sc.name, v));
+                        vars.retain(|v| shows_variable(&sc.name, v, zig.then_some(&zig_own)));
                         // None of the program's (none at all, or only
                         // the library's): no heading over nothing.
                         if vars.is_empty() && (all > 0 || sc.name == "Globals") {
@@ -5812,16 +5877,60 @@ mod tests {
             &var(
                 "std::__detail::__integer_to_chars_is_unsigned @ charconv.h:48",
                 "true"
-            )
+            ),
+            None
         ));
-        assert!(!shows_variable("Globals", &var("_IO_stdin_used", "1")));
         assert!(!shows_variable(
             "Globals",
-            &var("counter", "<error: empty>")
+            &var("_IO_stdin_used", "1"),
+            None
         ));
-        assert!(shows_variable("Globals", &var("counter", "3")));
-        assert!(shows_variable("Globals", &var("app::_count", "3")));
-        assert!(shows_variable("Locals", &var("__x", "1")));
+        assert!(!shows_variable(
+            "Globals",
+            &var("counter", "<error: empty>"),
+            None
+        ));
+        assert!(shows_variable("Globals", &var("counter", "3"), None));
+        assert!(shows_variable("Globals", &var("app::_count", "3"), None));
+        assert!(shows_variable("Locals", &var("__x", "1"), None));
+    }
+
+    /// At a Zig frame, Globals are the program's own: those in its files'
+    /// namespaces, not the standard library's, which lldb lists by the
+    /// hundred (`debug.Dwarf…`, `heap.debug_allocator…`, `Thread.Mutex…`).
+    #[test]
+    fn a_zig_programs_globals_are_its_own() {
+        let file = |rel: &str| clew_core::fs_scan::FileEntry {
+            abs: std::path::PathBuf::from("/p").join(rel),
+            rel: rel.into(),
+        };
+        let own = zig_namespaces(&[
+            file("cart.zig"),
+            file("src/util/math.zig"),
+            file("build.zig.zon"),
+            file("README.md"),
+        ]);
+        let var = |name: &str| crate::dap::proto::Variable {
+            name: name.into(),
+            value: "1".into(),
+            type_name: None,
+            variables_reference: 0,
+        };
+        for name in ["cart.total", "math.pi", "util.math.pi", "src.main.counter"] {
+            assert!(shows_variable("Globals", &var(name), Some(&own)), "{name}");
+        }
+        for name in [
+            "debug.Dwarf.call_frame.Opcode.lo_inline",
+            "builtin.zig_backend",
+            "Thread.Mutex.Recursive.init",
+            "heap.debug_allocator.DebugAllocator(.{ .stack_trace_frames = 10 }).mutex_init",
+            "test_runner.crippled",
+            "build",
+        ] {
+            assert!(!shows_variable("Globals", &var(name), Some(&own)), "{name}");
+        }
+        // A frame's locals are all its own.
+        assert!(shows_variable("Locals", &var("sum"), Some(&own)));
     }
 
     /// A JavaScript module's and script's own scopes are shown though
@@ -5833,6 +5942,8 @@ mod tests {
         assert!(super::shows_scope("Script", true, 3));
         assert!(!super::shows_scope("Global", true, 4));
         assert!(!super::shows_scope("Registers", true, 5));
+        // Not marked expensive by every lldb-dap: not shown either.
+        assert!(!super::shows_scope("Registers", false, 5));
         assert!(!super::shows_scope("Locals", false, 0));
     }
 
