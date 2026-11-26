@@ -1446,10 +1446,35 @@ impl ProjectCallGraph {
                     (Some(Receiver::Type(ty)), Lang::Elixir | Lang::Erlang) => {
                         !module_names.contains(ty.as_str())
                     }
+                    // A value of a type exactly known and the project's
+                    // none (`new AtomicReference(…)`, `std::vector`): the
+                    // library's methods, but for the project's extensions.
+                    (
+                        Some(Receiver::Type(ty)),
+                        Lang::Java
+                        | Lang::Kotlin
+                        | Lang::Scala
+                        | Lang::CSharp
+                        | Lang::Dart
+                        | Lang::Cpp,
+                    ) => {
+                        let last = ty.rsplit(['.', ':']).next().unwrap_or(ty);
+                        !project_types.contains(last)
+                            && !project_types.contains(ty.as_str())
+                            && !declared_types.contains(last)
+                    }
+                    // Zig's standard library's (`writer: *std.Io.Writer`).
+                    (Some(Receiver::Type(ty)), Lang::Zig) => ty == "std" || ty.starts_with("std."),
                     _ => false,
                 };
+                let extensions_only: Vec<usize>;
                 let targets: &[usize] = if foreign {
-                    &[]
+                    extensions_only = callees
+                        .iter()
+                        .copied()
+                        .filter(|c| extension_nodes.contains(c))
+                        .collect();
+                    &extensions_only
                 } else if narrowed.is_empty() {
                     callees
                 } else {
@@ -1526,12 +1551,9 @@ impl ProjectCallGraph {
                     .copied()
                     .filter(|&i| nodes[i].file == fc.file || imported.contains(&nodes[i].file));
                 for callee in targets.iter().copied().chain(constructed) {
-                    // `client.get(…)`: no value is a test class's.
-                    if cs.method
-                        && cs.receiver.is_none()
-                        && test_method[callee]
-                        && owner[callee] != owner[caller]
-                    {
+                    // `client.get(…)`: no value is a test class's, its own
+                    // class's methods called on another value included.
+                    if cs.method && cs.receiver.is_none() && test_method[callee] {
                         continue;
                     }
                     // A self-call is kept as a callee only (see `finalize`).
@@ -2205,6 +2227,8 @@ fn walk(
     // What each class's fields are declared as, by the class's start and
     // the field's name, read once.
     let mut fields: HashMap<(usize, String), Option<String>> = HashMap::new();
+    // Each function's (or closure's) parameters' names, by its node.
+    let mut parameters: HashMap<usize, Vec<String>> = HashMap::new();
     let places = Places::read(root, spec.fn_kinds);
     while let Some((node, parent, before, enclosing, inner)) = stack.pop() {
         let kind = node.kind();
@@ -2230,6 +2254,9 @@ fn walk(
 
         if spec.call_kinds.contains(&kind)
             && let Some((callee, method)) = callee_name(node, parent, src, lang)
+            // A parameter called (`emit('done')` in `(event, emit) { … }`,
+            // `cb()`) is the value passed, no function of the project's.
+            && (method || !calls_a_parameter(node, &callee, src, lang, &mut parameters))
         {
             // The receiver's name where nothing binds it (Scala's `os`).
             let mut unbound: Option<String> = None;
@@ -2421,6 +2448,192 @@ fn macro_calls(tree: Node, src: &str, caller: Option<&str>, out: &mut Vec<CallSi
             line: token.start_position().row + 1,
         });
     }
+}
+
+/// Whether the bare call `call` of `callee` calls a parameter of a function
+/// or closure around it — in a language whose functions are values, called
+/// by name like a function.
+fn calls_a_parameter(
+    call: Node,
+    callee: &str,
+    src: &str,
+    lang: Lang,
+    parameters: &mut HashMap<usize, Vec<String>>,
+) -> bool {
+    if !matches!(
+        lang,
+        Lang::Dart
+            | Lang::JavaScript
+            | Lang::TypeScript
+            | Lang::Tsx
+            | Lang::Python
+            | Lang::Kotlin
+            | Lang::Scala
+            | Lang::Go
+            | Lang::C
+            | Lang::Cpp
+            | Lang::CSharp
+            | Lang::Zig
+    ) {
+        return false;
+    }
+    let mut at = call.parent();
+    while let Some(node) = at {
+        let names = parameters
+            .entry(node.id())
+            .or_insert_with(|| parameter_names(node, src, lang));
+        if names.iter().any(|n| n == callee) {
+            return true;
+        }
+        at = node.parent();
+    }
+    false
+}
+
+/// The parameter-list kinds of the grammars [`calls_a_parameter`] reads.
+const PARAMETER_LISTS: &[&str] = &[
+    "formal_parameter_list",
+    "formal_parameters",
+    "parameters",
+    "parameter_list",
+    "function_value_parameters",
+    "lambda_parameters",
+    "bindings",
+    "implicit_parameter",
+];
+
+/// The names of the parameters `node` declares, if it is a function or a
+/// closure: its own parameter list's, or its signature's or declarator's
+/// (Dart's `function_signature`, C's `function_declarator`), or an arrow
+/// function's lone parameter (`x => …`).
+fn parameter_names(node: Node, src: &str, lang: Lang) -> Vec<String> {
+    let mut lists: Vec<Node> = Vec::new();
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        let kind = child.kind();
+        if PARAMETER_LISTS.contains(&kind) {
+            lists.push(child);
+        } else if kind.ends_with("signature") || kind.ends_with("declarator") {
+            let mut inner = child.walk();
+            lists.extend(
+                child
+                    .named_children(&mut inner)
+                    .filter(|c| PARAMETER_LISTS.contains(&c.kind())),
+            );
+        }
+    }
+    let mut names = Vec::new();
+    if node.kind() == "arrow_function"
+        && let Some(lone) = node.child_by_field_name("parameter")
+    {
+        names.push(node_text(lone, src).to_string());
+    }
+    for list in lists {
+        let text = node_text(list, src);
+        let text = text
+            .strip_prefix('(')
+            .and_then(|t| t.strip_suffix(')'))
+            .unwrap_or(text);
+        names.extend(split_top_level(text).filter_map(|p| parameter_name(p, lang)));
+    }
+    names
+}
+
+/// `text` split at its commas outside brackets.
+fn split_top_level(text: &str) -> impl Iterator<Item = &str> {
+    let mut depth = 0i32;
+    let mut start = 0;
+    let mut parts = Vec::new();
+    for (i, c) in text.char_indices() {
+        match c {
+            '(' | '[' | '{' | '<' => depth += 1,
+            ')' | ']' | '}' | '>' => depth -= 1,
+            ',' if depth <= 0 => {
+                parts.push(&text[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&text[start..]);
+    parts.into_iter()
+}
+
+/// The name one parameter declares: before its type in a language that
+/// writes the name first (`cb: () -> Unit`, `cb func()`, `*args`), after
+/// it in one that writes the type first (`Emitter<String> emit`, `Action
+/// cb`, `void (*cb)(int)`).
+fn parameter_name(param: &str, lang: Lang) -> Option<String> {
+    let is_name = |c: char| c == '_' || c == '$' || c.is_alphanumeric();
+    // Its default is no part of it.
+    let mut depth = 0i32;
+    let mut end = param.len();
+    for (i, c) in param.char_indices() {
+        match c {
+            '(' | '[' | '{' | '<' => depth += 1,
+            ')' | ']' | '}' | '>' => depth -= 1,
+            '=' if depth <= 0 && !param[i + 1..].starts_with(['=', '>']) => {
+                end = i;
+                break;
+            }
+            _ => {}
+        }
+    }
+    let param = param[..end]
+        .trim()
+        .trim_start_matches(['{', '['])
+        .trim_end_matches(['}', ']']);
+    let name_first = matches!(
+        lang,
+        Lang::Python
+            | Lang::Kotlin
+            | Lang::Scala
+            | Lang::JavaScript
+            | Lang::TypeScript
+            | Lang::Tsx
+            | Lang::Go
+            | Lang::Zig
+    );
+    let name = if name_first {
+        let head = param.split(':').next().unwrap_or(param);
+        head.split_whitespace()
+            .map(|w| w.trim_start_matches(['*', '.', '&']))
+            .find(|w| {
+                !w.is_empty()
+                    && !matches!(
+                        *w,
+                        "val"
+                            | "var"
+                            | "vararg"
+                            | "noinline"
+                            | "crossinline"
+                            | "comptime"
+                            | "noalias"
+                            | "readonly"
+                            | "private"
+                            | "public"
+                            | "protected"
+                            | "override"
+                            | "implicit"
+                            | "using"
+                            | "lazy"
+                    )
+            })?
+            .trim_end_matches('?')
+    } else if let Some(at) = param.find("(*") {
+        // A C function pointer: `void (*cb)(int)`.
+        let rest = &param[at + 2..];
+        &rest[..rest.find(|c: char| !is_name(c)).unwrap_or(rest.len())]
+    } else {
+        let end = param.trim_end_matches(|c: char| !is_name(c));
+        let start = end
+            .char_indices()
+            .rev()
+            .find(|&(_, c)| !is_name(c))
+            .map_or(0, |(i, c)| i + c.len_utf8());
+        &end[start..]
+    };
+    (!name.is_empty() && name.starts_with(|c: char| !c.is_ascii_digit())).then(|| name.to_string())
 }
 
 /// The names a function definition goes by, most preferred first. A
@@ -3216,7 +3429,8 @@ fn receiver_of(
     }
     match now {
         Said::Type(ty, exact) => {
-            if exact || matches!(lang, Lang::Go | Lang::Rust) {
+            // Go, Rust and Zig have no subtypes: a declared type is exact.
+            if exact || matches!(lang, Lang::Go | Lang::Rust | Lang::Zig) {
                 return Some(Receiver::Type(ty));
             }
             // Declared as the type: it or a subtype.
@@ -3783,12 +3997,24 @@ fn binding_at(head: &str, after: &str, lang: Lang) -> Binding {
     } else {
         None
     };
+    // A Zig value the standard library makes (`std.ArrayList(T).init(a)`,
+    // `try std.json.parseFromSlice(…)`): its methods are the library's.
+    if lang == Lang::Zig
+        && let Some(rhs) = assigned
+        && rhs
+            .trim_start()
+            .trim_start_matches("try ")
+            .trim_start()
+            .starts_with("std.")
+    {
+        return Binding::Typed("std".to_string(), true);
+    }
     if let Some(rhs) = assigned {
         return match constructed_type(rhs, lang) {
             Some(ty) => Binding::Typed(ty, true),
             // A declaration with a value of no known type still says its
             // own: `Cart cart = make();`.
-            None => match trailing_type(head) {
+            None => match declared_type(head, lang) {
                 Some(ty) if declares(head, lang) => Binding::Typed(ty, false),
                 _ => match factory_type(rhs, lang) {
                     Some(ty) => Binding::Typed(ty, false),
@@ -3804,6 +4030,14 @@ fn binding_at(head: &str, after: &str, lang: Lang) -> Binding {
         let text = text.strip_prefix("mut ").unwrap_or(text).trim_start();
         if text.starts_with("dyn ") || text.starts_with("impl ") {
             return Binding::Unknown;
+        }
+        // Zig's type is a path, the standard library's whole
+        // (`*std.Io.Writer`), a project's by its struct (`*Analyser`).
+        if lang == Lang::Zig {
+            return match zig_type_name(rest) {
+                Some(ty) => Binding::Typed(ty, false),
+                None => Binding::Unknown,
+            };
         }
         // Rust's own types are named in lower case (`&str`, `u8`), and a
         // path names its last segment.
@@ -3821,9 +4055,17 @@ fn binding_at(head: &str, after: &str, lang: Lang) -> Binding {
     // A declaration names the type before the name: `Cart cart;`.
     if after.starts_with([';', ',', ')'])
         && declares(head, lang)
-        && let Some(ty) = trailing_type(head)
+        && let Some(ty) = declared_type(head, lang)
     {
         return Binding::Typed(ty, false);
+    }
+    // C++ builds a value where it declares it: `Formatter f("%+");`,
+    // `std::vector<int> v{1, 2};` — exactly that type.
+    if lang == Lang::Cpp
+        && after.starts_with(['(', '{'])
+        && let Some(ty) = declared_type(head, lang)
+    {
+        return Binding::Typed(ty, true);
     }
     // Go writes the type after the name: `(c *Cart)`, `var c Cart`.
     if lang == Lang::Go
@@ -3862,7 +4104,71 @@ fn declares_its_own(head: &str, after: &str, lang: Lang) -> bool {
 /// writes one before the name (`Cart`, `final Cart`, `List<Cart>`).
 fn declares(head: &str, lang: Lang) -> bool {
     !matches!(lang, Lang::Python | Lang::Ruby | Lang::Go | Lang::Rust)
-        && trailing_type(head).is_some()
+        && declared_type(head, lang).is_some()
+}
+
+/// The type a declaration names before its name ([`trailing_type`]) — in
+/// C++ also one in lower case where it is a namespace's or a template's
+/// (`std::vector<int>`, `spdlog::pattern_formatter`), as the standard
+/// library and many projects name their types.
+fn declared_type(head: &str, lang: Lang) -> Option<String> {
+    trailing_type(head).or_else(|| match lang {
+        Lang::Cpp => cpp_trailing_type(head),
+        _ => None,
+    })
+}
+
+/// A C++ type before a declared name, written in lower case: qualified by
+/// a namespace or given template arguments, so no keyword or variable —
+/// `std::vector<basic_format_arg<Context>>` (`vector`), `const
+/// fmt::memory_buffer&` (`memory_buffer`).
+fn cpp_trailing_type(head: &str) -> Option<String> {
+    let mut head = head.trim_end().trim_end_matches(['*', '&', ' ']);
+    let templated = head.ends_with('>');
+    if templated {
+        let mut depth = 0usize;
+        let mut cut = None;
+        for (i, c) in head.char_indices().rev() {
+            match c {
+                '>' => depth += 1,
+                '<' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        cut = Some(i);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        head = head[..cut?].trim_end();
+    }
+    let start = head
+        .char_indices()
+        .rev()
+        .find(|&(_, c)| !(c == '_' || c == ':' || c.is_alphanumeric()))
+        .map_or(0, |(i, c)| i + c.len_utf8());
+    let qualified = head[start..].trim_start_matches(':');
+    let last = qualified.rsplit("::").next()?;
+    let named = last.starts_with(|c: char| c == '_' || c.is_alphabetic())
+        && !matches!(
+            last,
+            "return"
+                | "delete"
+                | "new"
+                | "throw"
+                | "case"
+                | "else"
+                | "goto"
+                | "sizeof"
+                | "co_return"
+                | "co_yield"
+                | "co_await"
+                | "typename"
+                | "template"
+        );
+    // Named by its last segment, as its methods' class is.
+    (named && (qualified.contains("::") || templated)).then(|| last.to_string())
 }
 
 /// The type a constructor expression builds: `Cart(…)`, `Cart { … }`,
@@ -3989,6 +4295,38 @@ fn leading_type(text: &str, lang: Lang) -> Option<String> {
         .unwrap_or(text.len());
     let ty = &text[..end];
     type_like(ty, lang).then(|| ty.to_string())
+}
+
+/// The type a Zig annotation names: past pointers, optionals, slices and
+/// `const` (`*const std.Io.Writer`, `?*Analyser`, `[]const u8`), its path —
+/// the standard library's whole (`std.Io.Writer`), a project's struct
+/// (`Analyser`, `DocumentStore.Handle`). `None` for a builtin (`u8`,
+/// `anytype`) or a type computed (`@This()`).
+fn zig_type_name(text: &str) -> Option<String> {
+    let mut t = text.trim_start();
+    loop {
+        let before = t;
+        for prefix in ["*", "?", "[]", "const ", "volatile "] {
+            if let Some(rest) = t.strip_prefix(prefix) {
+                t = rest.trim_start();
+            }
+        }
+        if let Some(rest) = t.strip_prefix('[')
+            && let Some(end) = rest.find(']')
+        {
+            t = rest[end + 1..].trim_start();
+        }
+        if t == before {
+            break;
+        }
+    }
+    let end = t
+        .find(|c: char| !(c == '_' || c == '.' || c.is_alphanumeric()))
+        .unwrap_or(t.len());
+    let path = t[..end].trim_end_matches('.');
+    let last = path.rsplit('.').next().unwrap_or(path);
+    (path == "std" || path.starts_with("std.") || last.starts_with(char::is_uppercase))
+        .then(|| path.to_string())
 }
 
 /// The type a Rust type names, as the one whose methods a value of it has:
@@ -7679,6 +8017,123 @@ def main():
             "{:?}",
             edges(&g)
         );
+    }
+
+    /// A parameter called is the value passed, no function of the
+    /// project's that shares its name: bloc's `emit('done')` in an event
+    /// handler `(event, emit) { … }` is the handler's emitter, not
+    /// `Bloc.emit`; so is a callback in every language whose functions are
+    /// values.
+    #[test]
+    fn a_parameter_called_is_no_project_function() {
+        let cases: &[(&str, &str)] = &[
+            (
+                "/p/lib/counter.dart",
+                "class Bloc {\n  void emit(int s) {}\n}\nclass Counter extends Bloc {\n  void setUp() {\n    on((event, emit) {\n      emit(1);\n    });\n  }\n}\n",
+            ),
+            (
+                "/p/src/run.ts",
+                "function emit(s: number) {}\nexport function run(emit: (s: number) => void) {\n  emit(1);\n}\nexport const go = (emit) => emit(2);\n",
+            ),
+            (
+                "/p/src/run.py",
+                "def emit(s):\n    pass\n\ndef run(emit, *rest):\n    emit(1)\n",
+            ),
+            (
+                "/p/src/Run.kt",
+                "package p\n\nfun emit(s: Int) {}\n\nfun run(emit: (Int) -> Unit) {\n    emit(1)\n}\n",
+            ),
+            (
+                "/p/src/run.go",
+                "package p\n\nfunc emit(s int) {}\n\nfunc run(emit func(int)) {\n\temit(1)\n}\n",
+            ),
+            (
+                "/p/src/run.c",
+                "void emit(int s) {}\n\nvoid run(void (*emit)(int)) {\n    emit(1);\n}\n",
+            ),
+            (
+                "/p/src/Run.cs",
+                "namespace P;\n\nclass Run\n{\n    void Emit(int s) {}\n    void Go(Action<int> Emit)\n    {\n        Emit(1);\n    }\n}\n",
+            ),
+        ];
+        for (file, src) in cases {
+            let g = graph(&[(file, src)]);
+            let e = edges(&g);
+            assert!(
+                !e.iter()
+                    .any(|(_, b)| b.ends_with(":emit") || b.ends_with(":Emit")),
+                "{file}: {e:?}"
+            );
+        }
+        // A parameter's default is no parameter: `compute()` in it, and in
+        // the body, is the function's.
+        let g = graph(&[(
+            "/p/src/defaults.py",
+            "def compute():\n    return 1\n\ndef run(x=compute()):\n    compute()\n",
+        )]);
+        assert!(has(
+            &g,
+            "/p/src/defaults.py:run",
+            "/p/src/defaults.py:compute"
+        ));
+    }
+
+    /// A value of a type the project does not declare has the library's
+    /// methods: a C++ field declared as `std::vector<…>`, a Zig parameter
+    /// of `*std.Io.Writer`, a Java `AtomicReference` built — none reaches
+    /// the project's `size`, `writeAll` or `get`. A C++ local built where it is declared
+    /// (`spdlog::pattern_formatter f("%+");`) is its class's exactly. And a
+    /// test class's own method is never another value's.
+    #[test]
+    fn a_library_typed_value_calls_no_project_method() {
+        let g = graph(&[
+            (
+                "/p/include/store.h",
+                "#include <vector>\nclass store {\n  std::vector<int> data_;\n public:\n  int size() const { return data_.size(); }\n};\n",
+            ),
+            (
+                "/p/include/pattern_formatter.h",
+                "namespace spdlog {\nclass pattern_formatter {\n public:\n  void format(int msg) {}\n};\nclass custom_flag {\n public:\n  void format(int msg) {}\n};\n}\nvoid use() {\n  spdlog::pattern_formatter formatter(\"%+\");\n  formatter.format(1);\n}\n",
+            ),
+            (
+                "/p/src/print.zig",
+                "const std = @import(\"std\");\nconst Escaping = struct {\n    fn writeAll(self: *Escaping, s: []const u8) void {}\n};\nfn render(writer: *std.Io.Writer) !void {\n    try writer.writeAll(\"x\");\n}\n",
+            ),
+            (
+                "/p/src/main/java/p/Pool.java",
+                "package p;\n\nclass Pool {\n  Object get() { return null; }\n  void park() {\n    AtomicReference<Object> signal = new AtomicReference<>();\n    signal.get();\n  }\n}\n",
+            ),
+            (
+                "/p/src/test/kotlin/p/StatusCodesTest.kt",
+                "package p\n\nclass StatusCodesTest {\n    @Test\n    fun put() {\n        client.put(\"/x\")\n    }\n}\n",
+            ),
+        ]);
+        let e = edges(&g);
+        for (from, to) in [
+            ("/p/include/store.h:size", "/p/include/store.h:size"),
+            ("/p/src/print.zig:render", "/p/src/print.zig:writeAll"),
+            (
+                "/p/src/main/java/p/Pool.java:park",
+                "/p/src/main/java/p/Pool.java:get",
+            ),
+            (
+                "/p/src/test/kotlin/p/StatusCodesTest.kt:put",
+                "/p/src/test/kotlin/p/StatusCodesTest.kt:put",
+            ),
+        ] {
+            assert!(!has(&g, from, to), "{from} -> {to}: {e:?}");
+        }
+        let formats: Vec<usize> = g
+            .callees_of(
+                g.id_of(Path::new("/p/include/pattern_formatter.h"), "use")
+                    .unwrap(),
+            )
+            .iter()
+            .copied()
+            .filter(|&c| g.node(c).name == "format")
+            .collect();
+        assert_eq!(formats.len(), 1, "{e:?}");
+        assert_eq!(g.node(formats[0]).line, 4, "{e:?}");
     }
 
     /// An Elixir file's `use`s and `import`s, the multi-alias form too.
