@@ -1865,7 +1865,10 @@ impl ProjectCallGraph {
                     found.extend(applies_of(callee_name).into_iter().filter(in_package));
                     if found.len() <= MAX_CANDIDATES {
                         for callee in found {
-                            if edges.len() < MAX_EDGES && (in_test || !test_node[callee]) {
+                            if edges.len() < MAX_EDGES
+                                && (in_test || !test_node[callee])
+                                && facts[callee].takes(cs.arity)
+                            {
                                 edges.insert((caller, callee));
                             }
                         }
@@ -1898,7 +1901,10 @@ impl ProjectCallGraph {
                         .unwrap_or_default();
                     if found.len() <= MAX_CANDIDATES {
                         for callee in found {
-                            if edges.len() < MAX_EDGES && (in_test || !test_node[callee]) {
+                            if edges.len() < MAX_EDGES
+                                && (in_test || !test_node[callee])
+                                && facts[callee].takes(cs.arity)
+                            {
                                 edges.insert((caller, callee));
                             }
                         }
@@ -1915,7 +1921,10 @@ impl ProjectCallGraph {
                         .collect();
                     if !found.is_empty() && found.len() <= MAX_CANDIDATES {
                         for callee in found {
-                            if edges.len() < MAX_EDGES && (in_test || !test_node[callee]) {
+                            if edges.len() < MAX_EDGES
+                                && (in_test || !test_node[callee])
+                                && facts[callee].takes(cs.arity)
+                            {
                                 edges.insert((caller, callee));
                             }
                         }
@@ -1964,7 +1973,10 @@ impl ProjectCallGraph {
                         (true, _) => callees.clone(),
                     };
                     for callee in targets {
-                        if edges.len() < MAX_EDGES && (in_test || !test_node[callee]) {
+                        if edges.len() < MAX_EDGES
+                            && (in_test || !test_node[callee])
+                            && facts[callee].takes(cs.arity)
+                        {
                             edges.insert((caller, callee));
                         }
                     }
@@ -2056,7 +2068,10 @@ impl ProjectCallGraph {
                         found.clear();
                     }
                     for callee in found {
-                        if edges.len() < MAX_EDGES && (in_test || !test_node[callee]) {
+                        if edges.len() < MAX_EDGES
+                            && (in_test || !test_node[callee])
+                            && facts[callee].takes(cs.arity)
+                        {
                             edges.insert((caller, callee));
                         }
                     }
@@ -2221,7 +2236,10 @@ impl ProjectCallGraph {
                         continue;
                     }
                     // A self-call is kept as a callee only (see `finalize`).
-                    if edges.len() < MAX_EDGES && (in_test || !test_node[callee]) {
+                    if edges.len() < MAX_EDGES
+                        && (in_test || !test_node[callee])
+                        && facts[callee].takes(cs.arity)
+                    {
                         edges.insert((caller, callee));
                     }
                 }
@@ -5456,9 +5474,11 @@ fn type_like(name: &str, lang: Lang) -> bool {
 }
 
 /// Containers a method belongs to, by node kind, named by their `name`
-/// field. Traits, interfaces, protocols and mixin modules are left out: a
-/// call on `self` in one of their methods may reach any implementation.
+/// field. An interface's methods are its own too (Java's, C#'s, PHP's):
+/// a value declared as it calls them, or an implementation's override,
+/// as the type's family reaches its subtypes.
 const CLASS_KINDS: &[&str] = &[
+    "interface_declaration",
     "class_definition",
     "class_declaration",
     "class",
@@ -9533,6 +9553,54 @@ def main():
     #[test]
     fn an_empty_name_has_no_parameter_list() {
         assert!(parameter_list("fun Foo.(x: Int) = x", "Foo.", Lang::Kotlin).is_none());
+    }
+
+    /// A value declared as an interface calls the interface's method (or an
+    /// implementation's), never a same-named method of the class around the
+    /// call; and a call on a declared type reaches only the overloads of its
+    /// argument count.
+    #[test]
+    fn a_declared_interface_and_its_overloads_are_reached_exactly() {
+        let g = graph(&[
+            (
+                "/p/src/main/java/p/VetRepository.java",
+                "package p;\n\npublic interface VetRepository {\n  Object findAll();\n}\n",
+            ),
+            (
+                "/p/src/test/java/p/PostgresIntegrationTests.java",
+                "package p;\n\nclass PostgresIntegrationTests {\n  private VetRepository vets;\n\n  void findAll() {\n    vets.findAll();\n  }\n}\n",
+            ),
+            (
+                "/p/src/main/java/p/JsonAdapter.java",
+                "package p;\n\nabstract class JsonAdapter {\n  String toJson(Object value) { return null; }\n  abstract void toJson(Object writer, Object value);\n}\n",
+            ),
+            (
+                "/p/src/main/java/p/Use.java",
+                "package p;\n\nclass Use {\n  void run(JsonAdapter adapter) {\n    adapter.toJson(1);\n  }\n}\n",
+            ),
+        ]);
+        let e = edges(&g);
+        let test = "/p/src/test/java/p/PostgresIntegrationTests.java:findAll";
+        assert!(
+            has(&g, test, "/p/src/main/java/p/VetRepository.java:findAll"),
+            "{e:?}"
+        );
+        let to_itself = g
+            .callees_of(
+                g.id_of(
+                    Path::new("/p/src/test/java/p/PostgresIntegrationTests.java"),
+                    "findAll",
+                )
+                .unwrap(),
+            )
+            .iter()
+            .any(|&c| g.node(c).file.ends_with("PostgresIntegrationTests.java"));
+        assert!(!to_itself, "{e:?}");
+        let run = g
+            .id_of(Path::new("/p/src/main/java/p/Use.java"), "run")
+            .unwrap();
+        let lines: Vec<usize> = g.callees_of(run).iter().map(|&c| g.node(c).line).collect();
+        assert_eq!(lines, [4], "{e:?}");
     }
 
     /// An Elixir file's `use`s and `import`s, the multi-alias form too.

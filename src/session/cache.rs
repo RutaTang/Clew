@@ -134,7 +134,8 @@ use crate::incremental::Version;
 /// [`CachedCalls::call_arities`]).
 /// 34: each function's declared return type ([`CachedCalls::returns`]),
 /// and a value assigned from a call typed by it.
-pub(crate) const CACHE_VERSION: u32 = 34;
+/// 35: an interface's methods are its own ([`CachedCalls::owners`]).
+pub(crate) const CACHE_VERSION: u32 = 35;
 
 /// A cached symbol (the index entry minus the paths, which are reconstructed
 /// from the project root + relative path on load).
