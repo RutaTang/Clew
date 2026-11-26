@@ -1604,20 +1604,36 @@ pub fn debug_test(
                 .file_stem()
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            let call = match (whole_file, runnable.name.ends_with("_test_")) {
-                // Code, not words: put together, not formatted.
-                (true, _) => ["eunit:test(", &erlang_atom(&module), ", [verbose])"].concat(),
-                (false, true) => format!(
-                    "eunit:test({{generator, {}, {}}}, [verbose])",
-                    erlang_atom(&module),
-                    erlang_atom(&runnable.name)
+            // Code, not words: put together, not formatted.
+            let m = erlang_atom(&module);
+            let tests = match (whole_file, runnable.name.ends_with("_test_")) {
+                // Each of its tests, held: a timeout around the module
+                // is not its tests' (they keep EUnit's five seconds).
+                (true, _) => [
+                    "[",
+                    &eunit_held(
+                        &[
+                            "case lists:suffix(\"_test_\", atom_to_list(F)) of true -> {generator, ",
+                            &m,
+                            ", F}; false -> {test, ",
+                            &m,
+                            ", F} end",
+                        ]
+                        .concat(),
+                    ),
+                    " || {F, 0} <- ",
+                    &m,
+                    ":module_info(exports), lists:suffix(\"_test\", atom_to_list(F)) orelse lists:suffix(\"_test_\", atom_to_list(F))]",
+                ]
+                .concat(),
+                (false, true) => eunit_held(
+                    &["{generator, ", &m, ", ", &erlang_atom(&runnable.name), "}"].concat(),
                 ),
-                (false, false) => format!(
-                    "eunit:test({{test, {}, {}}}, [verbose])",
-                    erlang_atom(&module),
-                    erlang_atom(&runnable.name)
-                ),
+                (false, false) => {
+                    eunit_held(&["{test, ", &m, ", ", &erlang_atom(&runnable.name), "}"].concat())
+                }
             };
+            let call = ["eunit:test(", &tests, ", [verbose])"].concat();
             // In its rebar3 project, where its dependencies are built; rebar3
             // itself is not needed.
             let cwd = above(root, file, &["rebar.config"])
@@ -1752,8 +1768,11 @@ pub fn debug_test(
                     target = elixir_string(&format!("{rel}:{}", runnable.line))
                 ),
             };
+            // ExUnit fails a test after a minute, and a test paused at a
+            // breakpoint failed under the person reading its frame: held
+            // as long as it is read, unless the test sets its own.
             let run = format!(
-                "{filter}%{{failures: failures}} = ExUnit.run()\nif failures > 0, do: 1, else: 0"
+                "ExUnit.configure(timeout: :infinity)\n{filter}%{{failures: failures}} = ExUnit.run()\nif failures > 0, do: 1, else: 0"
             );
             let mut debug = test("elixir", file.to_path_buf(), Vec::new(), project.clone());
             debug.launch.insert("language".into(), "elixir".into());
@@ -1842,6 +1861,14 @@ pub fn debug_test(
         }
         _ => Err(format!("{rel} has no tests to run", rel = lang)),
     }
+}
+
+/// EUnit's `test` held as long as it is read: EUnit cancels a test after
+/// five seconds, and a test paused at a breakpoint was cancelled under the
+/// person reading its frame ("*timed out*"). A day, as EUnit takes no
+/// `infinity`; a test's own `{timeout, …}` inside still holds.
+fn eunit_held(test: &str) -> String {
+    ["{timeout, 86400, ", test, "}"].concat()
 }
 
 /// `name` as an Erlang atom, quoted.
@@ -3608,13 +3635,26 @@ mod tests {
         assert_eq!((d.adapter, &d.cwd), ("erlang", &root.join("erl")));
         assert_eq!(
             d.launch["run"],
-            "eunit:test({test, 'cart_tests', 'add_test'}, [verbose])"
+            "eunit:test({timeout, 86400, {test, 'cart_tests', 'add_test'}}, [verbose])"
         );
         assert_eq!(d.launch["defines"], serde_json::json!(["TEST"]));
         let d = debug("erlang", &erl, 4);
         assert_eq!(
             d.launch["run"],
-            "eunit:test({generator, 'cart_tests', 'adds_test_'}, [verbose])"
+            "eunit:test({timeout, 86400, {generator, 'cart_tests', 'adds_test_'}}, [verbose])"
+        );
+        // The whole file: each of its tests held, as a timeout around the
+        // module is not its tests'.
+        let run = debug("erlang", &erl, 1).launch["run"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            run.starts_with("eunit:test([{timeout, 86400, case ")
+                && run.contains("{test, 'cart_tests', F}")
+                && run.contains("{generator, 'cart_tests', F}")
+                && run.contains("'cart_tests':module_info(exports)"),
+            "{run}"
         );
         let suite = write("erl/test/cart_SUITE.erl", "-module(cart_SUITE).\n");
         assert_eq!(test_debugger(&root, &suite, "erlang"), None);
@@ -3643,6 +3683,11 @@ mod tests {
             "{run}"
         );
         assert!(run.ends_with("if failures > 0, do: 1, else: 0"), "{run}");
+        // Held as long as it is read: ExUnit fails a test after a minute.
+        assert!(
+            run.starts_with("ExUnit.configure(timeout: :infinity)\n"),
+            "{run}"
+        );
     }
 
     /// Each program debugged runs as Run runs it, under its language's
