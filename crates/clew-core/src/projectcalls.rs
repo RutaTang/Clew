@@ -1202,6 +1202,65 @@ fn ruby_mixins(body: &str) -> Vec<String> {
     out
 }
 
+/// How C#'s header `text` writes the base `base`: with type arguments,
+/// named with their count (`IRequest`1` for `IRequest<TResponse>`), or
+/// without — both, where it writes both.
+fn csharp_written_bases(text: &str, base: &str) -> Vec<String> {
+    let header = text.split('{').next().unwrap_or(text);
+    let header = header.split(" where ").next().unwrap_or(header);
+    let Some((_, list)) = header.split_once(':') else {
+        return vec![base.to_string()];
+    };
+    let mut out: Vec<String> = Vec::new();
+    for part in split_top_level(list) {
+        let part = part.trim();
+        let name_end = part.find(['<', '(']).unwrap_or(part.len());
+        let name = part[..name_end].trim();
+        if name.rsplit('.').next() != Some(base) {
+            continue;
+        }
+        let written = match generic_arity(&part[name_end..]) {
+            Some(n) => format!("{base}`{n}"),
+            None => base.to_string(),
+        };
+        if !out.contains(&written) {
+            out.push(written);
+        }
+    }
+    if out.is_empty() {
+        out.push(base.to_string());
+    }
+    out
+}
+
+/// How many type arguments `rest` — what follows a type's name — gives it
+/// (`<A, B>` gives 2); `None` for none.
+fn generic_arity(rest: &str) -> Option<usize> {
+    let inner = rest.trim_start().strip_prefix('<')?;
+    let mut depth = 1usize;
+    let mut count = 1usize;
+    for c in inner.chars() {
+        match c {
+            '<' | '(' | '[' => depth += 1,
+            '>' | ')' | ']' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(count);
+                }
+            }
+            ',' if depth == 1 => count += 1,
+            _ => {}
+        }
+    }
+    None
+}
+
+/// A type's name without the count of its type arguments (`IRequest` for
+/// C#'s `IRequest`1`).
+fn without_arity(name: &str) -> &str {
+    name.split('`').next().unwrap_or(name)
+}
+
 /// A file's [`FileContext`], read off its source and outline.
 /// A file's types with its type aliases among them, each an alias of the
 /// type it names as its one base: `using daily_file_sink_st =
@@ -1337,6 +1396,16 @@ pub fn context_in(src: &str, lang: Lang, symbols: &[Located]) -> FileContext {
                         bases.extend(crate::heritage::inherited_names(header, Some(lang.key())));
                     }
                 }
+            }
+            // C#'s `IRequest` and `IRequest<T>` are two types: a base
+            // written with type arguments is named with their count
+            // (`IRequest`1`), as overloads are told apart by it (see
+            // `generic_arity`).
+            if lang == Lang::CSharp {
+                bases = bases
+                    .into_iter()
+                    .flat_map(|b| csharp_written_bases(&text, &b))
+                    .collect();
             }
             bases.retain(|b| *b != l.symbol.name);
             bases.dedup();
@@ -2102,22 +2171,31 @@ impl ProjectCallGraph {
             .collect();
         // The type hierarchy, by name: each type's bases, each base's
         // subtypes, and every type the project declares.
+        // (C#'s bases by their type arguments' count too, `IRequest`1`:
+        // what an argument passes as — see `generic_arity`.)
         let mut bases_of: HashMap<&str, Vec<&str>> = HashMap::new();
+        let mut exact_bases_of: HashMap<&str, Vec<&str>> = HashMap::new();
         let mut subtypes_of: HashMap<&str, Vec<&str>> = HashMap::new();
         let mut declared_types: HashSet<&str> = HashSet::new();
         for f in files.iter().copied() {
             for (ty, bases) in &f.context.types {
                 declared_types.insert(ty.as_str());
                 for base in bases {
-                    bases_of.entry(ty.as_str()).or_default().push(base.as_str());
-                    subtypes_of
-                        .entry(base.as_str())
+                    exact_bases_of
+                        .entry(ty.as_str())
                         .or_default()
-                        .push(ty.as_str());
+                        .push(base.as_str());
+                    let base = without_arity(base);
+                    bases_of.entry(ty.as_str()).or_default().push(base);
+                    subtypes_of.entry(base).or_default().push(ty.as_str());
                 }
             }
         }
-        for list in bases_of.values_mut().chain(subtypes_of.values_mut()) {
+        for list in bases_of
+            .values_mut()
+            .chain(subtypes_of.values_mut())
+            .chain(exact_bases_of.values_mut())
+        {
             list.sort_unstable();
             list.dedup();
         }
@@ -2174,6 +2252,30 @@ impl ProjectCallGraph {
                 out.retain(|&c| !facts[c].bodyless);
             }
             out
+        };
+        // Whether the type `child` has `base` above it, as written: C#'s
+        // `Ping : IRequest<Pong>` is an `IRequest`1`, no `IRequest`.
+        let descends_exactly = |child: &str, base: &str| -> bool {
+            let child = without_arity(child);
+            let mut level: Vec<&str> = vec![child];
+            let mut seen: HashSet<&str> = HashSet::from([child]);
+            for _ in 0..12 {
+                let next: Vec<&str> = level
+                    .iter()
+                    .flat_map(|t| exact_bases_of.get(without_arity(t)))
+                    .flatten()
+                    .copied()
+                    .filter(|b| seen.insert(b))
+                    .collect();
+                if next.contains(&base) {
+                    return true;
+                }
+                if next.is_empty() {
+                    return false;
+                }
+                level = next;
+            }
+            false
         };
         // Whether the type `child` has `base` above it.
         let descends = |child: &str, base: &str| -> bool {
@@ -2473,6 +2575,17 @@ impl ProjectCallGraph {
             .iter()
             .map(|n| parameters.get(&(n.file.as_path(), n.line)).copied())
             .collect();
+        // C#'s type names written with type arguments somewhere (a base's, a
+        // parameter's: `IRequest<T>`): an argument of the name with none
+        // known (a variable's type, read without them) may be of either.
+        let generic_named: HashSet<&str> = node_parameters
+            .iter()
+            .flatten()
+            .flat_map(|kinds| kinds.split(','))
+            .chain(exact_bases_of.values().flatten().copied())
+            .filter(|k| k.contains('`'))
+            .map(|k| without_arity(k.trim_start_matches('T')))
+            .collect();
         // (The name, its owner, and a free function's file.)
         type Family<'k> = (&'k str, Option<&'k str>, Option<&'k Path>);
         let mut overloads: HashMap<Family, Vec<usize>> = HashMap::new();
@@ -2592,7 +2705,7 @@ impl ProjectCallGraph {
                     arguments
                         .split(',')
                         .zip(params.split(','))
-                        .all(|(a, p)| passes(a, p, lang, &declared, &descends))
+                        .all(|(a, p)| passes(a, p, lang, &declared, &descends_exactly))
                 })
             };
             let file = owner[callee]
@@ -2626,11 +2739,16 @@ impl ProjectCallGraph {
                                 // (A nullable mark trimmed, a type parameter's
                                 // `?` is nothing.)
                                 let (a, p) = (a.trim_end_matches('?'), p.trim_end_matches('?'));
-                                if a == p {
+                                let either = lang == Lang::CSharp
+                                    && !a.contains('`')
+                                    && generic_named.contains(&a[1..])
+                                    && without_arity(p) == a;
+                                if a == p && !either {
                                     2
-                                } else if p.is_empty()
+                                } else if either
+                                    || p.is_empty()
                                     || p.strip_prefix('T')
-                                        .is_some_and(|class| descends(&a[1..], class))
+                                        .is_some_and(|class| descends_exactly(&a[1..], class))
                                 {
                                     1
                                 } else {
@@ -3035,7 +3153,34 @@ impl ProjectCallGraph {
                     && let Some(ty) = wanted
                     && matches!(cs.receiver, Some(Receiver::Own | Receiver::Declared(_)))
                 {
-                    let found = family(ty, callee_name, true);
+                    let mut found = family(ty, callee_name, true);
+                    // Classes of one name in several files (a library's
+                    // twin modules: `exposed-dao`'s `Entity` and
+                    // `exposed-dao-r2dbc`'s): of each name, the ones this
+                    // file sees, where it sees one.
+                    let visible = |c: usize| nodes[c].file == fc.file || site.sees(&nodes[c].file);
+                    let twins: HashSet<&str> = {
+                        let mut files_of: HashMap<&str, HashSet<&Path>> = HashMap::new();
+                        for &c in &found {
+                            if let Some(o) = owner[c] {
+                                files_of
+                                    .entry(o)
+                                    .or_default()
+                                    .insert(nodes[c].file.as_path());
+                            }
+                        }
+                        files_of
+                            .into_iter()
+                            .filter(|(_, files)| files.len() > 1)
+                            .map(|(o, _)| o)
+                            .collect()
+                    };
+                    for twin in twins {
+                        let of_twin = |c: &usize| owner[*c] == Some(twin);
+                        if found.iter().filter(|c| of_twin(c)).any(|&c| visible(c)) {
+                            found.retain(|c| !of_twin(c) || visible(*c));
+                        }
+                    }
                     let declared_here = declared_types
                         .contains(ty.rsplit(['.', ':']).next().unwrap_or(ty))
                         || project_types.contains(ty);
@@ -3901,6 +4046,45 @@ struct LangSpec {
     /// arguments tree-sitter does not parse as expressions — without this
     /// `assert_eq!(parse(x), …)` and `vec![build()]` hid their calls.
     macro_calls: bool,
+    /// Closures: no callers of their own (their calls are the function's
+    /// around them), but where the names a call's receiver may be are bound
+    /// — a test's `var request = Request(…)` in `test('b', () { … })` is no
+    /// sibling test's `request`; a name it does not bind, the function's
+    /// around it.
+    scope_kinds: &'static [&'static str],
+}
+
+/// Whether a name's type in `lang` is fixed where it is declared (or
+/// inferred), whatever is later assigned to it.
+fn statically_typed(lang: Lang) -> bool {
+    matches!(
+        lang,
+        Lang::Dart
+            | Lang::Kotlin
+            | Lang::Java
+            | Lang::Scala
+            | Lang::CSharp
+            | Lang::Go
+            | Lang::C
+            | Lang::Cpp
+            | Lang::Rust
+            | Lang::Zig
+            | Lang::TypeScript
+            | Lang::Tsx
+    )
+}
+
+/// Each language's closures (see [`LangSpec::scope_kinds`]).
+fn closure_kinds(lang: Lang) -> &'static [&'static str] {
+    match lang {
+        Lang::Dart => &["function_expression_body"],
+        Lang::Kotlin => &["lambda_literal"],
+        Lang::Java | Lang::Scala | Lang::Cpp => &["lambda_expression"],
+        Lang::CSharp => &["lambda_expression", "anonymous_method_expression"],
+        Lang::Go => &["func_literal"],
+        Lang::Ruby => &["do_block", "block"],
+        _ => &[],
+    }
 }
 
 fn lang_spec(lang: Lang) -> Option<LangSpec> {
@@ -3909,6 +4093,7 @@ fn lang_spec(lang: Lang) -> Option<LangSpec> {
         call_kinds,
         skip_kinds: &[],
         macro_calls: false,
+        scope_kinds: closure_kinds(lang),
     };
     Some(match lang {
         Lang::Rust => LangSpec {
@@ -3916,6 +4101,7 @@ fn lang_spec(lang: Lang) -> Option<LangSpec> {
             call_kinds: &["call_expression"],
             skip_kinds: &["macro_definition", "attribute_item", "inner_attribute_item"],
             macro_calls: true,
+            scope_kinds: &[],
         },
         Lang::Python => spec(&["function_definition"], &["call"]),
         Lang::JavaScript | Lang::TypeScript | Lang::Tsx => spec(
@@ -4270,7 +4456,13 @@ fn walk(
     let mut fields: HashMap<(usize, String), Option<String>> = HashMap::new();
     // Each function's (or closure's) parameters' names, by its node.
     let mut parameters: HashMap<usize, Vec<String>> = HashMap::new();
-    let places = Places::read(root, spec.fn_kinds);
+    let place_kinds: Vec<&str> = spec
+        .fn_kinds
+        .iter()
+        .chain(spec.scope_kinds)
+        .copied()
+        .collect();
+    let places = Places::read(root, &place_kinds);
     while let Some((node, parent, before, enclosing, inner)) = stack.pop() {
         let kind = node.kind();
         if spec.skip_kinds.contains(&kind) {
@@ -4287,7 +4479,7 @@ fn walk(
             None
         };
         let current = own.or(enclosing);
-        let inner = if spec.fn_kinds.contains(&kind) {
+        let inner = if spec.fn_kinds.contains(&kind) || spec.scope_kinds.contains(&kind) {
             Some(node.start_byte())
         } else {
             inner
@@ -4755,11 +4947,7 @@ fn argument_kind(
         return type_kind(&ty, lang);
     }
     if is_plain_name(t) {
-        let places = scope.places;
-        let said = bindings
-            .entry((scope.from, t.to_string()))
-            .or_insert_with(|| Bindings::from(scope.from, places))
-            .said_before(call.start_byte(), t, scope, src, lang);
+        let (_, said) = said_around(t, call.start_byte(), scope, src, lang, bindings);
         if let Said::Type(ty, _) = said
             && !ty.starts_with(RETURNED)
         {
@@ -4767,6 +4955,46 @@ fn argument_kind(
         }
     }
     "?".to_string()
+}
+
+/// What the bindings before `at` say `name` is, read from the function (or
+/// closure) starting at `scope.from` — and where that binds no such name,
+/// from the one around it: a closure's captured `store` in `useEffect(() =>
+/// store.load())`, as that one says it is bound before the closure and still
+/// is at its end (a binding after it may be what the closure sees when it
+/// runs). Rust's nested `fn`s capture nothing (its closures are no function
+/// here). With where it was read from.
+fn said_around(
+    name: &str,
+    at: usize,
+    scope: &Scope,
+    src: &str,
+    lang: Lang,
+    bindings: &mut HashMap<(usize, String), Bindings>,
+) -> (usize, Said) {
+    let places = scope.places;
+    let mut said = |from: usize, to: usize| {
+        bindings
+            .entry((from, name.to_string()))
+            .or_insert_with(|| Bindings::from(from, places))
+            .said_before(to, name, &Scope { places, from }, src, lang)
+    };
+    let (mut from, mut now) = (scope.from, said(scope.from, at));
+    while now == Said::Nothing && lang != Lang::Rust {
+        let Some((outer, outer_end)) = places.around(from) else {
+            break;
+        };
+        let at_end = said(outer, outer_end);
+        let before = said(outer, from);
+        // (One type before and at the end, as exactly or not: as declared.)
+        now = match (before, at_end) {
+            (before, at_end) if before == at_end => before,
+            (Said::Type(a, _), Said::Type(b, _)) if a == b => Said::Type(a, false),
+            _ => return (outer, Said::Unknown),
+        };
+        from = outer;
+    }
+    (from, now)
 }
 
 /// The kind of a literal ([`argument_kind`]), or `None` for no literal.
@@ -4870,12 +5098,38 @@ fn parameter_kinds(src: &str, l: &Located, lang: Lang) -> Option<String> {
             .next()
             .unwrap_or("");
         if generic.iter().any(|g| g == base) {
-            kinds.push("?".to_string());
+            // C#'s `TRequest request` with `where TRequest : IRequest`: an
+            // `IRequest`, as its constraint says.
+            let constraint = (lang == Lang::CSharp)
+                .then(|| csharp_constraint(&text[close + 1..], base))
+                .flatten();
+            kinds.push(constraint.map_or_else(|| "?".to_string(), |c| type_kind(c, lang)));
             continue;
         }
         kinds.push(type_kind(ty, lang));
     }
     (!kinds.is_empty()).then(|| kinds.join(","))
+}
+
+/// The class or interface C#'s `where` clause after a parameter list
+/// (`rest`) constrains the type parameter `name` to (`IRequest` in `where
+/// TRequest : IRequest`) — none for `class`, `struct`, `new()` and the
+/// like.
+fn csharp_constraint<'a>(rest: &'a str, name: &str) -> Option<&'a str> {
+    let rest = rest.split(['{', ';']).next().unwrap_or(rest);
+    let rest = rest.split("=>").next().unwrap_or(rest);
+    let head = format!("where {name}");
+    let at = rest.find(&head)?;
+    let after = rest[at + head.len()..].trim_start().strip_prefix(':')?;
+    let list = after.split(" where ").next().unwrap_or(after);
+    split_top_level(list).map(str::trim).find(|c| {
+        !c.is_empty()
+            && !matches!(
+                *c,
+                "class" | "class?" | "struct" | "new()" | "notnull" | "unmanaged" | "default"
+            )
+            && c.starts_with(|ch: char| ch.is_alphabetic() || ch == '_')
+    })
 }
 
 /// The type parameters a declaration's text before its parameter list
@@ -5215,7 +5469,15 @@ fn type_kind(ty: &str, lang: Lang) -> String {
                 && last.starts_with('T')
                 && last[1..].starts_with(char::is_uppercase)) =>
         {
-            format!("T{last}")
+            // C#'s `IRequest<TResponse>` is `IRequest`1`, another type than
+            // `IRequest`.
+            match (lang == Lang::CSharp)
+                .then(|| generic_arity(&t[path.len()..]))
+                .flatten()
+            {
+                Some(n) => format!("T{last}`{n}"),
+                None => format!("T{last}"),
+            }
         }
         "" => "?".to_string(),
         k => k.to_string(),
@@ -5283,10 +5545,20 @@ fn passes(
         ("n", k) => nullable || (lang != Lang::Kotlin && !primitive(k)),
         // A project class: no primitive or string, and none of another
         // project class it does not extend or implement.
-        (a, p) if a.starts_with('T') && strict && declared(&a[1..]) => match p.strip_prefix('T') {
-            Some(class) => !declared(class) || class == &a[1..] || descends(&a[1..], class),
-            None => !(primitive(p) || p == "s"),
-        },
+        // (C#'s `IRequest`1` is `IRequest<…>`: an argument of a class
+        // named with no count may be of either.)
+        (a, p) if a.starts_with('T') && strict && declared(without_arity(&a[1..])) => {
+            match p.strip_prefix('T') {
+                Some(class) => {
+                    let arg = &a[1..];
+                    !declared(without_arity(class))
+                        || class == arg
+                        || (!arg.contains('`') && without_arity(class) == arg)
+                        || descends(arg, class)
+                }
+                None => !(primitive(p) || p == "s"),
+            }
+        }
         _ => true,
     }
 }
@@ -6425,31 +6697,7 @@ fn receiver_of(
         }
         return None;
     }
-    let places = scope.places;
-    let mut said = |from: usize, to: usize| {
-        bindings
-            .entry((from, receiver.to_string()))
-            .or_insert_with(|| Bindings::from(from, places))
-            .said_before(to, receiver, &Scope { places, from }, src, lang)
-    };
-    let (mut from, mut now) = (scope.from, said(scope.from, call.start_byte()));
-    // A name the function the call is in does not bind is the function's
-    // around it, if it is nested — a closure's captured `store` in
-    // `useEffect(() => store.load())` — as that one says it is bound before
-    // it, and still is at its end: a binding after it may be what the
-    // nested function sees when it runs. Rust's nested `fn`s capture
-    // nothing (its closures are no function here).
-    while now == Said::Nothing && lang != Lang::Rust {
-        let Some((outer, outer_end)) = places.around(from) else {
-            break;
-        };
-        let at_end = said(outer, outer_end);
-        let before = said(outer, from);
-        if before != at_end {
-            return None;
-        }
-        (from, now) = (outer, before);
-    }
+    let (from, now) = said_around(receiver, call.start_byte(), scope, src, lang, bindings);
     match now {
         // Zig's `self: *Self` (`const Self = @This();`): the container
         // the function is in.
@@ -6893,7 +7141,20 @@ impl Bindings {
                 if own {
                     continue;
                 }
-                Said::Unknown
+                // In a statically typed language the value it is given is of
+                // the name's type still, or one below it: of the type it is
+                // built as (`observer = MockBlocObserver()` in `setUp(() {
+                // … })`, after `late BlocObserver observer;`), or else of
+                // the type said before.
+                match (
+                    statically_typed(lang),
+                    &binding,
+                    self.said.last().map(|(_, s)| s),
+                ) {
+                    (true, Binding::Typed(ty, _), _) => Said::Type(ty.clone(), false),
+                    (true, _, Some(Said::Type(seen, _))) => Said::Type(seen.clone(), false),
+                    _ => Said::Unknown,
+                }
             } else {
                 match binding {
                     Binding::Not => continue,
@@ -12708,6 +12969,117 @@ def main():
         );
         assert_eq!(scala_summoned("summon[Async[F]]").as_deref(), Some("Async"));
         assert_eq!(scala_summoned("Ref[IO](1)"), None);
+    }
+
+    /// Classes of one name in two modules (a library's jdbc and r2dbc
+    /// twins): a value declared as one calls the twin its file sees.
+    #[test]
+    fn a_value_calls_the_twin_class_its_file_sees() {
+        let jdbc = "/p/dao/src/main/kotlin/org/x/dao/Entity.kt";
+        let r2dbc = "/p/dao-r2dbc/src/main/kotlin/org/x/dao/r2dbc/Entity.kt";
+        let test = "/p/dao-r2dbc-tests/src/test/kotlin/org/x/t/BoardTest.kt";
+        let files = [
+            (
+                jdbc,
+                "package org.x.dao\n\nopen class Entity {\n    fun refresh() {}\n}\n",
+            ),
+            (
+                r2dbc,
+                "package org.x.dao.r2dbc\n\nopen class Entity {\n    fun refresh() {}\n}\n",
+            ),
+            (
+                test,
+                "package org.x.t\n\nimport org.x.dao.r2dbc.Entity\n\nclass BoardTest {\n    fun go(e: Entity) {\n        e.refresh()\n    }\n}\n",
+            ),
+        ];
+        let sources: Vec<(PathBuf, String)> = files
+            .iter()
+            .map(|(f, s)| (PathBuf::from(f), s.to_string()))
+            .collect();
+        // (The import resolved: the r2dbc twin is in the test's scope.)
+        let scope = HashMap::from([(PathBuf::from(test), HashSet::from([PathBuf::from(r2dbc)]))]);
+        let g = ProjectCallGraph::build(defs_of(&files), &sources, &scope);
+        let go = format!("{test}:go");
+        let e = edges(&g);
+        assert!(has(&g, &go, &format!("{r2dbc}:refresh")), "{e:?}");
+        assert!(!has(&g, &go, &format!("{jdbc}:refresh")), "{e:?}");
+    }
+
+    /// A closure is where its own names are bound: sibling tests' `var
+    /// request = make()` and `var request = Request(…)` are two values, each
+    /// test's call on its own; a name a closure does not bind is the
+    /// function's around it (`cart` captured) — in a statically typed
+    /// language, of its type still where another closure assigns it.
+    #[test]
+    fn a_closure_binds_its_own_names() {
+        let typed = |file: &str, src: &str, callee: &str| -> Vec<Option<Receiver>> {
+            FileCalls::read(Path::new(file), src)
+                .unwrap()
+                .calls
+                .into_iter()
+                .filter(|c| c.callee == callee)
+                .map(|c| c.receiver)
+                .collect()
+        };
+        let request = || Some(Receiver::Type("Request".to_string()));
+        let dart = "void main() {\n  group('g', () {\n    test('a', () {\n      var request = make();\n      request.x();\n    });\n    test('b', () {\n      var request = Request(\n        'GET',\n      );\n      var copy = request.change(path: 'a');\n    });\n  });\n}\n";
+        assert_eq!(typed("/p/test/a_test.dart", dart, "change"), [request()]);
+        let captured =
+            "void main() {\n  var cart = Cart();\n  test('a', () {\n    cart.add(1);\n  });\n}\n";
+        assert_eq!(
+            typed("/p/test/b_test.dart", captured, "add"),
+            [Some(Receiver::Type("Cart".to_string()))]
+        );
+        // Assigned in another closure (`setUp`): of the type it is built as
+        // there, or one below it.
+        let set_up = "void main() {\n  group('g', () {\n    late BlocObserver observer;\n    setUp(() {\n      observer = MockBlocObserver();\n    });\n    test('a', () async {\n      verify(() => observer.onClose(bloc)).called(1);\n    });\n  });\n}\n";
+        assert_eq!(
+            typed("/p/test/c_test.dart", set_up, "onClose"),
+            [Some(Receiver::Declared("MockBlocObserver".to_string()))]
+        );
+        let go = "package p\n\nfunc TestX(t *testing.T) {\n\tt.Run(\"a\", func(t *testing.T) {\n\t\tr := Make()\n\t\tr.X()\n\t})\n\tt.Run(\"b\", func(t *testing.T) {\n\t\tr := Request{}\n\t\tr.Change()\n\t})\n}\n";
+        assert_eq!(typed("/p/x_test.go", go, "Change"), [request()]);
+        let ruby = "describe Request do\n  it 'a' do\n    request = make\n    request.x\n  end\n  it 'b' do\n    request = Request.new\n    request.change\n  end\nend\n";
+        assert_eq!(
+            typed("/p/spec/request_spec.rb", ruby, "change"),
+            [request()]
+        );
+    }
+
+    /// C#'s `IRequest` and `IRequest<T>` are two types: `new PairCommand()`
+    /// (an `IRequest`) is passed to `Send<TRequest>(TRequest)` constrained
+    /// `where TRequest : IRequest`, `new Ping()` (an `IRequest<Pong>`) to
+    /// `Send<TResponse>(IRequest<TResponse>)` — each to one overload alone;
+    /// a value of a type named both ways, with its arguments unknown, to
+    /// either.
+    #[test]
+    fn a_csharp_generic_type_is_another_than_its_plain_namesake() {
+        let cs = "public interface IBaseRequest {}\npublic interface IRequest : IBaseRequest {}\npublic interface IRequest<out TResponse> : IBaseRequest {}\npublic class Pong {}\npublic class Ping : IRequest<Pong> {}\npublic class PairCommand : IRequest {}\npublic class Mediator\n{\n    public Task<TResponse> Send<TResponse>(IRequest<TResponse> request, CancellationToken ct = default) => null;\n    public Task Send<TRequest>(TRequest request, CancellationToken ct = default)\n        where TRequest : IRequest\n    {\n        return null;\n    }\n}\npublic class Use\n{\n    public void A(Mediator m) { m.Send(new PairCommand()); }\n    public void B(Mediator m) { m.Send(new Ping()); }\n    public void C(Mediator m, IRequest<Pong> r) { m.Send(r); }\n}\n";
+        let g = graph(&[("/p/src/Mediator.cs", cs)]);
+        let reached = |caller: &str| {
+            let at = (0..g.node_count())
+                .find(|&n| g.node(n).name == caller)
+                .unwrap();
+            let mut lines: Vec<usize> = g.callees_of(at).iter().map(|&c| g.node(c).line).collect();
+            lines.sort_unstable();
+            lines
+        };
+        assert_eq!(reached("A"), [10], "{:?}", edges(&g));
+        assert_eq!(reached("B"), [9], "{:?}", edges(&g));
+        // A variable's type is read without its type arguments: either.
+        assert_eq!(reached("C"), [9, 10], "{:?}", edges(&g));
+        assert_eq!(
+            csharp_written_bases(
+                "public class Ping : IRequest<Pong>, IDisposable",
+                "IRequest"
+            ),
+            ["IRequest`1"]
+        );
+        assert_eq!(
+            csharp_constraint(" where TRequest : class, IRequest\n{", "TRequest"),
+            Some("IRequest")
+        );
+        assert_eq!(csharp_constraint(" where T : new()\n{", "T"), None);
     }
 
     /// Of the overloads an argument of a known class fits, the most specific:
