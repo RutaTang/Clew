@@ -3226,9 +3226,28 @@ impl ProjectCallGraph {
             }
             false
         };
-        // Whether a Ruby class has a library's class above it: a base the
-        // project declares none of, or one named by a path whose first
-        // module is no project's (`ActiveRecord::Base`).
+        // Whether a Ruby class has a library's class above it: a framework's
+        // base class (`ActiveRecord::Base`, `ActionController::Base`: a
+        // `Base` the project declares none of) or one of Ruby's own
+        // (`StandardError`, `Struct`). A library's module mixed in
+        // (Sinatra's `Rack::Utils`) is no such class: the project's own
+        // extensions still add methods (`register BizzleExtension`).
+        let ruby_core_class = |name: &str| {
+            matches!(
+                name,
+                "StandardError"
+                    | "RuntimeError"
+                    | "ArgumentError"
+                    | "Exception"
+                    | "Struct"
+                    | "Hash"
+                    | "Array"
+                    | "String"
+                    | "Set"
+                    | "Delegator"
+                    | "SimpleDelegator"
+            )
+        };
         let ruby_library_above = |ty: &str| -> bool {
             let mut level: Vec<&str> = vec![ty];
             let mut seen: HashSet<&str> = HashSet::from([ty]);
@@ -3239,9 +3258,12 @@ impl ProjectCallGraph {
                         let path = base.trim_start_matches("::");
                         let first = path.split("::").next().unwrap_or(path);
                         let last = path.rsplit("::").next().unwrap_or(path);
-                        if !declared_types.contains(last)
-                            || (path.contains("::") && !declared_types.contains(first))
-                        {
+                        // (Bases are kept by their last name: `ActiveRecord::Base`
+                        // is a `Base` the project declares none of.)
+                        let framework = last == "Base"
+                            && (!declared_types.contains(last)
+                                || (path.contains("::") && !declared_types.contains(first)));
+                        if framework || (!declared_types.contains(last) && ruby_core_class(last)) {
                             return true;
                         }
                         if seen.insert(last) {
@@ -3682,6 +3704,34 @@ impl ProjectCallGraph {
             .iter()
             .map(|n| nested_lines.contains(&(n.file.as_path(), n.line)))
             .collect();
+        // The abstract declarations a class below theirs defines with a body
+        // (`SizedIterable.count`, `LimitedSizedIterable.count` its own).
+        let implemented: HashSet<usize> = {
+            let mut bodied_owners: HashMap<&str, Vec<&str>> = HashMap::new();
+            for (i, n) in nodes.iter().enumerate() {
+                if !facts[i].bodyless
+                    && !nested_node[i]
+                    && let Some(o) = owner[i]
+                {
+                    bodied_owners
+                        .entry(n.name.as_str())
+                        .or_default()
+                        .push(o.rsplit(['.', ':']).next().unwrap_or(o));
+                }
+            }
+            (0..nodes.len())
+                .filter(|&i| facts[i].bodyless)
+                .filter(|&i| {
+                    let Some(o) = owner[i] else {
+                        return false;
+                    };
+                    let o = o.rsplit(['.', ':']).next().unwrap_or(o);
+                    bodied_owners
+                        .get(nodes[i].name.as_str())
+                        .is_some_and(|subs| subs.iter().any(|&sub| sub != o && descends(sub, o)))
+                })
+                .collect()
+        };
         // The platforms each definition's source is built for, where its
         // path says ([`source_platforms`]): `core/js/…` for JavaScript alone.
         let node_platforms: Vec<Option<&'static [&'static str]>> =
@@ -4469,9 +4519,17 @@ impl ProjectCallGraph {
                     cs.arity,
                     qualifier_key,
                 );
-                let callees = resolved
-                    .entry(shape)
-                    .or_insert_with(|| resolve_callees(&defs, &nodes, &facts, &owner, cs, &site));
+                let callees = resolved.entry(shape).or_insert_with(|| {
+                    resolve_callees(
+                        &defs,
+                        &nodes,
+                        &facts,
+                        &owner,
+                        (&implemented, &nested_node),
+                        cs,
+                        &site,
+                    )
+                });
                 // Dart's `http.Response(…)`, `shelf_io.serve(…)`: a top-level
                 // function or a class of the library imported under that
                 // prefix — none of the project's where it lies outside it.
@@ -12593,6 +12651,7 @@ fn resolve_callees(
     nodes: &[SymNode],
     facts: &[NodeFacts],
     owner: &[Option<&str>],
+    (implemented, nested): (&HashSet<usize>, &[bool]),
     call: &CallSite,
     site: &Site,
 ) -> Vec<usize> {
@@ -12611,9 +12670,21 @@ fn resolve_callees(
             site.lang,
             Lang::Java | Lang::Kotlin | Lang::Scala | Lang::CSharp | Lang::Dart
         );
-        let defined_in: HashSet<&str> = named.defined.iter().filter_map(|&i| owner[i]).collect();
-        let abstract_elsewhere =
-            |i: usize| facts[i].bodyless && owner[i].is_some_and(|o| !defined_in.contains(o));
+        // (A method of a class declared in a function — `mapK`'s `new
+        // CyclicBarrier[G] { … }` — defines none of its class's.)
+        let defined_in: HashSet<&str> = named
+            .defined
+            .iter()
+            .filter(|&&i| !nested[i])
+            .filter_map(|&i| owner[i])
+            .collect();
+        // (Not one a class below it implements: `SizedIterable.count` is
+        // its implementations', already among them.)
+        let abstract_elsewhere = |i: usize| {
+            facts[i].bodyless
+                && !implemented.contains(&i)
+                && owner[i].is_some_and(|o| !defined_in.contains(o))
+        };
         if classes && call.method && named.all.iter().any(|&i| abstract_elsewhere(i)) {
             with_abstract = named
                 .all
