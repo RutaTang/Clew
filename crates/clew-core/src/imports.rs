@@ -81,7 +81,8 @@ pub fn imports_in(tree: &Tree, source: &str, lang: Lang) -> Vec<RawImport> {
         Lang::Rust => rust_imports(root, source, query),
         Lang::Python => python_imports(root, source, query),
         Lang::JavaScript | Lang::TypeScript | Lang::Tsx => js_imports(root, source, query),
-        Lang::Go | Lang::Dart => path_imports(root, source, query),
+        Lang::Go => path_imports(root, source, query),
+        Lang::Dart => dart_imports(root, source, query),
         Lang::Lean => lean_imports(root, source, query),
         Lang::Java => java_imports(root, source, query),
         Lang::CSharp => csharp_imports(root, source, query),
@@ -1448,7 +1449,42 @@ const DART_QUERY: &str = r#"
 (library_import (import_specification (uri (string_literal) @path)))
 (library_import (import_specification (configurable_uri (uri (string_literal) @path))))
 (library_export (configurable_uri (uri (string_literal) @path)))
+(part_directive (uri (string_literal) @part))
+(part_of_directive (uri (string_literal) @part_of))
 "#;
+
+/// What a Dart part's `part of 'library.dart';` is recorded as: its library's
+/// URI after this prefix — the library the part belongs to, whose imports
+/// are its own, as a Rust child module reaches its parent's items. The
+/// library's own `part 'x.dart';` is a declaration
+/// ([`RawImport::is_mod_decl`]): the part is of it, as a Rust `mod x;`.
+pub const DART_PART_OF: &str = "part of ";
+
+/// Dart's imports and exports, a library's parts ([`RawImport::is_mod_decl`])
+/// and the library a part is of ([`DART_PART_OF`]).
+fn dart_imports(root: Node, src: &str, query: &Query) -> Vec<RawImport> {
+    let mut out = Vec::new();
+    for_each_match(root, query, src, |caps| {
+        if let Some(node) = capture(caps, "path") {
+            push_module(&mut out, strip_quotes(node_text(node, src)), line_of(node));
+        } else if let Some(node) = capture(caps, "part") {
+            let uri = strip_quotes(node_text(node, src));
+            if !uri.is_empty() {
+                out.push(RawImport {
+                    module: uri.to_string(),
+                    line: line_of(node),
+                    is_mod_decl: true,
+                });
+            }
+        } else if let Some(node) = capture(caps, "part_of") {
+            let uri = strip_quotes(node_text(node, src));
+            if !uri.is_empty() {
+                push_module(&mut out, &format!("{DART_PART_OF}{uri}"), line_of(node));
+            }
+        }
+    });
+    out
+}
 
 /// Go and Dart: one quoted path per `@path` capture.
 fn path_imports(root: Node, src: &str, query: &Query) -> Vec<RawImport> {
@@ -2543,6 +2579,25 @@ mod extraction_tests {
             modules(src, "dart"),
             vec!["dart:async", "src/p.dart", "src/q.dart"]
         );
+        // A library's parts are declarations of it; a part names its library.
+        let library = "import 'package:bloc/bloc.dart';\npart 'cart_state.dart';\n";
+        let parts: Vec<(String, bool)> = imports_of(library, "dart")
+            .into_iter()
+            .map(|r| (r.module, r.is_mod_decl))
+            .collect();
+        assert_eq!(
+            parts,
+            [
+                ("package:bloc/bloc.dart".to_string(), false),
+                ("cart_state.dart".to_string(), true)
+            ]
+        );
+        assert_eq!(
+            modules("part of 'cart_bloc.dart';\n", "dart"),
+            vec![format!("{DART_PART_OF}cart_bloc.dart")]
+        );
+        // (An old part names its library by name, which no file is.)
+        assert!(modules("part of cart.bloc;\n", "dart").is_empty());
     }
 
     #[test]

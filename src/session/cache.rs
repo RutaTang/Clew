@@ -179,7 +179,12 @@ use crate::incremental::Version;
 /// 52: Go's `new(T)`; Kotlin backticked type names and a call's outer
 /// lambda; C++ friends unowned, specializations' bases; Zig decl literals.
 /// 53: a Dart call through an import's prefix names that import's URI.
-pub(crate) const CACHE_VERSION: u32 = 53;
+/// 54: C++ classes' converting constructors; wide strings their own kind;
+/// class templates' members defined apart outlined; test blocks' scopes;
+/// a Dart library's `part`s and a part's `part of` read as its imports;
+/// Kotlin's and Scala's expression bodies give their return types; a type
+/// nested in another names its own.
+pub(crate) const CACHE_VERSION: u32 = 54;
 
 /// A cached symbol (the index entry minus the paths, which are reconstructed
 /// from the project root + relative path on load).
@@ -323,6 +328,10 @@ pub struct CachedCalls {
     /// (`clew_core::projectcalls::FileContext::nested`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub nested: Vec<usize>,
+    /// What each C++ class converts from
+    /// (`clew_core::projectcalls::FileContext::converts`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub converts: Vec<(String, String)>,
 }
 
 /// Everything cached about one file: how to confirm it is unchanged (mtime,
@@ -458,6 +467,7 @@ mod tests {
                 parameters: vec![(3, "s,i".into())],
                 fields: vec![("Context".into(), "Request".into(), "http.Request".into())],
                 nested: vec![9],
+                converts: vec![("text_style".into(), "Temphasis".into())],
             }),
         }
     }

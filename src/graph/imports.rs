@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use clew_core::imports::{ERLANG_LIB, PY_NAME_SEP};
+use clew_core::imports::{DART_PART_OF, ERLANG_LIB, PY_NAME_SEP};
 use clew_core::rustscope::RustUse;
 
 use crate::{tr, trn};
@@ -1835,7 +1835,9 @@ impl Resolver {
     // --- Dart ---
 
     fn resolve_dart(&self, raw: &RawImport, from: &Path) -> Target {
+        // A part's library, by its URI.
         let spec = raw.module.as_str();
+        let spec = spec.strip_prefix(DART_PART_OF).unwrap_or(spec);
         // `dart:core`, `dart:async` — the SDK, always external.
         if let Some(rest) = spec.strip_prefix("dart:") {
             return Target::External(format!("dart:{}", rest.split('/').next().unwrap_or(rest)));
@@ -4060,6 +4062,10 @@ impl ImportGraph {
                     EdgeKind::ModDecl
                 } else if lang == "rust" {
                     resolver.rust_use_kind(r, file, &target, inferred)
+                } else if lang == "dart" && r.module.starts_with(DART_PART_OF) {
+                    // A part reaching its own library: inside the library,
+                    // no dependency (with the library's `part`, no cycle).
+                    EdgeKind::Enclosing
                 } else {
                     EdgeKind::Use
                 };
@@ -7063,6 +7069,42 @@ mod resolution_tests {
             [EdgeKind::Inferred]
         );
         assert!(g.cycles().is_empty(), "{:?}", g.cycles());
+    }
+
+    /// A Dart library's `part` is its own, as a Rust `mod` is; the part's
+    /// `part of` reaches its library from inside — neither a dependency, and
+    /// the two no cycle. The call graph's scope holds both ways, so a part
+    /// sees the library's imports.
+    #[test]
+    fn a_dart_part_and_its_library_are_one_library() {
+        let root = Path::new("/d");
+        let g = graph_from_sources(
+            root,
+            &[
+                (
+                    "lib/cart_bloc.dart",
+                    "import 'src/repo.dart';\npart 'cart_state.dart';\nclass CartBloc {}\n",
+                ),
+                (
+                    "lib/cart_state.dart",
+                    "part of 'cart_bloc.dart';\nclass CartState {}\n",
+                ),
+                ("lib/src/repo.dart", "class Repo {}\n"),
+            ],
+        );
+        let p = |f: &str| root.join(f);
+        assert_eq!(
+            kinds(&g, &p("lib/cart_bloc.dart"), &p("lib/cart_state.dart")),
+            [EdgeKind::ModDecl]
+        );
+        assert_eq!(
+            kinds(&g, &p("lib/cart_state.dart"), &p("lib/cart_bloc.dart")),
+            [EdgeKind::Enclosing]
+        );
+        assert!(g.cycles().is_empty(), "{:?}", g.cycles());
+        let scope = g.scope_map();
+        assert!(scope[&p("lib/cart_bloc.dart")].contains(&p("lib/cart_state.dart")));
+        assert!(scope[&p("lib/cart_state.dart")].contains(&p("lib/cart_bloc.dart")));
     }
 
     /// Input extraction did not scope and dropped the glob's star (an older

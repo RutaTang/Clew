@@ -338,6 +338,7 @@ fn to_cached_calls(calls: &FileCalls) -> CachedCalls {
         parameters: calls.context.parameters.clone(),
         fields: calls.context.fields.clone(),
         nested: calls.context.nested.clone(),
+        converts: calls.context.converts.clone(),
     }
 }
 
@@ -460,6 +461,7 @@ fn from_cached_calls(abs: &Path, cached: &CachedCalls) -> Option<FileCalls> {
             parameters: cached.parameters.clone(),
             fields: cached.fields.clone(),
             nested: cached.nested.clone(),
+            converts: cached.converts.clone(),
         },
     })
 }

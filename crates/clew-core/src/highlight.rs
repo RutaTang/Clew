@@ -552,7 +552,7 @@ impl Lang {
                 DART_CONSTRUCTOR_TAGS,
             ],
             Lang::C => &[tree_sitter_c::TAGS_QUERY],
-            Lang::Cpp => &[tree_sitter_cpp::TAGS_QUERY],
+            Lang::Cpp => &[tree_sitter_cpp::TAGS_QUERY, CPP_EXTRA_TAGS],
             Lang::Java => &[tree_sitter_java::TAGS_QUERY, JAVA_EXTRA_TAGS],
             Lang::Sql => &[SQL_TAGS],
             Lang::Lean => &[LEAN_TAGS],
@@ -1504,6 +1504,28 @@ const PYTHON_EXTRA_TAGS: &str = r#"
       (type (identifier) @name)
       (type (generic_type (identifier) @name))
     ]) @definition.type)
+"#;
+
+/// Added to tree-sitter-cpp's own tags query, whose member defined outside
+/// its class is only `Class::name` with a plain class name: a class
+/// template's (`template <typename T> int Box<T>::size() const`) and one
+/// named through a namespace too (`detail::Box<T>::size`, `ns::Cls::f`) were
+/// no definitions, and the calls in their bodies had no function to belong
+/// to.
+const CPP_EXTRA_TAGS: &str = r#"
+(function_declarator
+  declarator: (qualified_identifier
+    scope: (template_type)
+    name: (identifier) @name)) @definition.method
+(function_declarator
+  declarator: (qualified_identifier
+    name: (qualified_identifier
+      name: (identifier) @name))) @definition.method
+(function_declarator
+  declarator: (qualified_identifier
+    name: (qualified_identifier
+      name: (qualified_identifier
+        name: (identifier) @name)))) @definition.method
 "#;
 
 /// Added to tree-sitter-java's own tags query, which has no constructors: the
