@@ -4411,6 +4411,30 @@ impl ProjectCallGraph {
                                 })
                                 .flatten()
                         });
+                        // A Ruby method that builds a library's class
+                        // (`@fetcher ||= Bundler::Fetcher.new(…)`): its
+                        // result's methods are the library's.
+                        if returned.is_none()
+                            && fallback.is_none()
+                            && fc.lang == Lang::Ruby
+                            && !function.is_empty()
+                        {
+                            let built: Vec<&str> = defs
+                                .named
+                                .get(logical_name(function, Some(fc.lang)))
+                                .into_iter()
+                                .flat_map(|named| named.all.iter().copied())
+                                .filter_map(|i| node_returns[i].as_deref())
+                                .collect();
+                            let library = |t: &&str| {
+                                let path = t.trim_start_matches("::");
+                                let first = path.split("::").next().unwrap_or(path);
+                                path.contains("::") && !declared_types.contains(first)
+                            };
+                            if !built.is_empty() && built.iter().all(library) {
+                                continue;
+                            }
+                        }
                         guessed = returned.is_none() && fallback.is_some();
                         let returned = returned.or_else(|| fallback.map(str::to_string));
                         let exact = matches!(cs.receiver, Some(Receiver::Type(_)));
@@ -8141,6 +8165,67 @@ fn scala_member_type(before: &str, name: &str) -> Option<String> {
     None
 }
 
+/// The type a Kotlin file's top-level `val` or `var` named `name` declares
+/// (`val dao: DAOFacade = …`) or builds (`val pool = ComboPooledDataSource()
+/// .apply { … }`).
+fn kotlin_top_level_type(src: &str, name: &str) -> Option<String> {
+    for line in src.lines() {
+        if line.starts_with([' ', '\t']) {
+            continue;
+        }
+        let mut rest = line;
+        for m in ["private ", "internal ", "public ", "lateinit "] {
+            rest = rest.strip_prefix(m).unwrap_or(rest);
+        }
+        let Some(rest) = rest
+            .strip_prefix("val ")
+            .or_else(|| rest.strip_prefix("var "))
+        else {
+            continue;
+        };
+        let Some(rest) = rest.strip_prefix(name) else {
+            continue;
+        };
+        let rest = rest.trim_start();
+        let named = |t: &str| -> Option<String> {
+            let t: String = t
+                .trim_start()
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '.')
+                .collect();
+            let last = t.rsplit('.').next().unwrap_or(&t).to_string();
+            (last.starts_with(char::is_uppercase) && is_plain_name(&last)).then_some(last)
+        };
+        if let Some(ty) = rest.strip_prefix(':') {
+            return named(ty);
+        }
+        let value = rest.strip_prefix('=')?.trim_start();
+        let ctor = named(value)?;
+        let after = value[value.find(&*ctor)? + ctor.len()..].trim_start();
+        // A constructor's call, alone or scoped (`.apply {`, `.also {`).
+        let close = after.strip_prefix('(').and_then(|inner| {
+            let mut depth = 1i32;
+            inner.char_indices().find_map(|(i, c)| {
+                match c {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return Some(i);
+                        }
+                    }
+                    _ => {}
+                }
+                None
+            })
+        })?;
+        let tail = after[1 + close + 1..].trim_start();
+        return (tail.is_empty() || tail.starts_with(".apply") || tail.starts_with(".also"))
+            .then_some(ctor);
+    }
+    None
+}
+
 /// A Haskell file's modules imported only `qualified` (`import qualified
 /// Data.Aeson.Key as Key`, `import Data.Map qualified as M`), none of them
 /// also imported plain: a bare name is none of theirs.
@@ -10845,6 +10930,33 @@ fn receiver_of(
     if let Some(field) = cpp_member_field(call, receiver, src, lang) {
         return Some(field);
     }
+    // A Kotlin property of the file's top level (`val pool =
+    // ComboPooledDataSource().apply { … }`, `val dao: DAOFacade = …`): of
+    // the type it declares or builds (`apply` and `also` give back what
+    // they are called on).
+    if lang == Lang::Kotlin
+        && is_plain_name(receiver)
+        && receiver.starts_with(char::is_lowercase)
+        && let Some(ty) = kotlin_top_level_type(src, receiver)
+    {
+        return Some(Receiver::Declared(ty));
+    }
+    // A Ruby method of the file's own called bare as the receiver
+    // (`fetcher.fetch_spec(…)` with `def fetcher`): what it returns.
+    if lang == Lang::Ruby
+        && is_plain_name(receiver)
+        && receiver.starts_with(|c: char| c.is_lowercase() || c == '_')
+        && src
+            .match_indices(&format!("def {receiver}"))
+            .any(|(at, _)| {
+                src[at + 4 + receiver.len()..]
+                    .chars()
+                    .next()
+                    .is_none_or(|c| matches!(c, '\n' | '\r' | ' ' | '(' | ';'))
+            })
+    {
+        return Some(Receiver::Declared(format!("{RETURNED}{receiver}")));
+    }
     // A Scala member of no parameter list declared with its type, above
     // the call in its file (`protected def delegate: MonadError[OptionT[F,
     // *], E]` before `delegate.pure(a)`): of that type.
@@ -11576,6 +11688,28 @@ fn binding_at(head: &str, after: &str, lang: Lang) -> Binding {
                 .trim_end_matches('?');
             if !ty.is_empty() {
                 return Binding::Typed(ty.to_string(), false);
+            }
+        }
+    }
+    // A Scala collection a conversion makes (`(0 until n).toList`,
+    // `xs.toVector`): the library's, whose methods (`traverse_` by cats'
+    // syntax) are none of the project's.
+    if lang == Lang::Scala
+        && let Some(rhs) = assigned
+    {
+        let statement = rhs[..rhs.find(['\n', ';']).unwrap_or(rhs.len())].trim();
+        let statement = statement.strip_suffix("()").unwrap_or(statement);
+        for (method, ty) in [
+            (".toList", "List"),
+            (".toVector", "Vector"),
+            (".toSeq", "Seq"),
+            (".toSet", "Set"),
+            (".toMap", "Map"),
+            (".toArray", "Array"),
+            (".toIndexedSeq", "IndexedSeq"),
+        ] {
+            if statement.ends_with(method) {
+                return Binding::Typed(ty.to_string(), true);
             }
         }
     }
@@ -18707,6 +18841,51 @@ def main():
             ),
             "{e:?}"
         );
+    }
+
+    /// Audit 17's: a Ruby method of the class called bare as a receiver
+    /// (`fetcher.fetch_spec(…)`) is of what it builds — a library's class
+    /// (`Bundler::Fetcher`), whose `fetch_spec` is none of the project's,
+    /// not even the method the call sits in.
+    #[test]
+    fn a_ruby_method_building_a_library_class_calls_the_library() {
+        let src = "module DependencyParser\n  class Parse\n    def fetch_spec(name:, version: nil)\n      full_spec = fetcher.fetch_spec([name, version])\n    end\n\n    def fetcher\n      @fetcher ||= Bundler::Fetcher.new(Bundler::Source::Rubygems::Remote.new(\"x\"))\n    end\n  end\nend\n";
+        let g = graph(&[("/p/lib/dependency_parser/ruby/parse.rb", src)]);
+        let at = (0..g.node_count())
+            .find(|&n| g.node(n).name == "fetch_spec")
+            .unwrap();
+        assert!(g.callees_of(at).is_empty(), "{:?}", edges(&g));
+    }
+
+    /// More of audit 17's: a Kotlin property of the file's top level
+    /// built from a library's class (`val pool = ComboPooledDataSource()
+    /// .apply { … }`) calls the library's `close`, not a DAO's; a Scala
+    /// collection a conversion makes (`(0 until 1000).toList`) calls cats'
+    /// syntax, not the `IO.traverse_` helper.
+    #[test]
+    fn audit_17_shapes() {
+        let kt = "package io.ktor.samples.kweet\n\nval pool = ComboPooledDataSource().apply {\n    driverClass = \"org.h2.Driver\"\n}\n\nclass DAOFacadeCache {\n    fun close() {}\n}\n\nfun Application.main() {\n    monitor.subscribe(ApplicationStopped) { pool.close() }\n}\n";
+        let io = "package cats.effect\nobject IO {\n  def traverse_[A](ta: List[A])(f: A => Int): Int = 0\n}\n";
+        let suite = "package cats.effect\nclass IOConcurrencySuite {\n  def series(): Unit = {\n    val input = (0 until 1000).toList\n    val ioa = input.traverse_(i => i)\n  }\n}\n";
+        let g = graph(&[
+            (
+                "/p/kweet/src/main/kotlin/io/ktor/samples/kweet/KweetApplication.kt",
+                kt,
+            ),
+            ("/p/core/src/main/scala/cats/effect/IO.scala", io),
+            (
+                "/p/tests/src/test/scala/cats/effect/IOConcurrencySuite.scala",
+                suite,
+            ),
+        ]);
+        let reached = |name: &str| -> usize {
+            let at = (0..g.node_count())
+                .find(|&n| g.node(n).name == name)
+                .unwrap();
+            g.callees_of(at).len()
+        };
+        assert_eq!(reached("main"), 0, "{:?}", edges(&g));
+        assert_eq!(reached("series"), 0, "{:?}", edges(&g));
     }
 
     /// A Ruby method's result is the class its last statement builds —
