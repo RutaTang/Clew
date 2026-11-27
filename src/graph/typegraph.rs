@@ -439,6 +439,13 @@ mod tests {
         );
         assert_eq!(of("object Unit : Shape()", "kotlin"), ["Shape"]);
         assert_eq!(
+            of(
+                "object Customers : UUIDTable(name = \"customer\")",
+                "kotlin"
+            ),
+            ["UUIDTable"]
+        );
+        assert_eq!(
             of("class Del(b: Drawable) : Drawable by b", "kotlin"),
             ["Drawable"]
         );

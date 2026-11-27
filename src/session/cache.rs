@@ -195,7 +195,13 @@ use crate::incremental::Version;
 /// aliases; C++ templates' `enable_if` constraints.
 /// 58: Ruby's modules and `::Const` receivers; C++ calls' results as
 /// receivers; Go chains of fields from a function's result.
-pub(crate) const CACHE_VERSION: u32 = 58;
+/// 59: Kotlin properties' types and extensions' receivers; Ruby methods'
+/// results; Zig nested structs' fields; library number constants. Kotlin
+/// read whole where its soft keywords are names, its `when` guards,
+/// multi-dollar strings and context parameters; objects' bases; casts.
+/// C's specifier macros blanked as C++'s are; aliases of several types;
+/// Dart's calls through a null assertion; twins beside imported files.
+pub(crate) const CACHE_VERSION: u32 = 59;
 
 /// A cached symbol (the index entry minus the paths, which are reconstructed
 /// from the project root + relative path on load).
@@ -367,6 +373,10 @@ pub struct CachedCalls {
     /// (`clew_core::projectcalls::FileContext::modules`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub modules: Vec<String>,
+    /// The type each extension function extends
+    /// (`clew_core::projectcalls::FileContext::extension_receivers`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extension_receivers: Vec<(usize, String)>,
 }
 
 /// Everything cached about one file: how to confirm it is unchanged (mtime,
@@ -509,6 +519,7 @@ mod tests {
                 singletons: vec![7],
                 aliases: vec![("memory_buffer".into(), "basic_memory_buffer".into())],
                 modules: vec!["Helpers".into()],
+                extension_receivers: vec![(4, "Column".into())],
             }),
         }
     }

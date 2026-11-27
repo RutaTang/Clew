@@ -79,9 +79,10 @@ pub fn inherited_names(signature: &str, lang: Option<&str>) -> Vec<String> {
         Some("kotlin") | Some("csharp") => {
             if let Some(bases) = colon_bases(flat) {
                 // `Drawable by b` delegates to `b`; `Shape(1, 2)` passes
-                // arguments, whose commas part nothing.
+                // arguments, whose commas part nothing — nor do they name a
+                // base, named ones (`UUIDTable(name = "customer")`) neither.
                 for part in top_level_parts(bases) {
-                    push(part);
+                    push(part.split('(').next().unwrap_or(part));
                 }
             }
         }

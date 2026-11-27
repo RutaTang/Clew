@@ -345,6 +345,7 @@ fn to_cached_calls(calls: &FileCalls) -> CachedCalls {
         singletons: calls.context.singletons.clone(),
         aliases: calls.context.aliases.clone(),
         modules: calls.context.modules.clone(),
+        extension_receivers: calls.context.extension_receivers.clone(),
     }
 }
 
@@ -474,6 +475,7 @@ fn from_cached_calls(abs: &Path, cached: &CachedCalls) -> Option<FileCalls> {
             singletons: cached.singletons.clone(),
             aliases: cached.aliases.clone(),
             modules: cached.modules.clone(),
+            extension_receivers: cached.extension_receivers.clone(),
         },
     })
 }

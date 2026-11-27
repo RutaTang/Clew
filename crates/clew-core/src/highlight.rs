@@ -2018,20 +2018,346 @@ pub fn parse(source: &str, lang: Lang) -> Option<Tree> {
     // name made the class a function and its members no class's: parsed
     // as blanks, every byte where it was, so the text the tree's ranges
     // point into is the source's own.
-    match (lang == Lang::Cpp)
-        .then(|| without_export_macros(source))
-        .flatten()
-    {
+    // Kotlin's soft keywords used as names and its newer syntax, which the
+    // grammar reads as errors that swallow whole classes: read the same
+    // way, rewritten to what it reads, every byte where it was.
+    let readable = match lang {
+        Lang::Cpp => without_export_macros(source, false),
+        Lang::C => without_export_macros(source, true),
+        Lang::Kotlin => kotlin_readable(source),
+        Lang::Dart => dart_readable(source),
+        _ => None,
+    };
+    match readable {
         Some(blanked) => parser.parse(&blanked, None),
         None => parser.parse(source, None),
     }
+}
+
+/// `source` as the Dart grammar reads it, or `None` where it reads it as
+/// written: a call through a null assertion (`handler!(request)`,
+/// `onTap!()`), which the grammar reads as an error, with its `!` read as a
+/// space — every byte where it was.
+pub(crate) fn dart_readable(source: &str) -> Option<String> {
+    let bytes = source.as_bytes();
+    let mut out: Option<Vec<u8>> = None;
+    for (at, _) in source.match_indices("!(") {
+        let before = at.checked_sub(1).map(|b| bytes[b]);
+        if before.is_some_and(|c| c == b'_' || c == b')' || c == b']' || c.is_ascii_alphanumeric())
+        {
+            out.get_or_insert_with(|| bytes.to_vec())[at] = b' ';
+        }
+    }
+    out.map(|o| String::from_utf8(o).unwrap_or_else(|_| source.to_string()))
+}
+
+/// `source` as the Kotlin grammar reads it, or `None` where it reads it as
+/// written: each rewrite keeps every byte's place (and the names the tree
+/// points to are the source's own), so a file it would read as an error
+/// from one line on — a class's members as top-level functions, the class
+/// lost — is read whole.
+/// - `where` as a name (`where = predicate`, `where?.let { … }`), not a
+///   type parameter's constraint (`where T : Comparable<T>`);
+/// - `get` as a function's name — an infix one after a block (`insert {
+///   … } get Users.id`), a call with arguments or a lambda (`get("/users")
+///   { … }` after a property's line), a label (`return@get`) — not a
+///   getter;
+/// - `suspend { … }`, the function that makes a suspending lambda, not the
+///   modifier;
+/// - a `when` branch's guard (`is Join if dialect is H2 ->`, Kotlin 2.1),
+///   read as one more condition;
+/// - a multi-dollar string (`$$"${spring.show-sql}"`, Kotlin 2.2), read as
+///   a plain one;
+/// - context parameters (`context(_: Scope)` before a declaration);
+/// - `dynamic` as a name (`dynamic()`, a route's), and an annotation on its
+///   own line over a getter (`@OptIn(…)` then `get() = …`);
+/// - a primary constructor on the line after its class's name (`public
+///   class Options` then `private constructor(`), in another class's body.
+pub(crate) fn kotlin_readable(source: &str) -> Option<String> {
+    let bytes = source.as_bytes();
+    let mut out = bytes.to_vec();
+    let mut changed = false;
+    let word = |c: u8| c == b'_' || c.is_ascii_alphanumeric();
+    let word_at = |at: usize, w: &str| {
+        source[at..].starts_with(w)
+            && (at == 0 || !word(bytes[at - 1]))
+            && bytes.get(at + w.len()).is_none_or(|&c| !word(c))
+    };
+    let mut put = |out: &mut Vec<u8>, at: usize, text: &[u8]| {
+        out[at..at + text.len()].copy_from_slice(text);
+        changed = true;
+    };
+    for (at, _) in source.match_indices("where") {
+        if !word_at(at, "where") {
+            continue;
+        }
+        // A constraint: a name, then `:` (not `::`).
+        let rest = source[at + 5..].trim_start();
+        let name_len = rest.bytes().take_while(|&c| word(c)).count();
+        let after = rest[name_len..].trim_start();
+        if name_len > 0 && after.starts_with(':') && !after.starts_with("::") {
+            continue;
+        }
+        put(&mut out, at, b"wherE");
+    }
+    for (at, _) in source.match_indices("get") {
+        if !word_at(at, "get") {
+            continue;
+        }
+        // A label of the name: `return@get` in a route's `get { … }`.
+        if at >= 2 && bytes[at - 1] == b'@' && word(bytes[at - 2]) {
+            put(&mut out, at, b"gex");
+            continue;
+        }
+        // A call of a function of the name — with arguments or a lambda
+        // (`get("/users") { … }`, `get { … }`), which no getter takes (a
+        // getter is `get()`): after a property's line it was read as its.
+        let next = source[at + 3..].trim_start_matches([' ', '\t']);
+        if next.starts_with('{')
+            || (next.starts_with('(') && !next[1..].trim_start().starts_with(')'))
+        {
+            put(&mut out, at, b"gex");
+            continue;
+        }
+        let before = source[..at].trim_end_matches([' ', '\t']);
+        let gap = &source[at + 3..];
+        if before.ends_with('}')
+            && gap.starts_with([' ', '\t'])
+            && !gap
+                .trim_start_matches([' ', '\t'])
+                .starts_with(['=', '{', '\n', '\r'])
+        {
+            put(&mut out, at, b"gex");
+        }
+    }
+    // (`dynamic`, Kotlin/JS's type, a function's name on the JVM.)
+    for (at, _) in source.match_indices("dynamic") {
+        if word_at(at, "dynamic") {
+            put(&mut out, at, b"dynamiC");
+        }
+    }
+    for (at, _) in source.match_indices("suspend") {
+        if word_at(at, "suspend")
+            && source[at + 7..]
+                .trim_start_matches([' ', '\t'])
+                .starts_with('{')
+        {
+            put(&mut out, at, b"suspenX");
+        }
+    }
+    // A primary constructor on the line after its class's name (`public
+    // class Options` then `private constructor(`): in a class's body the
+    // grammar reads it as a secondary constructor of the class around, and
+    // the rest of that class as an error. Read on the class's line — the
+    // newline between moved to the next line's indent, so every line after
+    // is the line it was.
+    let starts: Vec<usize> = std::iter::once(0)
+        .chain(source.match_indices('\n').map(|(at, _)| at + 1))
+        .filter(|&at| at < source.len())
+        .collect();
+    for w in starts.windows(3) {
+        let (header, ctor, next) = (w[0], w[1], w[2]);
+        let header_text = source[header..ctor - 1].trim();
+        let ctor_text = source[ctor..next - 1].trim();
+        let mut head = header_text;
+        loop {
+            let before = head;
+            for m in [
+                "public ",
+                "private ",
+                "internal ",
+                "protected ",
+                "open ",
+                "abstract ",
+                "data ",
+                "sealed ",
+                "inner ",
+                "final ",
+            ] {
+                head = head.strip_prefix(m).unwrap_or(head);
+            }
+            if head == before {
+                break;
+            }
+        }
+        let mut ctor_head = ctor_text;
+        while let Some(rest) = ["private ", "internal ", "protected ", "public "]
+            .iter()
+            .find_map(|m| ctor_head.strip_prefix(m))
+        {
+            ctor_head = rest;
+        }
+        let class_header = head.starts_with("class ")
+            && !header_text.ends_with(['{', '(', ',', ':', '='])
+            && !header_text.contains("//");
+        if class_header
+            && ctor_head.starts_with("constructor(")
+            && bytes[next] == b' '
+            && bytes[ctor - 1] == b'\n'
+        {
+            put(&mut out, ctor - 1, b" ");
+            put(&mut out, next, b"\n");
+        }
+    }
+    // Lines: a guard's `if`, a context's parameters.
+    let mut line_start = 0;
+    for line in source.split_inclusive('\n') {
+        let indent = line.len() - line.trim_start().len();
+        let text = line.trim_start();
+        if (text.starts_with("is ") || text.starts_with("!is "))
+            && let Some(guard) = text[..text.find("->").unwrap_or(text.len())].find(" if ")
+        {
+            put(&mut out, line_start + indent + guard, b",   ");
+        }
+        // An annotation on its own line over a getter or setter.
+        if text.starts_with('@')
+            && !text.trim_end().ends_with(['(', ','])
+            && let Some(next) = source[line_start + line.len()..]
+                .lines()
+                .map(str::trim)
+                .find(|l| !l.is_empty())
+            && [
+                "get(",
+                "get ",
+                "set(",
+                "set ",
+                "private set",
+                "protected set",
+                "internal set",
+            ]
+            .iter()
+            .any(|k| next.starts_with(k) || next == k.trim_end())
+        {
+            let start = line_start + indent;
+            let end = line_start + line.trim_end().len();
+            put(&mut out, start, &vec![b' '; end - start]);
+        }
+        line_start += line.len();
+    }
+    // Context parameters: before a declaration (`context(_: Scope) fun …`)
+    // or a function type (`block: context(Scope) T.() -> Unit`) — not a
+    // call of a function of the name (`context(scope) { … }`).
+    for (at, _) in source.match_indices("context(") {
+        if !word_at(at, "context")
+            || source[..at].trim_end().ends_with('.')
+            || source[..at].trim_end().ends_with("fun")
+        {
+            continue;
+        }
+        let open = at + "context".len();
+        let mut depth = 0i32;
+        let close = source[open..].char_indices().find_map(|(k, c)| {
+            match c {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(open + k);
+                    }
+                }
+                _ => {}
+            }
+            None
+        });
+        let Some(close) = close else {
+            continue;
+        };
+        let after = &source[close + 1..];
+        let next = after.trim_start();
+        let same_line = !after[..after.len() - next.len()].contains('\n');
+        let declares = next.starts_with('@')
+            || next.starts_with("context(")
+            || [
+                "fun ",
+                "val ",
+                "var ",
+                "class ",
+                "object ",
+                "interface ",
+                "private ",
+                "public ",
+                "internal ",
+                "protected ",
+                "suspend ",
+                "inline ",
+                "override ",
+                "operator ",
+                "infix ",
+                "abstract ",
+                "open ",
+                "data ",
+                "sealed ",
+            ]
+            .iter()
+            .any(|k| next.starts_with(k));
+        let a_type = same_line && next.starts_with(|c: char| c.is_ascii_uppercase() || c == '(');
+        if declares || a_type {
+            let blank: Vec<u8> = bytes[at..=close]
+                .iter()
+                .map(|&c| if c == b'\n' { b'\n' } else { b' ' })
+                .collect();
+            put(&mut out, at, &blank);
+        }
+    }
+    // Multi-dollar strings: their dollars blanked, the string read plain.
+    let mut i = 0;
+    while let Some(found) = source[i..].find("$$") {
+        let at = i + found;
+        let dollars = source[at..].bytes().take_while(|&c| c == b'$').count();
+        let open = at + dollars;
+        i = open;
+        // (Not a plain string's closing quote: an odd count of quotes
+        // before it on its line.)
+        let line_from = source[..at].rfind('\n').map_or(0, |n| n + 1);
+        let quotes = {
+            let line = &bytes[line_from..at];
+            (0..line.len())
+                .filter(|&k| line[k] == b'"' && (k == 0 || line[k - 1] != b'\\'))
+                .count()
+        };
+        if !source[open..].starts_with('"') || quotes % 2 == 1 || (at > 0 && word(bytes[at - 1])) {
+            continue;
+        }
+        let raw = source[open..].starts_with("\"\"\"");
+        let body = open + if raw { 3 } else { 1 };
+        let end = if raw {
+            source[body..].find("\"\"\"").map(|e| body + e)
+        } else {
+            let mut k = body;
+            let mut end = None;
+            while k < bytes.len() && bytes[k] != b'\n' {
+                match bytes[k] {
+                    b'\\' => k += 1,
+                    b'"' => {
+                        end = Some(k);
+                        break;
+                    }
+                    _ => {}
+                }
+                k += 1;
+            }
+            end
+        };
+        let Some(end) = end else {
+            continue;
+        };
+        put(&mut out, at, &vec![b' '; dollars]);
+        for k in body..end {
+            if bytes[k] == b'$' {
+                out[k] = b' ';
+            }
+        }
+        i = end;
+    }
+    // (Every rewrite is ASCII over ASCII: still UTF-8.)
+    changed.then(|| String::from_utf8(out).unwrap_or_else(|_| source.to_string()))
 }
 
 /// `source` with each export macro between `class`, `struct` or `union`
 /// and the type's name blanked — an all-capitals word (`SPDLOG_API`,
 /// `Q_CORE_EXPORT`, `FMT_API`) a name, a base list or a body follows —
 /// or `None` where there is none.
-fn without_export_macros(source: &str) -> Option<String> {
+fn without_export_macros(source: &str, c: bool) -> Option<String> {
     let bytes = source.as_bytes();
     let word = |c: u8| c == b'_' || c.is_ascii_alphanumeric();
     let mut spans: Vec<(usize, usize)> = Vec::new();
@@ -2126,6 +2452,43 @@ fn without_export_macros(source: &str) -> Option<String> {
             // or a value).
             if j >= bytes.len() || !(word(bytes[j]) || bytes[j] == b':') {
                 break;
+            }
+            // In C, a type and then a name: a word the name follows at once
+            // is the type itself (flex's `YY_BUFFER_STATE yy_scan_string(…)`).
+            if c {
+                let mut k = j;
+                while k < bytes.len() && word(bytes[k]) {
+                    k += 1;
+                }
+                let after = source[k..].trim_start_matches([' ', '\t']);
+                // (Lua's `LUA_API int (lua_gettop) (lua_State *L)`: a
+                // keyword's a type all the same.)
+                let keyword = matches!(
+                    &source[j..k],
+                    "void"
+                        | "char"
+                        | "short"
+                        | "int"
+                        | "long"
+                        | "float"
+                        | "double"
+                        | "signed"
+                        | "unsigned"
+                        | "const"
+                        | "volatile"
+                        | "static"
+                        | "inline"
+                        | "extern"
+                        | "struct"
+                        | "union"
+                        | "enum"
+                        | "bool"
+                        | "_Bool"
+                        | "size_t"
+                );
+                if !keyword && after.starts_with(['(', ';', '=', ',', '[']) {
+                    break;
+                }
             }
             spans.push((start, i));
             i = j;
@@ -2458,6 +2821,25 @@ pub fn highlight_lines(source: &str, lang_key: Option<&'static str>) -> Vec<HlLi
             })
             .collect(),
         Lang::Astro => highlight_astro(source, config),
+        // C and C++ read as `parse` reads them, their specifier and export
+        // macros blanked ([`without_export_macros`]).
+        Lang::C | Lang::Cpp => match without_export_macros(source, lang == Lang::C) {
+            Some(readable) => highlight_read_as(source, &readable, config),
+            None => highlight_with(source, config),
+        }
+        .unwrap_or_else(|| plain_lines(source)),
+        Lang::Dart => match dart_readable(source) {
+            Some(readable) => highlight_read_as(source, &readable, config),
+            None => highlight_with(source, config),
+        }
+        .unwrap_or_else(|| plain_lines(source)),
+        // Read as `parse` reads it ([`kotlin_readable`]): a `where = …` or
+        // a `when` guard drew the rest of its class as one error.
+        Lang::Kotlin => match kotlin_readable(source) {
+            Some(readable) => highlight_read_as(source, &readable, config),
+            None => highlight_with(source, config),
+        }
+        .unwrap_or_else(|| plain_lines(source)),
         _ => highlight_with(source, config).unwrap_or_else(|| plain_lines(source)),
     }
 }
@@ -2603,6 +2985,105 @@ pub fn style_is_literal(idx: u8) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A Dart call through a null assertion (`handler!(request)`) is read
+    /// as a call, not an error; a negation (`!(a && b)`, `a != (b)`) is
+    /// left as it is.
+    #[test]
+    fn a_dart_call_through_a_null_assertion_is_read_whole() {
+        let src = "Future<Response> f(Request r) {\n  return Future.sync(() => handler!(r)).then((x) => _h!(x));\n}\n";
+        assert!(!parse(src, Lang::Dart).unwrap().root_node().has_error());
+        assert_eq!(dart_readable(src).map(|r| r.len()), Some(src.len()));
+        assert_eq!(
+            dart_readable("bool g(a, b) => !(a && b) || a != (b);\n"),
+            None
+        );
+    }
+
+    /// A C function's specifier macros are read past as C++'s are
+    /// (jemalloc's `JEMALLOC_ALWAYS_INLINE void`, Lua's `LUA_API int
+    /// (lua_gettop) (…)`), but an all-capitals type the function's name
+    /// follows at once (flex's `YY_BUFFER_STATE yy_scan_string(…)`) is its
+    /// type, kept.
+    #[test]
+    fn a_c_function_after_its_specifier_macros_is_read_whole() {
+        for src in [
+            "JEMALLOC_ALWAYS_INLINE void\narena_dalloc(int *p) {\n    free(p);\n}\n",
+            "LUA_API int (lua_gettop) (lua_State *L) {\n  return 0;\n}\n",
+            "JEMALLOC_ALWAYS_INLINE bool\nsz_large(size_t n) {\n    return n > 4;\n}\n",
+        ] {
+            let readable = without_export_macros(src, true).expect(src);
+            assert_eq!(readable.len(), src.len());
+            assert!(
+                !parse(src, Lang::C).unwrap().root_node().has_error(),
+                "{src}"
+            );
+        }
+        let flex = "YY_BUFFER_STATE yy_scan_string ( const char *yy_str );\n";
+        assert_eq!(without_export_macros(flex, true), None);
+        assert!(!parse(flex, Lang::C).unwrap().root_node().has_error());
+    }
+
+    /// Kotlin the grammar reads as an error that swallows the rest of a
+    /// class — `where` and `get` and `dynamic` as names, `suspend { … }`, a
+    /// `when` guard, a multi-dollar string, context parameters, an
+    /// annotated getter — is read whole: the rewrite keeps every byte's
+    /// place, and the tree has no error. Code it needs no rewrite for is
+    /// left alone, a constraint's `where` and a getter's `get()` among it.
+    #[test]
+    fn kotlin_the_grammar_misreads_is_read_whole() {
+        let cases = [
+            "class Query(where: Op?) {\n    fun where(p: Op): Query {\n        where?.let { error(\"x\") }\n        where = p\n        return this\n    }\n}\n",
+            "fun t() {\n    val id = Cities.insert { it[name] = \"x\" } get Cities.id\n}\n",
+            "fun f() {\n    val d = Format(\"x\")\n    get(\"/{id}\") {\n        val i = call.id ?: return@get\n    }\n    route {\n        get {\n            call.ok()\n        }\n    }\n}\n",
+            "fun f(x: Any) = when (x) {\n    is Column<*> if x.isId() -> 1\n    is Join if (\n        a && b\n    ) -> 2\n    else -> 3\n}\n",
+            "val m = mapOf(Get to suspend { client.get(\"/\") })\n",
+            "@Value($$\"${spring.show-sql:false}\")\nval json = $$\"{\\\"$foo\\\": 1}\"\n",
+            "class P {\n    context(_: Scope)\n    fun a() {}\n    fun b(block: context(Scope) P.() -> Unit) {\n        context(Scope()) { block() }\n    }\n}\n",
+            "fun Route.all() {\n    dynamic()\n}\nfun Route.dynamic() {}\n",
+            "class S {\n    val identifier\n        @OptIn(Api::class)\n        get() = 1\n}\n",
+            "public abstract class Reader {\n  public class Options\n  private constructor(\n    internal val strings: Array<out String>,\n  ) {\n    public fun strings(): List<String> = listOf()\n  }\n  public fun peek(): Int = 0\n}\n",
+        ];
+        for src in cases {
+            assert!(parse(src, Lang::Kotlin).is_some());
+            let readable = kotlin_readable(src).expect(src);
+            assert_eq!(readable.len(), src.len(), "{src}");
+            assert_eq!(
+                readable.matches('\n').count(),
+                src.matches('\n').count(),
+                "{src}"
+            );
+            let tree = parse(src, Lang::Kotlin).unwrap();
+            assert!(!tree.root_node().has_error(), "{src}\n{readable}");
+        }
+        for src in [
+            "fun <T> max(a: T): T where T : Comparable<T> = a\n",
+            "class C {\n    val n: Int\n        get() = 1\n}\n",
+            "suspend fun f() {}\n",
+            "val s = \"cost $$\" + \"${x}\"\n",
+        ] {
+            assert_eq!(kotlin_readable(src), None, "{src}");
+        }
+        // The class and its members, by their own names.
+        let src = cases[0];
+        let names: Vec<String> = crate::outline::extract(src, "kotlin")
+            .into_iter()
+            .map(|s| format!("{} {}", s.kind, s.name))
+            .collect();
+        assert!(names.contains(&"class Query".to_string()), "{names:?}");
+        assert!(
+            names.contains(&"method where".to_string())
+                || names.contains(&"function where".to_string()),
+            "{names:?}"
+        );
+        // Drawn as written.
+        let drawn: String = highlight_lines(src, Some("kotlin"))
+            .into_iter()
+            .flat_map(|l| l.spans.into_iter().map(|(t, _)| t))
+            .collect::<Vec<_>>()
+            .join("");
+        assert!(drawn.contains("where = p"), "{drawn}");
+    }
 
     /// What a Rust span is called, by its text, on the line it is on.
     fn rust_kinds(src: &str) -> Vec<Vec<(String, &'static str)>> {

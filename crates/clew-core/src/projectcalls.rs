@@ -198,6 +198,11 @@ pub struct FileContext {
     /// A Ruby file's modules (`module Helpers`): what classes include, whose
     /// methods a bare call in any of them may be.
     pub modules: Vec<String>,
+    /// The type each Kotlin or C# extension function extends, by its line
+    /// (`ExpressionWithColumnType` for `fun <T> ExpressionWithColumnType<T>.eq(…)`,
+    /// `IQueryable` for `static … Where(this IQueryable<T> q, …)`): the
+    /// values whose calls it can be. None for one of a type parameter.
+    pub extension_receivers: Vec<(usize, String)>,
 }
 
 /// The fewest arguments of a Scala definition with no parameter list (`def
@@ -1083,6 +1088,20 @@ fn zig_fields(src: &str, symbols: &[Located]) -> Vec<(String, String, String)> {
                 && !t.starts_with("const ")
                 && let Some((name, ty)) = field(t)
             {
+                // (A struct nested in another, `Testing.Response`: under
+                // that name too, which tells it from a `Response` of its
+                // own elsewhere.)
+                if let Some(outer) = symbols.iter().find(|o| {
+                    is_type_kind(&o.symbol.kind, Lang::Zig)
+                        && o.declaration.0 < l.declaration.0
+                        && l.declaration.1 <= o.declaration.1
+                }) {
+                    out.push((
+                        format!("{}.{}", outer.symbol.name, l.symbol.name),
+                        name.clone(),
+                        ty.clone(),
+                    ));
+                }
                 out.push((l.symbol.name.clone(), name, ty));
             }
         }
@@ -1883,7 +1902,7 @@ pub fn context_in(src: &str, lang: Lang, symbols: &[Located]) -> FileContext {
         })
         .map(|l| l.declaration)
         .collect();
-    let extensions = symbols
+    let extensions: Vec<usize> = symbols
         .iter()
         .filter(|l| is_callable(&l.symbol.kind))
         .filter(|l| {
@@ -1996,6 +2015,14 @@ pub fn context_in(src: &str, lang: Lang, symbols: &[Located]) -> FileContext {
             .filter(|l| is_callable(&l.symbol.kind))
             .filter_map(|l| Some((l.symbol.line, declared_return(src, l, lang)?)))
             .collect(),
+        Lang::Ruby => symbols
+            .iter()
+            .filter(|l| l.symbol.kind == "method")
+            .filter_map(|l| {
+                let method = src.get(l.declaration.0..l.declaration.1)?;
+                Some((l.symbol.line, ruby_built(method)?))
+            })
+            .collect(),
         _ => Vec::new(),
     };
     // A Zig function's result of a standard-library type the file names by
@@ -2019,14 +2046,36 @@ pub fn context_in(src: &str, lang: Lang, symbols: &[Located]) -> FileContext {
                     Some(path) if rest.is_empty() => (line, path.to_string()),
                     Some(path) => (line, format!("{path}.{rest}")),
                     // A project type by its own name (`analysis.Type` is a
-                    // `Type`), the standard library's in full.
+                    // `Type`), the standard library's in full — and one
+                    // nested in another by both (`testing.Testing.Response`
+                    // is a `Testing.Response`).
                     None if first == "std" => (line, ty),
-                    None => (line, ty.rsplit('.').next().unwrap_or(&ty).to_string()),
+                    None => {
+                        let types: Vec<&str> = ty
+                            .split('.')
+                            .rev()
+                            .take_while(|part| part.starts_with(char::is_uppercase))
+                            .collect();
+                        let name = match types.as_slice() {
+                            [] => ty.rsplit('.').next().unwrap_or(&ty).to_string(),
+                            [one] => one.to_string(),
+                            [inner, outer, ..] => format!("{outer}.{inner}"),
+                        };
+                        (line, name)
+                    }
                 }
             })
             .collect()
     } else {
         returns
+    };
+    let extension_receivers = match lang {
+        Lang::Kotlin | Lang::CSharp => symbols
+            .iter()
+            .filter(|l| extensions.contains(&l.symbol.line))
+            .filter_map(|l| Some((l.symbol.line, extension_receiver(src, l, lang)?)))
+            .collect(),
+        _ => Vec::new(),
     };
     FileContext {
         package: package_of(src, lang),
@@ -2050,6 +2099,7 @@ pub fn context_in(src: &str, lang: Lang, symbols: &[Located]) -> FileContext {
             Lang::Zig => zig_fields(src, symbols),
             Lang::Cpp => cpp_class_fields(src, symbols),
             Lang::Scala => scala_class_fields(src, symbols),
+            Lang::Kotlin => kotlin_class_fields(src, symbols),
             _ => Vec::new(),
         },
         nested: match lang {
@@ -2080,6 +2130,7 @@ pub fn context_in(src: &str, lang: Lang, symbols: &[Located]) -> FileContext {
             }
             _ => Vec::new(),
         },
+        extension_receivers,
         modules: match lang {
             Lang::Ruby => symbols
                 .iter()
@@ -2146,6 +2197,75 @@ fn ruby_in_block(node: Node) -> bool {
         }
     }
     false
+}
+
+/// The class a Ruby method's last statement builds, its result
+/// ([`FileContext::returns`]): `GithubFetcher::Issue` for `def fetcher …
+/// @fetcher ||= GithubFetcher::Issue.new(…) end`, `Job` for `Job.new(…)` or
+/// `return Job.new`.
+fn ruby_built(method: &str) -> Option<String> {
+    let lines: Vec<&str> = method.lines().collect();
+    let body = lines.get(1..lines.len().checked_sub(1)?)?;
+    let indent = |line: &str| line.len() - line.trim_start().len();
+    let first = body
+        .iter()
+        .find(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'))?;
+    let depth = indent(first);
+    // The last statement's first line: the last line at the body's depth.
+    let last = body
+        .iter()
+        .rev()
+        .find(|l| {
+            let t = l.trim_start();
+            !t.is_empty()
+                && indent(l) == depth
+                && !t.starts_with(['#', ')', ']', '}'])
+                && t != "end"
+        })?
+        .trim();
+    let mut expr = last.strip_prefix("return ").unwrap_or(last).trim_start();
+    // `@fetcher ||= …`, `job = …`.
+    if let Some((lhs, rhs)) = expr.split_once("||=").or_else(|| expr.split_once(" = "))
+        && lhs
+            .trim()
+            .trim_start_matches('@')
+            .chars()
+            .all(|c| c == '_' || c.is_alphanumeric())
+    {
+        expr = rhs.trim_start();
+    }
+    let path = expr.trim_start_matches("::");
+    let (class, rest) = path.split_once(".new")?;
+    // `X.new`, `X.new a`, `X.new(a)`, its arguments over lines (`X.new(`)
+    // — not a call on what it built (`X.new(a).call`).
+    let whole = match rest.strip_prefix('(') {
+        Some(inside) => {
+            let mut depth = 1i32;
+            let close = inside.char_indices().find_map(|(i, c)| {
+                match c {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return Some(i);
+                        }
+                    }
+                    _ => {}
+                }
+                None
+            });
+            close.is_none_or(|i| {
+                let after = inside[i + 1..].trim_start();
+                after.is_empty() || after.starts_with('#')
+            })
+        }
+        None => rest.is_empty() || (rest.starts_with(' ') && !rest.trim_start().starts_with('.')),
+    };
+    (whole
+        && class
+            .split("::")
+            .all(|part| part.starts_with(char::is_uppercase) && is_plain_name(part)))
+    .then(|| class.to_string())
 }
 
 /// What a Ruby method call is made on, where its receiver says: the class
@@ -3035,12 +3155,24 @@ impl ProjectCallGraph {
             out
         };
         // Each type alias's type ([`FileContext::aliases`]), followed to the
-        // end: one type, whichever name a value is declared by.
-        let alias_of: HashMap<&str, &str> = files
-            .iter()
-            .flat_map(|f| f.context.aliases.iter())
-            .map(|(alias, ty)| (alias.as_str(), ty.as_str()))
-            .collect();
+        // end: one type, whichever name a value is declared by. A name
+        // aliased to several types (fmt's `using iterator = …` in a dozen
+        // scopes, `basic_appender<Char>` in one, `reserve_iterator<OutputIt>`
+        // in another) is none of them: which file was read last decided.
+        let alias_of: HashMap<&str, &str> = {
+            let mut targets: HashMap<&str, HashSet<&str>> = HashMap::new();
+            for (alias, ty) in files.iter().flat_map(|f| f.context.aliases.iter()) {
+                targets
+                    .entry(alias.as_str())
+                    .or_default()
+                    .insert(ty.as_str());
+            }
+            targets
+                .into_iter()
+                .filter(|(_, tys)| tys.len() == 1)
+                .filter_map(|(alias, tys)| Some((alias, *tys.iter().next()?)))
+                .collect()
+        };
         // Whether the type `child` has `base` above it, as written: C#'s
         // `Ping : IRequest<Pong>` is an `IRequest`1`, no `IRequest`.
         let descends_exactly = |child: &str, base: &str| -> bool {
@@ -3086,6 +3218,39 @@ impl ProjectCallGraph {
                 level = next;
             }
             false
+        };
+        // The type each Kotlin or C# extension function extends
+        // ([`FileContext::extension_receivers`]), by node.
+        let receivers_at: HashMap<(&Path, usize), &str> = files
+            .iter()
+            .flat_map(|f| {
+                f.context
+                    .extension_receivers
+                    .iter()
+                    .map(move |(line, ty)| ((f.file.as_path(), *line), ty.as_str()))
+            })
+            .collect();
+        let extension_receiver: Vec<Option<&str>> = nodes
+            .iter()
+            .map(|n| receivers_at.get(&(n.file.as_path(), n.line)).copied())
+            .collect();
+        // Whether a value of `ty` can call the extension `c`: of the type it
+        // extends, one below it, or of a type this cannot relate to it (a
+        // library's) — never a project class of no kin to the project type
+        // it extends (a `Column`'s `eq` is no `CompositeColumn.eq`).
+        let extension_fits = |c: usize, ty: &str| -> bool {
+            let Some(extends) = extension_receiver[c] else {
+                return true;
+            };
+            let ty = ty.rsplit(['.', ':']).next().unwrap_or(ty);
+            let ty = ty.split('<').next().unwrap_or(ty).trim_end_matches('?');
+            // (Or one below the type read for the value — which, inferred, may
+            // be its base's: code that compiles holds the one extended.)
+            extends == ty
+                || matches!(extends, "Any" | "Object" | "object")
+                || descends(ty, extends)
+                || descends(extends, ty)
+                || !declared_types.contains(extends)
         };
         // The Elixir and Erlang modules the project defines, by each name a
         // call may give one: `Shop.Cart`, and `Cart` as an alias says it.
@@ -3573,6 +3738,22 @@ impl ProjectCallGraph {
         // interface's method declares — and, a method only a library's type
         // it embeds has (`Header()` of `http.ResponseWriter`), a library's
         // value.
+        // What the function `function` returns (`integer`, `T#m`), where
+        // its definitions agree: a field whose initializer calls it
+        // (Kotlin's `val id = integer("id")`) is of that type.
+        let returned_of = |function: &str, lang: Lang| -> Option<String> {
+            let found: Vec<usize> = match function.split_once('#') {
+                Some((owner, method)) => family(owner, method, false),
+                None => defs
+                    .named
+                    .get(logical_name(function, Some(lang)))
+                    .map(|named| named.all.clone())
+                    .unwrap_or_default(),
+            };
+            let mut types = found.iter().map(|&i| node_returns[i].as_deref());
+            let first = types.next().flatten()?;
+            types.all(|t| t == Some(first)).then(|| first.to_string())
+        };
         let through = |chain: &str, lang: Lang, from: &Path| -> Option<String> {
             let mut parts = chain.split('|');
             let root = parts.next()?;
@@ -3585,23 +3766,7 @@ impl ProjectCallGraph {
                 }
                 // What a function returns (`→PerformRequest`, `→T#m`), where
                 // its definitions agree.
-                None if root.starts_with(RETURNED) => {
-                    let function = &root[RETURNED.len()..];
-                    let found: Vec<usize> = match function.split_once('#') {
-                        Some((owner, method)) => family(owner, method, false),
-                        None => defs
-                            .named
-                            .get(logical_name(function, Some(lang)))
-                            .map(|named| named.all.clone())
-                            .unwrap_or_default(),
-                    };
-                    let mut types = found.iter().map(|&i| node_returns[i].as_deref());
-                    let first = types.next().flatten()?;
-                    if !types.all(|t| t == Some(first)) {
-                        return None;
-                    }
-                    first.to_string()
-                }
+                None if root.starts_with(RETURNED) => returned_of(&root[RETURNED.len()..], lang)?,
                 None => root.to_string(),
             };
             for field in parts {
@@ -3627,6 +3792,14 @@ impl ProjectCallGraph {
                         ty = first.to_string();
                         continue;
                     }
+                }
+                // (A nested struct by its qualified name first, `Testing.
+                // Response`: no other file's `Response`.)
+                if ty.contains('.')
+                    && let Some(found) = field_type(&ty, field, from)
+                {
+                    ty = found.to_string();
+                    continue;
                 }
                 let mut level: Vec<String> = vec![ty.rsplit('.').next().unwrap_or(&ty).to_string()];
                 let mut seen: Vec<String> = Vec::new();
@@ -3668,6 +3841,10 @@ impl ProjectCallGraph {
                     });
                 }
                 ty = next?;
+                // (A field of what a call gives: that call's result.)
+                if let Some(function) = ty.strip_prefix(RETURNED) {
+                    ty = returned_of(function, lang)?;
+                }
             }
             Some(ty)
         };
@@ -3774,49 +3951,69 @@ impl ProjectCallGraph {
                 // class it extends or implements, or a type parameter —
                 // before `Object` or a class this knows nothing of
                 // (`Send(ping)` is `Send(IRequest<T>)`, not `Send(object)`).
-                let rank = |i: usize| -> usize {
+                // (A literal, in the JVM languages and C#: the overload of its
+                // own kind before one it boxes or widens to — `value(1.0)` is
+                // `value(Double)`, not `value(Number?)`.)
+                let literal_rank = |i: usize| -> usize {
+                    if !matches!(lang, Lang::Java | Lang::Kotlin | Lang::Scala | Lang::CSharp) {
+                        return 0;
+                    }
                     node_parameters[i].map_or(0, |params| {
                         arguments
                             .split(',')
                             .zip(params.split(','))
-                            .filter(|(a, _)| {
-                                (a.starts_with('T') || a.starts_with('G')) && !a.contains('=')
-                            })
+                            .filter(|(a, _)| matches!(*a, "s" | "i" | "0" | "f" | "b" | "c"))
                             .map(|(a, p)| {
-                                // (A C++ template's own type parameter
-                                // ranks as its name.)
-                                let a = match a.strip_prefix('G') {
-                                    Some(name) => format!("T{name}"),
-                                    None => a.to_string(),
-                                };
-                                let a = a.as_str();
-                                // (A nullable mark trimmed, a type parameter's
-                                // `?` is nothing.)
-                                let (a, p) = (a.trim_end_matches('?'), p.trim_end_matches('?'));
-                                // (C#'s cast to `IRequest` says it is no
-                                // `IRequest<T>`: `0.)
-                                let (a, plain) = match a.strip_suffix("`0") {
-                                    Some(a) => (a, true),
-                                    None => (a, false),
-                                };
-                                let either = lang == Lang::CSharp
-                                    && !plain
-                                    && !a.contains('`')
-                                    && generic_named.contains(&a[1..])
-                                    && without_arity(p) == a;
-                                // (Or the one an alias of the other:
-                                // `memory_buffer` is `basic_memory_buffer`;
-                                // two aliases of one template, of other
-                                // arguments — `string_view_t`,
-                                // `wstring_view_t` — two types.)
-                                let same = a == p
-                                    || p.strip_prefix('T').is_some_and(|class| {
-                                        unaliased(&alias_of, &a[1..]) == class
-                                            || unaliased(&alias_of, class) == &a[1..]
-                                    });
-                                if same && !either {
-                                    2
-                                } else if either
+                                let p = p.trim_end_matches('?');
+                                usize::from(p == a || (a == "0" && p == "i")) * 2
+                            })
+                            .sum()
+                    })
+                };
+                let rank = |i: usize| -> usize {
+                    literal_rank(i)
+                        + node_parameters[i].map_or(0, |params| {
+                            arguments
+                                .split(',')
+                                .zip(params.split(','))
+                                .filter(|(a, _)| {
+                                    (a.starts_with('T') || a.starts_with('G')) && !a.contains('=')
+                                })
+                                .map(|(a, p)| {
+                                    // (A C++ template's own type parameter
+                                    // ranks as its name.)
+                                    let a = match a.strip_prefix('G') {
+                                        Some(name) => format!("T{name}"),
+                                        None => a.to_string(),
+                                    };
+                                    let a = a.as_str();
+                                    // (A nullable mark trimmed, a type parameter's
+                                    // `?` is nothing.)
+                                    let (a, p) = (a.trim_end_matches('?'), p.trim_end_matches('?'));
+                                    // (C#'s cast to `IRequest` says it is no
+                                    // `IRequest<T>`: `0.)
+                                    let (a, plain) = match a.strip_suffix("`0") {
+                                        Some(a) => (a, true),
+                                        None => (a, false),
+                                    };
+                                    let either = lang == Lang::CSharp
+                                        && !plain
+                                        && !a.contains('`')
+                                        && generic_named.contains(&a[1..])
+                                        && without_arity(p) == a;
+                                    // (Or the one an alias of the other:
+                                    // `memory_buffer` is `basic_memory_buffer`;
+                                    // two aliases of one template, of other
+                                    // arguments — `string_view_t`,
+                                    // `wstring_view_t` — two types.)
+                                    let same = a == p
+                                        || p.strip_prefix('T').is_some_and(|class| {
+                                            unaliased(&alias_of, &a[1..]) == class
+                                                || unaliased(&alias_of, class) == &a[1..]
+                                        });
+                                    if same && !either {
+                                        2
+                                    } else if either
                                     || p.is_empty()
                                     // (A C++ template's parameter its
                                     // `enable_if` constrains: a type
@@ -3824,14 +4021,14 @@ impl ProjectCallGraph {
                                     || p.starts_with('K')
                                     || p.strip_prefix('T')
                                         .is_some_and(|class| descends_exactly(&a[1..], class))
-                                {
-                                    1
-                                } else {
-                                    0
-                                }
-                            })
-                            .sum()
-                    })
+                                    {
+                                        1
+                                    } else {
+                                        0
+                                    }
+                                })
+                                .sum()
+                        })
                 };
                 let own = rank(callee);
                 // Of overloads that fit alike, Kotlin and C# take one that
@@ -3917,6 +4114,53 @@ impl ProjectCallGraph {
                 imported,
                 siblings: &siblings,
             };
+            // Classes of one name in several files (a library's twin
+            // modules: `exposed-dao`'s `Entity` and `exposed-dao-r2dbc`'s):
+            // of each name, the ones this file sees, where it sees one; else
+            // the ones beside a file it sees — a twin reached through a base
+            // the file imports (`IntEntityClass`'s `EntityClass`) is the one
+            // in that base's module.
+            let prefer_seen_twins = |found: &mut Vec<usize>| {
+                let visible = |c: usize| nodes[c].file == fc.file || site.sees(&nodes[c].file);
+                let twins: HashSet<&str> = {
+                    let mut files_of: HashMap<&str, HashSet<&Path>> = HashMap::new();
+                    for &c in found.iter() {
+                        if let Some(o) = owner[c] {
+                            files_of
+                                .entry(o)
+                                .or_default()
+                                .insert(nodes[c].file.as_path());
+                        }
+                    }
+                    files_of
+                        .into_iter()
+                        .filter(|(_, files)| files.len() > 1)
+                        .map(|(o, _)| o)
+                        .collect()
+                };
+                if twins.is_empty() {
+                    return;
+                }
+                let seen_dirs: HashSet<&Path> = site
+                    .scope()
+                    .filter_map(|f| f.parent())
+                    .chain(fc.file.parent())
+                    .collect();
+                let beside = |c: usize| {
+                    nodes[c]
+                        .file
+                        .parent()
+                        .is_some_and(|dir| seen_dirs.contains(dir))
+                };
+                for twin in twins {
+                    let of_twin = |c: &usize| owner[*c] == Some(twin);
+                    if found.iter().filter(|c| of_twin(c)).any(|&c| visible(c)) {
+                        found.retain(|c| !of_twin(c) || visible(*c));
+                    } else if found.iter().filter(|c| of_twin(c)).any(|&c| beside(c)) {
+                        found.retain(|c| !of_twin(c) || beside(*c));
+                    }
+                }
+            };
             // What a name called from this file resolves to depends on the
             // name and the call's shape only: worked out once per file.
             // (The name, whether it is a method call and with no receiver
@@ -3947,6 +4191,10 @@ impl ProjectCallGraph {
                             let first = types.next().flatten()?;
                             (types.all(|t| t == Some(first))
                                 && (declared_types.contains(first)
+                                    || (matches!(fc.lang, Lang::Ruby | Lang::Zig)
+                                        && declared_types.contains(
+                                            first.rsplit([':', '.']).next().unwrap_or(first),
+                                        ))
                                     || project_types.contains(first)
                                     || first.starts_with("std.")
                                     || first.starts_with("std::")
@@ -3988,6 +4236,15 @@ impl ProjectCallGraph {
                                                 // value of no known type did.
                                                 (types.all(|t| t == Some(first))
                                                     && (declared_types.contains(first)
+                                                        || (matches!(
+                                                            fc.lang,
+                                                            Lang::Ruby | Lang::Zig
+                                                        ) && declared_types.contains(
+                                                            first
+                                                                .rsplit([':', '.'])
+                                                                .next()
+                                                                .unwrap_or(first),
+                                                        ))
                                                         || project_types.contains(first)
                                                         || first.starts_with("std.")
                                                         || first.starts_with("std::")
@@ -4420,6 +4677,9 @@ impl ProjectCallGraph {
                             .flat_map(|named| named.all.iter().copied())
                             .filter(|&c| {
                                 extension_nodes.contains(&c)
+                                    && (guessed
+                                        || matches!(cs.receiver, Some(Receiver::Own))
+                                        || extension_fits(c, ty))
                                     && (nodes[c].file == fc.file || site.sees(&nodes[c].file))
                                     && fits_kinds(c, arguments, fc.lang)
                             })
@@ -4428,33 +4688,7 @@ impl ProjectCallGraph {
                             found = extended;
                         }
                     }
-                    // Classes of one name in several files (a library's
-                    // twin modules: `exposed-dao`'s `Entity` and
-                    // `exposed-dao-r2dbc`'s): of each name, the ones this
-                    // file sees, where it sees one.
-                    let visible = |c: usize| nodes[c].file == fc.file || site.sees(&nodes[c].file);
-                    let twins: HashSet<&str> = {
-                        let mut files_of: HashMap<&str, HashSet<&Path>> = HashMap::new();
-                        for &c in &found {
-                            if let Some(o) = owner[c] {
-                                files_of
-                                    .entry(o)
-                                    .or_default()
-                                    .insert(nodes[c].file.as_path());
-                            }
-                        }
-                        files_of
-                            .into_iter()
-                            .filter(|(_, files)| files.len() > 1)
-                            .map(|(o, _)| o)
-                            .collect()
-                    };
-                    for twin in twins {
-                        let of_twin = |c: &usize| owner[*c] == Some(twin);
-                        if found.iter().filter(|c| of_twin(c)).any(|&c| visible(c)) {
-                            found.retain(|c| !of_twin(c) || visible(*c));
-                        }
-                    }
+                    prefer_seen_twins(&mut found);
                     let declared_here = declared_types
                         .contains(ty.rsplit(['.', ':']).next().unwrap_or(ty))
                         || project_types.contains(ty);
@@ -4491,6 +4725,16 @@ impl ProjectCallGraph {
                         // the name in scope, as with no type.
                         (true, _) => callees.clone(),
                     };
+                    // (Not on `this`: in Kotlin it is also a lambda's
+                    // receiver — `apply { this.name() }` — or an extension's,
+                    // neither the class the code sits in.)
+                    let own = matches!(cs.receiver, Some(Receiver::Own));
+                    let targets: Vec<usize> = targets
+                        .into_iter()
+                        .filter(|&c| {
+                            guessed || own || !extension_nodes.contains(&c) || extension_fits(c, ty)
+                        })
+                        .collect();
                     for callee in targets {
                         if edges.len() < MAX_EDGES
                             && (in_test || !test_node[callee])
@@ -4577,6 +4821,7 @@ impl ProjectCallGraph {
                     && let Some(Receiver::Type(ty)) = &cs.receiver
                 {
                     narrowed = family(ty, callee_name, false);
+                    prefer_seen_twins(&mut narrowed);
                     if narrowed.len() > MAX_CANDIDATES {
                         narrowed.clear();
                     }
@@ -4844,6 +5089,28 @@ impl ProjectCallGraph {
                 } else {
                     targets
                 };
+                // An extension of a type the call's receiver is of no kin to:
+                // none of its.
+                let fitting_extensions: Vec<usize>;
+                let targets: &[usize] = match &cs.receiver {
+                    Some(Receiver::Type(ty) | Receiver::Declared(ty))
+                        if cs.method
+                            && !guessed
+                            && !ty.starts_with(RETURNED)
+                            && !ty.starts_with(THROUGH)
+                            && targets.iter().any(|&c| {
+                                extension_nodes.contains(&c) && !extension_fits(c, ty)
+                            }) =>
+                    {
+                        fitting_extensions = targets
+                            .iter()
+                            .copied()
+                            .filter(|&c| !extension_nodes.contains(&c) || extension_fits(c, ty))
+                            .collect();
+                        &fitting_extensions
+                    }
+                    _ => targets,
+                };
                 // A file built for some platforms (cats-effect's `core/js/`)
                 // reaches no definition built only for others
                 // (`core/jvm-native/`), where one built for its own is.
@@ -4956,10 +5223,15 @@ impl ProjectCallGraph {
                             found.retain(|&c| {
                                 owner[c].is_none_or(|o| {
                                     let o = o.rsplit("::").next().unwrap_or(o);
+                                    // (A module some other class includes,
+                                    // but not this one's: no method of it
+                                    // — Sinatra's `Helpers` is `Base`'s,
+                                    // never `Response`'s.)
                                     o == own
                                         || descends(own, o)
                                         || descends(o, own)
-                                        || ruby_modules.contains(o)
+                                        || (ruby_modules.contains(o)
+                                            && !bases_of.values().any(|bases| bases.contains(&o)))
                                 })
                             });
                         }
@@ -5744,6 +6016,208 @@ fn cpp_conversions(src: &str, symbols: &[Located]) -> Vec<(String, String)> {
             && after.starts_with('{')
         {
             out.push((name.to_string(), String::new()));
+        }
+    }
+    out
+}
+
+/// The type a Kotlin or C# extension function `l` extends
+/// ([`FileContext::extension_receivers`]): the part of Kotlin's `fun <T>
+/// ExpressionWithColumnType<T>.eq(…)` before the name, C#'s `this
+/// IQueryable<T> q` parameter's — by its last name, its type arguments and
+/// nullability aside. `None` for a type parameter (`fun <T> T.also(…)`).
+fn extension_receiver(src: &str, l: &Located, lang: Lang) -> Option<String> {
+    let text = src.get(l.declaration.0..l.signature_end.max(l.declaration.0))?;
+    let written = match lang {
+        Lang::Kotlin => {
+            let after = &text[text.find("fun ")? + 4..];
+            let after = after.trim_start();
+            // Its own type parameters, `<T>`.
+            let (generics, rest) = match after.strip_prefix('<') {
+                Some(inner) => {
+                    let mut depth = 1i32;
+                    let close = inner.char_indices().find_map(|(i, c)| {
+                        match c {
+                            '<' => depth += 1,
+                            '>' => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    return Some(i);
+                                }
+                            }
+                            _ => {}
+                        }
+                        None
+                    })?;
+                    (&inner[..close], inner[close + 1..].trim_start())
+                }
+                None => ("", after),
+            };
+            let name_at = rest.find(&format!(".{}", l.symbol.name))?;
+            let receiver = rest[..name_at].trim();
+            let base = receiver.split('<').next()?.trim().trim_end_matches('?');
+            let base = base.rsplit('.').next().unwrap_or(base);
+            let type_params: Vec<&str> = generics
+                .split(',')
+                .map(|g| g.split(':').next().unwrap_or("").trim())
+                .map(|g| {
+                    g.trim_start_matches("reified ")
+                        .trim_start_matches("out ")
+                        .trim()
+                })
+                .collect();
+            if type_params.contains(&base) {
+                return None;
+            }
+            base.to_string()
+        }
+        _ => {
+            let at = text.find("(this ").or_else(|| text.find("( this "))?;
+            let after = text[at..]
+                .trim_start_matches(['(', ' '])
+                .strip_prefix("this ")?;
+            let base = after.trim_start().split(['<', ' ', '?']).next()?;
+            let base = base.rsplit('.').next().unwrap_or(base);
+            // (A type parameter of the method's: `this T value`.)
+            let generic = text
+                .split('(')
+                .next()
+                .and_then(|head| head.rsplit_once('<'))
+                .is_some_and(|(_, params)| params.split([',', '>']).any(|p| p.trim() == base));
+            if generic {
+                return None;
+            }
+            base.to_string()
+        }
+    };
+    (is_plain_name(&written) && written.starts_with(char::is_uppercase)).then_some(written)
+}
+
+/// A Kotlin file's classes' and objects' properties ([`FileContext::
+/// fields`]): `val name: Column<String>` of type `Column`, `val id =
+/// integer("id")` of what `integer` returns ([`RETURNED`]), `val repo =
+/// Repo(db)` of `Repo`, a constructor's `val` and `var` parameters alike —
+/// what `Users.id.isNull()` is called on.
+fn kotlin_class_fields(src: &str, symbols: &[Located]) -> Vec<(String, String, String)> {
+    let type_of = |written: &str| -> Option<String> {
+        let t = written.trim();
+        // (Its first word: `val db: Db by lazy { … }` is a `Db`.)
+        let t = t
+            .split(['<', '=', '{', '('])
+            .next()?
+            .split_whitespace()
+            .next()?
+            .trim_end_matches('?');
+        let t = t.rsplit('.').next().unwrap_or(t);
+        (is_plain_name(t) && t.starts_with(char::is_uppercase)).then(|| t.to_string())
+    };
+    // What an initializer is: a class built (`Repo(db)`), or what the call
+    // it ends in returns (`integer("id").autoIncrement()`).
+    let value_of = |expr: &str| -> Option<String> {
+        let expr = expr.trim().trim_end_matches(';');
+        if !expr.ends_with(')') {
+            return None;
+        }
+        let open = {
+            let mut depth = 0i32;
+            let mut found = None;
+            for (i, c) in expr.char_indices().rev() {
+                match c {
+                    ')' => depth += 1,
+                    '(' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            found = Some(i);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            found?
+        };
+        let callee = expr[..open].trim_end();
+        let callee = callee.split('<').next().unwrap_or(callee);
+        let name = callee.rsplit('.').next().unwrap_or(callee).trim();
+        if !is_plain_name(name) {
+            return None;
+        }
+        Some(
+            if name.starts_with(char::is_uppercase) && !callee.contains('.') {
+                name.to_string()
+            } else {
+                format!("{RETURNED}{name}")
+            },
+        )
+    };
+    let mut out = Vec::new();
+    for class in symbols
+        .iter()
+        .filter(|l| matches!(l.symbol.kind.as_str(), "class" | "object" | "interface"))
+    {
+        let name = class.symbol.name.as_str();
+        let Some(text) = src.get(class.declaration.0..class.declaration.1) else {
+            continue;
+        };
+        let mut property = |line: &str| {
+            let mut t = line.trim();
+            loop {
+                let before = t;
+                for word in [
+                    "private ",
+                    "protected ",
+                    "internal ",
+                    "public ",
+                    "override ",
+                    "open ",
+                    "lateinit ",
+                    "const ",
+                    "final ",
+                    "abstract ",
+                ] {
+                    t = t.strip_prefix(word).unwrap_or(t).trim_start();
+                }
+                if t.starts_with('@') {
+                    t = t.split_once(' ').map_or("", |(_, r)| r).trim_start();
+                }
+                if t == before {
+                    break;
+                }
+            }
+            let Some(rest) = t.strip_prefix("val ").or_else(|| t.strip_prefix("var ")) else {
+                return;
+            };
+            let field_end = rest.find([':', '=', ' ']).unwrap_or(rest.len());
+            let field = rest[..field_end].trim();
+            if !is_plain_name(field) {
+                return;
+            }
+            let after = rest[field_end..].trim_start();
+            let ty = match after.strip_prefix(':') {
+                Some(written) => type_of(written),
+                None => after.strip_prefix('=').and_then(value_of),
+            };
+            if let Some(ty) = ty {
+                out.push((name.to_string(), field.to_string(), ty));
+            }
+        };
+        // The constructor's `val`/`var` parameters.
+        if let Some(Parameters::At(open, close)) = parameter_list(text, name, Lang::Kotlin) {
+            for part in split_top_level(&text[open + 1..close]) {
+                property(part);
+            }
+        }
+        // The body's own, at its top level.
+        let Some(body) = text.find('{') else {
+            continue;
+        };
+        let mut depth = 0i32;
+        for line in text[body..].lines() {
+            let at_top = depth == 1;
+            depth += line.matches('{').count() as i32 - line.matches('}').count() as i32;
+            if at_top {
+                property(line);
+            }
         }
     }
     out
@@ -7188,6 +7662,60 @@ fn cpp_template_params_around(node: Node, src: &str) -> Vec<String> {
     names
 }
 
+/// The kind of a number type's constant ([`argument_kind`]): `f` for
+/// `Double.MAX_VALUE`, `Float.NaN`, `Math.PI`, C#'s `double.MaxValue`; `i`
+/// for `Integer.MAX_VALUE`, `Long.MIN_VALUE`, Kotlin's `Int.MAX_VALUE`; `c`
+/// for `Character.MAX_VALUE`; `b` for `Boolean.TRUE`.
+fn number_constant_kind(text: &str) -> Option<&'static str> {
+    let (ty, member) = text.split_once('.')?;
+    let constant = member
+        .chars()
+        .all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit())
+        || matches!(
+            member,
+            "MaxValue" | "MinValue" | "NaN" | "PositiveInfinity" | "NegativeInfinity" | "Epsilon"
+        );
+    if !constant || member.is_empty() {
+        return None;
+    }
+    Some(match ty {
+        "Double" | "Float" | "double" | "float" | "Single" | "decimal" | "Decimal" => "f",
+        "Math" | "math" if matches!(member, "PI" | "E" | "Pi") => "f",
+        "Integer" | "Long" | "Short" | "Byte" | "Int" | "int" | "long" | "short" | "byte"
+        | "Int32" | "Int64" | "Int16" | "UInt" | "ULong" | "uint" | "ulong" => "i",
+        "Character" | "Char" | "char" => "c",
+        "Boolean" if matches!(member, "TRUE" | "FALSE") => "b",
+        _ => return None,
+    })
+}
+
+/// Methods whose result is a string, whatever they are called on
+/// (`compileError(…).msg.toLowerCase.contains(…)`, `x.toString().trim()`):
+/// a call on it is the library's — but for the project's extensions of it.
+const STRING_RESULTS: &[&str] = &[
+    "toString",
+    "toLowerCase",
+    "toUpperCase",
+    "lowercase",
+    "uppercase",
+    "trim",
+    "strip",
+    "trimIndent",
+    "trimMargin",
+    "stripMargin",
+    "mkString",
+    "substring",
+    "replaceAll",
+    "intern",
+    "ToString",
+    "ToLower",
+    "ToUpper",
+    "ToLowerInvariant",
+    "ToUpperInvariant",
+    "Trim",
+    "Substring",
+];
+
 /// What one argument is, as far as its text says: a literal's kind — `s` a
 /// string, `c` a character, `i` an integer (`0` the integer zero), `f` a
 /// floating-point number, `b` a boolean, `n` null — a value's type as
@@ -7207,6 +7735,14 @@ fn argument_kind(
         return "?".to_string();
     }
     if let Some(kind) = literal_kind(t, lang) {
+        return kind.to_string();
+    }
+    // A number type's constant (`Double.MAX_VALUE`, `-Double.MIN_NORMAL`,
+    // Kotlin's `Int.MAX_VALUE`, C#'s `double.MaxValue`, `Math.PI`): a
+    // number of that type.
+    if matches!(lang, Lang::Java | Lang::Kotlin | Lang::Scala | Lang::CSharp)
+        && let Some(kind) = number_constant_kind(t.trim_start_matches(['-', '+']).trim_start())
+    {
         return kind.to_string();
     }
     // A Kotlin lambda (`{ it.name }`).
@@ -8028,12 +8564,19 @@ fn type_kind(ty: &str, lang: Lang) -> String {
                 "char" | "wchar_t" | "char8_t" | "char16_t" | "char32_t"
             ) {
                 "c"
-            } else if matches!(last, "wstring" | "wstring_view" | "wformat_string")
-                || (matches!(last, "basic_string" | "basic_string_view")
-                    && t[path.len()..]
-                        .trim_start_matches('<')
-                        .trim_start()
-                        .starts_with("wchar_t"))
+            } else if matches!(
+                last,
+                "wstring"
+                    | "wstring_view"
+                    | "wformat_string"
+                    | "wformat_string_t"
+                    | "wstring_view_t"
+                    | "wmemory_buffer"
+            ) || (matches!(last, "basic_string" | "basic_string_view")
+                && t[path.len()..]
+                    .trim_start_matches('<')
+                    .trim_start()
+                    .starts_with("wchar_t"))
             {
                 "w"
             } else if matches!(
@@ -8929,12 +9472,16 @@ fn callee_name(call: Node, parent: Option<Node>, src: &str, lang: Lang) -> Optio
         // An infix call (`Users.id eq 1`): the function between, called
         // on its left.
         // (Only on a name — a parameter or a local, whose type its binding
-        // says — or `this`: on a property (`Users.id eq 1`), of a type this
-        // reads none of, every overload of the name would be as likely.)
+        // says — `this`, or a chain of properties (`Users.id eq 1`), whose
+        // types the classes declare: on another value, of a type this reads
+        // none of, every overload of the name would be as likely.)
         (Lang::Kotlin, "infix_expression") => {
             let function = call.named_child(1).filter(|f| f.kind() == "identifier")?;
             let left = call.named_child(0)?;
-            if !matches!(left.kind(), "identifier" | "this_expression") {
+            if !matches!(
+                left.kind(),
+                "identifier" | "this_expression" | "navigation_expression"
+            ) {
                 return None;
             }
             return Some((node_text(function, src).to_string(), true));
@@ -9205,6 +9752,15 @@ fn receiver_of(
         Lang::Ruby => receiver.trim_start_matches("::"),
         _ => receiver,
     };
+    // Ruby's class by its path (`GithubFetcher::Issue.new(…)`): that class.
+    if lang == Lang::Ruby
+        && receiver.contains("::")
+        && receiver
+            .split("::")
+            .all(|part| part.starts_with(char::is_uppercase) && is_plain_name(part))
+    {
+        return Some(Receiver::Type(receiver.to_string()));
+    }
     // A Scala method eta-expanded (`(this.apply _).tupled`, `f _`): a
     // function value, whose methods are the library's.
     if lang == Lang::Scala
@@ -9314,8 +9870,10 @@ fn receiver_of(
             .entry((scope.from, root.to_string()))
             .or_insert_with(|| Bindings::from(scope.from, places))
             .said_before(call.start_byte(), root, scope, src, lang);
+        // (Of what a function returns too, `var res = testReadParsed(…)`:
+        // its declared result's fields.)
         if let Said::Type(ty, _) = &said
-            && !ty.starts_with(RETURNED)
+            && (!ty.starts_with(RETURNED) || !ty.contains(['@', '|']))
             && !ty.starts_with(THROUGH)
         {
             return Some(Receiver::Type(format!(
@@ -9398,6 +9956,35 @@ fn receiver_of(
             )));
         }
     }
+    // A Kotlin chain of properties (`Users.id`, an object's; `repo.table`, a
+    // value's of a type known): the last one's type ([`THROUGH`]).
+    if lang == Lang::Kotlin
+        && let Some((root, path)) = receiver.split_once('.')
+        && is_plain_name(root)
+        && path
+            .split('.')
+            .all(|p| is_plain_name(p) && p.starts_with(char::is_lowercase))
+    {
+        if root.starts_with(char::is_uppercase) {
+            return Some(Receiver::Type(format!(
+                "{THROUGH}{root}|{}",
+                path.replace('.', "|")
+            )));
+        }
+        let places = scope.places;
+        if let Said::Type(ty, _) = bindings
+            .entry((scope.from, root.to_string()))
+            .or_insert_with(|| Bindings::from(scope.from, places))
+            .said_before(call.start_byte(), root, scope, src, lang)
+            && !ty.starts_with(RETURNED)
+            && !ty.starts_with(THROUGH)
+        {
+            return Some(Receiver::Type(format!(
+                "{THROUGH}{ty}|{}",
+                path.replace('.', "|")
+            )));
+        }
+    }
     if !is_plain_name(receiver) {
         // A chain on a value just built: `IO.pure(1).flatMap(…)`,
         // `new Cart().add(…)`, `Cart(items).total()`.
@@ -9431,6 +10018,25 @@ fn receiver_of(
         {
             let name = receiver[..open].rsplit("::").next().unwrap_or("");
             return Some(Receiver::Declared(format!("{RETURNED}{name}")));
+        }
+        // What a string method gives (`x.toString().trim()`): a string —
+        // Scala's with no parentheses too (`e.msg.toLowerCase`) — unless
+        // the project's method of the name says otherwise (Exposed's
+        // `Expression<T>.substring(…)` returns a `Substring<T>`).
+        if matches!(
+            lang,
+            Lang::Java | Lang::Kotlin | Lang::Scala | Lang::CSharp | Lang::Dart
+        ) {
+            let method = chain_link(receiver).map(|(_, m)| m).or_else(|| {
+                (lang == Lang::Scala)
+                    .then(|| receiver.rsplit_once('.'))
+                    .flatten()
+                    .map(|(_, m)| m)
+                    .filter(|m| is_plain_name(m))
+            });
+            if let Some(method) = method.filter(|m| STRING_RESULTS.contains(m)) {
+                return Some(Receiver::Declared(format!("{RETURNED}{method}|String")));
+            }
         }
         // One link of a chain (`const Pipeline().addMiddleware(m)` before
         // `.addHandler(h)`, `repo.find(id)` before `.total()`): what that
@@ -10239,6 +10845,24 @@ fn binding_at(head: &str, after: &str, lang: Lang) -> Binding {
     {
         return Binding::Typed(ty, true);
     }
+    // A Kotlin or C# value cast (`val e = Random() as Expression<Int?>`,
+    // `var c = o as Cart;`): of the type it is cast to.
+    if matches!(lang, Lang::Kotlin | Lang::CSharp)
+        && let Some(rhs) = assigned
+    {
+        let statement = rhs[..rhs.find(['\n', ';']).unwrap_or(rhs.len())].trim();
+        if let Some(ty) = cast_type(statement, lang) {
+            let ty = ty
+                .split('<')
+                .next()
+                .unwrap_or(ty)
+                .trim()
+                .trim_end_matches('?');
+            if !ty.is_empty() {
+                return Binding::Typed(ty.to_string(), false);
+            }
+        }
+    }
     if let Some(rhs) = assigned {
         return match constructed_type(rhs, lang) {
             Some(ty) => Binding::Typed(ty, true),
@@ -10869,6 +11493,7 @@ fn returned_call(rhs: &str, lang: Lang) -> Option<String> {
             | Lang::Cpp
             | Lang::Go
             | Lang::Zig
+            | Lang::Ruby
     ) {
         return None;
     }
@@ -11433,7 +12058,8 @@ fn owner_from(node: Node, src: &str, lang: Lang) -> Option<String> {
 fn unfinished_class(error: Node, inside: Node, src: &str) -> Option<String> {
     let mut cursor = error.walk();
     let tokens: Vec<Node> = error.children(&mut cursor).collect();
-    let mut open: Option<(String, usize)> = None;
+    // Each class header's name and its body's open brace, in order.
+    let mut opened: Vec<(String, usize)> = Vec::new();
     let mut named: Option<String> = None;
     for (i, token) in tokens.iter().enumerate() {
         if token.start_byte() >= inside.start_byte() {
@@ -11448,21 +12074,24 @@ fn unfinished_class(error: Node, inside: Node, src: &str) -> Option<String> {
                     .map(|t| node_text(*t, src).to_string());
             }
             "{" => {
-                open = named.take().map(|name| (name, token.start_byte())).or(open);
+                if let Some(name) = named.take() {
+                    opened.push((name, token.start_byte()));
+                }
             }
-            "}" => open = None,
             // `struct formatter;`: a declaration, no body opened.
             ";" => named = None,
             _ => {}
         }
     }
-    // Its body's `}` may be no token of the error's own (the grammar read
-    // part of the body as a node of its own): the text says whether the
-    // body is still open where `inside` is.
-    let (name, brace) = open?;
-    still_open(src.get(brace..inside.start_byte())?)
-        .then(|| base_type_name(&name))
-        .flatten()
+    // The innermost whose body is still open where `inside` is: its `}`
+    // may be no token of the error's own (the grammar read part of the
+    // body as a node of its own), and a `}` the error does hold may close
+    // a block inside it (a `when`'s) — the text says which are open.
+    opened
+        .iter()
+        .rev()
+        .find(|(_, brace)| src.get(*brace..inside.start_byte()).is_some_and(still_open))
+        .and_then(|(name, _)| base_type_name(name))
 }
 
 /// Whether the brace `text` starts with is still open at its end: no `}`
@@ -15046,18 +15675,30 @@ def main():
         );
     }
 
-    /// A class the grammar could not finish still owns its methods: Kotlin's
-    /// grammar reads a property named `where` as its keyword, and the whole
-    /// class became an error, every method no class's — so `q.limit(1)` on a
-    /// value of no known type, a class's method, reached none.
+    /// A class the grammar could not finish still owns its methods: the
+    /// grammar alone reads a property named `where` as its keyword, and the
+    /// whole class became an error, every method no class's — so
+    /// `q.limit(1)` on a value of no known type, a class's method, reached
+    /// none. (Clew reads that `where` as a name before parsing; the
+    /// recovery stays for what the grammar misreads next.)
     #[test]
     fn an_unfinished_class_still_owns_its_methods() {
         let query = "package shop\n\nopen class Query(where: Int?) {\n    fun limit(n: Int): Query = this\n\n    fun where(predicate: Int): Query {\n        where?.let { error(\"twice\") }\n        where = predicate\n        return this\n    }\n}\n";
-        // The grammar's error, which the owner is recovered through.
-        let tree = crate::highlight::parse(query, Lang::Kotlin).unwrap();
+        // The grammar's own error, read without the rewrite that spares it
+        // ([`crate::highlight::kotlin_readable`]): the owner is recovered
+        // through it.
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&Lang::Kotlin.grammar()).unwrap();
+        let tree = parser.parse(query, None).unwrap();
         assert!(tree.root_node().has_error());
-        let calls = FileCalls::read(Path::new("/p/src/Query.kt"), query).unwrap();
-        assert_eq!(calls.owners.get(&4).map(String::as_str), Some("Query"));
+        let symbols = crate::outline::located_in(&tree, query, Lang::Kotlin);
+        let owners = owners_in(&tree, query, Lang::Kotlin, &symbols);
+        let limit = symbols.iter().find(|l| l.symbol.name == "limit").unwrap();
+        assert_eq!(
+            owners.get(&limit.symbol.line).map(String::as_str),
+            Some("Query"),
+            "{owners:?}"
+        );
         let g = graph(&[
             ("/p/src/Query.kt", query),
             (
@@ -16594,6 +17235,35 @@ def main():
         assert_eq!(own, [12], "{:?}", edges(&g));
     }
 
+    /// A name aliased to two types (`using iterator = …` in two scopes) is
+    /// neither: an `iterator` passed reaches both overloads, whichever
+    /// file was read last.
+    #[test]
+    fn a_name_aliased_twice_is_neither_type() {
+        let a = "namespace fmt {\ntemplate <typename T> class basic_appender {};\ntemplate <typename T> class reserve_iterator {};\ntemplate <typename T> auto fill_n(basic_appender<T> out, int n) -> int { return 0; }\ntemplate <typename OutputIt> auto fill_n(OutputIt out, int n) -> int { return 0; }\nstruct printer {\n  using iterator = basic_appender<char>;\n};\n}\n";
+        let b = "#include \"a.h\"\nnamespace fmt {\ntemplate <typename OutputIt> void write(OutputIt out) {\n  using iterator = reserve_iterator<OutputIt>;\n  iterator it;\n  fill_n(it, 3);\n}\n}\n";
+        for order in [
+            [("/p/fmt/a.h", a), ("/p/fmt/b.h", b)],
+            [("/p/fmt/b.h", b), ("/p/fmt/a.h", a)],
+        ] {
+            let sources: Vec<(PathBuf, String)> = order
+                .iter()
+                .map(|(f, s)| (PathBuf::from(f), s.to_string()))
+                .collect();
+            let scope = HashMap::from([(
+                PathBuf::from("/p/fmt/b.h"),
+                HashSet::from([PathBuf::from("/p/fmt/a.h")]),
+            )]);
+            let g = ProjectCallGraph::build(defs_of(&order), &sources, &scope);
+            let at = (0..g.node_count())
+                .find(|&n| g.node(n).name == "write")
+                .unwrap();
+            let mut lines: Vec<usize> = g.callees_of(at).iter().map(|&c| g.node(c).line).collect();
+            lines.sort_unstable();
+            assert_eq!(lines, [4, 5], "{:?}", edges(&g));
+        }
+    }
+
     /// An argument of a class whose name holds a `G` (`GetTodosQuery`) is
     /// ranked by that name: `SendAsync(IRequest<T>)` before
     /// `SendAsync(IBaseRequest)`, as `IRequest<T>` (MediatR's) is the base it
@@ -16956,6 +17626,160 @@ def main():
         );
     }
 
+    /// Audit 13's shapes and the gaps left after it: a Kotlin object's
+    /// property (`Users.id`, of what `integer(…)` returns) is a `Column`,
+    /// whose call reaches `Column`'s method, and whose infix `eq` the
+    /// extension of a type it is (`ExpressionWithColumnType<T>.eq`), never one
+    /// of a type it is no kin to (`CompositeColumn<T>.eq`).
+    #[test]
+    fn a_kotlin_property_and_the_extensions_of_its_type() {
+        let kt = "package org.x\nopen class Expression<T>\nopen class ExpressionWithColumnType<T> : Expression<T>()\nclass Column<T> : ExpressionWithColumnType<T>() {\n    fun isNull(): Boolean = true\n}\nclass CompositeColumn<T> : Expression<T>()\nclass Op\ninfix fun <T> ExpressionWithColumnType<T>.eq(t: T): Op = Op()\ninfix fun <T> CompositeColumn<T>.eq(t: T): Op = Op()\nopen class Table {\n    fun integer(name: String): Column<Int> = Column()\n}\nclass Other {\n    fun isNull(): Boolean = false\n}\nobject Users : Table() {\n    val id = integer(\"id\")\n}\nfun find() = Users.id eq 1\nfun nulls() = Users.id.isNull()\n";
+        let g = graph(&[("/p/src/main/kotlin/org/x/A.kt", kt)]);
+        let reached = |name: &str| -> Vec<usize> {
+            let at = (0..g.node_count())
+                .find(|&n| g.node(n).name == name)
+                .unwrap();
+            g.callees_of(at).iter().map(|&c| g.node(c).line).collect()
+        };
+        assert_eq!(reached("find"), [9], "{:?}", edges(&g));
+        assert_eq!(reached("nulls"), [5], "{:?}", edges(&g));
+    }
+
+    /// A Ruby method's result is the class its last statement builds —
+    /// assigned, memoized or returned, its arguments over lines too — and
+    /// not one it calls a method on once built.
+    #[test]
+    fn a_ruby_method_returns_what_its_last_statement_builds() {
+        let of = |body: &str| ruby_built(&format!("def m\n{body}\nend"));
+        assert_eq!(
+            of("  @f ||= Shop::Issue.new(\n    a: 1\n  )"),
+            Some("Shop::Issue".into())
+        );
+        assert_eq!(of("  x = 1\n  Cart.new(x)"), Some("Cart".into()));
+        assert_eq!(of("  return Cart.new"), Some("Cart".into()));
+        assert_eq!(of("  Cart.new(x) # built"), Some("Cart".into()));
+        assert_eq!(of("  Cart.new(x).call"), None);
+        assert_eq!(of("  Cart.new.tap { |c| c.go }"), None);
+        assert_eq!(of("  if x\n    A.new\n  else\n    B.new\n  end"), None);
+    }
+
+    /// An extension of a project type takes a value of its own kin: an
+    /// `object` whose base is called with named arguments
+    /// (`object Customers : UUIDTable(name = "customer")`, a `FieldSet`), a
+    /// value cast to the type (`Random() as Expression<Int?>`), and `this`
+    /// in an extension or a lambda with a receiver — not the class around.
+    /// A project's `substring` returns what it declares, not a string.
+    #[test]
+    fn an_extension_takes_an_object_a_cast_and_this() {
+        let core = "package org.x\ninterface FieldSet\nabstract class ColumnSet : FieldSet\nopen class Table(name: String = \"\") : ColumnSet()\nabstract class IdTable<T : Any>(name: String = \"\") : Table(name)\nopen class UUIDTable(name: String = \"\") : IdTable<Int>(name)\nabstract class AbstractQuery<T : AbstractQuery<T>>(x: Int)\ninterface Expression<T>\nclass Cast<T>(e: Expression<*>) : Expression<T>\nclass VarCharColumnType\nclass Substring<T>(e: Expression<T>) : Expression<T>\nfun <T> Expression<T>.substring(start: Int, length: Int): Substring<T> = Substring(this)\nfun <T> Expression<T>.lowerCase(): Int = 1\nfun <R> Expression<*>.castTo(columnType: VarCharColumnType): Expression<R> = Cast(this)\nclass Column<T> : Expression<T> {\n    fun check(s: String) {}\n}\nprivate fun <T> Column<T>.unquotedName() = \"\"\nfun <T> Column<T>.idTable(): Int = 1\nopen class Builder {\n    fun <T> Column<T>.less(t: T): Int = this.idTable()\n    fun column(c: Column<Int>): Column<Int> = c.apply {\n        check(\"${this.unquotedName()}\")\n    }\n}\n";
+        let jdbc = "package org.x\nopen class Query(var set: FieldSet) : AbstractQuery<Query>(1)\nfun FieldSet.selectAll(): Query = Query(this)\nfun AbstractQuery<*>.union(other: Query): Int = 1\n";
+        let test = "package org.x\nobject CustomerTable : UUIDTable(name = \"customer\")\nclass T {\n    fun a() {\n        val customers = transaction { CustomerTable.selectAll().toList() }\n    }\n    fun b() {\n        val q: Query = CustomerTable.selectAll()\n        if (true) {\n            q.union(q)\n        }\n    }\n    fun c() {\n        val e = Random() as Expression<Int?>\n        e.castTo(VarCharColumnType())\n    }\n    fun d(e: Expression<String>) {\n        e.substring(1, 2).lowerCase()\n    }\n}\n";
+        let g = graph(&[
+            ("/p/core/src/main/kotlin/org/x/core/A.kt", core),
+            ("/p/jdbc/src/main/kotlin/org/x/jdbc/Q.kt", jdbc),
+            ("/p/tests/src/test/kotlin/org/x/tests/T.kt", test),
+        ]);
+        let reached = |name: &str| -> Vec<String> {
+            let at = (0..g.node_count())
+                .find(|&n| g.node(n).name == name)
+                .unwrap();
+            let mut out: Vec<String> = g
+                .callees_of(at)
+                .iter()
+                .map(|&c| g.node(c).name.clone())
+                .collect();
+            out.sort();
+            out
+        };
+        assert_eq!(reached("a"), ["selectAll"], "{:?}", edges(&g));
+        assert_eq!(reached("b"), ["selectAll", "union"], "{:?}", edges(&g));
+        assert_eq!(reached("c"), ["castTo"], "{:?}", edges(&g));
+        assert_eq!(reached("d"), ["lowerCase", "substring"], "{:?}", edges(&g));
+        assert_eq!(reached("less"), ["idTable"], "{:?}", edges(&g));
+        assert!(
+            reached("column").contains(&"unquotedName".to_string()),
+            "{:?}",
+            edges(&g)
+        );
+    }
+
+    /// More of audit 13's: a Java `Double.MAX_VALUE` is a `double`, and a
+    /// literal reaches the overload of its own kind before one it boxes to
+    /// (`value(double)`, not `value(Number)`); a Scala string method's result
+    /// (`msg.toLowerCase`) calls the library's `contains`; a Ruby method's
+    /// `@x ||= GithubFetcher::Issue.new(…)` makes it return that class, and a
+    /// bare call reaches no module another class includes and its own does
+    /// not; a Zig struct nested in another (`Testing.Response`) is told from
+    /// another file's `Response`.
+    #[test]
+    fn audit_13_shapes() {
+        let java = "class Writer {\n  Writer value(double d) { return this; }\n  Writer value(Number n) { return this; }\n  Writer value(String s) { return this; }\n}\nclass Uses {\n  void write(Writer w) {\n    w.value(Double.MAX_VALUE);\n    w.value(-1.0d);\n  }\n}\n";
+        let scala = "package os\nclass PermSet { def contains(p: Int): Boolean = true }\nobject T {\n  def t(): Unit = assert(compileError(\"x\").msg.toLowerCase.contains(\"y\"))\n}\n";
+        let issue = "class Issue < ApplicationRecord\n  def fetcher(repo = nil)\n    @fetcher ||= GithubFetcher::Issue.new(\n      owner_name: repo\n    )\n  end\n\n  def update_issue!(repo = nil)\n    fetch = fetcher(repo)\n    fetch.call(retry_on_bad_token: 3)\n  end\nend\n";
+        let resource = "module GithubFetcher\n  class Resource\n    def call(retry_on_bad_token: false)\n    end\n  end\nend\n";
+        let gi = "module GithubFetcher\n  class Issue < Resource\n  end\nend\n";
+        let other = "module DependencyParser\n  class Parse\n    def call\n    end\n  end\nend\n";
+        let sinatra = "module Sinatra\n  module Helpers\n    def informational?\n    end\n  end\n\n  class Base\n    include Helpers\n  end\n\n  class Response < Rack::Response\n    def drop_content_info?\n      informational?\n    end\n  end\nend\n";
+        let g = graph(&[
+            ("/p/src/Writer.java", java),
+            ("/p/os/T.scala", scala),
+            ("/p/app/models/issue.rb", issue),
+            ("/p/app/models/github_fetcher/resource.rb", resource),
+            ("/p/app/models/github_fetcher/issue.rb", gi),
+            ("/p/lib/dependency_parser/parse.rb", other),
+            ("/p/lib/sinatra/base.rb", sinatra),
+        ]);
+        let reached = |name: &str| -> Vec<String> {
+            let at = (0..g.node_count())
+                .find(|&n| g.node(n).name == name)
+                .unwrap();
+            let mut out: Vec<String> = g
+                .callees_of(at)
+                .iter()
+                .map(|&c| format!("{}:{}", g.node(c).file.display(), g.node(c).line))
+                .collect();
+            out.sort();
+            out
+        };
+        assert_eq!(
+            reached("write"),
+            ["/p/src/Writer.java:2"],
+            "{:?}",
+            edges(&g)
+        );
+        assert_eq!(reached("t"), [] as [&str; 0], "{:?}", edges(&g));
+        assert_eq!(
+            reached("update_issue!"),
+            [
+                "/p/app/models/github_fetcher/resource.rb:3",
+                "/p/app/models/issue.rb:2"
+            ],
+            "{:?}",
+            edges(&g)
+        );
+        assert_eq!(
+            reached("drop_content_info?"),
+            [] as [&str; 0],
+            "{:?}",
+            edges(&g)
+        );
+
+        let response = "pub const Response = struct {\n    headers: StringKeyValue,\n};\nconst StringKeyValue = struct {\n    pub fn get(self: *StringKeyValue, k: []const u8) ?[]const u8 {\n        _ = self;\n        _ = k;\n        return null;\n    }\n};\n";
+        let testing = "const std = @import(\"std\");\npub const Testing = struct {\n    pub const Response = struct {\n        headers: std.StringHashMap([]const u8),\n    };\n};\n";
+        let httpz = "const testing = @import(\"testing.zig\");\nfn testReadParsed() testing.Testing.Response {\n    return undefined;\n}\ntest \"cors\" {\n    var res = testReadParsed();\n    _ = res.headers.get(\"x\");\n}\n";
+        let g = graph(&[
+            ("/p/src/response.zig", response),
+            ("/p/src/testing.zig", testing),
+            ("/p/src/httpz.zig", httpz),
+        ]);
+        let gets: Vec<String> = edges(&g)
+            .into_iter()
+            .filter(|(_, callee)| callee.ends_with(":get"))
+            .map(|(caller, callee)| format!("{caller} {callee}"))
+            .collect();
+        assert!(gets.is_empty(), "{gets:?}");
+    }
+
     /// A file of a cross-built project's JavaScript sources (`core/js/`)
     /// reaches no definition built for the JVM and Native alone
     /// (`core/jvm-native/`), where one of its own platforms has the name.
@@ -17152,6 +17976,56 @@ def main():
         let e = edges(&g);
         assert!(has(&g, &go, &format!("{r2dbc}:refresh")), "{e:?}");
         assert!(!has(&g, &go, &format!("{jdbc}:refresh")), "{e:?}");
+    }
+
+    /// A twin's method reached through a base its file does not import
+    /// (`Org.new { … }`, `new` of the `EntityClass` that the imported
+    /// `IntEntityClass` extends): the twin beside the files it imports.
+    #[test]
+    fn a_twin_beside_the_imported_files_is_the_one_called() {
+        let dao = "/p/dao/src/main/kotlin/org/x/dao/";
+        let r2dbc = "/p/dao-r2dbc/src/main/kotlin/org/x/dao/r2dbc/";
+        let test = "/p/tests/src/test/kotlin/org/x/t/OrgTest.kt";
+        let entity = |pkg: &str| {
+            format!(
+                "package {pkg}\n\nabstract class EntityClass<T> {{\n    fun new(init: T.() -> Unit): T = TODO()\n}}\n"
+            )
+        };
+        let int = |pkg: &str| {
+            format!(
+                "package {pkg}\n\nabstract class IntEntityClass<T>(t: Int) : EntityClass<T>()\n"
+            )
+        };
+        let files_owned = [
+            (format!("{dao}EntityClass.kt"), entity("org.x.dao")),
+            (format!("{dao}IntEntityClass.kt"), int("org.x.dao")),
+            (format!("{r2dbc}EntityClass.kt"), entity("org.x.dao.r2dbc")),
+            (format!("{r2dbc}IntEntityClass.kt"), int("org.x.dao.r2dbc")),
+            (
+                test.to_string(),
+                "package org.x.t\n\nimport org.x.dao.IntEntityClass\n\nclass Org {\n    companion object : IntEntityClass<Org>(1)\n}\n\nfun go() {\n    Org.new { }\n}\n".to_string(),
+            ),
+        ];
+        let files: Vec<(&str, &str)> = files_owned
+            .iter()
+            .map(|(f, s)| (f.as_str(), s.as_str()))
+            .collect();
+        let sources: Vec<(PathBuf, String)> = files
+            .iter()
+            .map(|(f, s)| (PathBuf::from(f), s.to_string()))
+            .collect();
+        let scope = HashMap::from([(
+            PathBuf::from(test),
+            HashSet::from([PathBuf::from(format!("{dao}IntEntityClass.kt"))]),
+        )]);
+        let g = ProjectCallGraph::build(defs_of(&files), &sources, &scope);
+        let go = format!("{test}:go");
+        let e = edges(&g);
+        assert!(has(&g, &go, &format!("{dao}EntityClass.kt:new")), "{e:?}");
+        assert!(
+            !has(&g, &go, &format!("{r2dbc}EntityClass.kt:new")),
+            "{e:?}"
+        );
     }
 
     /// A closure is where its own names are bound: sibling tests' `var
