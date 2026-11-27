@@ -11510,11 +11510,12 @@ fn receiver_of(
                 {
                     format!("{RETURNED}{owner}#{method}")
                 }
-                // (A Zig value of a chain or a function's result: the
+                // (A Zig value of a chain from one of a type said: the
                 // method's result on what that turns out to be.)
                 _ if lang == Lang::Zig
                     && let Some(chain) =
-                        zig_chain(value, call.start_byte(), from, places, src, bindings, 1) =>
+                        zig_chain(value, call.start_byte(), from, places, src, bindings, 1)
+                    && !chain.starts_with(RETURNED) =>
                 {
                     return Some(Receiver::Type(format!("{THROUGH}{chain}|{method}()")));
                 }
@@ -12593,7 +12594,8 @@ fn binding_at(head: &str, after: &str, lang: Lang) -> Binding {
     {
         return Binding::Typed("std".to_string(), true);
     }
-    // A Zig struct's `init` makes one of it (`var p = try Params.init(a, 5)`).
+    // A Zig struct's `init` makes one of it (`var p = try Params.init(a, 5)`),
+    // a type function's struct's too (`try httpz.Server(*Handler).init(…)`).
     if lang == Lang::Zig
         && let Some(rhs) = assigned
         && let Some(ty) = rhs
@@ -12602,6 +12604,10 @@ fn binding_at(head: &str, after: &str, lang: Lang) -> Binding {
             .trim_start()
             .split_once(".init(")
             .map(|(ty, _)| ty.trim())
+            .map(|ty| match ty.find('(') {
+                Some(open) if ty.ends_with(')') && balanced_call(&ty[open..]) => &ty[..open],
+                _ => ty,
+            })
             .filter(|ty| {
                 ty.rsplit('.')
                     .next()
@@ -20166,7 +20172,7 @@ def main():
     #[test]
     fn a_zig_type_function_and_a_library_chain() {
         let worker = "const std = @import(\"std\");\n\npub fn Blocking(comptime S: type) type {\n    return struct {\n        server: S,\n        const Self = @This();\n        pub fn init(s: S) Self {\n            return .{ .server = s };\n        }\n    };\n}\n\npub fn NonBlocking(comptime S: type) type {\n    return struct {\n        server: S,\n        const Self = @This();\n        pub fn init(s: S) Self {\n            return .{ .server = s };\n        }\n    };\n}\n\npub const HTTPConn = struct {\n    pub fn writeAll(self: *HTTPConn, data: []const u8) !void {\n        _ = self;\n        _ = data;\n    }\n};\n";
-        let httpz = "const std = @import(\"std\");\nconst Io = std.Io;\nconst worker = @import(\"worker.zig\");\n\npub const Server = struct {\n    const Self = @This();\n    pub fn init() Self {\n        return .{};\n    }\n    pub fn listen(self: *Self) !void {\n        var a = try worker.Blocking(*Self).init(self);\n        const Worker = worker.NonBlocking(*Self);\n        var b = try Worker.init(self);\n        _ = a;\n        _ = b;\n    }\n};\n\nfn testStream(port: u16) Io.net.Stream {\n    _ = port;\n    unreachable;\n}\n\ntest \"chunks\" {\n    const stream = testStream(5993);\n    var writer = stream.writer(&.{});\n    const w = &writer.interface;\n    try w.writeAll(\"GET\");\n}\n";
+        let httpz = "const std = @import(\"std\");\nconst Io = std.Io;\nconst worker = @import(\"worker.zig\");\n\npub const Server = struct {\n    const Self = @This();\n    pub fn init() Self {\n        return .{};\n    }\n    pub fn listen(self: *Self) !void {\n        var a = try worker.Blocking(*Self).init(self);\n        const Worker = worker.NonBlocking(*Self);\n        var b = try Worker.init(self);\n        _ = a;\n        _ = b;\n    }\n};\n\nfn testStream(port: u16) Io.net.Stream {\n    _ = port;\n    unreachable;\n}\n\ntest \"chunks\" {\n    const stream = testStream(5993);\n    var writer = stream.writer(&.{});\n    const w = &writer.interface;\n    try w.writeAll(\"GET\");\n}\n\npub fn Router(comptime H: type) type {\n    return struct {\n        const Self = @This();\n        pub fn get(self: *Self, path: []const u8) void {\n            _ = self;\n            _ = path;\n        }\n    };\n}\n\npub fn Built(comptime H: type) type {\n    return struct {\n        const Self = @This();\n        pub fn init(h: H) !Self {\n            _ = h;\n            return .{};\n        }\n        pub fn router(self: *Self) !Router(H) {\n            _ = self;\n            return .{};\n        }\n    };\n}\n\nfn routes(h: u8) !void {\n    var server = try Built(u8).init(h);\n    var r = try server.router();\n    r.get(\"/\");\n}\n";
         let g = graph(&[("/p/src/worker.zig", worker), ("/p/src/httpz.zig", httpz)]);
         let reached = |name: &str| -> Vec<String> {
             let at = (0..g.node_count())
@@ -20196,6 +20202,14 @@ def main():
             "{:?}",
             edges(&g)
         );
+        // A struct a type function's `init` makes (`try Built(u8).init(h)`):
+        // its methods, and theirs on what they return.
+        let mut routes: Vec<String> = reached("routes")
+            .into_iter()
+            .map(|t| t.rsplit(':').next().unwrap().to_string())
+            .collect();
+        routes.sort();
+        assert_eq!(routes, ["34", "41", "44", "48"], "{:?}", edges(&g));
     }
 
     /// A C++ call naming its namespace (`details::os::gmtime(…)`) reaches
