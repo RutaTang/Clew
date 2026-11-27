@@ -5857,6 +5857,22 @@ mod language_tests {
         ] {
             assert!(has(&erl, kind, name, line), "erlang {kind} {name}: {erl:?}");
         }
+        // A clause matching a record (`State=#state{in_state=PS}`) is one
+        // of them still: a pattern's and an update's fields are no
+        // definitions of fields, only the `-record`'s.
+        let records = outline(
+            "-record(state, {in_state, opts = #{}}).\n\nparse(<< $\\s, Rest/bits >>, S) ->\n\tparse(Rest, S);\nparse(Buffer, State=#state{opts=Opts, in_state=PS}) ->\n\tState#state{in_state=PS#ps{buffer=Buffer}}.\n",
+            "erlang",
+        );
+        let parses: Vec<_> = records.iter().filter(|(_, n, _, _)| n == "parse").collect();
+        assert_eq!(parses.len(), 1, "{records:?}");
+        assert_eq!((parses[0].2, parses[0].3), (3, 6));
+        let fields: Vec<(&str, usize)> = records
+            .iter()
+            .filter(|(k, _, _, _)| k == "field")
+            .map(|(_, n, l, _)| (n.as_str(), *l))
+            .collect();
+        assert_eq!(fields, [("in_state", 1), ("opts", 1)], "{records:?}");
         let arities = outline("f(A) -> A.\nf(A, B) -> A + B.\nf(A, _) -> A.\n", "erlang");
         let fs: Vec<(usize, usize)> = arities
             .iter()

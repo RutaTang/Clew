@@ -207,7 +207,10 @@ use crate::incremental::Version;
 /// 62: Scala self-types' members and parameterless `def`s' declared types;
 /// C# LINQ lambdas' elements; Kotlin trailing lambdas' places; C++ call
 /// results as arguments.
-pub(crate) const CACHE_VERSION: u32 = 62;
+/// 63: Erlang record fields only from `-record`s (a function's clauses
+/// matching a record are one); Kotlin's imports; Zig type functions'
+/// structs; C++ functions' namespaces.
+pub(crate) const CACHE_VERSION: u32 = 63;
 
 /// A cached symbol (the index entry minus the paths, which are reconstructed
 /// from the project root + relative path on load).
@@ -383,6 +386,10 @@ pub struct CachedCalls {
     /// (`clew_core::projectcalls::FileContext::extension_receivers`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extension_receivers: Vec<(usize, String)>,
+    /// Each C++ function's namespaces
+    /// (`clew_core::projectcalls::FileContext::namespaces`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub namespaces: Vec<(usize, String)>,
 }
 
 /// Everything cached about one file: how to confirm it is unchanged (mtime,
@@ -526,6 +533,7 @@ mod tests {
                 aliases: vec![("memory_buffer".into(), "basic_memory_buffer".into())],
                 modules: vec!["Helpers".into()],
                 extension_receivers: vec![(4, "Column".into())],
+                namespaces: vec![(6, "spdlog::details::os".into())],
             }),
         }
     }

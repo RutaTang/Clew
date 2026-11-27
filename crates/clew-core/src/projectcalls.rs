@@ -198,6 +198,11 @@ pub struct FileContext {
     /// A Ruby file's modules (`module Helpers`): what classes include, whose
     /// methods a bare call in any of them may be.
     pub modules: Vec<String>,
+    /// Each C++ function's namespaces, by its definition line
+    /// (`spdlog::details::os` for `gmtime` in `namespace spdlog { namespace
+    /// details { namespace os {`): what a call naming its scope
+    /// (`details::os::gmtime(…)`) reaches.
+    pub namespaces: Vec<(usize, String)>,
     /// The type each Kotlin or C# extension function extends, by its line
     /// (`ExpressionWithColumnType` for `fun <T> ExpressionWithColumnType<T>.eq(…)`,
     /// `IQueryable` for `static … Where(this IQueryable<T> q, …)`): the
@@ -1954,6 +1959,9 @@ pub fn context_in(src: &str, lang: Lang, symbols: &[Located]) -> FileContext {
                 out.extend(haskell_exports(src));
                 out
             }
+            // Kotlin's imports, by their paths (`kotlin.test.assertEquals`,
+            // `org.x.*`): the names of other packages a bare call reaches.
+            (Lang::Kotlin, "import ") => kotlin_imports(src),
             _ => Vec::new(),
         }
     };
@@ -2086,6 +2094,20 @@ pub fn context_in(src: &str, lang: Lang, symbols: &[Located]) -> FileContext {
                     }
                 }
             })
+            .chain(
+                // A type function (`pub fn Blocking(comptime S: type) type
+                // {`): the struct it returns, named for it (its methods'
+                // container, see `zig_container_of`).
+                symbols
+                    .iter()
+                    .filter(|l| is_callable(&l.symbol.kind))
+                    .filter(|l| {
+                        src.get(l.declaration.0..l.declaration.1)
+                            .and_then(|text| text.split('{').next())
+                            .is_some_and(|head| head.trim_end().ends_with(") type"))
+                    })
+                    .map(|l| (l.symbol.line, l.symbol.name.clone())),
+            )
             .collect()
     } else {
         returns
@@ -2160,7 +2182,140 @@ pub fn context_in(src: &str, lang: Lang, symbols: &[Located]) -> FileContext {
                 .collect(),
             _ => Vec::new(),
         },
+        namespaces: match lang {
+            Lang::Cpp => cpp_namespaces(src, symbols),
+            _ => Vec::new(),
+        },
     }
+}
+
+/// Each C++ function's namespaces ([`FileContext::namespaces`]), read off
+/// the text: each `namespace a {` (`namespace a::b {`, `inline namespace v1
+/// {`; an anonymous one adds nothing) to its closing brace — past comments,
+/// strings and characters, and preprocessor lines (a macro's `namespace fmt
+/// {` opens none where it is defined).
+fn cpp_namespaces(src: &str, symbols: &[Located]) -> Vec<(usize, String)> {
+    let bytes = src.as_bytes();
+    let word = |c: u8| c == b'_' || c.is_ascii_alphanumeric();
+    // (Its brace's depth, its path, where it opens.)
+    let mut open: Vec<(usize, String, usize)> = Vec::new();
+    let mut spans: Vec<(usize, usize, String)> = Vec::new();
+    let mut pending: Option<String> = None;
+    let mut depth = 0usize;
+    let mut line_start = true;
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if c == b'\n' {
+            line_start = true;
+            i += 1;
+            continue;
+        }
+        if line_start && c == b'#' {
+            // A preprocessor line, its continuations too.
+            while i < bytes.len() && bytes[i] != b'\n' {
+                if bytes[i] == b'\\' && bytes.get(i + 1) == Some(&b'\n') {
+                    i += 1;
+                }
+                i += 1;
+            }
+            continue;
+        }
+        if !c.is_ascii_whitespace() {
+            line_start = false;
+        }
+        match c {
+            b'/' if bytes.get(i + 1) == Some(&b'/') => {
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+                continue;
+            }
+            b'/' if bytes.get(i + 1) == Some(&b'*') => {
+                i += 2;
+                while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                    i += 1;
+                }
+                i += 2;
+                continue;
+            }
+            b'"' | b'\'' => {
+                // (A digit separator, `1'000`, is no character's quote.)
+                if c == b'\'' && i > 0 && bytes[i - 1].is_ascii_digit() {
+                    i += 1;
+                    continue;
+                }
+                // A raw string (`R"(…)"`): to its `)"`.
+                if c == b'"' && i > 0 && bytes[i - 1] == b'R' {
+                    let close = src[i..].find(")\"").map_or(bytes.len(), |n| i + n + 2);
+                    i = close;
+                    continue;
+                }
+                i += 1;
+                while i < bytes.len() && bytes[i] != c && bytes[i] != b'\n' {
+                    if bytes[i] == b'\\' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+                i += 1;
+                continue;
+            }
+            b'{' => {
+                depth += 1;
+                if let Some(name) = pending.take() {
+                    let parent = open.last().map_or("", |(_, path, _)| path.as_str());
+                    let path = match (parent.is_empty(), name.is_empty()) {
+                        (_, true) => parent.to_string(),
+                        (true, false) => name,
+                        (false, false) => format!("{parent}::{name}"),
+                    };
+                    open.push((depth, path, i));
+                }
+            }
+            b'}' => {
+                if open.last().is_some_and(|(d, _, _)| *d == depth)
+                    && let Some((_, path, at)) = open.pop()
+                {
+                    spans.push((at, i, path));
+                }
+                depth = depth.saturating_sub(1);
+            }
+            b';' => pending = None,
+            b'n' if src[i..].starts_with("namespace")
+                && (i == 0 || !word(bytes[i - 1]))
+                && !bytes.get(i + 9).is_some_and(|&b| word(b)) =>
+            {
+                let rest = &src[i + 9..];
+                let name: String = rest
+                    .trim_start()
+                    .chars()
+                    .take_while(|&ch| ch == '_' || ch == ':' || ch.is_ascii_alphanumeric())
+                    .collect();
+                let after = rest.trim_start()[name.len()..].trim_start();
+                if after.starts_with('{') {
+                    pending = Some(name);
+                }
+                i += 9;
+                continue;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    symbols
+        .iter()
+        .filter(|l| is_callable(&l.symbol.kind))
+        .filter_map(|l| {
+            let at = l.declaration.0;
+            spans
+                .iter()
+                .filter(|(from, to, _)| *from < at && at < *to)
+                .max_by_key(|(from, _, _)| *from)
+                .map(|(_, _, path)| (l.symbol.line, path.clone()))
+        })
+        .filter(|(_, path)| !path.is_empty())
+        .collect()
 }
 
 /// The lines of a Ruby file's singleton methods ([`FileContext::
@@ -2989,13 +3144,18 @@ impl ProjectCallGraph {
         // A C++ function the project also declares apart (a header's
         // prototype) may leave out what that declaration defaults, its own
         // list showing none (C++ gives a parameter its default once).
-        let mut declared_fewest: HashMap<(&str, Option<&str>), u8> = HashMap::new();
+        // (The declaration of the same overload: as many parameters — one
+        // of another, `vformat_to(out, fmt, args)` beside `vformat_to(out,
+        // loc, fmt, args)`, defaults none of its. A header read as C says
+        // no count: any.)
+        let mut declared_fewest: HashMap<(&str, Option<&str>, Option<u8>), u8> = HashMap::new();
         for (i, n) in nodes.iter().enumerate() {
             if facts[i].bodyless && matches!(facts[i].lang, Some(Lang::C | Lang::Cpp)) {
-                // (A header read as C says no count: any.)
-                let fewest = facts[i].arity.map_or(0, |(fewest, _)| fewest);
+                let (fewest, most) = facts[i]
+                    .arity
+                    .map_or((0, None), |(fewest, most)| (fewest, Some(most)));
                 declared_fewest
-                    .entry((n.name.as_str(), owner[i]))
+                    .entry((n.name.as_str(), owner[i], most))
                     .and_modify(|f| *f = (*f).min(fewest))
                     .or_insert(fewest);
             }
@@ -3003,9 +3163,14 @@ impl ProjectCallGraph {
         for (i, n) in nodes.iter().enumerate() {
             if !facts[i].bodyless
                 && let Some((fewest, most)) = facts[i].arity
-                && let Some(&declared) = declared_fewest.get(&(n.name.as_str(), owner[i]))
             {
-                facts[i].arity = Some((fewest.min(declared), most));
+                let declared = [Some(most), None]
+                    .iter()
+                    .filter_map(|m| declared_fewest.get(&(n.name.as_str(), owner[i], *m)))
+                    .min();
+                if let Some(&declared) = declared {
+                    facts[i].arity = Some((fewest.min(declared), most));
+                }
             }
         }
         // The project's own types (and traits): what defines a method here.
@@ -3729,6 +3894,22 @@ impl ProjectCallGraph {
         let nested_node: Vec<bool> = nodes
             .iter()
             .map(|n| nested_lines.contains(&(n.file.as_path(), n.line)))
+            .collect();
+        // Each C++ function's namespaces, by its definition.
+        let node_namespace: HashMap<(&Path, usize), &str> = files
+            .iter()
+            .flat_map(|f| {
+                f.context
+                    .namespaces
+                    .iter()
+                    .map(move |(line, path)| ((f.file.as_path(), *line), path.as_str()))
+            })
+            .collect();
+        // Each Kotlin file's package, by file.
+        let package_of_file: HashMap<&Path, &str> = files
+            .iter()
+            .filter(|f| f.lang == Lang::Kotlin)
+            .map(|f| (f.file.as_path(), f.context.package.as_deref().unwrap_or("")))
             .collect();
         // Each Haskell file's exports ([`haskell_exports`]), by file.
         let haskell_exports_of: HashMap<&Path, &[String]> = files
@@ -5558,6 +5739,40 @@ impl ProjectCallGraph {
                 } else {
                     targets
                 };
+                // A Kotlin function of the top level, or an extension, of
+                // another package: called bare only where the file imports
+                // it by name, or its package whole — an `import kotlin.test.
+                // assertEquals` brings no `tests.shared.assertEquals`, nor
+                // does an `assertEqualCollections` imported from its file.
+                let imported_by_name: Vec<usize>;
+                let targets: &[usize] = if fc.lang == Lang::Kotlin
+                    && !cs.method
+                    && cs.qualifier.is_none()
+                    && matches!(cs.receiver, None | Some(Receiver::Own))
+                {
+                    let own = fc.context.package.as_deref().unwrap_or("");
+                    let visible = |c: usize| {
+                        if owner[c].is_some() && !extension_nodes.contains(&c) {
+                            return true;
+                        }
+                        let Some(package) = package_of_file.get(nodes[c].file.as_path()) else {
+                            return true;
+                        };
+                        *package == own
+                            || fc.context.imports.iter().any(|i| {
+                                i.strip_prefix(*package).is_some_and(|rest| {
+                                    rest == ".*"
+                                        || rest
+                                            .strip_prefix('.')
+                                            .is_some_and(|name| name == callee_name)
+                                })
+                            })
+                    };
+                    imported_by_name = targets.iter().copied().filter(|&c| visible(c)).collect();
+                    &imported_by_name
+                } else {
+                    targets
+                };
                 // A file built for some platforms (cats-effect's `core/js/`)
                 // reaches no definition built only for others
                 // (`core/jvm-native/`), where one built for its own is.
@@ -5605,11 +5820,19 @@ impl ProjectCallGraph {
                     &kept
                 } else if let Some(scope) = cpp_scoped {
                     let a_class = declared_types.contains(scope);
+                    // (A namespace of the name, where a free one is in one —
+                    // `details::os::gmtime` is no `fmt::gmtime`.)
+                    let in_scope = |c: usize| {
+                        node_namespace
+                            .get(&(nodes[c].file.as_path(), nodes[c].line))
+                            .is_some_and(|path| path.rsplit("::").next() == Some(scope))
+                    };
+                    let named = targets.iter().any(|&c| owner[c].is_none() && in_scope(c));
                     kept = targets
                         .iter()
                         .copied()
                         .filter(|&c| match owner[c] {
-                            None => !a_class,
+                            None => !a_class && (!named || in_scope(c)),
                             // `fmt::rgb(…)`: a constructor, its class named
                             // in the scope's.
                             Some(o) => {
@@ -6795,6 +7018,80 @@ fn scala_class_fields(src: &str, symbols: &[Located]) -> Vec<(String, String, St
         }
     }
     out
+}
+
+/// The chain of fields and method results ([`THROUGH`]) a Zig name of the
+/// function's is bound to, from a value of a type said: `std.Io.net.Stream|
+/// writer()|interface` for `w` of `const w = &writer.interface;`, `var
+/// writer = stream.writer(…);`, `const stream: Io.net.Stream = …` — or a
+/// function's result at its root (`→testStream|writer()`).
+fn zig_chain(
+    name: &str,
+    at: usize,
+    from: usize,
+    places: &Places,
+    src: &str,
+    bindings: &mut HashMap<(usize, String), Bindings>,
+    depth: usize,
+) -> Option<String> {
+    if depth > 4 {
+        return None;
+    }
+    let said = bindings
+        .entry((from, name.to_string()))
+        .or_insert_with(|| Bindings::from(from, places))
+        .said_before(at, name, &Scope { places, from }, src, Lang::Zig);
+    let Said::Type(ty, _) = said else {
+        return None;
+    };
+    if let Some(rest) = ty.strip_prefix(&format!("{THROUGH}$")) {
+        let (root, path) = rest.split_once('|')?;
+        let base = zig_chain(root, at, from, places, src, bindings, depth + 1)?;
+        return Some(format!("{base}|{path}"));
+    }
+    if let Some(rest) = ty.strip_prefix(&format!("{RETURNED}@")) {
+        let (value, method) = rest.split_once('#')?;
+        let base = zig_chain(value, at, from, places, src, bindings, depth + 1)?;
+        return Some(format!("{base}|{method}()"));
+    }
+    (!ty.starts_with(THROUGH)).then_some(ty)
+}
+
+/// Whether `args` (from its `(`) is one parenthesized list, closing at its
+/// end: `(a, f(b))`, never `(a).b(c)`.
+fn balanced_call(args: &str) -> bool {
+    let mut depth = 0i32;
+    for (i, c) in args.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return i + 1 == args.len();
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// A Kotlin file's imports, by their paths (`kotlin.test.assertEquals`,
+/// `org.x.*`) — an alias's (`import a.b as c`) by the path it names.
+fn kotlin_imports(src: &str) -> Vec<String> {
+    src.lines()
+        .map(str::trim_start)
+        .filter_map(|line| line.strip_prefix("import "))
+        .filter_map(|rest| {
+            let path = rest.split("//").next()?.trim().trim_end_matches(';');
+            let path = path.split(" as ").next()?.trim();
+            (!path.is_empty()
+                && path
+                    .chars()
+                    .all(|c| c == '.' || c == '*' || c == '_' || c == '`' || c.is_alphanumeric()))
+            .then(|| path.replace('`', ""))
+        })
+        .collect()
 }
 
 /// The type the self-type of the Scala class, trait or object around
@@ -10774,6 +11071,20 @@ fn receiver_of(
     {
         return Some(Receiver::Type(receiver.to_string()));
     }
+    // A Zig type function called for the receiver (`worker.Blocking(*Self,
+    // H).init(…)`, its name capitalized as a type's): the struct it
+    // returns, named for it.
+    if lang == Lang::Zig
+        && receiver.ends_with(')')
+        && let Some(open) = receiver.find('(')
+        && let Some(function) = receiver[..open].rsplit('.').next()
+        && is_plain_name(function)
+        && function.starts_with(char::is_uppercase)
+        && receiver[..open].split('.').all(is_plain_name)
+        && balanced_call(&receiver[open..])
+    {
+        return Some(Receiver::Type(function.to_string()));
+    }
     // A Scala placeholder's element (`lines.exists(_.contains("x"))`) of
     // no type this reads, called by a method every string and collection
     // has: the library's, never the one project class's of the name
@@ -11163,6 +11474,26 @@ fn receiver_of(
         // Zig's `self: *Self` (`const Self = @This();`): the container
         // the function is in.
         Said::Type(ty, _) if lang == Lang::Zig && ty == "Self" => return Some(Receiver::Own),
+        // A Zig value a chain from another of the function's makes (`const w
+        // = &writer.interface;` with `var writer = stream.writer(…);` and
+        // `const stream = testStream(…);`): the chain's last field's type,
+        // once the files are read — a library's for a library's value.
+        Said::Type(ty, _) if lang == Lang::Zig && ty.starts_with(&format!("{THROUGH}$")) => {
+            let chain = zig_chain(
+                receiver,
+                call.start_byte(),
+                from,
+                scope.places,
+                src,
+                bindings,
+                0,
+            )?;
+            return Some(Receiver::Type(if chain.contains('|') {
+                format!("{THROUGH}{chain}")
+            } else {
+                chain
+            }));
+        }
         // A method's result on a value (`val cell = cells.get(k)`): that
         // value's type's method, where its binding says the type; else the
         // method by its name alone.
@@ -11178,6 +11509,14 @@ fn receiver_of(
                     if !owner.starts_with(RETURNED) && !owner.starts_with(THROUGH) =>
                 {
                     format!("{RETURNED}{owner}#{method}")
+                }
+                // (A Zig value of a chain or a function's result: the
+                // method's result on what that turns out to be.)
+                _ if lang == Lang::Zig
+                    && let Some(chain) =
+                        zig_chain(value, call.start_byte(), from, places, src, bindings, 1) =>
+                {
+                    return Some(Receiver::Type(format!("{THROUGH}{chain}|{method}()")));
                 }
                 _ => format!("{RETURNED}{method}"),
             };
@@ -12222,6 +12561,26 @@ fn binding_at(head: &str, after: &str, lang: Lang) -> Binding {
     } else {
         None
     };
+    // A Zig field of another of the function's values (`const w =
+    // &writer.interface;`): the chain from it, read where it is used.
+    if lang == Lang::Zig
+        && let Some(rhs) = assigned
+        && let Some(path) = rhs
+            .split(';')
+            .next()
+            .map(|r| r.trim().trim_start_matches('&').trim_start())
+        && let Some((root, rest)) = path.split_once('.')
+        && is_plain_name(root)
+        && root.starts_with(char::is_lowercase)
+        && root != "std"
+        && !rest.is_empty()
+        && rest.split('.').all(is_plain_name)
+    {
+        return Binding::Typed(
+            format!("{THROUGH}${root}|{}", rest.replace('.', "|")),
+            false,
+        );
+    }
     // A Zig value the standard library makes (`std.ArrayList(T).init(a)`,
     // `try std.json.parseFromSlice(…)`): its methods are the library's.
     if lang == Lang::Zig
@@ -19756,6 +20115,163 @@ def main():
         };
         assert_eq!(lines("wide", "format_to_n"), [9, 13], "{:?}", edges(&g));
         assert_eq!(lines("run", "handle"), [20, 21], "{:?}", edges(&g));
+    }
+
+    /// A Kotlin function of another package's top level, or an extension
+    /// of it, is called bare only where the file imports it by name or its
+    /// package whole: `import kotlin.test.assertEquals` and an
+    /// `assertEqualCollections` imported from the project's file bring none
+    /// of that file's `JdbcTransaction.assertEquals`.
+    #[test]
+    fn a_kotlin_function_of_another_package_is_called_where_imported() {
+        let assert = "package org.jetbrains.exposed.v1.tests.shared\n\nimport kotlin.test.assertEquals\n\nfun <T> JdbcTransaction.assertEquals(exp: T, act: T) = assertEquals(exp, act, \"Failed\")\nfun <T> assertEqualCollections(a: Collection<T>, b: Collection<T>) {}\n";
+        let returning = "package org.jetbrains.exposed.v1.tests.shared.dml\n\nimport org.jetbrains.exposed.v1.tests.shared.assertEqualCollections\nimport kotlin.test.assertEquals\n\nclass ReturningTests {\n    fun testReturning() {\n        withTables {\n            assertEquals(1, 2)\n            assertEqualCollections(listOf(1), listOf(1))\n        }\n    }\n}\n";
+        let adjust = "package org.jetbrains.exposed.v1.tests.shared.dml\n\nimport org.jetbrains.exposed.v1.tests.shared.assertEquals\nimport kotlin.test.assertEquals\n\nclass AdjustQueryTests {\n    fun testAdjust() {\n        withTables {\n            assertEquals(1, 2)\n        }\n    }\n}\n";
+        let starred = "package org.jetbrains.exposed.v1.tests.other\n\nimport org.jetbrains.exposed.v1.tests.shared.*\n\nclass StarTests {\n    fun testStar() {\n        withTables {\n            assertEquals(1, 2)\n        }\n    }\n}\n";
+        let base = "/p/exposed-tests/src/test/kotlin/org/jetbrains/exposed/v1/tests/shared";
+        let g = graph(&[
+            (&format!("{base}/Assert.kt"), assert),
+            (&format!("{base}/dml/ReturningTests.kt"), returning),
+            (&format!("{base}/dml/AdjustQueryTests.kt"), adjust),
+            (&format!("{base}/../other/StarTests.kt"), starred),
+        ]);
+        let reached = |caller: &str| -> Vec<String> {
+            let at = (0..g.node_count())
+                .find(|&n| g.node(n).name == caller)
+                .unwrap();
+            let mut names: Vec<String> = g
+                .callees_of(at)
+                .iter()
+                .map(|&c| g.node(c).name.clone())
+                .collect();
+            names.sort();
+            names
+        };
+        assert_eq!(
+            reached("testReturning"),
+            ["assertEqualCollections"],
+            "{:?}",
+            edges(&g)
+        );
+        assert_eq!(reached("testAdjust"), ["assertEquals"], "{:?}", edges(&g));
+        assert_eq!(reached("testStar"), ["assertEquals"], "{:?}", edges(&g));
+    }
+
+    /// A Zig type function's struct (`worker.Blocking(*Self, H).init(…)`,
+    /// `const Worker = worker.NonBlocking(…); Worker.init(…)`) is the one
+    /// whose methods are called, never the calling struct's of the name; and
+    /// a field of a library's value (`const w = &writer.interface;` with
+    /// `var writer = stream.writer(…)` of a `std.Io.net.Stream`) is the
+    /// library's.
+    #[test]
+    fn a_zig_type_function_and_a_library_chain() {
+        let worker = "const std = @import(\"std\");\n\npub fn Blocking(comptime S: type) type {\n    return struct {\n        server: S,\n        const Self = @This();\n        pub fn init(s: S) Self {\n            return .{ .server = s };\n        }\n    };\n}\n\npub fn NonBlocking(comptime S: type) type {\n    return struct {\n        server: S,\n        const Self = @This();\n        pub fn init(s: S) Self {\n            return .{ .server = s };\n        }\n    };\n}\n\npub const HTTPConn = struct {\n    pub fn writeAll(self: *HTTPConn, data: []const u8) !void {\n        _ = self;\n        _ = data;\n    }\n};\n";
+        let httpz = "const std = @import(\"std\");\nconst Io = std.Io;\nconst worker = @import(\"worker.zig\");\n\npub const Server = struct {\n    const Self = @This();\n    pub fn init() Self {\n        return .{};\n    }\n    pub fn listen(self: *Self) !void {\n        var a = try worker.Blocking(*Self).init(self);\n        const Worker = worker.NonBlocking(*Self);\n        var b = try Worker.init(self);\n        _ = a;\n        _ = b;\n    }\n};\n\nfn testStream(port: u16) Io.net.Stream {\n    _ = port;\n    unreachable;\n}\n\ntest \"chunks\" {\n    const stream = testStream(5993);\n    var writer = stream.writer(&.{});\n    const w = &writer.interface;\n    try w.writeAll(\"GET\");\n}\n";
+        let g = graph(&[("/p/src/worker.zig", worker), ("/p/src/httpz.zig", httpz)]);
+        let reached = |name: &str| -> Vec<String> {
+            let at = (0..g.node_count())
+                .find(|&n| g.node(n).name == name)
+                .unwrap();
+            let mut out: Vec<String> = g
+                .callees_of(at)
+                .iter()
+                .map(|&c| format!("{}:{}", g.node(c).file.display(), g.node(c).line))
+                .collect();
+            out.sort();
+            out
+        };
+        assert_eq!(
+            reached("listen"),
+            [
+                "/p/src/worker.zig:13",
+                "/p/src/worker.zig:17",
+                "/p/src/worker.zig:3",
+                "/p/src/worker.zig:7"
+            ],
+            "{:?}",
+            edges(&g)
+        );
+        assert!(
+            !edges(&g).iter().any(|(_, to)| to.ends_with(":writeAll")),
+            "{:?}",
+            edges(&g)
+        );
+    }
+
+    /// A C++ call naming its namespace (`details::os::gmtime(…)`) reaches
+    /// the functions of a namespace of that name, where one is — never
+    /// `fmt::gmtime`, its namespace a macro's; and a prototype lends its
+    /// defaults to the definition of its own overload only (a 3-argument
+    /// `vformat_to(out, fmt, args)` is no `vformat_to(out, loc, fmt, args)`).
+    #[test]
+    fn a_cpp_call_naming_its_namespace_and_a_prototypes_overload() {
+        let os_h = "#pragma once\nnamespace spdlog {\nnamespace details {\nnamespace os {\nstd::tm gmtime(const std::time_t &time_tt);\n}  // namespace os\n}  // namespace details\n}  // namespace spdlog\n";
+        let os_inl = "#include \"os.h\"\nnamespace spdlog {\nnamespace details {\nnamespace os {\nstd::tm gmtime(const std::time_t &time_tt) {\n  return {};\n}\n}  // namespace os\n}  // namespace details\n}  // namespace spdlog\n";
+        let chrono = "#define FMT_BEGIN_NAMESPACE namespace fmt {\nFMT_BEGIN_NAMESPACE\ninline auto gmtime(std::time_t time) -> std::tm {\n  return {};\n}\nauto vformat_to(int out, int fmt, int args) -> int;\nauto vformat_to(int out, int fmt, int args) -> int {\n  return out;\n}\nauto vformat_to(int out, locale_ref loc, int fmt, int args) -> int {\n  return out;\n}\nauto format_to(int out, int fmt) -> int {\n  return vformat_to(out, fmt, 3);\n}\n}\n";
+        let formatter = "#include \"os.h\"\n#include \"chrono.h\"\nnamespace spdlog {\nstd::tm get_time_(std::time_t t) {\n  return details::os::gmtime(t);\n}\n}\n";
+        let files = [
+            ("/p/include/spdlog/details/os.h", os_h),
+            ("/p/include/spdlog/details/os-inl.h", os_inl),
+            ("/p/include/spdlog/details/chrono.h", chrono),
+            ("/p/include/spdlog/details/formatter.cpp", formatter),
+        ];
+        let sources: Vec<(PathBuf, String)> = files
+            .iter()
+            .map(|(f, s)| (PathBuf::from(f), s.to_string()))
+            .collect();
+        let dir = "/p/include/spdlog/details";
+        let scope: HashMap<PathBuf, HashSet<PathBuf>> = HashMap::from([
+            (
+                PathBuf::from(format!("{dir}/formatter.cpp")),
+                HashSet::from([
+                    PathBuf::from(format!("{dir}/os.h")),
+                    PathBuf::from(format!("{dir}/os-inl.h")),
+                    PathBuf::from(format!("{dir}/chrono.h")),
+                ]),
+            ),
+            (
+                PathBuf::from(format!("{dir}/os-inl.h")),
+                HashSet::from([PathBuf::from(format!("{dir}/os.h"))]),
+            ),
+        ]);
+        let g = ProjectCallGraph::build(defs_of(&files), &sources, &scope);
+        let reached = |caller: &str| -> Vec<String> {
+            let at = (0..g.node_count())
+                .find(|&n| g.node(n).name == caller)
+                .unwrap();
+            let mut out: Vec<String> = g
+                .callees_of(at)
+                .iter()
+                .map(|&c| format!("{}:{}", g.node(c).file.display(), g.node(c).line))
+                .collect();
+            out.sort();
+            out
+        };
+        assert!(
+            reached("get_time_")
+                .iter()
+                .all(|t| !t.ends_with("chrono.h:3")),
+            "{:?}",
+            edges(&g)
+        );
+        assert!(!reached("get_time_").is_empty(), "{:?}", edges(&g));
+        assert_eq!(
+            reached("format_to"),
+            [format!("{dir}/chrono.h:7")],
+            "{:?}",
+            edges(&g)
+        );
+        assert_eq!(
+            cpp_namespaces(
+                os_inl,
+                &crate::outline::located_in(
+                    &crate::highlight::parse(os_inl, Lang::Cpp).unwrap(),
+                    os_inl,
+                    Lang::Cpp
+                )
+            ),
+            [(5, "spdlog::details::os".to_string())]
+        );
     }
 
     /// More of audit 17's: a Kotlin property of the file's top level

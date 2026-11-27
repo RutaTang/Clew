@@ -1054,12 +1054,14 @@ const CSHARP_TAGS: &str = r#"
 
 /// The Erlang outline: the module, its functions (one per clause — the
 /// outline merges a function's clauses, see `outline::merge_clauses`),
-/// records and their fields, types and macros.
+/// records and their fields (a `-record`'s own — never a pattern's or an
+/// update's, `State#state{in_state=PS}`, which name no field anew), types
+/// and macros.
 const ERLANG_TAGS: &str = r#"
 (module_attribute name: (atom) @name) @definition.module
 (fun_decl clause: (function_clause name: (atom) @name)) @definition.function
 (record_decl name: (atom) @name) @definition.struct
-(record_field name: (atom) @name) @definition.field
+(record_decl fields: (record_field name: (atom) @name) @definition.field)
 (type_alias name: (type_name name: (atom) @name)) @definition.type
 (opaque name: (type_name name: (atom) @name)) @definition.type
 (pp_define lhs: (macro_lhs name: (_) @name)) @definition.macro
