@@ -4803,6 +4803,47 @@ impl ProjectCallGraph {
                 } else {
                     targets
                 };
+                // A C or C++ free function several source files each define
+                // (spdlog's `tests/utils.cpp` and `bench/async_bench.cpp`
+                // `count_lines`, two programs'): the caller's nearest — the
+                // program it is part of.
+                let nearest_program: Vec<usize>;
+                let targets: &[usize] = if matches!(fc.lang, Lang::C | Lang::Cpp)
+                    && !cs.method
+                    && cs.qualifier.is_none()
+                    && targets
+                        .iter()
+                        .filter(|&&c| owner[c].is_none() && !is_header(&nodes[c].file))
+                        .map(|&c| nodes[c].file.as_path())
+                        .collect::<HashSet<_>>()
+                        .len()
+                        >= 2
+                {
+                    let shared = |c: usize| {
+                        nodes[c]
+                            .file
+                            .components()
+                            .zip(fc.file.components())
+                            .take_while(|(a, b)| a == b)
+                            .count()
+                    };
+                    let defined = |c: usize| owner[c].is_none() && !is_header(&nodes[c].file);
+                    let best = targets
+                        .iter()
+                        .copied()
+                        .filter(|&c| defined(c))
+                        .map(shared)
+                        .max()
+                        .unwrap_or(0);
+                    nearest_program = targets
+                        .iter()
+                        .copied()
+                        .filter(|&c| !defined(c) || shared(c) == best)
+                        .collect();
+                    &nearest_program
+                } else {
+                    targets
+                };
                 // A file built for some platforms (cats-effect's `core/js/`)
                 // reaches no definition built only for others
                 // (`core/jvm-native/`), where one built for its own is.
@@ -7510,6 +7551,14 @@ fn csharp_constraint<'a>(rest: &'a str, name: &str) -> Option<&'a str> {
     })
 }
 
+/// Whether `path` is a C or C++ header (`.h`, `.hpp`, `.hh`, `.hxx`,
+/// `.inl`): declarations shared between source files, not one program's.
+fn is_header(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| matches!(e, "h" | "hpp" | "hh" | "hxx" | "inl" | "ipp" | "tpp"))
+}
+
 /// The platforms a source file is built for, where a folder of its path
 /// says — sbt's and Mill's cross-built `js/`, `jvm/`, `native/`,
 /// `jvm-native/` (and the like), os-lib's `src-jvm/`, Kotlin
@@ -8139,6 +8188,11 @@ fn passes(
         ("f", "i" | "b" | "c" | "s" | "a") => false,
         ("b", "i" | "f" | "c" | "s" | "a") => false,
         ("n", k) => nullable || (lang != Lang::Kotlin && !primitive(k)),
+        // A value declared `Object` (`Any`, C#'s `object`): only a parameter
+        // of that type, as the language passes it with no cast to none other
+        // (moshi's `add(shapeFromJsonAdapter)` with `Object
+        // shapeFromJsonAdapter` is `add(Any)`, never `add(JsonAdapter.Factory)`).
+        ("o", _) if strict => false,
         // A project class: no primitive or string, and none of another
         // project class it does not extend or implement.
         // (C#'s `IRequest`1` is `IRequest<…>`: an argument of a class
@@ -16848,6 +16902,58 @@ def main():
         assert_eq!(reached("x_test.go", 11), [9], "{:?}", edges(&g));
         assert_eq!(reached("x_test.dart", 4), [3], "{:?}", edges(&g));
         assert_eq!(reached("x_test.dart", 8), [7], "{:?}", edges(&g));
+    }
+
+    /// Audit 12's shapes: a Java value declared `Object` passes only for a
+    /// parameter of that type (`add(Object)`, not `add(Factory)`); of free
+    /// functions two programs of a C++ project each define (`tests/` and
+    /// `bench/` `count_lines`), a call reaches its own program's.
+    #[test]
+    fn audit_12_shapes() {
+        let java = "class Builder {\n  Builder add(Object adapter) { return this; }\n  Builder add(Factory factory) { return this; }\n}\ninterface Factory {}\nclass Uses {\n  void build() {\n    Object shape = null;\n    new Builder().add(shape);\n  }\n}\n";
+        let g = graph(&[("/p/src/Builder.java", java)]);
+        let at = (0..g.node_count())
+            .find(|&n| g.node(n).name == "build")
+            .unwrap();
+        let lines: Vec<usize> = g.callees_of(at).iter().map(|&c| g.node(c).line).collect();
+        assert_eq!(lines, [2], "{:?}", edges(&g));
+
+        let utils =
+            "#include <string>\nint count_lines(const std::string &filename) { return 0; }\n";
+        let bench = "int count_lines(const char *filename) { return 0; }\nint main() { return count_lines(\"x\"); }\n";
+        let test = "#include \"utils.h\"\nvoid logs() { count_lines(\"test_logs/simple_log\"); }\n";
+        let header = "#include <string>\nint count_lines(const std::string &filename);\n";
+        let files = [
+            ("/p/tests/utils.cpp", utils),
+            ("/p/tests/utils.h", header),
+            ("/p/bench/async_bench.cpp", bench),
+            ("/p/tests/test_file_logging.cpp", test),
+        ];
+        let sources: Vec<(PathBuf, String)> = files
+            .iter()
+            .map(|(f, s)| (PathBuf::from(f), s.to_string()))
+            .collect();
+        // (Every file sees every other, as a scope this tests nothing of.)
+        let all: HashSet<PathBuf> = files.iter().map(|(f, _)| PathBuf::from(f)).collect();
+        let scope: HashMap<PathBuf, HashSet<PathBuf>> = files
+            .iter()
+            .map(|(f, _)| (PathBuf::from(f), all.clone()))
+            .collect();
+        let g = ProjectCallGraph::build(defs_of(&files), &sources, &scope);
+        let at = (0..g.node_count())
+            .find(|&n| g.node(n).name == "logs")
+            .unwrap();
+        let reached: Vec<String> = g
+            .callees_of(at)
+            .iter()
+            .map(|&c| g.node(c).file.display().to_string())
+            .collect();
+        assert!(!reached.is_empty(), "{:?}", edges(&g));
+        assert!(
+            reached.iter().all(|f| f.starts_with("/p/tests/")),
+            "{reached:?} {:?}",
+            edges(&g)
+        );
     }
 
     /// A file of a cross-built project's JavaScript sources (`core/js/`)
