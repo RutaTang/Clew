@@ -163,8 +163,10 @@ pub struct FileContext {
     /// arguments it can take, to tell its overloads of one arity apart.
     pub parameters: Vec<(usize, String)>,
     /// A Go file's struct fields and their types (`("Context", "Request",
-    /// "http.Request")`), pointers and embedding read through: what a chain
-    /// of fields from a value is ([`THROUGH`]).
+    /// "http.Request")`), pointers and embedding read through — a Zig
+    /// file's, a C++ file's classes' (`("logger", "sinks_",
+    /// "std::vector")`) alike: what a chain of fields from a value is
+    /// ([`THROUGH`]).
     pub fields: Vec<(String, String, String)>,
     /// Definition lines of the functions a Scala, Kotlin, Java, C# or Dart
     /// file declares inside another (a local `def`, an anonymous class's
@@ -926,8 +928,9 @@ fn nested_functions(symbols: &[Located]) -> Vec<usize> {
 
 /// A Zig file's container fields with their types ([`FileContext::fields`]):
 /// a struct's `headers: std.StringHashMap([]const u8)` (`Response`,
-/// `headers`, `std.StringHashMap`), and the file's own variables, under no
-/// container's name (`pub var arena = std.heap.ArenaAllocator.init(a);`).
+/// `headers`, `std.StringHashMap`) — a file struct's own, under the name
+/// `@This()` gives it — and the file's own variables, under no container's
+/// name (`pub var arena = std.heap.ArenaAllocator.init(a);`).
 fn zig_fields(src: &str, symbols: &[Located]) -> Vec<(String, String, String)> {
     let mut out = Vec::new();
     let field = |line: &str| -> Option<(String, String)> {
@@ -962,6 +965,43 @@ fn zig_fields(src: &str, symbols: &[Located]) -> Vec<(String, String, String)> {
                 && let Some((name, ty)) = field(t)
             {
                 out.push((l.symbol.name.clone(), name, ty));
+            }
+        }
+    }
+    // A file that is a struct (`const Server = @This();`): its own fields,
+    // at the file's top level (`diagnostics_collection:
+    // DiagnosticsCollection,`), under that name.
+    let file_struct = src.lines().find_map(|line| {
+        let rest = line.trim().strip_prefix("const ")?;
+        let (name, value) = rest.split_once('=')?;
+        (value.trim().trim_end_matches(';').trim() == "@This()" && is_plain_name(name.trim()))
+            .then(|| name.trim().to_string())
+    });
+    if let Some(file_struct) = file_struct {
+        let mut depth = 0i32;
+        for line in src.lines() {
+            let at_top = depth == 0;
+            let code = line.split("//").next().unwrap_or("");
+            depth +=
+                code.matches(['{', '(']).count() as i32 - code.matches(['}', ')']).count() as i32;
+            let t = line.trim_start();
+            if at_top
+                && t.trim_end().ends_with(',')
+                && ![
+                    "pub ",
+                    "fn ",
+                    "const ",
+                    "var ",
+                    "test ",
+                    "comptime",
+                    "usingnamespace",
+                    "extern ",
+                ]
+                .iter()
+                .any(|w| t.starts_with(w))
+                && let Some((name, ty)) = field(t)
+            {
+                out.push((file_struct.clone(), name, ty));
             }
         }
     }
@@ -1687,6 +1727,7 @@ pub fn context_in(src: &str, lang: Lang, symbols: &[Located]) -> FileContext {
                 fields
             }
             Lang::Zig => zig_fields(src, symbols),
+            Lang::Cpp => cpp_class_fields(src, symbols),
             _ => Vec::new(),
         },
         nested: match lang {
@@ -2746,6 +2787,7 @@ impl ProjectCallGraph {
         // of a package not the project's, Zig's standard library's.
         let library = |ty: &str, lang: Lang| match lang {
             Lang::Zig => ty == "std" || ty.starts_with("std."),
+            Lang::Cpp => ty.starts_with("std::"),
             _ => ty
                 .split_once('.')
                 .is_some_and(|(pkg, _)| !go_packages.contains_key(pkg)),
@@ -4224,6 +4266,194 @@ fn statically_typed(lang: Lang) -> bool {
             | Lang::TypeScript
             | Lang::Tsx
     )
+}
+
+/// The field `name` of the class a C++ member function defined apart from
+/// its class belongs to (`Class::method`), as a chain of fields from the
+/// class ([`THROUGH`]) — what its declaration in another file types.
+fn cpp_member_field(call: Node, name: &str, src: &str, lang: Lang) -> Option<Receiver> {
+    if lang != Lang::Cpp || !is_plain_name(name) {
+        return None;
+    }
+    let mut node = call.parent();
+    while let Some(n) = node {
+        if n.kind() == "function_definition" {
+            break;
+        }
+        node = n.parent();
+    }
+    let mut declarator = node?.child_by_field_name("declarator")?;
+    while declarator.kind() != "function_declarator" {
+        declarator = declarator.child_by_field_name("declarator")?;
+    }
+    let qualified = declarator.child_by_field_name("declarator")?;
+    if qualified.kind() != "qualified_identifier" {
+        return None;
+    }
+    let scope = node_text(qualified.child_by_field_name("scope")?, src);
+    let class = scope.split('<').next()?.rsplit("::").next()?.trim();
+    // `logger_->info(…)`: what the field points to.
+    let arrow = call
+        .child_by_field_name("function")
+        .and_then(|f| f.child_by_field_name("operator"))
+        .is_some_and(|o| node_text(o, src) == "->");
+    let field = if arrow {
+        format!("{name}->")
+    } else {
+        name.to_string()
+    };
+    is_plain_name(class).then(|| Receiver::Type(format!("{THROUGH}{class}|{field}")))
+}
+
+/// A C++ file's classes' fields and their types ([`FileContext::fields`]):
+/// `std::vector<std::unique_ptr<flag_formatter>> formatters_;` is
+/// `formatters_` of type `std::vector`, `int a_, b_;` two; a pointer's, a
+/// `std::shared_ptr<logger> logger_;`'s pointee is the field `logger_->`'s
+/// (its `.` the smart pointer's own `reset`, `get`). What a member function
+/// defined apart from its class calls a field's method on.
+fn cpp_class_fields(src: &str, symbols: &[Located]) -> Vec<(String, String, String)> {
+    let mut out = Vec::new();
+    for l in symbols
+        .iter()
+        .filter(|l| matches!(l.symbol.kind.as_str(), "class" | "struct"))
+    {
+        let Some(text) = src.get(l.declaration.0..l.declaration.1) else {
+            continue;
+        };
+        let Some(open) = text.find('{') else {
+            continue;
+        };
+        let mut depth = 0i32;
+        let mut statement = String::new();
+        for line in text[open..].lines() {
+            let code = line.split("//").next().unwrap_or("");
+            let at_top = depth == 1;
+            depth += code.matches('{').count() as i32 - code.matches('}').count() as i32;
+            if !at_top || code.contains(['{', '}']) || code.trim_start().starts_with('#') {
+                statement.clear();
+                continue;
+            }
+            // (After an access label: `private:`, `public slots:`.)
+            let mut code = code.trim();
+            for label in ["public", "private", "protected"] {
+                if let Some(rest) = code.strip_prefix(label)
+                    && let Some((words, rest)) = rest.split_once(':')
+                    && !rest.starts_with(':')
+                    && words
+                        .split_whitespace()
+                        .all(|w| matches!(w, "slots" | "Q_SLOTS"))
+                {
+                    statement.clear();
+                    code = rest.trim();
+                }
+            }
+            statement.push(' ');
+            statement.push_str(code);
+            if !statement.trim_end().ends_with(';') {
+                continue;
+            }
+            let decl = std::mem::take(&mut statement);
+            let decl = decl.trim().trim_end_matches(';').trim();
+            if decl.contains('(')
+                || [
+                    "using ",
+                    "typedef ",
+                    "friend ",
+                    "static_assert",
+                    "enum ",
+                    "template",
+                    "return ",
+                ]
+                .iter()
+                .any(|w| decl.starts_with(w))
+            {
+                continue;
+            }
+            let decl = decl.split(['=', '{']).next().unwrap_or(decl).trim();
+            // The type and the first name, then the others (`int a_, b_`):
+            // the first split at the last space outside the type's angle
+            // brackets.
+            let mut angle = 0i32;
+            let mut comma = decl.len();
+            for (i, c) in decl.char_indices() {
+                match c {
+                    '<' => angle += 1,
+                    '>' => angle -= 1,
+                    ',' if angle == 0 => {
+                        comma = i;
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            let (first, others) = (&decl[..comma], decl.get(comma + 1..).unwrap_or(""));
+            let mut angle = 0i32;
+            let mut split = None;
+            for (i, c) in first.char_indices() {
+                match c {
+                    '<' => angle += 1,
+                    '>' => angle -= 1,
+                    ' ' | '*' | '&' if angle == 0 => split = Some(i),
+                    _ => {}
+                }
+            }
+            let Some(split) = split else {
+                continue;
+            };
+            let ty = first[..=split].trim();
+            let names = format!("{},{others}", &first[split + 1..]);
+            let names = names.as_str();
+            let ty = ty
+                .split_whitespace()
+                .filter(|w| {
+                    !matches!(
+                        *w,
+                        "static" | "mutable" | "const" | "constexpr" | "inline" | "volatile"
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            let pointer = ty.trim_end().ends_with('*');
+            let ty = ty.trim_end_matches(['*', '&', ' ']);
+            let (base, args) = match ty.split_once('<') {
+                Some((base, args)) => (base.trim(), Some(args.trim_end_matches('>').trim())),
+                None => (ty.trim(), None),
+            };
+            // What `->` reaches: a pointer's, a smart pointer's pointee (`.`
+            // its own methods, `reset`, `lock`).
+            let pointee = match (base, args) {
+                ("std::shared_ptr" | "std::unique_ptr", Some(pointee))
+                    if !pointee.contains(['<', ',']) =>
+                {
+                    Some(pointee.trim_start_matches("const ").trim())
+                }
+                _ => pointer.then_some(base),
+            };
+            let plain = |t: &str| {
+                !t.is_empty()
+                    && t.chars()
+                        .all(|c| c == '_' || c == ':' || c.is_alphanumeric())
+            };
+            if !plain(base) {
+                continue;
+            }
+            for name in names.split(',') {
+                let name = name.trim().trim_start_matches(['*', '&']).trim();
+                let name = name.split('[').next().unwrap_or(name).trim();
+                if is_plain_name(name) {
+                    out.push((l.symbol.name.clone(), name.to_string(), base.to_string()));
+                    if let Some(pointee) = pointee.filter(|p| plain(p)) {
+                        out.push((
+                            l.symbol.name.clone(),
+                            format!("{name}->"),
+                            pointee.to_string(),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Each language's closures (see [`LangSpec::scope_kinds`]).
@@ -6741,14 +6971,16 @@ fn receiver_of(
     // `this.owners.findById(…)` with `private final OwnerRepository owners;`.
     if has_inheritance(lang)
         && lang != Lang::Go
-        && let Some(field) = ["this.", "self.", "$this->"]
+        && let Some(field) = ["this.", "self.", "$this->", "this->"]
             .iter()
             .find_map(|p| receiver.strip_prefix(p))
     {
-        return is_plain_name(field)
-            .then(|| class_field_type(call, field, src, lang, scope.places, fields))
-            .flatten()
-            .map(Receiver::Declared);
+        if !is_plain_name(field) {
+            return None;
+        }
+        return class_field_type(call, field, src, lang, scope.places, fields)
+            .map(Receiver::Declared)
+            .or_else(|| cpp_member_field(call, field, src, lang));
     }
     // A field of the type's own: `self.items.len()` is `Vec`'s `len`, as
     // its struct declares `items`.
@@ -6997,6 +7229,12 @@ fn receiver_of(
         && let Some(ty) = class_field_type(call, receiver, src, lang, scope.places, fields)
     {
         return Some(Receiver::Declared(ty));
+    }
+    // A C++ member function defined apart from its class (`void
+    // pattern_formatter::handle_flag_(…)`): the class's field, as its
+    // declaration in the header says — once the classes are read.
+    if let Some(field) = cpp_member_field(call, receiver, src, lang) {
+        return Some(field);
     }
     // Nor a field: in Scala, a package or an object (`os` in `os.read(p)`),
     // or a member inherited from a trait; in Go, an imported package
@@ -13237,6 +13475,59 @@ def main():
         assert_eq!(scala_summoned("Ref[IO](1)"), None);
     }
 
+    /// A C++ member function defined apart from its class calls its fields'
+    /// methods as the class's header declares them: `formatters_.push_back`
+    /// with `std::vector<…> formatters_;` is the library's, never another
+    /// class's `push_back`; `logger_->info` with `std::shared_ptr<logger>
+    /// logger_;` is `logger`'s — `this->logger_` alike — and its
+    /// `logger_.reset()` the smart pointer's own.
+    #[test]
+    fn a_cpp_member_defined_apart_calls_its_fields_as_declared() {
+        let header = "namespace spdlog {\nclass flag_formatter {};\nclass logger {\npublic:\n    void info(int a) {}\n};\nclass pattern_formatter {\npublic:\n    void handle_flag_(char flag);\nprivate:\n    std::vector<std::unique_ptr<flag_formatter>> formatters_;\n    std::shared_ptr<logger> logger_;\n    int a_, b_;\n};\n}\n";
+        let inl = "namespace fmt {\nclass buffer {\npublic:\n    void push_back(int v) {}\n    void info(int v) {}\n    void reset() {}\n};\n}\nnamespace spdlog {\nvoid pattern_formatter::handle_flag_(char flag) {\n    formatters_.push_back(1);\n    logger_->info(2);\n    this->logger_->info(3);\n    logger_.reset();\n}\n}\n";
+        let g = graph(&[
+            ("/p/include/spdlog/pattern_formatter.h", header),
+            ("/p/include/spdlog/pattern_formatter-inl.h", inl),
+        ]);
+        let at = (0..g.node_count())
+            .find(|&n| {
+                g.node(n).name == "handle_flag_"
+                    && g.node(n).file.ends_with("pattern_formatter-inl.h")
+            })
+            .unwrap();
+        let reached: Vec<String> = g
+            .callees_of(at)
+            .iter()
+            .map(|&c| {
+                format!(
+                    "{}:{}",
+                    g.node(c).file.file_name().unwrap().to_string_lossy(),
+                    g.node(c).name
+                )
+            })
+            .collect();
+        assert_eq!(reached, ["pattern_formatter.h:info"], "{:?}", edges(&g));
+        let fc =
+            FileCalls::read(Path::new("/p/include/spdlog/pattern_formatter.h"), header).unwrap();
+        for (field, ty) in [
+            ("formatters_", "std::vector"),
+            ("logger_", "std::shared_ptr"),
+            ("logger_->", "logger"),
+            ("a_", "int"),
+            ("b_", "int"),
+        ] {
+            assert!(
+                fc.context.fields.contains(&(
+                    "pattern_formatter".to_string(),
+                    field.to_string(),
+                    ty.to_string()
+                )),
+                "{field}: {:?}",
+                fc.context.fields
+            );
+        }
+    }
+
     /// A Go index on a field is an element of its slice or map: of a named
     /// slice type (`Errors errorMsgs` with `type errorMsgs []*Error`), of a
     /// field's own (`Items []*Item`, `ByName map[string]*Item`).
@@ -13667,7 +13958,8 @@ def main():
     /// library's (`res.headers.get(…)` with `headers: std.StringHashMap`,
     /// `t.arena.allocator()` with `t.zig`'s `var arena =
     /// std.heap.ArenaAllocator.init(…)`) is the library's; a struct's
-    /// (`srv.pool.acquire()`) is that struct's.
+    /// (`srv.pool.acquire()`) is that struct's — a file struct's own fields
+    /// too (`server.collection.push(…)` in `Server.zig`).
     #[test]
     fn a_zig_field_chain_has_its_last_fields_type() {
         let g = graph(&[
@@ -13699,6 +13991,26 @@ def main():
         assert_eq!(reached("run"), Vec::<String>::new(), "{:?}", edges(&g));
         assert_eq!(reached("go"), Vec::<String>::new(), "{:?}", edges(&g));
         assert_eq!(reached("serve"), ["acquire:4"], "{:?}", edges(&g));
+        // A file that is a struct: its own fields, at its top level.
+        let g = graph(&[
+            (
+                "/p/src/Collection.zig",
+                "const Collection = @This();\nallocator: u8,\n\npub fn push(collection: *Collection, tag: u8) void {}\n",
+            ),
+            (
+                "/p/src/Server.zig",
+                "const Server = @This();\nconst Collection = @import(\"Collection.zig\");\n\ncollection: Collection,\nother: u8 = 0,\n\npub fn run(server: *Server) void {\n    server.collection.push(1);\n}\n",
+            ),
+        ]);
+        let at = (0..g.node_count())
+            .find(|&n| g.node(n).name == "run")
+            .unwrap();
+        let reached: Vec<String> = g
+            .callees_of(at)
+            .iter()
+            .map(|&c| g.node(c).name.clone())
+            .collect();
+        assert_eq!(reached, ["push"], "{:?}", edges(&g));
     }
 
     /// One link of a chain is of what its method returns on the type it is

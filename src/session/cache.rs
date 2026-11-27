@@ -173,7 +173,9 @@ use crate::incremental::Version;
 /// in a head's arity; C++ macros alone on their line blanked at parse.
 /// 49: casts in argument kinds; Go fields of slices and maps, by their
 /// elements, and an index in a chain of fields.
-pub(crate) const CACHE_VERSION: u32 = 49;
+/// 50: C++ classes' fields (and a member defined apart from its class
+/// reading them); a Zig file struct's own fields.
+pub(crate) const CACHE_VERSION: u32 = 50;
 
 /// A cached symbol (the index entry minus the paths, which are reconstructed
 /// from the project root + relative path on load).

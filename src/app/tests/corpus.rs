@@ -124,13 +124,44 @@ fn live_a_projects_reading() {
     // The types the project declares: a call on a value declared as any
     // other type is a library's.
     let mut project_types: std::collections::HashSet<String> = Default::default();
+    // Each class's fields' types: where a chain of fields (`↦Class|f`) ends,
+    // a library's type (`std::vector`) makes the call the library's.
+    let mut field_types: HashMap<(String, String), String> = HashMap::new();
     for fc in files
         .iter()
         .filter_map(|f| app.proj.calls_by_file.get(&f.abs))
     {
         project_types.extend(fc.context.types.iter().map(|(t, _)| t.clone()));
         project_types.extend(fc.owners.values().cloned());
+        for (ty, field, of) in &fc.context.fields {
+            field_types
+                .entry((ty.clone(), field.clone()))
+                .or_insert_with(|| of.clone());
+        }
     }
+    // Whether a chain of fields ends in a library's value, as the graph
+    // reads it: a C++ `std::` type, a Zig `std.` one, a Go package's
+    // (`http.Request`) — every field after it the library's too.
+    let library_chain = |chain: &str| -> bool {
+        let library = |t: &str| t.starts_with("std::") || t.starts_with("std.") || t.contains('.');
+        let mut parts = chain.split('|');
+        // (`.`: the file's own package, `@file`: a Zig file's variable.)
+        let Some(root) = parts.next().filter(|r| *r != "." && !r.starts_with('@')) else {
+            return false;
+        };
+        let mut ty = root.to_string();
+        for field in parts {
+            if library(&ty) {
+                return true;
+            }
+            let last = ty.rsplit(['.', ':']).next().unwrap_or(&ty).to_string();
+            match field_types.get(&(last, field.to_string())) {
+                Some(next) => ty = next.clone(),
+                None => return false,
+            }
+        }
+        library(&ty)
+    };
     let mut library_calls = 0usize;
     let mut tallies: BTreeMap<&'static str, Tally> = BTreeMap::new();
     let rel = |p: &Path| p.strip_prefix(&root).unwrap_or(p).display().to_string();
@@ -207,7 +238,16 @@ fn live_a_projects_reading() {
                 | clew_core::projectcalls::Receiver::Type(ty),
             ) = &site.receiver
                 && !ty.starts_with(clew_core::projectcalls::RETURNED)
+                && !ty.starts_with(clew_core::projectcalls::THROUGH)
                 && !project_types.contains(ty.rsplit('.').next().unwrap_or(ty))
+            {
+                library_calls += 1;
+                continue;
+            }
+            // A chain of fields ending in a library's type.
+            if let Some(clew_core::projectcalls::Receiver::Type(ty)) = &site.receiver
+                && let Some(chain) = ty.strip_prefix(clew_core::projectcalls::THROUGH)
+                && library_chain(chain)
             {
                 library_calls += 1;
                 continue;
