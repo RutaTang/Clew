@@ -813,6 +813,21 @@ fn return_type_name(raw: &str, lang: Lang) -> Option<String> {
     }
     let base_end = t.find(['<', '[', '(', ' ']).unwrap_or(t.len());
     let base = &t[..base_end];
+    // C++'s standard library's, whole (`std::string`): a value whose
+    // methods are the library's.
+    if lang == Lang::Cpp && base.starts_with("std::") && base.len() > "std::".len() {
+        return Some(base.to_string());
+    }
+    // Go's of a package, with it (`flag.FlagSet`): another package's —
+    // a library's or the project's — told apart once the project is read.
+    if lang == Lang::Go
+        && let Some((pkg, name)) = base.split_once('.')
+        && is_plain_name(pkg)
+        && is_plain_name(name)
+        && name.starts_with(char::is_uppercase)
+    {
+        return Some(base.to_string());
+    }
     let last = base.rsplit(['.', ':']).next().unwrap_or(base).trim();
     if last.chars().count() <= 1
         || !last.starts_with(|c: char| c == '_' || c.is_alphabetic())
@@ -1106,6 +1121,46 @@ fn zig_fields(src: &str, symbols: &[Located]) -> Vec<(String, String, String)> {
             && let Some(ty) = zig_type_name(ty)
         {
             out.push((String::new(), name.trim().to_string(), ty));
+        }
+    }
+    // A type another file's re-exported (`pub const Request =
+    // request.Request;`, `request` that file's `@import`): the struct.
+    let imports: HashSet<&str> = src
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            let rest = line
+                .strip_prefix("pub ")
+                .unwrap_or(line)
+                .strip_prefix("const ")?;
+            let (name, value) = rest.split_once('=')?;
+            value
+                .trim()
+                .starts_with("@import(")
+                .then_some(name.trim())
+                .filter(|n| is_plain_name(n))
+        })
+        .collect();
+    for line in src.lines() {
+        let line = line.trim();
+        let Some(rest) = line
+            .strip_prefix("pub ")
+            .unwrap_or(line)
+            .strip_prefix("const ")
+        else {
+            continue;
+        };
+        let Some((name, value)) = rest.split_once('=') else {
+            continue;
+        };
+        let (name, value) = (name.trim(), value.trim().trim_end_matches(';').trim());
+        if let Some((module, ty)) = value.split_once('.')
+            && imports.contains(module)
+            && is_plain_name(name)
+            && is_plain_name(ty)
+            && ty.starts_with(char::is_uppercase)
+        {
+            out.push((String::new(), name.to_string(), ty.to_string()));
         }
     }
     out
@@ -2907,9 +2962,19 @@ impl ProjectCallGraph {
                     .map(|(line, ty)| ((f.file.as_path(), *line), ty.as_str()))
             })
             .collect();
+        // (A Go type of the project's own packages, `models.User`, by its
+        // name; another package's, `flag.FlagSet`, whole: the library's.)
         let written: Vec<Option<&str>> = nodes
             .iter()
-            .map(|n| returns.get(&(n.file.as_path(), n.line)).copied())
+            .map(|n| {
+                returns
+                    .get(&(n.file.as_path(), n.line))
+                    .copied()
+                    .map(|t| match t.split_once('.') {
+                        Some((pkg, name)) if go_packages.contains_key(pkg) => name,
+                        _ => t,
+                    })
+            })
             .collect();
         // A body that gives what a call gives ([`inferred_result`]): the
         // class the function's name is (a Scala case class's `apply`), or
@@ -3353,7 +3418,9 @@ impl ProjectCallGraph {
                             (types.all(|t| t == Some(first))
                                 && (declared_types.contains(first)
                                     || project_types.contains(first)
-                                    || first.starts_with("std.")))
+                                    || first.starts_with("std.")
+                                    || first.starts_with("std::")
+                                    || (fc.lang == Lang::Go && library(first, fc.lang))))
                             .then(|| first.to_string())
                         });
                         let function = function.split_once('#').map_or(function, |(_, m)| m);
@@ -3377,7 +3444,10 @@ impl ProjectCallGraph {
                                                 (types.all(|t| t == Some(first))
                                                     && (declared_types.contains(first)
                                                         || project_types.contains(first)
-                                                        || first.starts_with("std.")))
+                                                        || first.starts_with("std.")
+                                                        || first.starts_with("std::")
+                                                        || (fc.lang == Lang::Go
+                                                            && library(first, fc.lang))))
                                                 .then(|| first.to_string())
                                             });
                                             // A class's own name called, where no
@@ -3449,6 +3519,22 @@ impl ProjectCallGraph {
                 ) else {
                     continue;
                 };
+                // Ruby's `Cart.new(…)` runs `Cart#initialize`, its own or the
+                // one it inherits — never a method named `new` (a Rails
+                // controller's action).
+                if fc.lang == Lang::Ruby && cs.method && cs.callee == "new" {
+                    if let Some(Receiver::Type(ty) | Receiver::Declared(ty)) = &cs.receiver {
+                        for callee in family(ty, "initialize", false) {
+                            if edges.len() < MAX_EDGES
+                                && (in_test || !test_node[callee])
+                                && facts[callee].takes_call(cs, fc.lang, owner[callee])
+                            {
+                                edges.insert((caller, callee));
+                            }
+                        }
+                    }
+                    continue;
+                }
                 let shape = (
                     callee_key,
                     cs.method,
@@ -4097,6 +4183,28 @@ impl ProjectCallGraph {
                                 let o = o.rsplit(['.', ':']).next().unwrap_or(o);
                                 o == scope || descends(scope, o) || nodes[c].name == o
                             }
+                        })
+                        .collect();
+                    &kept
+                } else if !cs.method && cs.qualifier.is_none() && fc.lang == Lang::Java {
+                    // A Java bare call: a method of its class or a base, of a
+                    // class around it (its file's), a constructor, or one a
+                    // `static` import brings — never another class's of the
+                    // package it neither inherits nor imports.
+                    kept = targets
+                        .iter()
+                        .copied()
+                        .filter(|&c| {
+                            nodes[c].file == fc.file
+                                || imported.contains(&nodes[c].file)
+                                || owner[c].is_none_or(|o| {
+                                    let o = o.rsplit('.').next().unwrap_or(o);
+                                    nodes[c].name == o
+                                        || owner[caller].is_some_and(|own| {
+                                            let own = own.rsplit('.').next().unwrap_or(own);
+                                            own == o || descends(own, o)
+                                        })
+                                })
                         })
                         .collect();
                     &kept
@@ -6092,6 +6200,36 @@ fn argument_kind(
     if lang == Lang::Kotlin && t.starts_with('{') && t.ends_with('}') {
         return "L".to_string();
     }
+    // A class literal: Java's `Pizza.class` and Kotlin's `Pizza::class.java`
+    // are a `Class`, Kotlin's `Pizza::class` a `KClass`, Scala's
+    // `classOf[Pizza]` a `Class`, C#'s `typeof(Pizza)` a `Type`.
+    let literal_of = |prefix: &str| {
+        !prefix.is_empty()
+            && prefix
+                .chars()
+                .all(|c| c == '_' || c == '.' || c.is_alphanumeric())
+    };
+    let class_literal = match lang {
+        Lang::Java => t
+            .strip_suffix(".class")
+            .filter(|p| literal_of(p))
+            .map(|_| "TClass"),
+        Lang::Kotlin => t
+            .strip_suffix("::class.java")
+            .filter(|p| literal_of(p))
+            .map(|_| "TClass")
+            .or_else(|| {
+                t.strip_suffix("::class")
+                    .filter(|p| literal_of(p))
+                    .map(|_| "TKClass")
+            }),
+        Lang::Scala => (t.starts_with("classOf[") && t.ends_with(']')).then_some("TClass"),
+        Lang::CSharp => (t.starts_with("typeof(") && t.ends_with(')')).then_some("TType"),
+        _ => None,
+    };
+    if let Some(kind) = class_literal {
+        return kind.to_string();
+    }
     // A cast says the type (`(IRequest<TResponse>) request`, `x as Foo`):
     // what an overload is picked by.
     if let Some(ty) = cast_type(t, lang) {
@@ -8051,7 +8189,13 @@ fn receiver_of(
         // method returns, on the type of what it is called on.
         if matches!(
             lang,
-            Lang::Java | Lang::Kotlin | Lang::Scala | Lang::CSharp | Lang::Dart | Lang::Cpp
+            Lang::Java
+                | Lang::Kotlin
+                | Lang::Scala
+                | Lang::CSharp
+                | Lang::Dart
+                | Lang::Cpp
+                | Lang::Go
         ) && let Some((base, method)) = chain_link(receiver)
         {
             let base_type = constructed_type(base, lang).or_else(|| {
@@ -8069,7 +8213,12 @@ fn receiver_of(
                 }
             });
             if let Some(ty) = base_type {
-                return Some(Receiver::Declared(format!("{RETURNED}{ty}#{method}")));
+                let marker = format!("{RETURNED}{ty}#{method}");
+                // (Go has no subtypes: what a method returns is exact.)
+                return Some(match lang {
+                    Lang::Go => Receiver::Type(marker),
+                    _ => Receiver::Declared(marker),
+                });
             }
         }
         return None;
@@ -14930,7 +15079,8 @@ def main():
     /// A Rails controller's actions run on the instance Rails holds: a
     /// method called on a value of no known type (`user.github`, a model's
     /// attribute) is none of them, while the controller's own bare call of
-    /// one is.
+    /// one is; and `Generator.new(…)` is `Generator#initialize`, never the
+    /// `new` action.
     #[test]
     fn a_rails_action_is_called_by_rails() {
         let callbacks = "class Users::OmniauthCallbacksController < ApplicationController\n  def github\n    redirect\n  end\n  def redirect\n    github_login\n  end\n  def github_login\n  end\nend\n";
@@ -14949,6 +15099,25 @@ def main():
         };
         assert!(!calls("show", "github"), "{:?}", edges(&g));
         assert!(calls("github", "redirect"), "{:?}", edges(&g));
+        // `Generator.new(…)` runs `Generator#initialize`, never the
+        // controller's `new` action.
+        let repos = "class ReposController < ApplicationController\n  def new\n  end\nend\n";
+        let generator = "class Generator\n  def initialize(name)\n  end\nend\nclass Other\nend\n";
+        let test = "class GeneratorTest\n  def test_builds\n    Generator.new(\"x\")\n    Other.new\n  end\nend\n";
+        let g = graph(&[
+            ("/p/app/controllers/repos_controller.rb", repos),
+            ("/p/app/models/generator.rb", generator),
+            ("/p/test/unit/generator_test.rb", test),
+        ]);
+        let builds = (0..g.node_count())
+            .find(|&n| g.node(n).name == "test_builds")
+            .unwrap();
+        let reached: Vec<String> = g
+            .callees_of(builds)
+            .iter()
+            .map(|&c| format!("{}:{}", g.node(c).name, g.node(c).line))
+            .collect();
+        assert_eq!(reached, ["initialize:2"], "{:?}", edges(&g));
     }
 
     /// Scala reads that call no `def`: a case class's field (`res.exitCode`,
@@ -15069,6 +15238,94 @@ def main():
         // (The abstract declaration gives way to the definition taking the
         // same parameters.)
         assert_eq!(files, ["IO.scala"], "{:?}", edges(&g));
+    }
+
+    /// A Go method's result of another package's type (`PersistentFlags()
+    /// *flag.FlagSet`) is the library's value: `c.PersistentFlags().
+    /// HasFlags()` calls no `HasFlags` of the project's, while a result of
+    /// the project's (`Root() *Command`) calls its own.
+    #[test]
+    fn a_go_result_of_a_library_type_calls_the_library() {
+        let src = "package cobra\n\nimport (\n\tflag \"github.com/spf13/pflag\"\n)\n\ntype Command struct{}\n\nfunc (c *Command) PersistentFlags() *flag.FlagSet { return nil }\n\nfunc (c *Command) HasFlags() bool { return false }\n\nfunc (c *Command) Root() *Command { return c }\n\nfunc run(cmd *Command) {\n\tcmd.PersistentFlags().HasFlags()\n\tcmd.Root().HasFlags()\n}\n";
+        let g = graph(&[("/p/cobra/command.go", src)]);
+        let run = (0..g.node_count())
+            .find(|&n| g.node(n).name == "run")
+            .unwrap();
+        let mut reached: Vec<&str> = g
+            .callees_of(run)
+            .iter()
+            .map(|&c| g.node(c).name.as_str())
+            .collect();
+        reached.sort_unstable();
+        // (`cmd.Root().HasFlags()` is the project's: `Root` returns a
+        // `*Command`.)
+        assert_eq!(
+            reached,
+            ["HasFlags", "PersistentFlags", "Root"],
+            "{:?}",
+            edges(&g)
+        );
+        let fc = FileCalls::read(Path::new("/p/cobra/command.go"), src).unwrap();
+        let first = fc
+            .calls
+            .iter()
+            .find(|c| c.callee == "HasFlags" && c.line == 16)
+            .unwrap();
+        assert_eq!(
+            first.receiver,
+            Some(Receiver::Type(format!("{RETURNED}Command#PersistentFlags")))
+        );
+    }
+
+    /// A Java bare call reaches its own class's method, a base's, or one a
+    /// `static` import brings (`newReader` from `TestUtil`) — never the
+    /// same-named method of another class of the package; and a class
+    /// literal (`Pizza.class`) is a `Class`, which picks `adapter(Class<T>)`
+    /// over `adapter(Type)`.
+    #[test]
+    fn a_java_bare_call_reaches_what_it_inherits_or_imports() {
+        let util = "package com.squareup.moshi;\npublic final class TestUtil {\n  public static JsonReader newReader(String json) { return null; }\n}\n";
+        let other = "package com.squareup.moshi;\nclass JsonReaderTest {\n  JsonReader newReader(String json) { return null; }\n}\n";
+        let moshi = "package com.squareup.moshi;\npublic class Moshi {\n  public <T> JsonAdapter<T> adapter(Type type) { return null; }\n  public <T> JsonAdapter<T> adapter(Class<T> type) { return null; }\n}\n";
+        let test = "package com.squareup.moshi;\nimport static com.squareup.moshi.TestUtil.newReader;\nclass JsonUtf8ReaderTest {\n  void reads(Moshi moshi) {\n    newReader(\"[]\");\n    moshi.adapter(Pizza.class);\n  }\n}\n";
+        let dir = "/p/moshi/src/test/java/com/squareup/moshi";
+        let files = [
+            (format!("{dir}/TestUtil.java"), util),
+            (format!("{dir}/JsonReaderTest.java"), other),
+            (format!("{dir}/Moshi.java"), moshi),
+            (format!("{dir}/JsonUtf8ReaderTest.java"), test),
+        ];
+        let files: Vec<(&str, &str)> = files.iter().map(|(f, s)| (f.as_str(), *s)).collect();
+        let sources: Vec<(PathBuf, String)> = files
+            .iter()
+            .map(|(f, s)| (PathBuf::from(f), s.to_string()))
+            .collect();
+        let scope: HashMap<PathBuf, HashSet<PathBuf>> = HashMap::from([(
+            PathBuf::from(format!("{dir}/JsonUtf8ReaderTest.java")),
+            HashSet::from([PathBuf::from(format!("{dir}/TestUtil.java"))]),
+        )]);
+        let g = ProjectCallGraph::build(defs_of(&files), &sources, &scope);
+        let at = (0..g.node_count())
+            .find(|&n| g.node(n).name == "reads")
+            .unwrap();
+        let mut reached: Vec<String> = g
+            .callees_of(at)
+            .iter()
+            .map(|&c| {
+                format!(
+                    "{}:{}",
+                    g.node(c).file.file_name().unwrap().to_string_lossy(),
+                    g.node(c).line
+                )
+            })
+            .collect();
+        reached.sort();
+        assert_eq!(
+            reached,
+            ["Moshi.java:4", "TestUtil.java:3"],
+            "{:?}",
+            edges(&g)
+        );
     }
 
     /// Audit 8's shapes: Go's `new(bytes.Buffer)` is the library's value; a
@@ -15620,6 +15877,26 @@ def main():
             .find(|&n| g.node(n).name == "add")
             .unwrap();
         assert!(g.callees_of(add).is_empty(), "{:?}", edges(&g));
+        // A type another file re-exports (`pub const Request =
+        // request.Request;`): that file's struct's method, no other `init`
+        // of the re-exporting file.
+        let root = "const request = @import(\"request.zig\");\npub const Request = request.Request;\nconst Handler = struct {\n    pub fn init(a: u8, b: u8) void {}\n};\n";
+        let request = "pub const Request = struct {\n    pub fn init(a: u8, b: u8) Request {\n        return .{};\n    }\n};\n";
+        let user = "const httpz = @import(\"httpz.zig\");\npub fn make() void {\n    _ = httpz.Request.init(1, 2);\n}\n";
+        let g = graph(&[
+            ("/p/src/httpz.zig", root),
+            ("/p/src/request.zig", request),
+            ("/p/src/t.zig", user),
+        ]);
+        let make = (0..g.node_count())
+            .find(|&n| g.node(n).name == "make")
+            .unwrap();
+        let reached: Vec<String> = g
+            .callees_of(make)
+            .iter()
+            .map(|&c| format!("{}", g.node(c).file.display()))
+            .collect();
+        assert_eq!(reached, ["/p/src/request.zig"], "{:?}", edges(&g));
     }
 
     /// One link of a chain is of what its method returns on the type it is

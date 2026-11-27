@@ -186,7 +186,9 @@ use crate::incremental::Version;
 /// nested in another names its own.
 /// 55: Scala classes' fields; Scala's `new` a call of the class; Zig's
 /// `pub const X = @This()` file structs' fields; C++ built-in types.
-pub(crate) const CACHE_VERSION: u32 = 55;
+/// 56: C++ `std::` and Go package-qualified return types kept whole; class
+/// literals' kinds; Zig re-exported types.
+pub(crate) const CACHE_VERSION: u32 = 56;
 
 /// A cached symbol (the index entry minus the paths, which are reconstructed
 /// from the project root + relative path on load).
