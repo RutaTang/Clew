@@ -29,7 +29,9 @@ struct Tally {
 
 /// The project at `CLEW_TEST_PROJECT`, read as Clew reads one: its files
 /// scanned and indexed, its imports resolved, its call graph built — and per
-/// language what came of it. `CLEW_TEST_LANG` keeps one language.
+/// language what came of it. `CLEW_TEST_LANG` keeps one language;
+/// `CLEW_TEST_DUMP` prints every call site and what it reached (`SITE
+/// file:line name -> targets`), for two builds' readings to be compared.
 #[test]
 #[ignore = "reads a project (CLEW_TEST_PROJECT=path); run explicitly"]
 fn live_a_projects_reading() {
@@ -240,8 +242,32 @@ fn live_a_projects_reading() {
                         format!("{}:{}", rel(&n.file), n.line)
                     })
                     .collect();
+                if std::env::var_os("CLEW_TEST_DUMP").is_some() {
+                    println!(
+                        "SITE {}:{} {} -> {}",
+                        rel(&file.abs),
+                        site.line,
+                        site.callee,
+                        targets.join(", ")
+                    );
+                }
+                // The graph links callers, not calls: where the caller calls
+                // the name more than once, the targets are all its calls'.
+                let others: Vec<String> = file_calls
+                    .calls
+                    .iter()
+                    .filter(|c| {
+                        c.line != site.line && c.callee == site.callee && c.caller == site.caller
+                    })
+                    .map(|c| c.line.to_string())
+                    .collect();
+                let shared = if others.is_empty() {
+                    String::new()
+                } else {
+                    format!(" (with the caller's calls at {})", others.join(", "))
+                };
                 t.linked_samples.push(format!(
-                    "{}:{} {}{} [{:?}] -> {}",
+                    "{}:{} {}{} [{:?}] -> {}{shared}",
                     rel(&file.abs),
                     site.line,
                     if site.method { "." } else { "" },
@@ -259,6 +285,14 @@ fn live_a_projects_reading() {
                         "method on a declared type"
                     }
                 };
+                if std::env::var_os("CLEW_TEST_DUMP").is_some() {
+                    println!(
+                        "SITE {}:{} {} -> NONE",
+                        rel(&file.abs),
+                        site.line,
+                        site.callee
+                    );
+                }
                 *t.shapes.entry(shape).or_default() += 1;
                 *t.missed_names.entry(site.callee.clone()).or_default() += 1;
                 let samples = t.missed.entry(site.callee.clone()).or_default();

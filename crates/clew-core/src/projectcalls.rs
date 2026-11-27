@@ -172,6 +172,19 @@ pub struct FileContext {
     pub nested: Vec<usize>,
 }
 
+/// The fewest arguments of a Scala definition with no parameter list (`def
+/// total: Int`, its most `NO_LIST` too, or only an `implicit`/`using` one,
+/// its most that list's count), and what a Scala member read with no
+/// parentheses passes (`r.exitCode`): neither is a call with `()`. As the
+/// most of a fewest of 0: an `override def toString()`, which a read calls
+/// too (see [`NodeFacts::takes`]).
+const NO_LIST: u8 = u8::MAX - 1;
+
+/// What a Scala member read passed as a function passes (`xs.map(Cart.total)`,
+/// `laws.evalOn _`, `macro Impl.expand`): an eta-expansion of a method of any
+/// parameters, or a parameterless one's value.
+const ETA: u8 = u8::MAX - 2;
+
 /// The mark a receiver's type starts with when the receiver was assigned
 /// from a call (`val a = moshi.adapter()`): `RETURNED` and the function's
 /// name, the type its definitions declare it returns, worked out once the
@@ -775,17 +788,42 @@ fn return_type_name(raw: &str, lang: Lang) -> Option<String> {
 /// `int b = 0`, Dart's `{…}` and `[…]`) may be left out, a variadic
 /// (`String...`, `vararg`, `params`, `xs: Int*`, `...T`) takes any number
 /// more; a C# extension's `this` and a Zig function's first parameter
-/// are passed by the dot of a method call. C's and C++'s fewest is none: their defaults
-/// are in the header's declaration, not in the definition the call reaches.
-/// `None` when no parameter list is found.
+/// are passed by the dot of a method call. A C++ definition's defaults may
+/// be its prototype's, which the graph reads too. A Scala `def` with no
+/// parameter list takes [`NO_LIST`]. `None` when no parameter list is found.
 fn declared_arity(src: &str, l: &Located, lang: Lang) -> Option<(u8, u8)> {
     const ANY: u8 = u8::MAX;
     let text = src.get(l.declaration.0..l.declaration.1)?;
     let (open, close) = match parameter_list(text, &l.symbol.name, lang)? {
         Parameters::At(open, close) => (open, close),
+        // Scala's `def total: Int`.
+        Parameters::None(_) if lang == Lang::Scala => return Some((NO_LIST, NO_LIST)),
         Parameters::None(_) => return Some((0, 0)),
     };
     let inner = text[open + 1..close].trim();
+    if lang == Lang::Scala {
+        // `def f(implicit x: X, y: Y)`, `(using x: X)`: no list a call need
+        // write — or its implicits, passed explicitly.
+        if let Some(rest) = inner
+            .strip_prefix("implicit ")
+            .or_else(|| inner.strip_prefix("using "))
+        {
+            let passed = split_top_level(rest)
+                .filter(|p| !p.trim().is_empty())
+                .count();
+            return Some((NO_LIST, u8::try_from(passed).unwrap_or(ETA).min(ETA - 1)));
+        }
+        // `override def toString()`: a Java method's override, which Scala
+        // calls with no parentheses too.
+        if inner.is_empty()
+            && text
+                .split_whitespace()
+                .take_while(|w| *w != "def")
+                .any(|w| w == "override")
+        {
+            return Some((0, NO_LIST));
+        }
+    }
     if inner.is_empty() || (matches!(lang, Lang::C | Lang::Cpp) && inner == "void") {
         return Some((0, 0));
     }
@@ -1542,7 +1580,9 @@ fn package_clauses(src: &str, lang: Lang) -> Vec<String> {
             if lang == Lang::CSharp && (t.starts_with("using ") || t.starts_with("global using ")) {
                 continue;
             }
-            if lang == Lang::Scala && t.starts_with("import ") && parts.is_empty() {
+            // Scala's imports may come before a package object
+            // (`package os`, imports, `package object watch`).
+            if lang == Lang::Scala && t.starts_with("import ") {
                 continue;
             }
             break;
@@ -2307,6 +2347,7 @@ impl ProjectCallGraph {
         // `package os`, and for `package object os`): what `os.read(p)`
         // names.
         let mut scala_packages: HashMap<&str, HashSet<&Path>> = HashMap::new();
+        let mut scala_package_of: HashMap<&Path, &str> = HashMap::new();
         for f in files.iter().copied() {
             if f.lang == Lang::Scala
                 && let Some(package) = f.context.package.as_deref()
@@ -2316,6 +2357,7 @@ impl ProjectCallGraph {
                     .entry(last)
                     .or_default()
                     .insert(f.file.as_path());
+                scala_package_of.insert(f.file.as_path(), package);
             }
         }
         // A Go package's files by its name (`package binding`).
@@ -2558,12 +2600,13 @@ impl ProjectCallGraph {
                 .then_some(nodes[callee].file.as_path());
             let family = overloads.get(&(nodes[callee].name.as_str(), owner[callee], file));
             let facts = &facts;
+            let owner = &owner;
             let others = || {
                 family
                     .into_iter()
                     .flatten()
                     .copied()
-                    .filter(move |&i| i != callee && facts[i].takes(cs.arity))
+                    .filter(move |&i| i != callee && facts[i].takes_call(cs, lang, owner[i]))
             };
             if fits(callee) {
                 // The most specific of the overloads that fit, by what the
@@ -2778,27 +2821,55 @@ impl ProjectCallGraph {
                     .or_insert_with(|| resolve_callees(&defs, &nodes, &facts, &owner, cs, &site));
                 // Scala's `pkg.member(…)`: the package's own function (a
                 // package object's) or its object's `apply` — and nothing
-                // else, as the package names the member.
-                if fc.lang == Lang::Scala
-                    && let Some(package) = cs.qualifier.as_deref()
+                // else, as the package names the member. Through a path,
+                // the last package's (`os.watch.watch(…)`), or the object's
+                // it ends in (`os.ResourcePath.resource(…)`).
+                // (A path names its package whole: `scala.math` is no
+                // `com.acme.math`.)
+                let scala_path = (fc.lang == Lang::Scala)
+                    .then_some(cs.qualifier.as_deref())
+                    .flatten()
+                    .filter(|path| !template_path(path) && !reverse_route(path))
+                    .map(|path| match path.rsplit_once('.') {
+                        Some((package, object)) if object.starts_with(char::is_uppercase) => {
+                            (package, Some(object))
+                        }
+                        _ => (path, None),
+                    });
+                if let Some((path, object)) = scala_path
+                    && let package = path.rsplit('.').next().unwrap_or(path)
                     && let Some(package_files) = scala_packages.get(package)
                 {
                     let callee_name = logical_name(&cs.callee, Some(fc.lang));
-                    let in_package = |i: &usize| package_files.contains(nodes[*i].file.as_path());
+                    let in_package = |i: &usize| {
+                        let file = nodes[*i].file.as_path();
+                        package_files.contains(file)
+                            && (path == package
+                                || scala_package_of.get(file).is_some_and(|p| {
+                                    *p == path || p.ends_with(&format!(".{path}"))
+                                }))
+                    };
                     let mut found: Vec<usize> = defs
                         .named
                         .get(callee_name)
                         .into_iter()
                         .flat_map(|named| named.all.iter().copied())
                         .filter(in_package)
-                        .filter(|&i| owner[i].is_none_or(|o| o.rsplit('.').next() == Some(package)))
+                        .filter(|&i| match object {
+                            Some(object) => {
+                                owner[i].is_some_and(|o| o.rsplit('.').next() == Some(object))
+                            }
+                            None => owner[i].is_none_or(|o| o.rsplit('.').next() == Some(package)),
+                        })
                         .collect();
-                    found.extend(applies_of(callee_name).into_iter().filter(in_package));
+                    if object.is_none() {
+                        found.extend(applies_of(callee_name).into_iter().filter(in_package));
+                    }
                     if found.len() <= MAX_CANDIDATES {
                         for callee in found {
                             if edges.len() < MAX_EDGES
                                 && (in_test || !test_node[callee])
-                                && facts[callee].takes(cs.arity)
+                                && facts[callee].takes_call(cs, fc.lang, owner[callee])
                                 && fits_arguments(callee, cs, fc.lang)
                             {
                                 edges.insert((caller, callee));
@@ -2835,7 +2906,7 @@ impl ProjectCallGraph {
                         for callee in found {
                             if edges.len() < MAX_EDGES
                                 && (in_test || !test_node[callee])
-                                && facts[callee].takes(cs.arity)
+                                && facts[callee].takes_call(cs, fc.lang, owner[callee])
                                 && fits_arguments(callee, cs, fc.lang)
                             {
                                 edges.insert((caller, callee));
@@ -2878,7 +2949,7 @@ impl ProjectCallGraph {
                         .collect();
                     for callee in found {
                         if edges.len() < MAX_EDGES
-                            && facts[callee].takes(cs.arity)
+                            && facts[callee].takes_call(cs, fc.lang, owner[callee])
                             && fits_arguments(callee, cs, fc.lang)
                         {
                             edges.insert((caller, callee));
@@ -2917,7 +2988,7 @@ impl ProjectCallGraph {
                     for callee in found {
                         if edges.len() < MAX_EDGES
                             && (in_test || !test_node[callee])
-                            && facts[callee].takes(cs.arity)
+                            && facts[callee].takes_call(cs, fc.lang, owner[callee])
                         {
                             edges.insert((caller, callee));
                         }
@@ -2936,7 +3007,7 @@ impl ProjectCallGraph {
                         for callee in found {
                             if edges.len() < MAX_EDGES
                                 && (in_test || !test_node[callee])
-                                && facts[callee].takes(cs.arity)
+                                && facts[callee].takes_call(cs, fc.lang, owner[callee])
                                 && fits_arguments(callee, cs, fc.lang)
                             {
                                 edges.insert((caller, callee));
@@ -2999,7 +3070,7 @@ impl ProjectCallGraph {
                     for callee in targets {
                         if edges.len() < MAX_EDGES
                             && (in_test || !test_node[callee])
-                            && facts[callee].takes(cs.arity)
+                            && facts[callee].takes_call(cs, fc.lang, owner[callee])
                             && fits_arguments(callee, cs, fc.lang)
                         {
                             edges.insert((caller, callee));
@@ -3068,7 +3139,7 @@ impl ProjectCallGraph {
                         .copied()
                         .filter(|&c| {
                             owned_by(c, ty)
-                                && facts[c].takes(cs.arity)
+                                && facts[c].takes_call(cs, fc.lang, owner[c])
                                 && fits_arguments(c, cs, fc.lang)
                         })
                         .collect();
@@ -3099,7 +3170,7 @@ impl ProjectCallGraph {
                     for callee in found {
                         if edges.len() < MAX_EDGES
                             && (in_test || !test_node[callee])
-                            && facts[callee].takes(cs.arity)
+                            && facts[callee].takes_call(cs, fc.lang, owner[callee])
                             && fits_arguments(callee, cs, fc.lang)
                         {
                             edges.insert((caller, callee));
@@ -3350,7 +3421,9 @@ impl ProjectCallGraph {
                     .filter(|&i| nodes[i].file == fc.file || imported.contains(&nodes[i].file));
                 for callee in targets.iter().copied().chain(constructed) {
                     // `f(a)` is `f/1`: no call of `f/2`.
-                    if !facts[callee].takes(cs.arity) || !fits_arguments(callee, cs, fc.lang) {
+                    if !facts[callee].takes_call(cs, fc.lang, owner[callee])
+                        || !fits_arguments(callee, cs, fc.lang)
+                    {
                         continue;
                     }
                     // `client.get(…)`: no value is a test class's, its own
@@ -3367,7 +3440,7 @@ impl ProjectCallGraph {
                     // A self-call is kept as a callee only (see `finalize`).
                     if edges.len() < MAX_EDGES
                         && (in_test || !test_node[callee])
-                        && facts[callee].takes(cs.arity)
+                        && facts[callee].takes_call(cs, fc.lang, owner[callee])
                         && fits_arguments(callee, cs, fc.lang)
                     {
                         edges.insert((caller, callee));
@@ -3705,12 +3778,63 @@ struct NodeFacts {
 
 impl NodeFacts {
     /// Whether a call passing `passed` arguments can be of this function:
-    /// of a BEAM function, one of its arities; of any other, yes.
+    /// one its parameter list takes; of a function whose list is unknown,
+    /// yes. (Of a Scala `def` of no list, any call: see [`Self::takes_call`].)
     fn takes(&self, passed: Option<u8>) -> bool {
-        match (passed, self.arity) {
-            (Some(n), Some((fewest, most))) => (fewest..=most).contains(&n),
-            _ => true,
+        let (Some(n), Some((fewest, most))) = (passed, self.arity) else {
+            return true;
+        };
+        if self.lang == Some(Lang::Scala) {
+            return match n {
+                // A read with no parentheses: a `def` of no list (or of
+                // implicits alone), or an override of a Java method's
+                // (`toString`) — never a plain `def f()`, which Scala 3 calls
+                // only as `f()`.
+                NO_LIST => fewest == NO_LIST || most == NO_LIST,
+                // A read passed as a function: any but a plain `def f()`.
+                ETA => (fewest, most) != (0, 0),
+                _ if fewest == NO_LIST => true,
+                _ if most == NO_LIST => n == fewest,
+                _ => (fewest..=most).contains(&n),
+            };
         }
+        // A Scala read of a Java or Kotlin method (`p.getName`).
+        n >= ETA || (fewest..=most).contains(&n)
+    }
+
+    /// [`Self::takes`] for the call `cs` in a file of `lang`, of this
+    /// function of the class `owner`. A Scala `def` of no list called with
+    /// parentheses is its value applied (Mill's `scalaVersion()`, `items(0)`)
+    /// — named through its own class alone: bare, on `this` or `super`, or
+    /// through the class's name, as `head.get()` on another value is a
+    /// library's method far more often; or its implicits passed explicitly
+    /// (`Async.asyncForWriterT(async, L0)`). From Java or Kotlin, it is the
+    /// JVM method Scala compiles it to: its implicits its parameters.
+    fn takes_call(&self, cs: &CallSite, lang: Lang, owner: Option<&str>) -> bool {
+        if !self.takes(cs.arity) {
+            return false;
+        }
+        let (Some(n), Some((NO_LIST, most))) = (cs.arity, self.arity) else {
+            return true;
+        };
+        if self.lang != Some(Lang::Scala) || n >= ETA {
+            return true;
+        }
+        let implicits = (most != NO_LIST).then_some(most);
+        if lang != Lang::Scala {
+            return n == implicits.unwrap_or(0);
+        }
+        let last = |s: &str| s.rsplit(['.', ':']).next().unwrap_or(s).to_string();
+        let named_owner = owner.is_some_and(|o| {
+            let o = last(o);
+            cs.qualifier.as_deref().is_some_and(|q| last(q) == o)
+                || matches!(&cs.receiver, Some(Receiver::Type(t)) if last(t) == o)
+        });
+        let own = !cs.method
+            || matches!(&cs.receiver, Some(Receiver::Own))
+            || matches!(&cs.receiver, Some(Receiver::Declared(t)) if t == SUPER)
+            || named_owner;
+        own && implicits.is_none_or(|k| n == k)
     }
 }
 
@@ -4395,6 +4519,25 @@ fn macro_calls(tree: Node, src: &str, caller: Option<&str>, out: &mut Vec<CallSi
 
 /// How many arguments an Erlang or Elixir call passes ([`CallSite::arity`]).
 fn call_arity(call: Node, parent: Option<Node>, src: &str, lang: Lang) -> Option<u8> {
+    // A Scala member read with no parentheses (`r.exitCode`) — or one
+    // passed as a function (`xs.map(Cart.total)`, `laws.evalOn _`, `macro
+    // Impl.expand`), an eta-expansion of a method of any parameters. (`_.run`
+    // reads its argument's member.)
+    if lang == Lang::Scala && call.kind() == "field_expression" {
+        let placeholder = call
+            .child_by_field_name("value")
+            .is_some_and(|v| node_text(v, src) == "_");
+        let passed = parent.is_some_and(|p| p.kind() == "arguments" || p.kind() == "method_value");
+        let before = src[..call.start_byte()].trim_end();
+        let expanded = before
+            .strip_suffix("macro")
+            .is_some_and(|b| !b.ends_with(|c: char| c.is_alphanumeric() || c == '_'));
+        return Some(if !placeholder && (passed || expanded) {
+            ETA
+        } else {
+            NO_LIST
+        });
+    }
     let count = |args: Node| {
         args.named_children(&mut args.walk())
             .filter(|a| a.kind() != "comment")
@@ -6170,6 +6313,25 @@ fn receiver_of(
             )));
         }
     }
+    // A Scala path from a name the function does not bind (`os.watch` in
+    // `os.watch.watch(…)`, `os.ResourcePath`): a package's — its package
+    // object's, or its object's — member, as `os.read(p)` is.
+    if lang == Lang::Scala
+        && let Some((root, path)) = receiver.split_once('.')
+        && is_plain_name(root)
+        && root.starts_with(char::is_lowercase)
+        && path.split('.').all(is_plain_name)
+    {
+        let places = scope.places;
+        let said = bindings
+            .entry((scope.from, root.to_string()))
+            .or_insert_with(|| Bindings::from(scope.from, places))
+            .said_before(call.start_byte(), root, scope, src, lang);
+        if said == Said::Nothing {
+            *unbound = Some(receiver.to_string());
+            return None;
+        }
+    }
     // A Go chain of fields from a value of a known type (`c.Request.Header`
     // with `c *Context`): the last field's type, once the structs are read.
     if lang == Lang::Go
@@ -6485,28 +6647,36 @@ const JS_GLOBALS: &[&str] = &[
 
 /// The receiver expression of a call written `receiver<sep>name(…)`: what
 /// precedes the first `.name`, `->name`, `?.name` or `::name` standing as a
-/// whole name in `call`'s text. `None` for an empty name (a call tree-sitter
+/// whole name in `call`'s text — but one the path goes on past (`os.watch`
+/// in `os.watch.watch(…)`). `None` for an empty name (a call tree-sitter
 /// recovered from half-typed code), which every position would match.
 fn receiver_text<'a>(call: &'a str, name: &str) -> Option<&'a str> {
     if name.is_empty() {
         return None;
     }
     let word = |c: char| c == '_' || c.is_alphanumeric();
+    const SEPARATORS: [&str; 5] = ["?->", "->", "?.", "::", "."];
     let mut at = 0;
+    let mut first = None;
     while let Some(found) = call[at..].find(name) {
         let start = at + found;
         let end = start + name.len();
         let whole = !call[end..].starts_with(word);
         let head = &call[..start];
-        let sep = ["?->", "->", "?.", "::", "."]
-            .into_iter()
-            .find(|sep| head.ends_with(sep));
+        let sep = SEPARATORS.into_iter().find(|sep| head.ends_with(sep));
         if whole && let Some(sep) = sep {
-            return Some(&head[..head.len() - sep.len()]);
+            let receiver = &head[..head.len() - sep.len()];
+            // A member of the same name that the path goes on past
+            // (`os.watch` in `os.watch.watch(…)`) is not the one called.
+            let rest = &call[end..];
+            if !SEPARATORS.iter().any(|sep| rest.starts_with(sep)) {
+                return Some(receiver);
+            }
+            first.get_or_insert(receiver);
         }
         at = end;
     }
-    None
+    first
 }
 
 /// A name standing alone — `cart`, `$cart`, `@cart` — not an expression.
@@ -10968,6 +11138,19 @@ def main():
         assert_eq!(receiver_text("cart.total()", "total"), Some("cart"));
     }
 
+    /// A receiver is what precedes the member called: past a member of the
+    /// same name that the path goes on beyond (Scala's `os.watch.watch(…)`,
+    /// its package object's `watch`), at the first a call follows.
+    #[test]
+    fn a_receiver_is_what_precedes_the_member_called() {
+        assert_eq!(
+            receiver_text("os.watch.watch(p)", "watch"),
+            Some("os.watch")
+        );
+        assert_eq!(receiver_text("a.f.g.f()", "f"), Some("a.f.g"));
+        assert_eq!(receiver_text("b.with(x).with(y)", "with"), Some("b"));
+    }
+
     /// A method that overrides another is called where its base's is, on
     /// `self` or on a value typed as the base: the base's caller is the
     /// override's too.
@@ -11490,6 +11673,39 @@ def main():
             "{:?}",
             edges(&g)
         );
+    }
+
+    /// Through a path, a Scala call is the last package's member
+    /// (`os.watch.watch(…)`, its package object's, after the file's
+    /// imports) or the object's it ends
+    /// in (`os.ResourcePath.resource(r)`, its implicit passed explicitly) —
+    /// a path naming its package whole: `scala.math.max` is no
+    /// `com.acme.math`'s.
+    #[test]
+    fn a_scala_path_names_its_package_or_object() {
+        let g = graph(&[
+            (
+                "/p/os/watch/package.scala",
+                "package os\n\nimport scala.util.Random\n\npackage object watch {\n  def watch(roots: Seq[String], onEvent: Int => Unit, filter: Int = 0): Int = 0\n}\n",
+            ),
+            (
+                "/p/os/ResourcePath.scala",
+                "package os\n\nobject ResourcePath {\n  def resource(implicit root: Int = 0): Int = root\n}\n",
+            ),
+            (
+                "/p/acme/Math.scala",
+                "package com.acme\n\npackage object math {\n  def max(a: Int, b: Int): Int = a\n}\n",
+            ),
+            (
+                "/p/os/test/WatchTests.scala",
+                "package test\n\nobject WatchTests {\n  def go(): Unit = {\n    val w = os.watch.watch(Seq(\"a\"), onEvent = x => ())\n    os.ResourcePath.resource(3)\n    scala.math.max(1, 2)\n  }\n}\n",
+            ),
+        ]);
+        let go = "/p/os/test/WatchTests.scala:go";
+        let e = edges(&g);
+        assert!(has(&g, go, "/p/os/watch/package.scala:watch"), "{e:?}");
+        assert!(has(&g, go, "/p/os/ResourcePath.scala:resource"), "{e:?}");
+        assert!(!has(&g, go, "/p/acme/Math.scala:max"), "{e:?}");
     }
 
     /// A Scala package's member is called through the package: `os.read(p)`
@@ -12791,6 +13007,82 @@ def main():
             "{:?}",
             edges(&g)
         );
+    }
+
+    /// A Scala member read with no parentheses (`res.exitCode`, a case
+    /// class's field) is no call of a Scala `def exitCode()`, which Scala 3
+    /// calls only as `exitCode()`; it is one of a `def isAlive: Boolean`,
+    /// and `exitCode()` is that method's.
+    #[test]
+    fn a_scala_read_without_parentheses_is_no_call_of_a_parenthesised_def() {
+        let src = "case class CommandResult(exitCode: Int)\nclass SubProcess {\n  def exitCode(): Int = 0\n  def isAlive: Boolean = true\n}\nclass Use {\n  def a(): Int = make().exitCode\n  def b(): Boolean = make().isAlive\n  def c(): Int = make().exitCode()\n}\n";
+        let g = graph(&[("/p/src/Proc.scala", src)]);
+        let reached = |caller: &str| {
+            let at = (0..g.node_count())
+                .find(|&n| g.node(n).name == caller)
+                .unwrap();
+            let mut out: Vec<String> = g
+                .callees_of(at)
+                .iter()
+                .map(|&c| format!("{}:{}", g.node(c).name, g.node(c).line))
+                .collect();
+            out.sort();
+            out
+        };
+        assert_eq!(reached("a"), Vec::<String>::new(), "{:?}", edges(&g));
+        assert_eq!(reached("b"), ["isAlive:4"], "{:?}", edges(&g));
+        assert_eq!(reached("c"), ["exitCode:3"], "{:?}", edges(&g));
+    }
+
+    /// A Scala `def` of no list called with parentheses is its value
+    /// applied, through its own class alone (Mill's `scalaVersion()`,
+    /// `super.scalacOptions()`); its implicits may be passed explicitly. A
+    /// read passed as a function expands a method of any parameters (`xs
+    /// .foreach(Seg.check)`, `laws.evalOn _`, `macro Macros.impl`) — but
+    /// `_.exitCode` reads its argument's member. An `override def
+    /// toString()` is read bare too; Java calls a `def total: Int` as
+    /// `total()`.
+    #[test]
+    fn a_scala_def_of_no_list_is_applied_through_its_class_and_expanded_where_passed() {
+        let build = "trait Base {\n  def scalacOptions: Seq[String] = Seq()\n}\ntrait Module extends Base {\n  def scalaVersion: String = \"3\"\n  def opts = if (scalaVersion().startsWith(\"3\")) 1 else 2\n  override def scalacOptions = super.scalacOptions() ++ Seq(\"-x\")\n}\n";
+        let model = "class Holder {\n  def get: Int = 1\n  def exitCode(): Int = 0\n  override def toString() = \"h\"\n}\nobject Seg {\n  def check(s: String): Unit = ()\n}\nobject Laws {\n  def evalOn(n: Int): Boolean = true\n}\nobject Async {\n  implicit def forW[F](implicit a: Int, b: Int): Int = a\n}\nobject Macros {\n  def impl(c: Any)(s: Any): Any = s\n}\nclass Cart {\n  def total: Int = 1\n}\n";
+        let uses = "class Use {\n  def a(): Int = make().get()\n  def b(xs: Seq[String]): Unit = xs.foreach(Seg.check)\n  def c(): Unit = forAll(Laws.evalOn _)\n  def d(xs: Seq[Holder]) = xs.map(_.exitCode)\n  def e(h: Holder): String = h.toString\n  def f(): Int = Async.forW(1, 2)\n  def g(): Int = make().forW(1, 2)\n  def h(): Int = Async.forW\n  def i(s: String): Int = macro Macros.impl\n}\n";
+        let java = "class J {\n  void j(Cart c) { c.total(); }\n}\n";
+        let g = graph(&[
+            ("/p/build.mill", build),
+            ("/p/src/Model.scala", model),
+            ("/p/src/Use.scala", uses),
+            ("/p/src/J.java", java),
+        ]);
+        // (The last of a name: `scalacOptions`, the override.)
+        let reached = |caller: &str| {
+            let at = (0..g.node_count())
+                .rfind(|&n| g.node(n).name == caller)
+                .unwrap();
+            let mut out: Vec<String> = g
+                .callees_of(at)
+                .iter()
+                .map(|&c| format!("{}:{}", g.node(c).name, g.node(c).line))
+                .collect();
+            out.sort();
+            out
+        };
+        for (caller, expected) in [
+            ("opts", &["scalaVersion:5"][..]),
+            ("scalacOptions", &["scalacOptions:2"]),
+            ("a", &[]),
+            ("b", &["check:7"]),
+            ("c", &["evalOn:10"]),
+            ("d", &[]),
+            ("e", &["toString:4"]),
+            ("f", &["forW:13"]),
+            ("g", &[]),
+            ("h", &["forW:13"]),
+            ("i", &["impl:16"]),
+            ("j", &["total:19"]),
+        ] {
+            assert_eq!(reached(caller), expected, "{caller}: {:?}", edges(&g));
+        }
     }
 
     /// A class's body is open where its braces say, those in strings,

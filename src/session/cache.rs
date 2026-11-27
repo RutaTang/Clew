@@ -162,7 +162,11 @@ use crate::incremental::Version;
 /// constructor calls.
 /// 44: functions declared inside another ([`CachedCalls::nested`]); C++
 /// specifier macros; Zig's standard-library results.
-pub(crate) const CACHE_VERSION: u32 = 44;
+/// 45: a Scala read passed as a function, an `override def f()` and an
+/// implicits-only list in a call's and a definition's arities; a Scala
+/// package's path, and the receiver past a member of the callee's name, in
+/// a call's qualifier.
+pub(crate) const CACHE_VERSION: u32 = 45;
 
 /// A cached symbol (the index entry minus the paths, which are reconstructed
 /// from the project root + relative path on load).
