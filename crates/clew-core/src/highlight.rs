@@ -2495,6 +2495,29 @@ fn without_export_macros(source: &str, c: bool) -> Option<String> {
         }
         line_start += line.len();
     }
+    // A macro between `if` and its condition (`if FMT_CONSTEXPR20
+    // (need_copy<T>::value)`, `constexpr` where the standard has it): the
+    // condition after it is the `if`'s.
+    for (at, _) in source.match_indices("if ") {
+        if at > 0 && word(bytes[at - 1]) {
+            continue;
+        }
+        let start =
+            at + 3 + (source[at + 3..].len() - source[at + 3..].trim_start_matches(' ').len());
+        let mut end = start;
+        while end < bytes.len() && word(bytes[end]) {
+            end += 1;
+        }
+        let w = &source[start..end];
+        let capitals = w.len() > 2
+            && w.bytes()
+                .all(|c| c == b'_' || c.is_ascii_uppercase() || c.is_ascii_digit())
+            && w.bytes().any(|c| c == b'_')
+            && w.bytes().next().is_some_and(|c| c.is_ascii_uppercase());
+        if capitals && source[end..].trim_start_matches(' ').starts_with('(') {
+            spans.push((start, end));
+        }
+    }
     // A macro standing alone on its line before a declaration
     // (`SPDLOG_NAMESPACE_BEGIN` above `class SPDLOG_API logger {`,
     // `FMT_BEGIN_NAMESPACE`): the namespace it opens is no type of the
@@ -3019,6 +3042,14 @@ mod tests {
                 "{src}"
             );
         }
+        // A macro between `if` and its condition (fmt's `if
+        // FMT_CONSTEXPR20 (…)`), in C++.
+        let cpp = "template <typename T> void push_back(const T& arg) {\n  if FMT_CONSTEXPR20 (need_copy<T>::value)\n    emplace(arg);\n  else\n    emplace(arg);\n}\n";
+        assert!(without_export_macros(cpp, false).is_some());
+        assert!(
+            !parse(cpp, Lang::Cpp).unwrap().root_node().has_error(),
+            "{cpp}"
+        );
         let flex = "YY_BUFFER_STATE yy_scan_string ( const char *yy_str );\n";
         assert_eq!(without_export_macros(flex, true), None);
         assert!(!parse(flex, Lang::C).unwrap().root_node().has_error());

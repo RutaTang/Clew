@@ -3226,6 +3226,36 @@ impl ProjectCallGraph {
             }
             false
         };
+        // Whether a Ruby class has a library's class above it: a base the
+        // project declares none of, or one named by a path whose first
+        // module is no project's (`ActiveRecord::Base`).
+        let ruby_library_above = |ty: &str| -> bool {
+            let mut level: Vec<&str> = vec![ty];
+            let mut seen: HashSet<&str> = HashSet::from([ty]);
+            for _ in 0..12 {
+                let mut next: Vec<&str> = Vec::new();
+                for t in &level {
+                    for base in exact_bases_of.get(t).into_iter().flatten() {
+                        let path = base.trim_start_matches("::");
+                        let first = path.split("::").next().unwrap_or(path);
+                        let last = path.rsplit("::").next().unwrap_or(path);
+                        if !declared_types.contains(last)
+                            || (path.contains("::") && !declared_types.contains(first))
+                        {
+                            return true;
+                        }
+                        if seen.insert(last) {
+                            next.push(last);
+                        }
+                    }
+                }
+                if next.is_empty() {
+                    return false;
+                }
+                level = next;
+            }
+            false
+        };
         // The type each Kotlin or C# extension function extends
         // ([`FileContext::extension_receivers`]), by node.
         let receivers_at: HashMap<(&Path, usize), &str> = files
@@ -4683,6 +4713,15 @@ impl ProjectCallGraph {
                 // name (an inherited one) keeps them all.
                 let wanted = match &cs.receiver {
                     Some(Receiver::Own) => owner[caller],
+                    // (A C++ alias by the type it names: a `log_levels`
+                    // field is the `std::unordered_map` it aliases.)
+                    Some(Receiver::Type(ty) | Receiver::Declared(ty)) if fc.lang == Lang::Cpp => {
+                        let last = ty.rsplit(':').next().unwrap_or(ty);
+                        match unaliased(&alias_of, last) {
+                            named if named != last => Some(named),
+                            _ => Some(ty.as_str()),
+                        }
+                    }
                     Some(Receiver::Type(ty) | Receiver::Declared(ty)) => Some(ty.as_str()),
                     None => None,
                 };
@@ -4942,13 +4981,35 @@ impl ProjectCallGraph {
                         | Lang::Cpp,
                     ) => {
                         let last = ty.rsplit(['.', ':']).next().unwrap_or(ty);
+                        // (A C++ alias by the type it names: `log_levels`
+                        // for `using log_levels = std::unordered_map<…>`.)
+                        let last = match fc.lang {
+                            Lang::Cpp => unaliased(&alias_of, last),
+                            _ => last,
+                        };
+                        let ty: &str = if last == ty.rsplit(['.', ':']).next().unwrap_or(ty) {
+                            ty
+                        } else {
+                            last
+                        };
                         let declared = declared_types.contains(last);
                         (!project_types.contains(last)
-                            && !project_types.contains(ty.as_str())
+                            && !project_types.contains(ty)
                             && !declared)
                             // A project class neither it nor a project class
                             // above it defines the method of: the library's.
                             || (declared && narrowed.is_empty() && closed_hierarchy(fc.lang))
+                    }
+                    // A Ruby project class neither it nor anything above it
+                    // defines the method of, below a library's class
+                    // (`Issue < ApplicationRecord < ActiveRecord::Base`):
+                    // the library's (`issue.valid?`), never another
+                    // class's of the name.
+                    (Some(Receiver::Type(ty)), Lang::Ruby) => {
+                        let last = ty.rsplit(':').next().unwrap_or(ty);
+                        declared_types.contains(last)
+                            && narrowed.is_empty()
+                            && ruby_library_above(last)
                     }
                     // Zig's standard library's (`writer: *std.Io.Writer`).
                     (Some(Receiver::Type(ty)), Lang::Zig) => ty == "std" || ty.starts_with("std."),
@@ -7746,6 +7807,78 @@ fn number_constant_kind(text: &str) -> Option<&'static str> {
     })
 }
 
+/// The type a Zig file's own top-level `var` or `const` named `name` is
+/// declared with: `Server` for `var default_server: Server(void) =
+/// undefined;`, `Pool` for `pub var pool: *Pool = …` — a project type's
+/// name, by its capital.
+fn zig_global_type(src: &str, name: &str) -> Option<String> {
+    for line in src.lines() {
+        if line.starts_with([' ', '\t']) {
+            continue;
+        }
+        let rest = line.strip_prefix("pub ").unwrap_or(line);
+        let Some(rest) = rest
+            .strip_prefix("var ")
+            .or_else(|| rest.strip_prefix("const "))
+        else {
+            continue;
+        };
+        let Some(rest) = rest.trim_start().strip_prefix(name) else {
+            continue;
+        };
+        let Some(ty) = rest.trim_start().strip_prefix(':') else {
+            continue;
+        };
+        let ty = ty.trim_start().trim_start_matches(['*', '?']);
+        let ty = ty.strip_prefix("const ").unwrap_or(ty);
+        let ty: String = ty
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '.')
+            .collect();
+        let last = ty.rsplit('.').next().unwrap_or(&ty);
+        return (last.starts_with(char::is_uppercase) && is_plain_name(last))
+            .then(|| last.to_string());
+    }
+    None
+}
+
+/// Methods Scala's strings and collections have, which a placeholder's
+/// element of no known type (`_.contains("x")`) calls as the library's.
+const SCALA_LIBRARY_METHODS: &[&str] = &[
+    "contains",
+    "startsWith",
+    "endsWith",
+    "exists",
+    "forall",
+    "isEmpty",
+    "nonEmpty",
+    "length",
+    "size",
+    "trim",
+    "split",
+    "toLowerCase",
+    "toUpperCase",
+    "toInt",
+    "toLong",
+    "toDouble",
+    "mkString",
+    "indexOf",
+    "replace",
+    "stripPrefix",
+    "stripSuffix",
+    "matches",
+    "head",
+    "tail",
+    "headOption",
+    "lastOption",
+    "isDefined",
+    "getOrElse",
+    "equals",
+    "hashCode",
+    "compareTo",
+    "toString",
+];
+
 /// Methods whose result is a string, whatever they are called on
 /// (`compileError(…).msg.toLowerCase.contains(…)`, `x.toString().trim()`):
 /// a call on it is the library's — but for the project's extensions of it.
@@ -9818,6 +9951,13 @@ fn receiver_of(
     {
         return Some(Receiver::Type(receiver.to_string()));
     }
+    // A Scala placeholder's element (`lines.exists(_.contains("x"))`) of
+    // no type this reads, called by a method every string and collection
+    // has: the library's, never the one project class's of the name
+    // (os-lib's `PermSet.contains`).
+    if lang == Lang::Scala && receiver == "_" && SCALA_LIBRARY_METHODS.contains(&callee) {
+        return Some(Receiver::Type("Any".to_string()));
+    }
     // A nested class named through its outer one, its package's path
     // before them or not (`JsonReader.Options.of(…)`,
     // `com.squareup.moshi.JsonReader.Options.of(…)`): the nested class. (A
@@ -10101,6 +10241,21 @@ fn receiver_of(
             let name = receiver[..open].rsplit("::").next().unwrap_or("");
             return Some(Receiver::Declared(format!("{RETURNED}{name}")));
         }
+        // A Ruby method's own call (`email_decider(user).skip?(…)`,
+        // `self.fetcher(repo).call`): what that method returns
+        // ([`ruby_built`]).
+        if lang == Lang::Ruby
+            && let Some(open) = receiver.find('(')
+            && receiver.ends_with(')')
+        {
+            let name = receiver[..open].trim();
+            let name = name.strip_prefix("self.").unwrap_or(name);
+            if is_plain_name(name.trim_end_matches(['?', '!']))
+                && name.starts_with(|c: char| c.is_lowercase() || c == '_')
+            {
+                return Some(Receiver::Declared(format!("{RETURNED}{name}")));
+            }
+        }
         // What a string method gives (`x.toString().trim()`): a string —
         // Scala's with no parentheses too (`e.msg.toLowerCase`) — unless
         // the project's method of the name says otherwise (Exposed's
@@ -10235,6 +10390,15 @@ fn receiver_of(
     // declaration in the header says — once the classes are read.
     if let Some(field) = cpp_member_field(call, receiver, src, lang) {
         return Some(field);
+    }
+    // A Zig variable of the file's own, declared with its type (`var
+    // default_server: Server(void) = undefined;`): of that type — the
+    // struct the type function returns.
+    if lang == Lang::Zig
+        && is_plain_name(receiver)
+        && let Some(ty) = zig_global_type(src, receiver)
+    {
+        return Some(Receiver::Type(ty));
     }
     // Nor a field: in Scala, a package or an object (`os` in `os.read(p)`),
     // or a member inherited from a trait; in Go, an imported package
@@ -12437,8 +12601,30 @@ fn resolve_callees(
         return Vec::new();
     };
     let with_body = !named.defined.is_empty();
+    // (In a language of classes, a method's abstract declaration in a
+    // class with no definition of it among them stays: a value of that
+    // class's type calls it — `barrier.await` is `CyclicBarrier`'s, however
+    // many `CountDownLatch` implementations define an `await`.)
+    let with_abstract: Vec<usize>;
     let cands: &[usize] = if with_body {
-        &named.defined
+        let classes = matches!(
+            site.lang,
+            Lang::Java | Lang::Kotlin | Lang::Scala | Lang::CSharp | Lang::Dart
+        );
+        let defined_in: HashSet<&str> = named.defined.iter().filter_map(|&i| owner[i]).collect();
+        let abstract_elsewhere =
+            |i: usize| facts[i].bodyless && owner[i].is_some_and(|o| !defined_in.contains(o));
+        if classes && call.method && named.all.iter().any(|&i| abstract_elsewhere(i)) {
+            with_abstract = named
+                .all
+                .iter()
+                .copied()
+                .filter(|&i| !facts[i].bodyless || abstract_elsewhere(i))
+                .collect();
+            &with_abstract
+        } else {
+            &named.defined
+        }
     } else {
         &named.all
     };
@@ -12521,6 +12707,13 @@ fn resolve_callees(
             let mut seen: HashSet<usize> = HashSet::new();
             site.scope()
                 .flat_map(|file| in_file(defs, facts, file, name, with_body, call.arity))
+                // (And the abstract declarations kept above.)
+                .chain(cands.iter().copied().filter(|&i| {
+                    with_body
+                        && facts[i].bodyless
+                        && facts[i].takes(call.arity)
+                        && site.sees(&nodes[i].file)
+                }))
                 .filter(|&i| seen.insert(i))
                 .take(MAX_CANDIDATES + 1)
                 .collect()
@@ -17764,6 +17957,120 @@ def main():
             "{:?}",
             edges(&g)
         );
+    }
+
+    /// Audit 14's Ruby: a method's own call as the receiver
+    /// (`email_decider(user).skip?(…)`) is of the class that method builds,
+    /// not the caller's own `skip?`; a model's library method
+    /// (`issue.valid?` on an `ActiveRecord` model) is no other class's
+    /// method of the name.
+    #[test]
+    fn audit_14_ruby_shapes() {
+        let job = "class SendJob\n  def perform(user)\n    skip = email_decider(user).skip?(3)\n  end\n\n  def skip?(user)\n    false\n  end\n\n  def email_decider(user)\n    EmailRateLimit.new(user.days, minimum_frequency: 2)\n  end\nend\n";
+        let limit = "class EmailRateLimit\n  def skip?(days)\n    days > 1\n  end\nend\n";
+        let record =
+            "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n";
+        let issue = "class Issue < ApplicationRecord\n  def title\n  end\nend\n";
+        let user =
+            "module GithubFetcher\n  class User\n    def valid?\n      true\n    end\n  end\nend\n";
+        let test = "class IssueTest\n  def test_valid\n    issue = Issue.new\n    issue.valid?\n  end\nend\n";
+        let g = graph(&[
+            ("/p/app/jobs/send_job.rb", job),
+            ("/p/app/models/email_rate_limit.rb", limit),
+            ("/p/app/models/application_record.rb", record),
+            ("/p/app/models/issue.rb", issue),
+            ("/p/app/models/github_fetcher/user.rb", user),
+            ("/p/test/unit/issue_test.rb", test),
+        ]);
+        let reached = |name: &str| -> Vec<String> {
+            let at = (0..g.node_count())
+                .find(|&n| g.node(n).name == name)
+                .unwrap();
+            let mut out: Vec<String> = g
+                .callees_of(at)
+                .iter()
+                .map(|&c| format!("{}:{}", g.node(c).file.display(), g.node(c).line))
+                .collect();
+            out.sort();
+            out
+        };
+        assert!(
+            reached("perform").contains(&"/p/app/models/email_rate_limit.rb:2".to_string())
+                && !reached("perform").contains(&"/p/app/jobs/send_job.rb:6".to_string()),
+            "{:?}",
+            edges(&g)
+        );
+        assert_eq!(reached("test_valid"), [] as [&str; 0], "{:?}", edges(&g));
+    }
+
+    /// Audit 14's C++: a field declared by an alias of a library's type
+    /// (`log_levels` for `using log_levels = std::unordered_map<…>`) calls
+    /// the library's methods, none of the project's of the name.
+    #[test]
+    fn a_cpp_field_of_an_aliased_library_type_calls_the_library() {
+        let h = "#pragma once\n#include <unordered_map>\n#include <string>\nnamespace spdlog {\nusing log_levels = std::unordered_map<std::string, int>;\nclass buffer {\npublic:\n  int* end() { return nullptr; }\n};\nclass registry {\npublic:\n  bool has(const std::string& name);\nprivate:\n  log_levels log_levels_;\n};\n}\n";
+        let inl = "#pragma once\n#include \"registry.h\"\nnamespace spdlog {\nbool registry::has(const std::string& name) {\n  auto it = log_levels_.find(name);\n  return it != log_levels_.end();\n}\n}\n";
+        let files = [
+            ("/p/include/spdlog/registry.h", h),
+            ("/p/include/spdlog/registry-inl.h", inl),
+        ];
+        let sources: Vec<(PathBuf, String)> = files
+            .iter()
+            .map(|(f, s)| (PathBuf::from(f), s.to_string()))
+            .collect();
+        let scope = HashMap::from([(
+            PathBuf::from("/p/include/spdlog/registry-inl.h"),
+            HashSet::from([PathBuf::from("/p/include/spdlog/registry.h")]),
+        )]);
+        let g = ProjectCallGraph::build(defs_of(&files), &sources, &scope);
+        let at = (0..g.node_count())
+            .find(|&n| g.node(n).name == "has" && g.node(n).file.ends_with("registry-inl.h"))
+            .unwrap();
+        assert!(g.callees_of(at).is_empty(), "{:?}", edges(&g));
+    }
+
+    /// Audit 14's Scala: a method of a value of no known type reaches an
+    /// abstract declaration in a class with no definition of it
+    /// (`barrier.await` is `CyclicBarrier`'s, not only the `CountDownLatch`
+    /// implementation's), and a placeholder's string method
+    /// (`_.contains("x")`) is the library's, never `PermSet.contains`.
+    #[test]
+    fn audit_14_scala_shapes() {
+        let std = "package cats.effect.std\nabstract class CyclicBarrier[F[_]] {\n  def await: F[Unit]\n}\nabstract class CountDownLatch[F[_]] {\n  def await: F[Unit]\n}\nobject CountDownLatch {\n  final class Impl extends CountDownLatch[Option] {\n    def await: Option[Unit] = None\n  }\n}\n";
+        let test = "package cats.effect.std\nclass Suite {\n  def run(newBarrier: Int => Option[CyclicBarrier[Option]]): Unit = {\n    newBarrier(2).flatMap { barrier => barrier.await }\n  }\n}\n";
+        let model =
+            "package os\nclass PermSet(value: Int) {\n  def contains(p: Int): Boolean = true\n}\n";
+        let os_test = "package os\nobject SubProcessTests {\n  def lines(out: Vector[String]): Unit = assert(out.exists(_.contains(\"File.txt\")))\n}\n";
+        let g = graph(&[
+            ("/p/std/src/main/scala/cats/effect/std/Std.scala", std),
+            ("/p/tests/src/test/scala/cats/effect/std/Suite.scala", test),
+            ("/p/os/src/Model.scala", model),
+            ("/p/os/test/src/SubProcessTests.scala", os_test),
+        ]);
+        let reached = |name: &str| -> Vec<usize> {
+            let at = (0..g.node_count())
+                .find(|&n| g.node(n).name == name)
+                .unwrap();
+            let mut out: Vec<usize> = g.callees_of(at).iter().map(|&c| g.node(c).line).collect();
+            out.sort_unstable();
+            out
+        };
+        assert!(reached("run").contains(&3), "{:?}", edges(&g));
+        assert_eq!(reached("lines"), [] as [usize; 0], "{:?}", edges(&g));
+    }
+
+    /// Audit 14's Zig: a variable of the file's own, declared with a type
+    /// function's type (`var default_server: Server(void) = undefined;`),
+    /// calls that struct's method, not every `deinit` in the file.
+    #[test]
+    fn a_zig_global_of_a_type_function_calls_its_struct() {
+        let zig = "const std = @import(\"std\");\n\npub fn Server(comptime H: type) type {\n    return struct {\n        handler: H,\n        const Self = @This();\n        pub fn deinit(self: *Self) void {\n            _ = self;\n        }\n    };\n}\n\npub fn Middleware(comptime H: type) type {\n    return struct {\n        handler: H,\n        const Self = @This();\n        pub fn deinit(self: *Self) void {\n            _ = self;\n        }\n    };\n}\n\nvar default_server: Server(void) = undefined;\n\nfn stop() void {\n    default_server.deinit();\n}\n";
+        let g = graph(&[("/p/src/httpz.zig", zig)]);
+        let at = (0..g.node_count())
+            .find(|&n| g.node(n).name == "stop")
+            .unwrap();
+        let lines: Vec<usize> = g.callees_of(at).iter().map(|&c| g.node(c).line).collect();
+        assert_eq!(lines, [7], "{:?}", edges(&g));
     }
 
     /// A Ruby method's result is the class its last statement builds —
