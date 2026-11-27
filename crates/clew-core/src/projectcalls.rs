@@ -7563,7 +7563,22 @@ fn macro_calls(tree: Node, src: &str, caller: Option<&str>, out: &mut Vec<CallSi
 /// `*rest`. `None` where the parameters are not plain (`...` forwarding).
 fn ruby_arity(src: &str, l: &Located) -> Option<(u8, u8)> {
     let text = src.get(l.declaration.0..l.declaration.1)?;
-    let head = text.lines().next()?;
+    // Its first line past comments: a `def`, after a visibility word or
+    // not (`private def f`) — an `alias`, an `attr_*` or a
+    // `define_method` says nothing of them.
+    let head = text
+        .lines()
+        .map(str::trim_start)
+        .find(|line| !line.is_empty() && !line.starts_with('#'))?;
+    let def = ["", "private ", "protected ", "public ", "module_function "]
+        .iter()
+        .any(|v| {
+            head.strip_prefix(v)
+                .is_some_and(|rest| rest.starts_with("def "))
+        });
+    if !def {
+        return None;
+    }
     let at = head.find(&*l.symbol.name)? + l.symbol.name.len();
     let rest = &head[at..];
     let params: &str = match rest.trim_start().strip_prefix('(') {
@@ -7595,9 +7610,16 @@ fn ruby_arity(src: &str, l: &Located) -> Option<(u8, u8)> {
         }
     };
     let (mut fewest, mut most) = (0u8, 0u8);
+    // (Keywords take a call's `key: value` pairs, which a method of none
+    // takes as one positional hash: a slot more.)
+    let mut keywords = false;
     for part in split_top_level(params) {
         let part = part.trim();
-        if part.is_empty() || part.starts_with('&') || part.starts_with("**") {
+        if part.is_empty() || part.starts_with('&') {
+            continue;
+        }
+        if part.starts_with("**") {
+            keywords = true;
             continue;
         }
         if part == "..." {
@@ -7612,6 +7634,7 @@ fn ruby_arity(src: &str, l: &Located) -> Option<(u8, u8)> {
             .find(|c: char| !(c.is_alphanumeric() || c == '_'))
             .unwrap_or(part.len());
         if part[name_end..].trim_start().starts_with(':') {
+            keywords = true;
             continue;
         }
         if part[name_end..].trim_start().starts_with('=') {
@@ -7620,6 +7643,9 @@ fn ruby_arity(src: &str, l: &Located) -> Option<(u8, u8)> {
             fewest = fewest.saturating_add(1);
             most = most.saturating_add(1);
         }
+    }
+    if keywords {
+        most = most.saturating_add(1);
     }
     Some((fewest, most.max(fewest)))
 }
@@ -7794,18 +7820,30 @@ fn call_arity(call: Node, parent: Option<Node>, src: &str, lang: Lang) -> Option
         // (`&blk`, `do … end`) passed apart; a splat says nothing of how
         // many.
         (Lang::Ruby, "call") => {
+            // A setter (`response.body = […]`): its one value.
+            if let Some(p) = parent
+                && matches!(p.kind(), "assignment" | "operator_assignment")
+                && p.child_by_field_name("left")
+                    .is_some_and(|l| l.id() == call.id())
+            {
+                return Some(1);
+            }
             let Some(args) = call.child_by_field_name("arguments") else {
                 return Some(0);
             };
             let mut n = 0usize;
+            let mut pairs = false;
             for a in args.named_children(&mut args.walk()) {
                 match a.kind() {
-                    "pair" | "block_argument" | "comment" => {}
+                    // `key: value` pairs: one hash, or a method's keywords
+                    // (which it counts a slot more for).
+                    "pair" => pairs = true,
+                    "block_argument" | "comment" => {}
                     "splat_argument" | "hash_splat_argument" | "forward_argument" => return None,
                     _ => n += 1,
                 }
             }
-            n
+            n + usize::from(pairs)
         }
         (Lang::Java | Lang::CSharp | Lang::Cpp | Lang::Go | Lang::Scala, _) => {
             let args = call.child_by_field_name("arguments").or_else(|| {
@@ -18376,7 +18414,7 @@ def main():
         };
         assert_eq!(reached("show"), [] as [&str; 0], "{:?}", edges(&g));
         // (In one class: a `*rest` takes any more, keywords none of them.)
-        let one = "class Labels\n  def label(prefix, suffix = \"\", *rest, key: 1, &blk)\n  end\n\n  def many\n    label(\"a\", \"b\", \"c\", key: 2)\n  end\n\n  def none\n    label()\n  end\nend\n";
+        let one = "class Labels\n  def label(prefix, suffix = \"\", *rest, key: 1, &blk)\n  end\n\n  def many\n    label(\"a\", \"b\", \"c\", key: 2)\n  end\n\n  def none\n    label()\n  end\n\n  def write_app_file(options = {})\n  end\n  alias update_app_file write_app_file\n\n  def reload\n    update_app_file(:routes => [\"x\"])\n  end\n\n  def body=(value)\n  end\n\n  def reset\n    self.body = []\n  end\nend\n";
         let g1 = graph(&[("/p/lib/labels.rb", one)]);
         let lines = |name: &str| -> Vec<usize> {
             let at = (0..g1.node_count())
@@ -18386,6 +18424,10 @@ def main():
         };
         assert_eq!(lines("many"), [2], "{:?}", edges(&g1));
         assert_eq!(lines("none"), [] as [usize; 0], "{:?}", edges(&g1));
+        // (An alias of no arity read; a hash of pairs one argument; a
+        // setter's value one.)
+        assert_eq!(lines("reload"), [15], "{:?}", edges(&g1));
+        assert_eq!(lines("reset"), [21], "{:?}", edges(&g1));
         assert_eq!(
             reached("asyncSyntax"),
             ["/p/kernel/src/main/scala/cats/effect/kernel/syntax/AsyncSyntax.scala:3"],
