@@ -169,7 +169,9 @@ use crate::incremental::Version;
 /// 46: C#'s bases and parameter kinds by their type arguments' count
 /// (`IRequest`1`), and a constrained type parameter's kind its constraint.
 /// 47: a closure binds its own names (receivers and arguments read there).
-pub(crate) const CACHE_VERSION: u32 = 47;
+/// 48: Zig's `test` blocks bind their own names; Elixir's `fun` is a name
+/// in a head's arity; C++ macros alone on their line blanked at parse.
+pub(crate) const CACHE_VERSION: u32 = 48;
 
 /// A cached symbol (the index entry minus the paths, which are reconstructed
 /// from the project root + relative path on load).

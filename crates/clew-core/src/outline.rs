@@ -599,7 +599,7 @@ pub(crate) fn clause_arity(source: &str, item: &Located) -> Option<usize> {
     // From the clause's own name: a `-spec` or a comment before it says
     // nothing of its head.
     let at = head_of(text, &item.symbol.name, &[""])?;
-    Some(head_arguments(&text[at..])?.0)
+    Some(head_arguments(&text[at..], true)?.0)
 }
 
 /// An Elixir clause's arity: its head's arguments (`def f(a, b)` two, a
@@ -608,7 +608,7 @@ pub(crate) fn clause_arity(source: &str, item: &Located) -> Option<usize> {
 pub(crate) fn elixir_arity(source: &str, item: &Located) -> Option<usize> {
     let text = source.get(item.declaration.0..item.declaration.1)?;
     let at = head_of(text, &item.symbol.name, ELIXIR_DEFINES)?;
-    Some(head_arguments(&text[at..]).map_or(0, |(n, _)| n))
+    Some(head_arguments(&text[at..], false).map_or(0, |(n, _)| n))
 }
 
 /// How many of an Elixir clause's arguments have a default (`b \\ 1`): a
@@ -618,7 +618,7 @@ pub(crate) fn elixir_defaults(source: &str, item: &Located) -> usize {
         return 0;
     };
     head_of(text, &item.symbol.name, ELIXIR_DEFINES)
-        .and_then(|at| head_arguments(&text[at..]))
+        .and_then(|at| head_arguments(&text[at..], false))
         .map_or(0, |(_, defaults)| defaults)
 }
 
@@ -671,7 +671,7 @@ fn head_of(text: &str, name: &str, keywords: &[&str]) -> Option<usize> {
 /// many, and how many have an Elixir default — counted at the top level of
 /// the parenthesis, past brackets, binaries (`<<A:8, B/binary>>`), strings
 /// and character literals. `None` when no parenthesis follows.
-fn head_arguments(text: &str) -> Option<(usize, usize)> {
+fn head_arguments(text: &str, erlang: bool) -> Option<(usize, usize)> {
     let rest = text.strip_prefix('(')?;
     let bytes = rest.as_bytes();
     let (mut depth, mut args, mut defaults) = (0usize, 0usize, 0usize);
@@ -698,18 +698,25 @@ fn head_arguments(text: &str) -> Option<(usize, usize)> {
                 i += 1;
                 empty = false;
             }
-            // An anonymous function in a default (`fn a, b -> a end`): its
-            // commas are its own.
+            // An anonymous function (Elixir's `fn a, b -> a end` in a
+            // default, Erlang's `fun (A) -> A end`): its commas are its own.
+            // Elixir's `fun` is a name like any (`{mod, fun}`), and so is an
+            // Erlang `fun` not opening one (`fun f/1`).
             b'f' | b'e'
                 if !(i > 0 && (bytes[i - 1] == b'_' || bytes[i - 1].is_ascii_alphanumeric())) =>
             {
                 let word_end = rest[i..]
                     .find(|c: char| !(c == '_' || c.is_ascii_alphanumeric()))
                     .map_or(bytes.len(), |n| i + n);
-                match &rest[i..word_end] {
-                    "fn" | "fun" => depth += 1,
-                    "end" => depth = depth.saturating_sub(1),
-                    _ => {}
+                let opens = match &rest[i..word_end] {
+                    "fn" => !erlang,
+                    "fun" => erlang && rest[word_end..].trim_start().starts_with('('),
+                    _ => false,
+                };
+                if opens {
+                    depth += 1;
+                } else if &rest[i..word_end] == "end" {
+                    depth = depth.saturating_sub(1);
                 }
                 i = word_end;
                 empty = false;

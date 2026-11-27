@@ -2203,6 +2203,20 @@ impl ProjectCallGraph {
         // or, failing that, its nearest bases' (what it inherits; Go's
         // embedded types'), and — `overrides` — its subtypes' that override
         // it, as a value declared as `ty` may be one of them.
+        // Each function's parameter kinds ([`FileContext::parameters`]).
+        let parameters: HashMap<(&Path, usize), &str> = files
+            .iter()
+            .flat_map(|f| {
+                f.context
+                    .parameters
+                    .iter()
+                    .map(|(line, kinds)| ((f.file.as_path(), *line), kinds.as_str()))
+            })
+            .collect();
+        let node_parameters: Vec<Option<&str>> = nodes
+            .iter()
+            .map(|n| parameters.get(&(n.file.as_path(), n.line)).copied())
+            .collect();
         let family = |ty: &str, callee: &str, overrides: bool| -> Vec<usize> {
             let last = ty.rsplit(['.', ':']).next().unwrap_or(ty);
             let mut out: Vec<usize> = Vec::new();
@@ -2247,10 +2261,15 @@ impl ProjectCallGraph {
             out.sort_unstable();
             out.dedup();
             // A definition over a declaration of it (a C++ header's, an
-            // interface's abstract one) where there is one.
-            if out.iter().any(|&c| !facts[c].bodyless) {
-                out.retain(|&c| !facts[c].bodyless);
-            }
+            // interface's abstract one) where there is one taking the same
+            // parameters: of overloads, each its own (an abstract
+            // `value(String?)` is no `value(BufferedSource)` with a body).
+            let bodied: HashSet<Option<&str>> = out
+                .iter()
+                .filter(|&&c| !facts[c].bodyless)
+                .map(|&c| node_parameters[c])
+                .collect();
+            out.retain(|&c| !facts[c].bodyless || !bodied.contains(&node_parameters[c]));
             out
         };
         // Whether the type `child` has `base` above it, as written: C#'s
@@ -2559,22 +2578,8 @@ impl ProjectCallGraph {
             })
             .collect();
         let mut returned_types: HashMap<String, Option<String>> = HashMap::new();
-        // Each function's parameter kinds ([`FileContext::parameters`]), and
-        // its overloads: the definitions of its name and owner (for a free
+        // Its overloads: the definitions of its name and owner (for a free
         // function, its file), whichever take kinds.
-        let parameters: HashMap<(&Path, usize), &str> = files
-            .iter()
-            .flat_map(|f| {
-                f.context
-                    .parameters
-                    .iter()
-                    .map(|(line, kinds)| ((f.file.as_path(), *line), kinds.as_str()))
-            })
-            .collect();
-        let node_parameters: Vec<Option<&str>> = nodes
-            .iter()
-            .map(|n| parameters.get(&(n.file.as_path(), n.line)).copied())
-            .collect();
         // C#'s type names written with type arguments somewhere (a base's, a
         // parameter's: `IRequest<T>`): an argument of the name with none
         // known (a variable's type, read without them) may be of either.
@@ -2711,13 +2716,44 @@ impl ProjectCallGraph {
             let file = owner[callee]
                 .is_none()
                 .then_some(nodes[callee].file.as_path());
-            let family = overloads.get(&(nodes[callee].name.as_str(), owner[callee], file));
+            let name = nodes[callee].name.as_str();
+            let mut family: Vec<usize> = overloads
+                .get(&(name, owner[callee], file))
+                .cloned()
+                .unwrap_or_default();
+            // An override's overloads are its bases' too: a subclass's
+            // `value(String?)` beside its base's `value(Long)`.
+            if let Some(own) = owner[callee] {
+                let own = own.rsplit(['.', ':']).next().unwrap_or(own);
+                let mut level: Vec<&str> = vec![own];
+                let mut seen: HashSet<&str> = HashSet::from([own]);
+                for _ in 0..12 {
+                    level = level
+                        .iter()
+                        .flat_map(|t| bases_of.get(t))
+                        .flatten()
+                        .copied()
+                        .filter(|b| seen.insert(b))
+                        .collect();
+                    if level.is_empty() {
+                        break;
+                    }
+                    for base in &level {
+                        family.extend(
+                            overloads
+                                .get(&(name, Some(*base), None))
+                                .into_iter()
+                                .flatten(),
+                        );
+                    }
+                }
+            }
             let facts = &facts;
             let owner = &owner;
+            let family = &family;
             let others = || {
                 family
-                    .into_iter()
-                    .flatten()
+                    .iter()
                     .copied()
                     .filter(move |&i| i != callee && facts[i].takes_call(cs, lang, owner[i]))
             };
@@ -4083,6 +4119,8 @@ fn closure_kinds(lang: Lang) -> &'static [&'static str] {
         Lang::CSharp => &["lambda_expression", "anonymous_method_expression"],
         Lang::Go => &["func_literal"],
         Lang::Ruby => &["do_block", "block"],
+        // A Zig `test "…" { … }` block: no function, its names its own.
+        Lang::Zig => &["test_declaration"],
         _ => &[],
     }
 }
@@ -5525,13 +5563,19 @@ fn passes(
         );
     }
     let strict = matches!(lang, Lang::Java | Lang::Kotlin | Lang::CSharp);
-    // A literal for a project class: Java and Kotlin convert none to one
-    // (C# and Scala may, by a conversion the class declares).
+    // A string, number, character or boolean for a class: Java and Kotlin
+    // convert none to one but those above them (`Number`, `Comparable`) —
+    // no project class, nor a library's like `BufferedSource` (C# and Scala
+    // may, by a conversion the class declares).
     if matches!(lang, Lang::Java | Lang::Kotlin)
         && matches!(a, "s" | "c" | "i" | "0" | "f" | "b")
-        && p.strip_prefix('T').is_some_and(declared)
+        && let Some(class) = p.strip_prefix('T')
     {
-        return false;
+        return !declared(class)
+            && matches!(
+                class,
+                "Number" | "Comparable" | "Serializable" | "Constable" | "ConstantDesc"
+            );
     }
     match (a, p) {
         ("s", k) => !primitive(k) && k != "a",
@@ -12293,7 +12337,8 @@ def main():
 
     /// A function's arity is read from its own head: past a binary
     /// pattern's commas (`<<1:1, X:7, Tl/binary>>`), past the `@doc` before
-    /// it, and with every default of a head written over several lines.
+    /// it, and with every default of a head written over several lines —
+    /// Elixir's `fun` a name, no `fn`.
     #[test]
     fn beam_arities_are_read_from_the_head() {
         let erl = "-module(pb).\n\n-spec read_gr_b(binary(), integer()) -> integer().\n%% read (a, b, c)\nread_gr_b(<<1:1, X:7, Tl/binary>>, N)\n  when N < (32-7) ->\n    read_gr_b(Tl, N + X);\nread_gr_b(<<0:1, _:7, _/binary>>, $,) -> 0.\n";
@@ -12312,6 +12357,15 @@ def main():
         let stub = "defmodule SsoTest do\n  defp stub_uri(\n         assertion \\\\ fn _c, _t, _r, _s -> :ok end\n       ) do\n    assertion\n  end\nend\n";
         let fc = FileCalls::read(Path::new("/p/test/sso_test.exs"), stub).unwrap();
         assert_eq!(fc.context.arities, [(2, 0, 1)], "{:?}", fc.context.arities);
+        // Elixir's `fun` is a name (`{mod, fun}`), no anonymous function.
+        let forward = "defmodule Plug do\n  defp do_forward({mod, fun}, conn, opts) do\n    apply(mod, fun, [conn, opts])\n  end\nend\n";
+        let fc = FileCalls::read(Path::new("/p/lib/plug.ex"), forward).unwrap();
+        assert_eq!(fc.context.arities, [(2, 3, 3)], "{:?}", fc.context.arities);
+        // Erlang's anonymous `fun (…) -> … end` has commas of its own; its
+        // `fun f/1` none to hide.
+        let erl = "-module(m).\nf(X, Y) -> lists:map(fun (A, B) -> A end, X), Y.\n";
+        let fc = FileCalls::read(Path::new("/p/src/m.erl"), erl).unwrap();
+        assert_eq!(fc.context.arities, [(2, 2, 2)], "{:?}", fc.context.arities);
     }
 
     /// A Go call qualified by an imported package is that package's: a
@@ -12971,6 +13025,26 @@ def main():
         assert_eq!(scala_summoned("Ref[IO](1)"), None);
     }
 
+    /// Of overloads, each its own: an abstract `value(String?)` is reached
+    /// through its override, an abstract `value(Long)` no class overrides
+    /// is reached itself — neither hidden by a concrete `value(source:
+    /// BufferedSource)`, which a Kotlin string never passes for.
+    #[test]
+    fn an_abstract_overload_is_its_own() {
+        let kt = "abstract class JsonWriter {\n  abstract fun value(value: String?): JsonWriter\n  abstract fun value(value: Long): JsonWriter\n  fun value(source: BufferedSource): JsonWriter {\n    return this\n  }\n}\ninternal class JsonValueWriter : JsonWriter() {\n  override fun value(value: String?): JsonWriter {\n    return this\n  }\n}\nclass A {\n  fun text(writer: JsonWriter, value: String) {\n    writer.value(value)\n  }\n  fun number(writer: JsonWriter) {\n    writer.value(5L)\n  }\n}\n";
+        let g = graph(&[("/p/src/W.kt", kt)]);
+        let reached = |caller: &str| {
+            let at = (0..g.node_count())
+                .find(|&n| g.node(n).name == caller)
+                .unwrap();
+            let mut lines: Vec<usize> = g.callees_of(at).iter().map(|&c| g.node(c).line).collect();
+            lines.sort_unstable();
+            lines
+        };
+        assert_eq!(reached("text"), [9], "{:?}", edges(&g));
+        assert_eq!(reached("number"), [3], "{:?}", edges(&g));
+    }
+
     /// Classes of one name in two modules (a library's jdbc and r2dbc
     /// twins): a value declared as one calls the twin its file sees.
     #[test]
@@ -13044,6 +13118,10 @@ def main():
             typed("/p/spec/request_spec.rb", ruby, "change"),
             [request()]
         );
+        // Zig's `test` blocks alike.
+        let zig = "test \"a\" {\n    var r = make();\n    r.x();\n}\ntest \"b\" {\n    var r = Request.init();\n    r.change();\n}\n";
+        let reached = typed("/p/src/request.zig", zig, "change");
+        assert!(reached[0].is_some(), "{reached:?}");
     }
 
     /// C#'s `IRequest` and `IRequest<T>` are two types: `new PairCommand()`
@@ -13174,8 +13252,9 @@ def main():
     }
 
     /// A C++ class declared with its export macro (`class SPDLOG_API logger
-    /// {`) is the class its name says, its members its own: a call on a
-    /// logger reaches the logger's `info`, not a namespace's.
+    /// {`) — after a namespace's macro alone on its line, too — is the class
+    /// its name says, its members its own: a call on a logger reaches the
+    /// logger's `info`, not a namespace's.
     #[test]
     fn a_cpp_export_macro_is_no_class_name() {
         let src = "namespace spdlog {\nvoid info(int m) {}\nclass SPDLOG_API logger {\npublic:\n    template <typename T>\n    void info(const T &msg) {}\n};\nclass FMT_API sink : public base {\n    void flush() {}\n};\n}\nvoid run(spdlog::logger &l) {\n    l.info(1);\n}\n";
@@ -13207,6 +13286,44 @@ def main():
             .collect();
         assert!(names.contains(&"get".to_string()), "{names:?}");
         assert!(names.contains(&"size".to_string()), "{names:?}");
+        // A namespace's macro alone on its line before the class
+        // (`SPDLOG_NAMESPACE_BEGIN`) is no type the class is read as; an
+        // enumerator alone on its line before `}` is left as it is.
+        let opened = "#include <string>\nSPDLOG_NAMESPACE_BEGIN\n\nclass SPDLOG_API logger {\npublic:\n    void info(int m) {}\n};\n\nenum class level {\n    trace,\n    LAST_LEVEL\n};\n\nSPDLOG_NAMESPACE_END\n";
+        let fc = FileCalls::read(Path::new("/p/logger.h"), opened).unwrap();
+        assert_eq!(
+            fc.owners.get(&6).map(String::as_str),
+            Some("logger"),
+            "{:?}",
+            fc.owners
+        );
+        assert!(
+            crate::highlight::parse(opened, crate::highlight::Lang::Cpp)
+                .is_some_and(|t| !t.root_node().has_error()),
+            "a lone macro blanked, the enumerator kept"
+        );
+        // A macro called alone with no `;` (`FMT_PRAGMA_GCC(push_options)`),
+        // and a specifier macro after a template's header on its line, are
+        // no C++ either; `TEST(Cart, Adds)` keeps its body.
+        let pragmas = "FMT_PRAGMA_GCC(push_options)\nFMT_PRAGMA_MSVC(warning(disable : 4702))\n\nnamespace fmt {\ntemplate <typename... T> FMT_CONSTEXPR void ignore_unused(const T&...) {}\nclass view {\n public:\n  auto size() const -> int { return 0; }\n};\n}\nTEST(Cart, Adds)\n{\n  run();\n}\n";
+        let tree = crate::highlight::parse(pragmas, crate::highlight::Lang::Cpp).unwrap();
+        assert!(
+            !tree.root_node().has_error(),
+            "{}",
+            tree.root_node().to_sexp()
+        );
+        let fc = FileCalls::read(Path::new("/p/core.h"), pragmas).unwrap();
+        assert_eq!(
+            fc.owners.get(&8).map(String::as_str),
+            Some("view"),
+            "{:?}",
+            fc.owners
+        );
+        let names: Vec<String> = crate::outline::extract_located(pragmas, "cpp")
+            .into_iter()
+            .map(|l| l.symbol.name)
+            .collect();
+        assert!(names.contains(&"ignore_unused".to_string()), "{names:?}");
         let g = graph(&[("/p/src/logger.cpp", src)]);
         let at = (0..g.node_count())
             .find(|&n| g.node(n).name == "run")

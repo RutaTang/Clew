@@ -2055,6 +2055,29 @@ fn without_export_macros(source: &str) -> Option<String> {
     let mut line_start = 0;
     for line in source.split_inclusive('\n') {
         let mut i = line_start + (line.len() - line.trim_start().len());
+        // (After a template's header on the line: `template <typename...
+        // T> FMT_CONSTEXPR void ignore_unused(…)`.)
+        if let Some(header) = line.trim_start().strip_prefix("template")
+            && header.trim_start().starts_with('<')
+        {
+            let mut depth = 0usize;
+            let open = line.len() - header.len();
+            for (k, c) in line[open..].char_indices() {
+                match c {
+                    '<' => depth += 1,
+                    '>' => {
+                        depth = depth.saturating_sub(1);
+                        if depth == 0 {
+                            let after = open + k + 1;
+                            let skip = line[after..].len() - line[after..].trim_start().len();
+                            i = line_start + after + skip;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
         loop {
             let start = i;
             while i < bytes.len() && word(bytes[i]) {
@@ -2082,6 +2105,83 @@ fn without_export_macros(source: &str) -> Option<String> {
             i = j;
         }
         line_start += line.len();
+    }
+    // A macro standing alone on its line before a declaration
+    // (`SPDLOG_NAMESPACE_BEGIN` above `class SPDLOG_API logger {`,
+    // `FMT_BEGIN_NAMESPACE`): the namespace it opens is no type of the
+    // class's — read so, the class was a function's return type and its
+    // members no class's. (An enumerator stands alone only before `}` or
+    // another.)
+    let lines: Vec<(usize, &str)> = {
+        let mut at = 0;
+        source
+            .split_inclusive('\n')
+            .map(|line| {
+                let start = at;
+                at += line.len();
+                (start, line)
+            })
+            .collect()
+    };
+    const DECLARATION: &[&str] = &[
+        "class ",
+        "struct ",
+        "union ",
+        "namespace ",
+        "template",
+        "enum ",
+        "typedef ",
+        "using ",
+        "inline ",
+        "static ",
+        "extern ",
+        "constexpr ",
+        "#",
+    ];
+    // So is a macro called alone on its line with no `;` before one
+    // (`FMT_PRAGMA_GCC(push_options)`, `FMT_PRAGMA_MSVC(warning(disable :
+    // 4702))`): a statement of the preprocessor's, no C++ the grammar reads.
+    // (`TEST(Cart, Adds)` has its body after it.)
+    let capitals = |w: &str| {
+        w.len() > 2
+            && w.bytes()
+                .all(|c| c == b'_' || c.is_ascii_uppercase() || c.is_ascii_digit())
+            && w.bytes().any(|c| c == b'_')
+            && w.bytes().next().is_some_and(|c| c.is_ascii_uppercase())
+    };
+    let alone = |w: &str| -> bool {
+        if capitals(w) {
+            return true;
+        }
+        let Some((name, rest)) = w.split_once('(') else {
+            return false;
+        };
+        if !capitals(name) || !w.ends_with(')') {
+            return false;
+        }
+        let mut depth = 1i32;
+        for c in rest.chars() {
+            match c {
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                _ => {}
+            }
+        }
+        depth == 0
+    };
+    for (n, &(start, line)) in lines.iter().enumerate() {
+        let w = line.trim();
+        if !alone(w) || line.trim_end().ends_with('\\') {
+            continue;
+        }
+        // (Past comments: a doc comment's `/**`, `*` and `*/` lines.)
+        let next = lines[n + 1..].iter().map(|(_, l)| l.trim()).find(|l| {
+            !l.is_empty() && !l.starts_with("//") && !l.starts_with("/*") && !l.starts_with('*')
+        });
+        if next.is_none_or(|l| DECLARATION.iter().any(|d| l.starts_with(d)) || alone(l)) {
+            let at = start + (line.len() - line.trim_start().len());
+            spans.push((at, at + w.len()));
+        }
     }
     if spans.is_empty() {
         return None;

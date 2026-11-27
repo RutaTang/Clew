@@ -216,15 +216,31 @@ fn live_a_projects_reading() {
             let Some(caller) = site.caller.as_deref() else {
                 continue;
             };
-            // Every definition of the caller's name in the file: a clause, an
-            // overload — the call is in one of them.
-            let from: Vec<usize> = by_name
-                .get(caller)
-                .into_iter()
-                .flatten()
-                .copied()
-                .filter(|&id| calls.node(id).file == file.abs)
-                .collect();
+            // The definition of the caller's name in the file that the call
+            // is in: the last to start before it (of a function's clauses or
+            // overloads, or same-named methods of several classes, its own).
+            let enclosing = |line: usize, caller: &str| -> Vec<usize> {
+                let named: Vec<usize> = by_name
+                    .get(caller)
+                    .into_iter()
+                    .flatten()
+                    .copied()
+                    .filter(|&id| calls.node(id).file == file.abs)
+                    .collect();
+                let start = named
+                    .iter()
+                    .map(|&id| calls.node(id).line)
+                    .filter(|&l| l <= line)
+                    .max();
+                match start {
+                    Some(start) => named
+                        .into_iter()
+                        .filter(|&id| calls.node(id).line == start)
+                        .collect(),
+                    None => named,
+                }
+            };
+            let from = enclosing(site.line, caller);
             if from.is_empty() {
                 continue;
             }
@@ -257,7 +273,10 @@ fn live_a_projects_reading() {
                     .calls
                     .iter()
                     .filter(|c| {
-                        c.line != site.line && c.callee == site.callee && c.caller == site.caller
+                        c.line != site.line
+                            && c.callee == site.callee
+                            && c.caller == site.caller
+                            && enclosing(c.line, caller) == from
                     })
                     .map(|c| c.line.to_string())
                     .collect();
