@@ -178,7 +178,8 @@ use crate::incremental::Version;
 /// 51: a Kotlin lambda's argument kind; a Ruby class built by its path.
 /// 52: Go's `new(T)`; Kotlin backticked type names and a call's outer
 /// lambda; C++ friends unowned, specializations' bases; Zig decl literals.
-pub(crate) const CACHE_VERSION: u32 = 52;
+/// 53: a Dart call through an import's prefix names that import's URI.
+pub(crate) const CACHE_VERSION: u32 = 53;
 
 /// A cached symbol (the index entry minus the paths, which are reconstructed
 /// from the project root + relative path on load).

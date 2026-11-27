@@ -2700,6 +2700,12 @@ impl ProjectCallGraph {
         // A Scala package's files by the package's last name (`os` for
         // `package os`, and for `package object os`): what `os.read(p)`
         // names.
+        // Every Dart file, for an import's URI to name ([`dart_library_root`]).
+        let dart_files: Vec<&Path> = files
+            .iter()
+            .filter(|f| f.lang == Lang::Dart)
+            .map(|f| f.file.as_path())
+            .collect();
         let mut scala_packages: HashMap<&str, HashSet<&Path>> = HashMap::new();
         let mut scala_package_of: HashMap<&Path, &str> = HashMap::new();
         for f in files.iter().copied() {
@@ -3221,6 +3227,44 @@ impl ProjectCallGraph {
                 let callees = resolved
                     .entry(shape)
                     .or_insert_with(|| resolve_callees(&defs, &nodes, &facts, &owner, cs, &site));
+                // Dart's `http.Response(…)`, `shelf_io.serve(…)`: a top-level
+                // function or a class of the library imported under that
+                // prefix — none of the project's where it lies outside it.
+                if fc.lang == Lang::Dart
+                    && let Some(uri) = cs
+                        .qualifier
+                        .as_deref()
+                        .and_then(|q| q.strip_prefix("import:"))
+                {
+                    let Some(root) = dart_library_root(uri, &fc.file, &dart_files) else {
+                        continue;
+                    };
+                    let callee_name = logical_name(&cs.callee, Some(fc.lang));
+                    let found: Vec<usize> = defs
+                        .named
+                        .get(callee_name)
+                        .into_iter()
+                        .flat_map(|named| named.all.iter().copied())
+                        .filter(|&i| {
+                            nodes[i].file.starts_with(&root)
+                                && owner[i].is_none_or(|o| {
+                                    o.rsplit('.').next() == Some(nodes[i].name.as_str())
+                                })
+                        })
+                        .collect();
+                    if found.len() <= MAX_CANDIDATES {
+                        for callee in found {
+                            if edges.len() < MAX_EDGES
+                                && (in_test || !test_node[callee])
+                                && facts[callee].takes_call(cs, fc.lang, owner[callee])
+                                && fits_arguments(callee, cs, fc.lang)
+                            {
+                                edges.insert((caller, callee));
+                            }
+                        }
+                    }
+                    continue;
+                }
                 // Scala's `pkg.member(…)`: the package's own function (a
                 // package object's) or its object's `apply` — and nothing
                 // else, as the package names the member. Through a path,
@@ -4597,6 +4641,70 @@ fn snake_case(name: &str) -> String {
         }
     }
     out
+}
+
+/// The URI a Dart file imports under the prefix `name` (`import
+/// 'package:http/http.dart' as http;`), if any.
+fn dart_import_prefix(src: &str, name: &str) -> Option<String> {
+    if !is_plain_name(name) {
+        return None;
+    }
+    src.lines().find_map(|line| {
+        let rest = line.trim_start().strip_prefix("import ")?.trim_start();
+        let quote = rest.chars().next().filter(|c| matches!(c, '\'' | '"'))?;
+        let (uri, after) = rest[1..].split_once(quote)?;
+        let after = after.trim_start();
+        let after = after
+            .strip_prefix("deferred ")
+            .unwrap_or(after)
+            .trim_start();
+        let prefix: String = after
+            .strip_prefix("as ")?
+            .trim_start()
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        (prefix == name).then(|| uri.to_string())
+    })
+}
+
+/// Where the library a Dart file imports by `uri` lies in the project: the
+/// `lib` folder of the package it names (`package:shelf/shelf.dart` is
+/// `…/shelf/lib/`), or the file a relative URI names — `None` for a
+/// library outside the project (`dart:math`, `package:http/…`).
+fn dart_library_root(uri: &str, from: &Path, dart_files: &[&Path]) -> Option<PathBuf> {
+    if uri.starts_with("dart:") {
+        return None;
+    }
+    if let Some(rest) = uri.strip_prefix("package:") {
+        let (package, path) = rest.split_once('/')?;
+        let named = format!("/{package}/lib/{path}");
+        let any = format!("/lib/{path}");
+        // (A library of exports alone holds no definition this reads: the
+        // package's `lib` folder has the files it exports.)
+        let lib = format!("/{package}/lib/");
+        if let Some(found) = dart_files
+            .iter()
+            .find(|f| f.to_string_lossy().ends_with(&named))
+            .or_else(|| {
+                dart_files
+                    .iter()
+                    .find(|f| f.to_string_lossy().ends_with(&any))
+            })
+        {
+            let text = found.to_string_lossy();
+            let at = text.rfind(&any)?;
+            return Some(PathBuf::from(&text[..at + "/lib/".len()]));
+        }
+        let under = dart_files.iter().find_map(|f| {
+            let text = f.to_string_lossy();
+            text.find(&lib)
+                .map(|at| PathBuf::from(&text[..at + lib.len()]))
+        });
+        return under;
+    }
+    let file = lexical_join(from.parent()?, uri);
+    dart_files.contains(&file.as_path()).then_some(file)
 }
 
 /// Each language's closures (see [`LangSpec::scope_kinds`]).
@@ -7452,6 +7560,14 @@ fn receiver_of(
         && !receiver.starts_with(|c: char| c.is_uppercase())
     {
         *unbound = Some(receiver.to_string());
+    }
+    // A Dart import's prefix (`http` in `import 'package:http/http.dart' as
+    // http;`): that library's, by its URI.
+    if lang == Lang::Dart
+        && let Some(uri) = dart_import_prefix(src, receiver)
+    {
+        *unbound = Some(format!("import:{uri}"));
+        return None;
     }
     // A Go name no import gives: a variable of the package (`Form` with
     // `var Form Binding = formBinding{}` in another of its files), of the
@@ -13889,6 +14005,50 @@ def main():
         assert_eq!(cast_type("(count) - 1", Lang::Java), None);
         assert_eq!(cast_type("(a + b)", Lang::Java), None);
         assert_eq!(cast_type("x as? Foo", Lang::Kotlin), Some("Foo"));
+    }
+
+    /// A Dart call through an import's prefix is that library's: `shelf.
+    /// Response(200)` the project's shelf package's class, `http.Response(…)`
+    /// (`package:http`, outside the project) none of the project's.
+    #[test]
+    fn a_dart_prefixed_call_is_its_librarys() {
+        let response = "class Response {\n  Response(int code);\n}\n";
+        let shelf = "export 'src/response.dart';\n";
+        let test = "import 'package:http/http.dart' as http;\nimport 'package:shelf/shelf.dart' as shelf;\n\nvoid viaHttp() {\n  var r = http.Response('x', 200);\n}\nvoid viaShelf() {\n  var s = shelf.Response(200);\n}\n";
+        let g = graph(&[
+            ("/p/pkgs/shelf/lib/src/response.dart", response),
+            ("/p/pkgs/shelf/lib/shelf.dart", shelf),
+            ("/p/pkgs/shelf_proxy/test/proxy_test.dart", test),
+        ]);
+        // (Its library of exports alone read or not, the package's folder.)
+        let without_exports = graph(&[
+            ("/p/pkgs/shelf/lib/src/response.dart", response),
+            ("/p/pkgs/shelf_proxy/test/proxy_test.dart", test),
+        ]);
+        let at = (0..without_exports.node_count())
+            .find(|&n| without_exports.node(n).name == "viaShelf")
+            .unwrap();
+        assert_eq!(
+            without_exports.callees_of(at).len(),
+            1,
+            "{:?}",
+            edges(&without_exports)
+        );
+        let reached = |caller: &str| -> Vec<String> {
+            let at = (0..g.node_count())
+                .find(|&n| g.node(n).name == caller)
+                .unwrap();
+            g.callees_of(at)
+                .iter()
+                .map(|&c| format!("{}:{}", g.node(c).name, g.node(c).line))
+                .collect()
+        };
+        assert_eq!(reached("viaHttp"), Vec::<String>::new(), "{:?}", edges(&g));
+        assert_eq!(reached("viaShelf"), ["Response:2"], "{:?}", edges(&g));
+        assert_eq!(
+            dart_import_prefix("import 'package:http/http.dart' as http;", "http").as_deref(),
+            Some("package:http/http.dart")
+        );
     }
 
     /// Audit 8's shapes: Go's `new(bytes.Buffer)` is the library's value; a
