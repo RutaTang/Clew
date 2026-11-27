@@ -344,6 +344,7 @@ fn to_cached_calls(calls: &FileCalls) -> CachedCalls {
         instance_methods: calls.context.instance_methods.clone(),
         singletons: calls.context.singletons.clone(),
         aliases: calls.context.aliases.clone(),
+        modules: calls.context.modules.clone(),
     }
 }
 
@@ -472,6 +473,7 @@ fn from_cached_calls(abs: &Path, cached: &CachedCalls) -> Option<FileCalls> {
             instance_methods: cached.instance_methods.clone(),
             singletons: cached.singletons.clone(),
             aliases: cached.aliases.clone(),
+            modules: cached.modules.clone(),
         },
     })
 }

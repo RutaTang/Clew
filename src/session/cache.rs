@@ -193,7 +193,9 @@ use crate::incremental::Version;
 /// arguments' kinds. Go interfaces' methods and embedded types; chains of
 /// fields ending in a method's result. Ruby's singleton methods. Type
 /// aliases; C++ templates' `enable_if` constraints.
-pub(crate) const CACHE_VERSION: u32 = 57;
+/// 58: Ruby's modules and `::Const` receivers; C++ calls' results as
+/// receivers; Go chains of fields from a function's result.
+pub(crate) const CACHE_VERSION: u32 = 58;
 
 /// A cached symbol (the index entry minus the paths, which are reconstructed
 /// from the project root + relative path on load).
@@ -361,6 +363,10 @@ pub struct CachedCalls {
     /// (`clew_core::projectcalls::FileContext::aliases`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub aliases: Vec<(String, String)>,
+    /// A Ruby file's modules
+    /// (`clew_core::projectcalls::FileContext::modules`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub modules: Vec<String>,
 }
 
 /// Everything cached about one file: how to confirm it is unchanged (mtime,
@@ -502,6 +508,7 @@ mod tests {
                 instance_methods: vec![5],
                 singletons: vec![7],
                 aliases: vec![("memory_buffer".into(), "basic_memory_buffer".into())],
+                modules: vec!["Helpers".into()],
             }),
         }
     }

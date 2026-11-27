@@ -195,6 +195,9 @@ pub struct FileContext {
     /// ([`type_aliases`]): `memory_buffer` for `basic_memory_buffer` — one
     /// type, which a value of either passes for exactly.
     pub aliases: Vec<(String, String)>,
+    /// A Ruby file's modules (`module Helpers`): what classes include, whose
+    /// methods a bare call in any of them may be.
+    pub modules: Vec<String>,
 }
 
 /// The fewest arguments of a Scala definition with no parameter list (`def
@@ -2077,6 +2080,14 @@ pub fn context_in(src: &str, lang: Lang, symbols: &[Located]) -> FileContext {
             }
             _ => Vec::new(),
         },
+        modules: match lang {
+            Lang::Ruby => symbols
+                .iter()
+                .filter(|l| l.symbol.kind == "module")
+                .map(|l| l.symbol.name.clone())
+                .collect(),
+            _ => Vec::new(),
+        },
     }
 }
 
@@ -2119,6 +2130,22 @@ fn ruby_singletons(src: &str, symbols: &[Located]) -> Vec<usize> {
         })
         .map(|l| l.symbol.line)
         .collect()
+}
+
+/// Whether the Ruby call `node` is inside a block (`do … end`, `{ … }`)
+/// — within its method, which `instance_eval` or `class_eval` may run on
+/// another object (Sinatra's `mock_app do get('/') { … } end`), or around
+/// the method itself (a `def` in `Module.new { … }`, of no class's).
+fn ruby_in_block(node: Node) -> bool {
+    let mut at = node.parent();
+    while let Some(n) = at {
+        match n.kind() {
+            "do_block" | "block" => return true,
+            "class" | "module" => return false,
+            _ => at = n.parent(),
+        }
+    }
+    false
 }
 
 /// What a Ruby method call is made on, where its receiver says: the class
@@ -2755,6 +2782,12 @@ impl ProjectCallGraph {
                     .iter()
                     .map(move |&line| (f.file.as_path(), line))
             })
+            .collect();
+        // Ruby's modules, by name ([`FileContext::modules`]).
+        let ruby_modules: HashSet<&str> = files
+            .iter()
+            .filter(|f| f.lang == Lang::Ruby)
+            .flat_map(|f| f.context.modules.iter().map(String::as_str))
             .collect();
         let singleton_node: Vec<bool> = nodes
             .iter()
@@ -3447,6 +3480,10 @@ impl ProjectCallGraph {
             .iter()
             .map(|n| nested_lines.contains(&(n.file.as_path(), n.line)))
             .collect();
+        // The platforms each definition's source is built for, where its
+        // path says ([`source_platforms`]): `core/js/…` for JavaScript alone.
+        let node_platforms: Vec<Option<&'static [&'static str]>> =
+            nodes.iter().map(|n| source_platforms(&n.file)).collect();
         // Every Go struct's fields, by the struct's name and the field's.
         let field_types: HashMap<(&str, &str), &str> = files
             .iter()
@@ -3545,6 +3582,25 @@ impl ProjectCallGraph {
                     let file = lexical_join(from.parent()?, path);
                     let field = parts.next()?;
                     file_fields.get(&(file.as_path(), field))?.to_string()
+                }
+                // What a function returns (`→PerformRequest`, `→T#m`), where
+                // its definitions agree.
+                None if root.starts_with(RETURNED) => {
+                    let function = &root[RETURNED.len()..];
+                    let found: Vec<usize> = match function.split_once('#') {
+                        Some((owner, method)) => family(owner, method, false),
+                        None => defs
+                            .named
+                            .get(logical_name(function, Some(lang)))
+                            .map(|named| named.all.clone())
+                            .unwrap_or_default(),
+                    };
+                    let mut types = found.iter().map(|&i| node_returns[i].as_deref());
+                    let first = types.next().flatten()?;
+                    if !types.all(|t| t == Some(first)) {
+                        return None;
+                    }
+                    first.to_string()
                 }
                 None => root.to_string(),
             };
@@ -4720,8 +4776,57 @@ impl ProjectCallGraph {
                 } else if !cs.method && targets.iter().any(|&c| local(c)) {
                     outer_only = targets.iter().copied().filter(|&c| local(c)).collect();
                     &outer_only
+                } else if !cs.method
+                    && targets
+                        .iter()
+                        .filter(|&&c| nested_node[c] && nodes[c].file == fc.file)
+                        .count()
+                        >= 2
+                    && targets.iter().any(|&c| {
+                        nested_node[c] && nodes[c].file == fc.file && nodes[c].line < cs.line
+                    })
+                {
+                    // Of functions of the name declared inside others before
+                    // the call — each a closure's own (a Dart test group's
+                    // `buildSubject`) — the nearest: the one whose scope the
+                    // call is in.
+                    outer_only = targets
+                        .iter()
+                        .copied()
+                        .filter(|&c| {
+                            nested_node[c] && nodes[c].file == fc.file && nodes[c].line < cs.line
+                        })
+                        .max_by_key(|&c| nodes[c].line)
+                        .into_iter()
+                        .collect();
+                    &outer_only
                 } else {
                     targets
+                };
+                // A file built for some platforms (cats-effect's `core/js/`)
+                // reaches no definition built only for others
+                // (`core/jvm-native/`), where one built for its own is.
+                let same_platform: Vec<usize>;
+                let targets: &[usize] = match source_platforms(&fc.file) {
+                    Some(mine)
+                        if targets.iter().any(|&c| {
+                            node_platforms[c].is_some_and(|t| !t.iter().any(|p| mine.contains(p)))
+                        }) =>
+                    {
+                        same_platform = targets
+                            .iter()
+                            .copied()
+                            .filter(|&c| {
+                                node_platforms[c].is_none_or(|t| t.iter().any(|p| mine.contains(p)))
+                            })
+                            .collect();
+                        if same_platform.is_empty() {
+                            targets
+                        } else {
+                            &same_platform
+                        }
+                    }
+                    _ => targets,
                 };
                 let kept: Vec<usize>;
                 let targets: &[usize] = if let Some(own) = cpp_own {
@@ -4794,6 +4899,29 @@ impl ProjectCallGraph {
                     kept = {
                         let mut found = targets.to_vec();
                         ruby_kind(&mut found);
+                        // A bare call in a class's method is `self`'s: its
+                        // class's, one above or below it, a module's (one it
+                        // may include) or the top level's — never an
+                        // unrelated class's (a test's `doc_methods(:x)`, a
+                        // fixture accessor, is no `RepoSubscription#
+                        // doc_methods`).
+                        if !cs.method
+                            && cs.receiver.is_none()
+                            && cs.qualifier.is_none()
+                            && let Some(own) = owner[caller]
+                            && !ruby_modules.contains(own.rsplit("::").next().unwrap_or(own))
+                        {
+                            let own = own.rsplit("::").next().unwrap_or(own);
+                            found.retain(|&c| {
+                                owner[c].is_none_or(|o| {
+                                    let o = o.rsplit("::").next().unwrap_or(o);
+                                    o == own
+                                        || descends(own, o)
+                                        || descends(o, own)
+                                        || ruby_modules.contains(o)
+                                })
+                            });
+                        }
                         found
                     };
                     &kept
@@ -4823,7 +4951,7 @@ impl ProjectCallGraph {
                     if kept.is_empty() { targets } else { &kept }
                 } else if elixir_bare {
                     let reached = bare_scopes.get(fc.file.as_path());
-                    kept = targets
+                    let mut found: Vec<usize> = targets
                         .iter()
                         .copied()
                         .filter(|&c| {
@@ -4831,6 +4959,26 @@ impl ProjectCallGraph {
                                 || reached.is_some_and(|r| r.contains(nodes[c].file.as_path()))
                         })
                         .collect();
+                    // (Its own module's, where one has the name: a module
+                    // nested in it is reached by its name, `SamplePlug.call`.)
+                    if owner[caller].is_some() && found.iter().any(|&c| owner[c] == owner[caller]) {
+                        found.retain(|&c| owner[c] == owner[caller]);
+                    } else if owner[caller].is_none() {
+                        // (From a test block, of no module of its own: not a
+                        // module nested in another of them, `Plug.RouterTest.
+                        // SamplePlug` beside `Plug.RouterTest`.)
+                        let outer: Vec<&str> = found.iter().filter_map(|&c| owner[c]).collect();
+                        found.retain(|&c| {
+                            owner[c].is_none_or(|o| {
+                                !outer.iter().any(|p| {
+                                    o.len() > p.len()
+                                        && o.starts_with(p)
+                                        && o[p.len()..].starts_with('.')
+                                })
+                            })
+                        });
+                    }
+                    kept = found;
                     &kept
                 } else if methods_only || own_or_free {
                     kept = targets
@@ -6511,6 +6659,11 @@ fn walk(
             let qualifier = qualifier.or_else(|| {
                 (lang == Lang::Kotlin && kind == "infix_expression").then(|| "infix".to_string())
             });
+            // A Ruby bare call in a block (`mock_app do set :views … end`):
+            // `block`, as the block may run on another object entirely.
+            let qualifier = qualifier.or_else(|| {
+                (lang == Lang::Ruby && !method && ruby_in_block(node)).then(|| "block".to_string())
+            });
             let arity = call_arity(node, parent, src, lang);
             let arguments = matches!(
                 lang,
@@ -6549,7 +6702,7 @@ fn walk(
                 callee: node_text(node, src).to_string(),
                 method: false,
                 receiver: None,
-                qualifier: None,
+                qualifier: ruby_in_block(node).then(|| "block".to_string()),
                 arity: None,
                 arguments: None,
                 line: node.start_position().row + 1,
@@ -7354,6 +7507,32 @@ fn csharp_constraint<'a>(rest: &'a str, name: &str) -> Option<&'a str> {
                 "class" | "class?" | "struct" | "new()" | "notnull" | "unmanaged" | "default"
             )
             && c.starts_with(|ch: char| ch.is_alphabetic() || ch == '_')
+    })
+}
+
+/// The platforms a source file is built for, where a folder of its path
+/// says — sbt's and Mill's cross-built `js/`, `jvm/`, `native/`,
+/// `jvm-native/` (and the like), os-lib's `src-jvm/`, Kotlin
+/// Multiplatform's `jsMain/`, `jvmMain/`, `nativeMain/` — the innermost
+/// such folder's. `None` for a file of every platform (`shared/`, none
+/// named).
+fn source_platforms(path: &Path) -> Option<&'static [&'static str]> {
+    path.components().rev().find_map(|c| {
+        let name = c.as_os_str().to_str()?;
+        let name = name
+            .strip_prefix("src-")
+            .or_else(|| name.strip_suffix("Main"))
+            .or_else(|| name.strip_suffix("Test"))
+            .unwrap_or(name);
+        Some(match name {
+            "js" => &["js"][..],
+            "jvm" | "android" => &["jvm"][..],
+            "native" | "ios" | "linuxX64" | "macosArm64" => &["native"][..],
+            "jvm-native" | "native-jvm" => &["jvm", "native"][..],
+            "js-jvm" | "jvm-js" => &["js", "jvm"][..],
+            "js-native" | "native-js" => &["js", "native"][..],
+            _ => return None,
+        })
     })
 }
 
@@ -8968,6 +9147,8 @@ fn receiver_of(
         Lang::Dart | Lang::CSharp | Lang::TypeScript | Lang::Tsx | Lang::Kotlin => {
             receiver.trim_end_matches('!').trim_end()
         }
+        // Ruby's `::UserMailer`: the top level's `UserMailer`.
+        Lang::Ruby => receiver.trim_start_matches("::"),
         _ => receiver,
     };
     // A Scala method eta-expanded (`(this.apply _).tupled`, `f _`): a
@@ -9132,8 +9313,10 @@ fn receiver_of(
             .entry((scope.from, root.to_string()))
             .or_insert_with(|| Bindings::from(scope.from, places))
             .said_before(call.start_byte(), root, scope, src, lang);
+        // (Of what a function returns, `w := PerformRequest(…)`: its
+        // declared result's fields, `w.Body`.)
         if let Said::Type(ty, _) = &said
-            && !ty.starts_with(RETURNED)
+            && (!ty.starts_with(RETURNED) || !ty.contains(['@', '|']))
         {
             return Some(Receiver::Type(format!(
                 "{THROUGH}{ty}|{}",
@@ -9183,6 +9366,17 @@ fn receiver_of(
             if let Some(ty) = factory_type(receiver, lang) {
                 return Some(Receiver::Declared(factory_guess(receiver, &ty, lang)));
             }
+        }
+        // C++'s `fmt::format_int(42).str()`: what the call returns, or
+        // the class it builds.
+        if lang == Lang::Cpp
+            && let Some(open) = receiver.find('(')
+            && receiver.ends_with(')')
+            && !receiver[..open].contains(['.', '-', ' ', '<'])
+            && receiver[..open].split("::").all(is_plain_name)
+        {
+            let name = receiver[..open].rsplit("::").next().unwrap_or("");
+            return Some(Receiver::Declared(format!("{RETURNED}{name}")));
         }
         // One link of a chain (`const Pipeline().addMiddleware(m)` before
         // `.addHandler(h)`, `repo.find(id)` before `.total()`): what that
@@ -16615,6 +16809,80 @@ def main():
         // (A view pattern binds what it matches, not the function it
         // applies: `(run -> n)` calls `run`.)
         assert_eq!(reached("viewed"), [5], "{:?}", edges(&g));
+    }
+
+    /// Audit 11's shapes: Ruby's `::UserMailer.send_triage` is
+    /// `UserMailer`'s, and a bare call in a class's method no unrelated
+    /// class's (`doc_methods(:x)`, a fixture accessor); an Elixir bare call
+    /// from a test reaches no module nested in its own; C++'s
+    /// `fmt::format_int(42).str()` is `format_int`'s; Go's `w.Body.String()`
+    /// with `w := PerformRequest(…)` of `*httptest.ResponseRecorder` is the
+    /// library's; a Dart test group's local `buildSubject` is its own.
+    #[test]
+    fn audit_11_shapes() {
+        let rb = "class UserMailer\n  def send_triage(user)\n  end\nend\n\nclass UserPreview\n  def send_triage\n    ::UserMailer.send_triage(1)\n  end\nend\n\nclass RepoSubscription\n  def doc_methods\n  end\nend\n\nclass DocsTest < ActiveSupport::TestCase\n  def test_docs\n    doc_methods(:issue)\n  end\nend\n";
+        let ex = "defmodule Plug.RouterTest do\n  defmodule SamplePlug do\n    def call(conn, _), do: conn\n  end\n\n  test \"x\" do\n    call(Sample, 1)\n  end\n\n  defp call(mod, conn), do: mod.call(conn, [])\nend\n";
+        let cpp = "namespace fmt {\nclass format_int {\n public:\n  explicit format_int(int value) {}\n  auto str() const -> int { return 0; }\n};\nclass string_buffer {\n public:\n  auto str() const -> int { return 0; }\n};\n}\nvoid t() { auto s = fmt::format_int(42).str(); }\n";
+        let go = "package gin\n\nimport \"net/http/httptest\"\n\ntype errorMsgs []string\n\nfunc (a errorMsgs) String() string { return \"\" }\n\nfunc PerformRequest(r int) *httptest.ResponseRecorder { return nil }\n\nfunc TestX(t *testing.T) {\n\tw := PerformRequest(1)\n\t_ = w.Body.String()\n}\n";
+        let dart = "void main() {\n  group('A', () {\n    Widget buildSubject() => A();\n    test('a', () { buildSubject(); });\n  });\n  group('B', () {\n    Widget buildSubject() => B();\n    test('b', () { buildSubject(); });\n  });\n}\n";
+        let files = [
+            ("/p/app/x.rb", rb),
+            ("/p/test/router_test.exs", ex),
+            ("/p/fmt/format.h", cpp),
+            ("/p/gin/x_test.go", go),
+            ("/p/test/x_test.dart", dart),
+        ];
+        let g = graph(&files);
+        let reached = |file: &str, line: usize| -> Vec<usize> {
+            let at = (0..g.node_count())
+                .find(|&n| g.node(n).line == line && g.node(n).file.ends_with(file))
+                .unwrap();
+            let mut lines: Vec<usize> = g.callees_of(at).iter().map(|&c| g.node(c).line).collect();
+            lines.sort_unstable();
+            lines
+        };
+        assert_eq!(reached("x.rb", 7), [2], "{:?}", edges(&g));
+        assert_eq!(reached("x.rb", 18), [] as [usize; 0], "{:?}", edges(&g));
+        assert_eq!(reached("router_test.exs", 6), [10], "{:?}", edges(&g));
+        assert_eq!(reached("format.h", 12), [4, 5], "{:?}", edges(&g));
+        assert_eq!(reached("x_test.go", 11), [9], "{:?}", edges(&g));
+        assert_eq!(reached("x_test.dart", 4), [3], "{:?}", edges(&g));
+        assert_eq!(reached("x_test.dart", 8), [7], "{:?}", edges(&g));
+    }
+
+    /// A file of a cross-built project's JavaScript sources (`core/js/`)
+    /// reaches no definition built for the JVM and Native alone
+    /// (`core/jvm-native/`), where one of its own platforms has the name.
+    #[test]
+    fn a_platforms_source_reaches_its_platforms_definitions() {
+        let js = "package cats.effect\nobject IOPlatform {\n  def unsafeRunSync(): Int = 1\n  def run(): Int = unsafeRunSync()\n}\n";
+        let jvm = "package cats.effect\nobject IOPlatform {\n  def unsafeRunSync(): Int = 2\n}\n";
+        let g = graph(&[
+            ("/p/core/js/src/main/scala/cats/effect/IOPlatform.scala", js),
+            (
+                "/p/core/jvm-native/src/main/scala/cats/effect/IOPlatform.scala",
+                jvm,
+            ),
+        ]);
+        let at = (0..g.node_count())
+            .find(|&n| g.node(n).name == "run")
+            .unwrap();
+        let reached: Vec<String> = g
+            .callees_of(at)
+            .iter()
+            .map(|&c| format!("{}:{}", g.node(c).file.display(), g.node(c).line))
+            .collect();
+        assert_eq!(
+            reached,
+            ["/p/core/js/src/main/scala/cats/effect/IOPlatform.scala:3"],
+            "{:?}",
+            edges(&g)
+        );
+        assert_eq!(
+            source_platforms(Path::new("/p/os/src-jvm/x.scala")),
+            Some(&["jvm"][..])
+        );
+        assert_eq!(source_platforms(Path::new("/p/shared/src/x.scala")), None);
     }
 
     /// Audit 8's shapes: Go's `new(bytes.Buffer)` is the library's value; a
