@@ -184,7 +184,9 @@ use crate::incremental::Version;
 /// a Dart library's `part`s and a part's `part of` read as its imports;
 /// Kotlin's and Scala's expression bodies give their return types; a type
 /// nested in another names its own.
-pub(crate) const CACHE_VERSION: u32 = 54;
+/// 55: Scala classes' fields; Scala's `new` a call of the class; Zig's
+/// `pub const X = @This()` file structs' fields; C++ built-in types.
+pub(crate) const CACHE_VERSION: u32 = 55;
 
 /// A cached symbol (the index entry minus the paths, which are reconstructed
 /// from the project root + relative path on load).

@@ -1386,7 +1386,28 @@ impl Resolver {
         let mut own_module: Vec<&PathBuf> =
             self.java_roots.iter().filter(|r| in_module(r)).collect();
         own_module.sort_by_key(|r| std::cmp::Reverse(r.components().count()));
-        let others = self.java_roots.iter().filter(|r| !in_module(r));
+        // Of a class cross-built for several platforms (Scala's `core/js`
+        // and `core/jvm-native`, Kotlin's `jsMain` and `jvmMain`), the
+        // importer's own platform's first, then a shared one's — the JVM's
+        // for an importer of none, as a benchmark or test module is.
+        let wanted = platforms_of(from);
+        let wanted: Vec<&str> = if wanted.is_empty() {
+            vec!["jvm"]
+        } else {
+            wanted
+        };
+        let rank = |r: &PathBuf| {
+            let of = platforms_of(r);
+            if of.is_empty() {
+                1
+            } else if of.iter().any(|p| wanted.contains(p)) {
+                0
+            } else {
+                2
+            }
+        };
+        let mut others: Vec<&PathBuf> = self.java_roots.iter().filter(|r| !in_module(r)).collect();
+        others.sort_by_key(|r| rank(r));
         let conventional = own_module.into_iter().chain(others);
         own.into_iter()
             .chain(conventional.filter(|r| Some(*r) != own))
@@ -4884,6 +4905,28 @@ const PY_STDLIB: &[&str] = &[
     "venv", "warnings", "wave", "weakref", "webbrowser", "winreg", "winsound", "wsgiref",
     "xdrlib", "xml", "xmlrpc", "zipapp", "zipfile", "zipimport", "zlib", "zoneinfo",
 ];
+
+/// The platforms a path's folders name it built for: Scala's cross-built
+/// `js`, `jvm`, `native`, `jvm-native` folders, Kotlin's `jsMain`,
+/// `jvmTest`, `nativeMain` — none for a shared one (`shared`, `commonMain`)
+/// or a path outside any.
+fn platforms_of(path: &Path) -> Vec<&str> {
+    const PLATFORMS: [&str; 4] = ["js", "jvm", "native", "wasm"];
+    for c in path.components() {
+        let Some(name) = c.as_os_str().to_str() else {
+            continue;
+        };
+        let base = name
+            .strip_suffix("Main")
+            .or_else(|| name.strip_suffix("Test"))
+            .unwrap_or(name);
+        let tokens: Vec<&str> = base.split('-').collect();
+        if tokens.iter().all(|t| PLATFORMS.contains(t)) {
+            return tokens;
+        }
+    }
+    Vec::new()
+}
 
 #[cfg(test)]
 mod tests {
@@ -9176,6 +9219,37 @@ mod resolution_tests {
     /// top-level function its package. An Elixir module is its file by
     /// Mix's convention under a `lib/` (an umbrella app's too); a library's
     /// module is its library's.
+    /// A class cross-built for several platforms (cats-effect's `ArrayStack`
+    /// in `core/js` and `core/jvm-native`): an importer of no platform (a
+    /// benchmark module) reaches the JVM's, one under `js` the Scala.js one.
+    #[test]
+    fn a_cross_built_class_is_the_importers_platforms() {
+        let root = Path::new("/ce");
+        let js = "core/js/src/main/scala/cats/effect/ArrayStack.scala";
+        let jvm = "core/jvm-native/src/main/scala/cats/effect/ArrayStack.scala";
+        let bench = "benchmarks/src/main/scala/cats/effect/benchmarks/StackBench.scala";
+        let js_test = "tests/js/src/test/scala/cats/effect/JsStackSpec.scala";
+        let class = "package cats.effect\nclass ArrayStack[A] {\n  def push(a: A): Unit = ()\n}\n";
+        let user = |pkg: &str| format!("package {pkg}\n\nimport cats.effect.ArrayStack\n");
+        let bench_src = user("cats.effect.benchmarks");
+        let js_src = user("cats.effect.tests");
+        let g = graph_with(
+            root,
+            &[
+                (js, class),
+                (jvm, class),
+                (bench, &bench_src),
+                (js_test, &js_src),
+            ],
+            false,
+        );
+        let at = |f: &str| root.join(f);
+        assert_eq!(internal_uses(&g, &at(bench)), [at(jvm)]);
+        assert_eq!(internal_uses(&g, &at(js_test)), [at(js)]);
+        assert_eq!(platforms_of(Path::new("a/jvmMain/kotlin/X.kt")), ["jvm"]);
+        assert!(platforms_of(Path::new("a/commonMain/kotlin/X.kt")).is_empty());
+    }
+
     #[test]
     fn kotlin_scala_and_elixir_imports_resolve() {
         let root = Path::new("/k");

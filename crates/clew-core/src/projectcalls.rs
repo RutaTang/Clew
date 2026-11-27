@@ -1050,11 +1050,16 @@ fn zig_fields(src: &str, symbols: &[Located]) -> Vec<(String, String, String)> {
             }
         }
     }
-    // A file that is a struct (`const Server = @This();`): its own fields,
+    // A file that is a struct (`const Server = @This();`, `pub const`
+    // too): its own fields,
     // at the file's top level (`diagnostics_collection:
     // DiagnosticsCollection,`), under that name.
     let file_struct = src.lines().find_map(|line| {
-        let rest = line.trim().strip_prefix("const ")?;
+        let line = line.trim();
+        let rest = line
+            .strip_prefix("pub ")
+            .unwrap_or(line)
+            .strip_prefix("const ")?;
         let (name, value) = rest.split_once('=')?;
         (value.trim().trim_end_matches(';').trim() == "@This()" && is_plain_name(name.trim()))
             .then(|| name.trim().to_string())
@@ -1900,6 +1905,7 @@ pub fn context_in(src: &str, lang: Lang, symbols: &[Located]) -> FileContext {
             }
             Lang::Zig => zig_fields(src, symbols),
             Lang::Cpp => cpp_class_fields(src, symbols),
+            Lang::Scala => scala_class_fields(src, symbols),
             _ => Vec::new(),
         },
         nested: match lang {
@@ -2504,7 +2510,14 @@ impl ProjectCallGraph {
                         .entry(ty.as_str())
                         .or_default()
                         .push(base.as_str());
+                    // (A base named by its path, `kernel.Async[IO]`, is the
+                    // class `Async`, as owners are named — but Go's, whose
+                    // package says whose it is, `http.Handler`.)
                     let base = without_arity(base);
+                    let base = match base.rsplit_once(['.', ':']) {
+                        Some((_, last)) if !last.is_empty() && f.lang != Lang::Go => last,
+                        _ => base,
+                    };
                     bases_of.entry(ty.as_str()).or_default().push(base);
                     subtypes_of.entry(base).or_default().push(ty.as_str());
                 }
@@ -3021,6 +3034,24 @@ impl ProjectCallGraph {
                     .map(|(owner, field, ty)| ((owner.as_str(), field.as_str()), ty.as_str()))
             })
             .collect();
+        // Whether the class `ty`, or a class above it, has the field `name`.
+        let has_field = |ty: &str, name: &str| -> bool {
+            let mut level: Vec<&str> = vec![ty.rsplit(['.', ':']).next().unwrap_or(ty)];
+            for _ in 0..6 {
+                if level.iter().any(|t| field_types.contains_key(&(*t, name))) {
+                    return true;
+                }
+                level = level
+                    .iter()
+                    .flat_map(|t| bases_of.get(t).into_iter().flatten())
+                    .copied()
+                    .collect();
+                if level.is_empty() {
+                    break;
+                }
+            }
+            false
+        };
         // A Zig file's own variables, by the file.
         let file_fields: HashMap<(&Path, &str), &str> = files
             .iter()
@@ -3209,14 +3240,45 @@ impl ProjectCallGraph {
                     })
                 };
                 let own = rank(callee);
-                return !others().filter(|&i| fits(i)).any(|i| rank(i) > own);
+                // Of overloads that fit alike, Kotlin and C# take one that
+                // needs no default value (`vector(name, dimensions)` before
+                // `vector<T>(name, dimensions, format = null)`) — where every
+                // argument's kind is known, so that both do fit.
+                let count = arguments.split(',').count();
+                let defaulted = |i: usize| {
+                    node_parameters[i].is_some_and(|params| {
+                        !params.split(',').any(|p| p == "v") && params.split(',').count() > count
+                    })
+                };
+                let prefers_exact = matches!(lang, Lang::Kotlin | Lang::CSharp)
+                    && !arguments
+                        .split(',')
+                        .any(|a| a.trim_end_matches('?').is_empty() || a == "?")
+                    && defaulted(callee);
+                return !others().filter(|&i| fits(i)).any(|i| {
+                    let other = rank(i);
+                    other > own || (prefers_exact && other == own && !defaulted(i))
+                });
             }
             !others().any(fits)
         };
         // A test class's methods (`StatusCodesTest.get`): the runner holds
         // its instance, so no other code calls them on a value.
+        // So does Rails hold a controller's (`UsersController#github`, an
+        // action): `user.github` on a value of no known type is a model's
+        // attribute, never the action.
         let test_method: Vec<bool> = (0..nodes.len())
-            .map(|i| test_node[i] && owner[i].is_some_and(is_test_class_name))
+            .map(|i| {
+                (test_node[i] && owner[i].is_some_and(is_test_class_name))
+                    || (nodes[i].file.extension().is_some_and(|e| e == "rb")
+                        && nodes[i]
+                            .file
+                            .components()
+                            .any(|c| c.as_os_str() == "controllers")
+                        && owner[i].is_some_and(|o| {
+                            o.rsplit("::").next().unwrap_or(o).ends_with("Controller")
+                        }))
+            })
             .collect();
         let empty_scope: HashSet<PathBuf> = HashSet::new();
         let mut edges: HashSet<(usize, usize)> = HashSet::new();
@@ -3308,15 +3370,25 @@ impl ProjectCallGraph {
                                                 .into_iter()
                                                 .flat_map(|named| named.all.iter().copied())
                                                 .map(|i| node_returns[i].as_deref());
-                                            let first = types.next().flatten()?;
-                                            // A type the project declares: a library's
-                                            // (`Future`, `String`) says less than the
-                                            // value of no known type did.
-                                            (types.all(|t| t == Some(first))
-                                                && (declared_types.contains(first)
-                                                    || project_types.contains(first)
-                                                    || first.starts_with("std.")))
-                                            .then(|| first.to_string())
+                                            let agreed = types.next().flatten().and_then(|first| {
+                                                // A type the project declares: a library's
+                                                // (`Future`, `String`) says less than the
+                                                // value of no known type did.
+                                                (types.all(|t| t == Some(first))
+                                                    && (declared_types.contains(first)
+                                                        || project_types.contains(first)
+                                                        || first.starts_with("std.")))
+                                                .then(|| first.to_string())
+                                            });
+                                            // A class's own name called, where no
+                                            // function of it says otherwise (C++'s
+                                            // `basic_memory_buffer<Char>()`): the class
+                                            // it builds.
+                                            agreed.or_else(|| {
+                                                declared_types
+                                                    .contains(name)
+                                                    .then(|| name.to_string())
+                                            })
                                         })
                                         .clone()
                                 })
@@ -3695,6 +3767,11 @@ impl ProjectCallGraph {
                             .copied()
                             .filter(|c| extension_nodes.contains(c))
                             .collect(),
+                        // A Scala class's field read (`res.exitCode` on a
+                        // case class's value, `c.id`): no method at all.
+                        (true, true) if fc.lang == Lang::Scala && has_field(ty, callee_name) => {
+                            Vec::new()
+                        }
                         // No method of the name on the type or above it
                         // that this can see (a mixin, a library's base): by
                         // the name in scope, as with no type.
@@ -4762,6 +4839,100 @@ fn cpp_conversions(src: &str, symbols: &[Located]) -> Vec<(String, String)> {
     out
 }
 
+/// A Scala file's classes' fields ([`FileContext::fields`]): a case
+/// class's parameters, a class's `val` and `var` ones, and the `val`s and
+/// `var`s of a class's or object's body — what `res.exitCode` reads, no
+/// method called. The type is the last part of the one written, where one
+/// is.
+fn scala_class_fields(src: &str, symbols: &[Located]) -> Vec<(String, String, String)> {
+    let classes: Vec<&Located> = symbols
+        .iter()
+        .filter(|l| l.symbol.kind == "class")
+        .collect();
+    let type_of = |written: &str| -> String {
+        let t = written.split('=').next().unwrap_or("").trim();
+        let t = t.split('[').next().unwrap_or(t).trim();
+        t.rsplit('.').next().unwrap_or(t).to_string()
+    };
+    let mut out = Vec::new();
+    for class in &classes {
+        let name = class.symbol.name.as_str();
+        let Some(text) = src.get(class.declaration.0..class.declaration.1) else {
+            continue;
+        };
+        let case = text
+            .split(name)
+            .next()
+            .is_some_and(|before| before.split_whitespace().any(|w| w == "case"));
+        let Some(Parameters::At(open, close)) = parameter_list(text, name, Lang::Scala) else {
+            continue;
+        };
+        for part in split_top_level(&text[open + 1..close]) {
+            let mut part = part.trim();
+            // Past annotations and modifiers (`@JsonProperty("x")`,
+            // `private[os] val`, `override val`).
+            loop {
+                let before = part;
+                if part.starts_with('@') {
+                    let end = part.find(' ').unwrap_or(part.len());
+                    part = part[end..].trim_start();
+                }
+                for word in [
+                    "private",
+                    "protected",
+                    "override",
+                    "final",
+                    "implicit",
+                    "lazy",
+                ] {
+                    if let Some(rest) = part.strip_prefix(word) {
+                        let rest = match rest.strip_prefix('[') {
+                            Some(scoped) => scoped.split_once(']').map_or("", |(_, r)| r),
+                            None => rest,
+                        };
+                        if rest.starts_with(' ') {
+                            part = rest.trim_start();
+                        }
+                    }
+                }
+                if part == before {
+                    break;
+                }
+            }
+            let (member, rest) = match part
+                .strip_prefix("val ")
+                .or_else(|| part.strip_prefix("var "))
+            {
+                Some(rest) => (true, rest),
+                None => (case, part),
+            };
+            let Some((field, ty)) = rest.split_once(':') else {
+                continue;
+            };
+            let field = field.trim();
+            if member && is_plain_name(field) {
+                out.push((name.to_string(), field.to_string(), type_of(ty)));
+            }
+        }
+    }
+    // A body's `val`s and `var`s, its innermost class's or object's.
+    for l in symbols.iter().filter(|l| l.symbol.kind == "property") {
+        let around = classes
+            .iter()
+            .filter(|c| c.declaration.0 < l.declaration.0 && l.declaration.1 <= c.declaration.1)
+            .max_by_key(|c| c.declaration.0);
+        if let Some(class) = around {
+            let ty = src
+                .get(l.declaration.0..l.declaration.1)
+                .and_then(|t| t.split_once(':'))
+                .map(|(_, t)| type_of(t.lines().next().unwrap_or("")))
+                .unwrap_or_default();
+            out.push((class.symbol.name.clone(), l.symbol.name.clone(), ty));
+        }
+    }
+    out
+}
+
 /// A C++ file's classes' fields and their types ([`FileContext::fields`]):
 /// `std::vector<std::unique_ptr<flag_formatter>> formatters_;` is
 /// `formatters_` of type `std::vector`, `int a_, b_;` two; a pointer's, a
@@ -5439,6 +5610,10 @@ fn walk(
             // The receiver's name where nothing binds it (Scala's `os`).
             let mut unbound: Option<String> = None;
             let receiver = match &current {
+                // Scala's `new Column(_)`: the class's own constructor.
+                _ if lang == Lang::Scala && kind == "instance_expression" => {
+                    Some(Receiver::Type(callee.clone()))
+                }
                 // `Cart.add(…)`, `cart:add(…)`: the module named.
                 _ if method && matches!(lang, Lang::Elixir | Lang::Erlang) => {
                     module_receiver(node, parent, src, lang)
@@ -7433,6 +7608,8 @@ fn callee_name(call: Node, parent: Option<Node>, src: &str, lang: Lang) -> Optio
             return (name.starts_with(char::is_lowercase) && field.kind() == "identifier")
                 .then(|| (name.to_string(), true));
         }
+        // `new Column(_)` builds a class: its constructor's call (as a
+        // method of the class itself, [`receiver_of`]), never a `def Column`.
         (Lang::Scala, "instance_expression") => {
             let mut cursor = call.walk();
             let ty = call
@@ -7442,7 +7619,7 @@ fn callee_name(call: Node, parent: Option<Node>, src: &str, lang: Lang) -> Optio
                 "generic_type" => ty.named_child(0)?,
                 _ => ty,
             };
-            return Some((last_identifier(node_text(ty, src))?, false));
+            return Some((last_identifier(node_text(ty, src))?, true));
         }
         // Elixir: `f(…)`, or another module's `Mod.f(…)` (like Erlang's
         // `mod:f(…)`). A `def` defines rather than calls (`fn_names`).
@@ -7655,6 +7832,17 @@ fn receiver_of(
         }
         _ => receiver,
     };
+    // A Scala method eta-expanded (`(this.apply _).tupled`, `f _`): a
+    // function value, whose methods are the library's.
+    if lang == Lang::Scala
+        && receiver
+            .trim_start_matches('(')
+            .trim_end_matches(')')
+            .trim_end()
+            .ends_with(" _")
+    {
+        return Some(Receiver::Declared("Function".to_string()));
+    }
     // `super.f()`, C#'s `base.F()`: the base's method.
     if (receiver == "super" && matches!(lang, Lang::Java | Lang::Kotlin | Lang::Scala | Lang::Dart))
         || (receiver == "base" && lang == Lang::CSharp)
@@ -8787,16 +8975,21 @@ fn declares(head: &str, lang: Lang) -> bool {
 /// library and many projects name their types.
 fn declared_type(head: &str, lang: Lang) -> Option<String> {
     trailing_type(head).or_else(|| match lang {
-        Lang::Cpp => cpp_trailing_type(head),
+        Lang::Cpp => cpp_trailing_type(head).or_else(|| built_in_type(head, lang)),
         Lang::Java | Lang::CSharp => built_in_type(head, lang),
         _ => None,
     })
 }
 
-/// A Java or C# built-in type before a declared name, which neither writes
-/// as a class: `int count`, C#'s `string name`.
+/// A Java, C# or C++ built-in type before a declared name, which none
+/// writes as a class: `int count`, C#'s `string name`, C++'s `unsigned n`.
 fn built_in_type(head: &str, lang: Lang) -> Option<String> {
     let head = head.trim_end();
+    // (A C++ reference is of its type; a pointer is none of these.)
+    let head = match lang {
+        Lang::Cpp => head.trim_end_matches('&').trim_end(),
+        _ => head,
+    };
     let start = head
         .rfind(|c: char| !(c == '_' || c.is_alphanumeric()))
         .map_or(0, |i| i + 1);
@@ -8804,6 +8997,32 @@ fn built_in_type(head: &str, lang: Lang) -> Option<String> {
     let built_in: &[&str] = match lang {
         Lang::Java => &[
             "int", "long", "short", "byte", "char", "boolean", "float", "double",
+        ],
+        Lang::Cpp => &[
+            "int",
+            "long",
+            "short",
+            "char",
+            "bool",
+            "float",
+            "double",
+            "unsigned",
+            "signed",
+            "size_t",
+            "ssize_t",
+            "ptrdiff_t",
+            "int8_t",
+            "int16_t",
+            "int32_t",
+            "int64_t",
+            "uint8_t",
+            "uint16_t",
+            "uint32_t",
+            "uint64_t",
+            "wchar_t",
+            "char8_t",
+            "char16_t",
+            "char32_t",
         ],
         _ => &[
             "int", "long", "short", "byte", "sbyte", "uint", "ulong", "ushort", "char", "bool",
@@ -14708,6 +14927,150 @@ def main():
         assert_eq!(lines("sums"), [7], "{:?}", edges(&g));
     }
 
+    /// A Rails controller's actions run on the instance Rails holds: a
+    /// method called on a value of no known type (`user.github`, a model's
+    /// attribute) is none of them, while the controller's own bare call of
+    /// one is.
+    #[test]
+    fn a_rails_action_is_called_by_rails() {
+        let callbacks = "class Users::OmniauthCallbacksController < ApplicationController\n  def github\n    redirect\n  end\n  def redirect\n    github_login\n  end\n  def github_login\n  end\nend\n";
+        let api = "class ApiInfoController < ApplicationController\n  def show\n    user = @repo.subscribers.first\n    user.github\n  end\nend\n";
+        let g = graph(&[
+            (
+                "/p/app/controllers/users/omniauth_callbacks_controller.rb",
+                callbacks,
+            ),
+            ("/p/app/controllers/api_info_controller.rb", api),
+        ]);
+        let calls = |from: &str, to: &str| {
+            edges(&g)
+                .iter()
+                .any(|(a, b)| a.ends_with(&format!(":{from}")) && b.ends_with(&format!(":{to}")))
+        };
+        assert!(!calls("show", "github"), "{:?}", edges(&g));
+        assert!(calls("github", "redirect"), "{:?}", edges(&g));
+    }
+
+    /// Scala reads that call no `def`: a case class's field (`res.exitCode`,
+    /// `c.id`) is no other class's method of the name; `new Column(_)`
+    /// builds the class (a Java class's constructor, where it is one) and
+    /// is no `def Column`; and a method eta-expanded (`(this.apply _)`) is a
+    /// function value, whose `tupled` is the library's.
+    #[test]
+    fn a_scala_read_or_new_calls_no_def_of_the_name() {
+        let scala = "package shop\ncase class CommandResult(command: Seq[String], exitCode: Int)\nclass SubProcess {\n  def exitCode(): Int = 0\n}\ncase class Company(id: Option[Long], name: String)\nobject Company {\n  def tupled = (this.apply _).tupled\n}\nobject Dog {\n  def tupled = 1\n}\nobject Repo {\n  def id = 1\n}\nclass Gen {\n  def Column = new Column(1)\n  def make() = new JavaThing()\n}\nobject Use {\n  def run(res: CommandResult, c: Company) = {\n    res.exitCode\n    c.id\n  }\n}\n";
+        let java = "package shop;\nclass JavaThing {\n  JavaThing() {}\n  void go() {}\n}\n";
+        let g = graph(&[
+            ("/p/src/main/scala/shop/Shop.scala", scala),
+            ("/p/src/main/java/shop/JavaThing.java", java),
+        ]);
+        let reached = |name: &str| -> Vec<String> {
+            let at = (0..g.node_count())
+                .find(|&n| g.node(n).name == name)
+                .unwrap_or_else(|| panic!("{name}: {:?}", edges(&g)));
+            g.callees_of(at)
+                .iter()
+                .map(|&c| format!("{}:{}", g.node(c).name, g.node(c).line))
+                .collect()
+        };
+        assert!(reached("run").is_empty(), "{:?}", edges(&g));
+        assert!(reached("tupled").is_empty(), "{:?}", edges(&g));
+        assert!(reached("Column").is_empty(), "{:?}", edges(&g));
+        assert_eq!(reached("make"), ["JavaThing:3"], "{:?}", edges(&g));
+        let fc = FileCalls::read(Path::new("/p/src/main/scala/shop/Shop.scala"), scala).unwrap();
+        let fields: Vec<(&str, &str)> = fc
+            .context
+            .fields
+            .iter()
+            .map(|(c, f, _)| (c.as_str(), f.as_str()))
+            .collect();
+        assert!(
+            fields.contains(&("CommandResult", "exitCode")),
+            "{fields:?}"
+        );
+        assert!(fields.contains(&("Company", "id")), "{fields:?}");
+        assert!(
+            !fields.iter().any(|(c, _)| *c == "SubProcess"),
+            "{fields:?}"
+        );
+    }
+
+    /// A C++ value built by its class's name (`auto&& buf =
+    /// basic_memory_buffer<Char>();`) is of that class — `buf.size()` its
+    /// base's `size`, no other class's — and a parameter of a built-in type
+    /// (`int id`) passes as one: `args_.get(id)` is `get(int)`, never
+    /// `get(basic_string_view<Char>)`.
+    #[test]
+    fn a_cpp_value_built_or_declared_built_in_is_of_its_type() {
+        let src = "template <typename T> class buffer {\n public:\n  auto size() const -> size_t { return 0; }\n};\ntemplate <typename T> class basic_memory_buffer : public buffer<T> {};\nclass format_int {\n public:\n  auto size() const -> size_t { return 1; }\n};\nclass format_args {\n public:\n  auto get(int id) const -> int { return id; }\n  template <typename Char> auto get(basic_string_view<Char> name) const -> int { return 0; }\n};\nclass context {\n  format_args args_;\n public:\n  auto arg(int id) const -> int { return args_.get(id); }\n};\ntemplate <typename Char> void write() {\n  auto&& buf = basic_memory_buffer<Char>();\n  buf.size();\n}\n";
+        let g = graph(&[("/p/include/fmt/format.hpp", src)]);
+        let reached = |name: &str| -> Vec<usize> {
+            let at = (0..g.node_count())
+                .find(|&n| g.node(n).name == name)
+                .unwrap();
+            g.callees_of(at).iter().map(|&c| g.node(c).line).collect()
+        };
+        assert_eq!(reached("write"), [3], "{:?}", edges(&g));
+        assert_eq!(reached("arg"), [12], "{:?}", edges(&g));
+    }
+
+    /// Of Kotlin overloads that fit alike, the one that needs no default
+    /// value: `vector("e", 4)` is `vector(name, dimensions)`, not `vector<T>(
+    /// name, dimensions, format = null)` — which a third argument reaches;
+    /// an argument of no known kind fits either.
+    #[test]
+    fn a_kotlin_call_takes_the_overload_needing_no_default() {
+        let src = "open class Table {\n  fun vector(name: String, dimensions: Int?): Int = 0\n  inline fun <reified T : Any> vector(name: String, dimensions: Int?, format: String? = null): Int = 1\n  fun exec(stmt: String, args: List<Int> = emptyList()) {}\n  fun exec(stmt: Statement) {}\n}\nclass Items : Table() {\n  fun two() = vector(\"embedding\", 4)\n  fun three() = vector(\"embedding\", 4, \"f\")\n  fun drop() = exec(load())\n}\n";
+        let g = graph(&[("/p/src/Items.kt", src)]);
+        let reached = |name: &str| -> Vec<usize> {
+            let at = (0..g.node_count())
+                .find(|&n| g.node(n).name == name)
+                .unwrap();
+            g.callees_of(at).iter().map(|&c| g.node(c).line).collect()
+        };
+        assert_eq!(reached("two"), [2], "{:?}", edges(&g));
+        assert_eq!(reached("three"), [3], "{:?}", edges(&g));
+        // (An argument of no known kind may be either's.)
+        let mut drop = reached("drop");
+        drop.sort_unstable();
+        assert_eq!(drop, [4, 5], "{:?}", edges(&g));
+    }
+
+    /// A base named by its path (`extends kernel.Async[IO]`) is the class
+    /// `Async`: a trait's call of its own abstract method reaches the
+    /// override there, which it missed under the name `kernel.Async`.
+    #[test]
+    fn a_base_named_by_its_path_is_its_class() {
+        let kernel = "package cats.effect.kernel\ntrait Async[F[_]] {\n  def flatMap[A, B](fa: F[A])(f: A => F[B]): F[B]\n  def fromFuture[A](fut: F[A]): F[A] =\n    flatMap(fut)(a => fut)\n}\n";
+        let io = "package cats.effect\nimport cats.effect.kernel\nfinal class IOAsync extends kernel.Async[IO] {\n  def flatMap[A, B](fa: IO[A])(f: A => IO[B]): IO[B] = fa\n}\n";
+        let g = graph(&[
+            (
+                "/p/kernel/src/main/scala/cats/effect/kernel/Async.scala",
+                kernel,
+            ),
+            ("/p/core/src/main/scala/cats/effect/IO.scala", io),
+        ]);
+        let at = (0..g.node_count())
+            .find(|&n| g.node(n).name == "fromFuture")
+            .unwrap();
+        let mut files: Vec<String> = g
+            .callees_of(at)
+            .iter()
+            .map(|&c| {
+                g.node(c)
+                    .file
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        files.sort();
+        // (The abstract declaration gives way to the definition taking the
+        // same parameters.)
+        assert_eq!(files, ["IO.scala"], "{:?}", edges(&g));
+    }
+
     /// Audit 8's shapes: Go's `new(bytes.Buffer)` is the library's value; a
     /// C++ bare call in a free function reaches no class's member; a Kotlin
     /// lambda is passed for no `Iterable`; Zig's decl literal `.of(1, 2)`
@@ -15249,6 +15612,14 @@ def main():
             .map(|&c| g.node(c).name.clone())
             .collect();
         assert_eq!(reached, ["push"], "{:?}", edges(&g));
+        // (`pub const` too; a field of the standard library's type calls
+        // none of the project's methods of the name.)
+        let store = "pub const Store = @This();\ndeclarations: std.MultiArrayList(Declaration),\n\npub fn add(store: *Store) void {\n    store.declarations.append(1);\n}\nconst Filter = struct {\n    pub fn append(f: *Filter, x: u8) void {}\n};\n";
+        let g = graph(&[("/p/src/Store.zig", store)]);
+        let add = (0..g.node_count())
+            .find(|&n| g.node(n).name == "add")
+            .unwrap();
+        assert!(g.callees_of(add).is_empty(), "{:?}", edges(&g));
     }
 
     /// One link of a chain is of what its method returns on the type it is
