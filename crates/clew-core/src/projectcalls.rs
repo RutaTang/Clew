@@ -4039,6 +4039,13 @@ impl ProjectCallGraph {
             let Some(arguments) = cs.arguments.as_deref() else {
                 return true;
             };
+            // (A function's result says which overloads it fits, not which
+            // of those is nearest: ranked as a value of no type known.)
+            let ranking: String = arguments
+                .split(',')
+                .map(|a| if a.starts_with(RETURNED) { "?" } else { a })
+                .collect::<Vec<_>>()
+                .join(",");
             // A function's result (`→runtime`): of the type its definitions
             // agree it returns — or of none this can tell.
             let resolved: String;
@@ -4047,12 +4054,20 @@ impl ProjectCallGraph {
                     .split(',')
                     .map(|a| match a.strip_prefix(RETURNED) {
                         Some(function) => {
-                            let mut types = defs
+                            let found: Vec<usize> = defs
                                 .named
                                 .get(function)
                                 .into_iter()
                                 .flat_map(|named| named.all.iter().copied())
-                                .map(|i| node_returns[i].as_deref());
+                                .collect();
+                            // (A catch-all `(...)` stands in for a library's
+                            // function of the name — fmt's `gmtime_r(...) ->
+                            // null<>` for the C library's: what it returns
+                            // says nothing.)
+                            if found.iter().any(|&i| node_parameters[i] == Some("v")) {
+                                return "?".to_string();
+                            }
+                            let mut types = found.iter().map(|&i| node_returns[i].as_deref());
                             match types.next().flatten() {
                                 Some(first) if types.all(|t| t == Some(first)) => {
                                     type_kind(first, lang)
@@ -4147,7 +4162,7 @@ impl ProjectCallGraph {
                 let rank = |i: usize| -> usize {
                     literal_rank(i)
                         + node_parameters[i].map_or(0, |params| {
-                            arguments
+                            ranking
                                 .split(',')
                                 .zip(params.split(','))
                                 .filter(|(a, _)| {
@@ -4700,7 +4715,9 @@ impl ProjectCallGraph {
                         &facts,
                         &owner,
                         (
-                            if in_test {
+                            // (On a value of a type known: a test's
+                            // implementation is no other code's.)
+                            if in_test || cs.receiver.is_none() {
                                 &implemented
                             } else {
                                 &implemented_apart_from_tests
@@ -19702,6 +19719,43 @@ def main():
             .map(|&c| g.node(c).line)
             .collect();
         assert_eq!(lines, [10], "{:?}", edges(&g));
+    }
+
+    /// A C++ function's result narrows which overloads an argument fits,
+    /// but ranks none above another: `format_to_n(…, runtime(L"{}"), …)`
+    /// keeps the `wformat_string` overload beside a template's `const S&`.
+    /// Nor does a catch-all `(...)` say what it returns: fmt's `gmtime_r(...)
+    /// -> null<>` stands in for the C library's, so `handle(gmtime_r(…))`
+    /// is either `handle`.
+    #[test]
+    fn a_cpp_call_result_narrows_but_ranks_no_overload() {
+        let header = "namespace fmt {\nstruct null {};\nstruct tm {};\ntemplate <typename Char = char> struct runtime_format_string {\n  int str;\n};\ninline auto runtime(wstring_view s) -> runtime_format_string<wchar_t> { return {}; }\ntemplate <typename OutputIt, typename... T>\nauto format_to_n(OutputIt out, size_t n, wformat_string<T...> fmt, T&&... args) -> int {\n  return 0;\n}\ntemplate <typename OutputIt, typename S, typename... T>\nauto format_to_n(OutputIt out, size_t n, const S& fmt, T&&... args) -> int {\n  return 1;\n}\ninline auto gmtime_r(...) -> null { return null(); }\nstruct dispatcher {\n  tm tm_;\n  auto run() -> bool { return handle(gmtime_r(&tm_)); }\n  auto handle(tm* t) -> bool { return t != nullptr; }\n  auto handle(null) -> bool { return false; }\n};\n}\n";
+        let main = "#include \"fmt.h\"\nvoid wide() {\n  wchar_t buffer[4];\n  fmt::format_to_n(buffer, 3, fmt::runtime(L\"{}\"), 12345);\n}\n";
+        let files = [("/p/fmt.h", header), ("/p/main.cc", main)];
+        let sources: Vec<(PathBuf, String)> = files
+            .iter()
+            .map(|(f, s)| (PathBuf::from(f), s.to_string()))
+            .collect();
+        let scope: HashMap<PathBuf, HashSet<PathBuf>> = HashMap::from([(
+            PathBuf::from("/p/main.cc"),
+            HashSet::from([PathBuf::from("/p/fmt.h")]),
+        )]);
+        let g = ProjectCallGraph::build(defs_of(&files), &sources, &scope);
+        let lines = |caller: &str, callee: &str| -> Vec<usize> {
+            let at = (0..g.node_count())
+                .find(|&n| g.node(n).name == caller)
+                .unwrap();
+            let mut lines: Vec<usize> = g
+                .callees_of(at)
+                .iter()
+                .filter(|&&c| g.node(c).name == callee)
+                .map(|&c| g.node(c).line)
+                .collect();
+            lines.sort();
+            lines
+        };
+        assert_eq!(lines("wide", "format_to_n"), [9, 13], "{:?}", edges(&g));
+        assert_eq!(lines("run", "handle"), [20, 21], "{:?}", edges(&g));
     }
 
     /// More of audit 17's: a Kotlin property of the file's top level
