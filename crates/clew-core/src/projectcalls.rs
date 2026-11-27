@@ -3729,7 +3729,10 @@ impl ProjectCallGraph {
                             .map(|(a, p)| {
                                 // (A C++ template's own type parameter
                                 // ranks as its name.)
-                                let a = a.replacen('G', "T", 1);
+                                let a = match a.strip_prefix('G') {
+                                    Some(name) => format!("T{name}"),
+                                    None => a.to_string(),
+                                };
                                 let a = a.as_str();
                                 // (A nullable mark trimmed, a type parameter's
                                 // `?` is nothing.)
@@ -16341,6 +16344,21 @@ def main():
         let mut own = reached("use_own");
         own.sort_unstable();
         assert_eq!(own, [12], "{:?}", edges(&g));
+    }
+
+    /// An argument of a class whose name holds a `G` (`GetTodosQuery`) is
+    /// ranked by that name: `SendAsync(IRequest<T>)` before
+    /// `SendAsync(IBaseRequest)`, as `IRequest<T>` (MediatR's) is the base it
+    /// names.
+    #[test]
+    fn a_class_named_with_a_g_is_ranked_by_its_name() {
+        let cs = "using MediatR;\nclass TodosVm {}\nclass GetTodosQuery : IRequest<TodosVm> {}\nstatic class TestApp {\n  public static Task<TResponse> SendAsync<TResponse>(IRequest<TResponse> request) { return null; }\n  public static Task SendAsync(IBaseRequest request) { return null; }\n}\nclass Tests {\n  void Gets() { var query = new GetTodosQuery(); TestApp.SendAsync(query); }\n}\n";
+        let g = graph(&[("/p/tests/TestApp.cs", cs)]);
+        let at = (0..g.node_count())
+            .find(|&n| g.node(n).name == "Gets")
+            .unwrap();
+        let lines: Vec<usize> = g.callees_of(at).iter().map(|&c| g.node(c).line).collect();
+        assert_eq!(lines, [5], "{:?}", edges(&g));
     }
 
     /// A Kotlin infix call (`c eq 3`) is a call of the function between,
