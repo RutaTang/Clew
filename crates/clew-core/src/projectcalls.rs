@@ -1965,6 +1965,17 @@ pub fn context_in(src: &str, lang: Lang, symbols: &[Located]) -> FileContext {
                 Some((l.symbol.line, fewest, most))
             })
             .collect(),
+        // Ruby's positional parameters: the required, then those with a
+        // default, and a `*rest` taking any more (keywords, `**opts` and
+        // `&block` are passed apart).
+        Lang::Ruby => symbols
+            .iter()
+            .filter(|l| is_callable(&l.symbol.kind))
+            .filter_map(|l| {
+                let (fewest, most) = ruby_arity(src, l)?;
+                Some((l.symbol.line, fewest, most))
+            })
+            .collect(),
         // (Not C's: it has no overloads to choose among, and a C++ header
         // read as C says nothing sure of its arguments.)
         Lang::Java
@@ -4793,6 +4804,31 @@ impl ProjectCallGraph {
                     && let Some(ty) = wanted
                     && matches!(cs.receiver, Some(Receiver::Own | Receiver::Declared(_)))
                 {
+                    // A Scala value of a type parameter's type (`target: F[A]`
+                    // in `def f[F[_], A]`), by the one capital such names
+                    // are: its methods are its type class's syntax — an
+                    // `…Ops` class wrapping it (`AsyncOps.evalOn`) or an
+                    // extension — never a project class's that bears the
+                    // letter (`Resource.evalOn`).
+                    if fc.lang == Lang::Scala
+                        && matches!(cs.receiver, Some(Receiver::Declared(_)))
+                        && ty.len() == 1
+                        && ty.starts_with(char::is_uppercase)
+                    {
+                        for &callee in callees.iter() {
+                            let syntax = owner[callee].is_some_and(|o| o.ends_with("Ops"))
+                                || extension_nodes.contains(&callee);
+                            if syntax
+                                && edges.len() < MAX_EDGES
+                                && (in_test || !test_node[callee])
+                                && facts[callee].takes_call(cs, fc.lang, owner[callee])
+                                && fits_arguments(callee, cs, fc.lang)
+                            {
+                                edges.insert((caller, callee));
+                            }
+                        }
+                        continue;
+                    }
                     let mut found = family(ty, callee_name, true);
                     ruby_kind(&mut found);
                     // Kotlin: where no member of the name takes what the call
@@ -7522,6 +7558,72 @@ fn macro_calls(tree: Node, src: &str, caller: Option<&str>, out: &mut Vec<CallSi
     }
 }
 
+/// A Ruby method's fewest and most positional arguments, read off its
+/// `def`: `(1, 2)` for `def f(a, b = 1, key: 2, &blk)`, `(1, u8::MAX)` with a
+/// `*rest`. `None` where the parameters are not plain (`...` forwarding).
+fn ruby_arity(src: &str, l: &Located) -> Option<(u8, u8)> {
+    let text = src.get(l.declaration.0..l.declaration.1)?;
+    let head = text.lines().next()?;
+    let at = head.find(&*l.symbol.name)? + l.symbol.name.len();
+    let rest = &head[at..];
+    let params: &str = match rest.trim_start().strip_prefix('(') {
+        Some(inner) => {
+            let mut depth = 1i32;
+            let close = inner.char_indices().find_map(|(i, c)| {
+                match c {
+                    '(' | '[' | '{' => depth += 1,
+                    ')' | ']' | '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return Some(i);
+                        }
+                    }
+                    _ => {}
+                }
+                None
+            })?;
+            &inner[..close]
+        }
+        // `def f a, b` with no parentheses; `def f = x`, `def f; …`.
+        None => {
+            let rest = rest.trim();
+            if rest.is_empty() || rest.starts_with(['=', ';', '#']) {
+                ""
+            } else {
+                rest.split(';').next().unwrap_or(rest)
+            }
+        }
+    };
+    let (mut fewest, mut most) = (0u8, 0u8);
+    for part in split_top_level(params) {
+        let part = part.trim();
+        if part.is_empty() || part.starts_with('&') || part.starts_with("**") {
+            continue;
+        }
+        if part == "..." {
+            return None;
+        }
+        if part.starts_with('*') {
+            most = u8::MAX;
+            continue;
+        }
+        // A keyword parameter (`key:`, `key: 1`).
+        let name_end = part
+            .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .unwrap_or(part.len());
+        if part[name_end..].trim_start().starts_with(':') {
+            continue;
+        }
+        if part[name_end..].trim_start().starts_with('=') {
+            most = most.saturating_add(1);
+        } else {
+            fewest = fewest.saturating_add(1);
+            most = most.saturating_add(1);
+        }
+    }
+    Some((fewest, most.max(fewest)))
+}
+
 /// How many arguments an Erlang or Elixir call passes ([`CallSite::arity`]).
 fn call_arity(call: Node, parent: Option<Node>, src: &str, lang: Lang) -> Option<u8> {
     // A Scala member read with no parentheses (`r.exitCode`) — or one
@@ -7687,6 +7789,23 @@ fn call_arity(call: Node, parent: Option<Node>, src: &str, lang: Lang) -> Option
             call.named_children(&mut call.walk())
                 .filter(|c| c.id() != function.id() && c.kind() != "comment")
                 .count()
+        }
+        // Ruby's positional arguments: keywords (`key: 1`) and a block
+        // (`&blk`, `do … end`) passed apart; a splat says nothing of how
+        // many.
+        (Lang::Ruby, "call") => {
+            let Some(args) = call.child_by_field_name("arguments") else {
+                return Some(0);
+            };
+            let mut n = 0usize;
+            for a in args.named_children(&mut args.walk()) {
+                match a.kind() {
+                    "pair" | "block_argument" | "comment" => {}
+                    "splat_argument" | "hash_splat_argument" | "forward_argument" => return None,
+                    _ => n += 1,
+                }
+            }
+            n
         }
         (Lang::Java | Lang::CSharp | Lang::Cpp | Lang::Go | Lang::Scala, _) => {
             let args = call.child_by_field_name("arguments").or_else(|| {
@@ -7863,6 +7982,61 @@ fn number_constant_kind(text: &str) -> Option<&'static str> {
         "Boolean" if matches!(member, "TRUE" | "FALSE") => "b",
         _ => return None,
     })
+}
+
+/// The type the nearest `def name: T` (no parameter list) or `val name: T`
+/// in `before` declares: `MonadError` for `protected def delegate:
+/// MonadError[OptionT[F, *], E] =`.
+fn scala_member_type(before: &str, name: &str) -> Option<String> {
+    for line in before.lines().rev() {
+        let t = line.trim_start();
+        let mut t = t;
+        loop {
+            let prev = t;
+            for m in [
+                "override ",
+                "protected ",
+                "private ",
+                "final ",
+                "implicit ",
+                "lazy ",
+                "abstract ",
+            ] {
+                t = t.strip_prefix(m).unwrap_or(t).trim_start();
+            }
+            if let Some(rest) = t
+                .strip_prefix("private[")
+                .or_else(|| t.strip_prefix("protected["))
+                && let Some(close) = rest.find(']')
+            {
+                t = rest[close + 1..].trim_start();
+            }
+            if t == prev {
+                break;
+            }
+        }
+        let Some(rest) = t
+            .strip_prefix("def ")
+            .or_else(|| t.strip_prefix("val "))
+            .or_else(|| t.strip_prefix("var "))
+        else {
+            continue;
+        };
+        let Some(rest) = rest.strip_prefix(name) else {
+            continue;
+        };
+        let Some(ty) = rest.trim_start().strip_prefix(':') else {
+            continue;
+        };
+        let ty: String = ty
+            .trim_start()
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '.')
+            .collect();
+        let last = ty.rsplit('.').next().unwrap_or(&ty).to_string();
+        return (last.starts_with(char::is_uppercase) && is_plain_name(&last)).then_some(last);
+    }
+    None
 }
 
 /// The type a Zig file's own top-level `var` or `const` named `name` is
@@ -10448,6 +10622,16 @@ fn receiver_of(
     // declaration in the header says — once the classes are read.
     if let Some(field) = cpp_member_field(call, receiver, src, lang) {
         return Some(field);
+    }
+    // A Scala member of no parameter list declared with its type, above
+    // the call in its file (`protected def delegate: MonadError[OptionT[F,
+    // *], E]` before `delegate.pure(a)`): of that type.
+    if lang == Lang::Scala
+        && is_plain_name(receiver)
+        && receiver.starts_with(char::is_lowercase)
+        && let Some(ty) = scala_member_type(&src[..call.start_byte()], receiver)
+    {
+        return Some(Receiver::Declared(ty));
     }
     // A Zig variable of the file's own, declared with its type (`var
     // default_server: Server(void) = undefined;`): of that type — the
@@ -18142,6 +18326,76 @@ def main():
             .unwrap();
         let lines: Vec<usize> = g.callees_of(at).iter().map(|&c| g.node(c).line).collect();
         assert_eq!(lines, [7], "{:?}", edges(&g));
+    }
+
+    /// Audit 15's: a Ruby call passes its positional arguments to a method
+    /// that takes them (`repo_path("x")` is no `def repo_path` of none);
+    /// a Scala value of a type parameter's type calls its syntax's
+    /// (`target.evalOn(ec)` is `AsyncOps.evalOn`, not `Resource.evalOn`);
+    /// a Scala member declared with a library's type (`def delegate:
+    /// MonadError[…]`) calls the library's `pure`.
+    #[test]
+    fn audit_15_shapes() {
+        let model = "class Repo < ActiveRecord::Base\n  def repo_path\n    \"x\"\n  end\nend\n";
+        let test = "class ReposControllerTest < ActionController::TestCase\n  test \"show\" do\n    get repo_path(\"refinery/refinerycms\")\n  end\nend\n";
+        let resource = "package cats.effect.kernel\nfinal class Resource[F[_], A] {\n  def evalOn(ec: Int): Resource[F, A] = this\n}\ntrait F\n";
+        let ops = "package cats.effect.kernel\nfinal class AsyncOps[F[_], A](val wrapped: F[A]) {\n  def evalOn(ec: Int): F[A] = wrapped\n}\n";
+        let suite = "package cats.effect.kernel\nclass SyntaxSuite {\n  def asyncSyntax[F[_], A](target: F[A]) = {\n    val result = target.evalOn(1)\n  }\n}\n";
+        let cancel = "package cats.effect.kernel\ntrait StateTMonadCancel[F[_]] {\n  protected def delegate: MonadError[F, Int] = ???\n  def pure[A](x: A): F[A] =\n    delegate.pure(x)\n}\n";
+        let g = graph(&[
+            ("/p/app/models/repo.rb", model),
+            ("/p/test/functional/repos_controller_test.rb", test),
+            (
+                "/p/kernel/src/main/scala/cats/effect/kernel/Resource.scala",
+                resource,
+            ),
+            (
+                "/p/kernel/src/main/scala/cats/effect/kernel/syntax/AsyncSyntax.scala",
+                ops,
+            ),
+            (
+                "/p/kernel/src/test/scala/cats/effect/kernel/SyntaxSuite.scala",
+                suite,
+            ),
+            (
+                "/p/kernel/src/main/scala/cats/effect/kernel/MonadCancel.scala",
+                cancel,
+            ),
+        ]);
+        let reached = |name: &str| -> Vec<String> {
+            let at = (0..g.node_count())
+                .find(|&n| g.node(n).name == name)
+                .unwrap();
+            let mut out: Vec<String> = g
+                .callees_of(at)
+                .iter()
+                .map(|&c| format!("{}:{}", g.node(c).file.display(), g.node(c).line))
+                .collect();
+            out.sort();
+            out
+        };
+        assert_eq!(reached("show"), [] as [&str; 0], "{:?}", edges(&g));
+        // (In one class: a `*rest` takes any more, keywords none of them.)
+        let one = "class Labels\n  def label(prefix, suffix = \"\", *rest, key: 1, &blk)\n  end\n\n  def many\n    label(\"a\", \"b\", \"c\", key: 2)\n  end\n\n  def none\n    label()\n  end\nend\n";
+        let g1 = graph(&[("/p/lib/labels.rb", one)]);
+        let lines = |name: &str| -> Vec<usize> {
+            let at = (0..g1.node_count())
+                .find(|&n| g1.node(n).name == name)
+                .unwrap();
+            g1.callees_of(at).iter().map(|&c| g1.node(c).line).collect()
+        };
+        assert_eq!(lines("many"), [2], "{:?}", edges(&g1));
+        assert_eq!(lines("none"), [] as [usize; 0], "{:?}", edges(&g1));
+        assert_eq!(
+            reached("asyncSyntax"),
+            ["/p/kernel/src/main/scala/cats/effect/kernel/syntax/AsyncSyntax.scala:3"],
+            "{:?}",
+            edges(&g)
+        );
+        let pure = (0..g.node_count())
+            .find(|&n| g.node(n).name == "pure")
+            .unwrap();
+        assert!(g.callees_of(pure).is_empty(), "{:?}", edges(&g));
     }
 
     /// A Ruby method's result is the class its last statement builds —

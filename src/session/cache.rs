@@ -201,7 +201,9 @@ use crate::incremental::Version;
 /// multi-dollar strings and context parameters; objects' bases; casts.
 /// C's specifier macros blanked as C++'s are; aliases of several types;
 /// Dart's calls through a null assertion; twins beside imported files.
-pub(crate) const CACHE_VERSION: u32 = 59;
+/// 60: Ruby calls' and methods' positional arguments; Scala members'
+/// declared types as receivers; Zig globals' types; C++ `if MACRO (…)`.
+pub(crate) const CACHE_VERSION: u32 = 60;
 
 /// A cached symbol (the index entry minus the paths, which are reconstructed
 /// from the project root + relative path on load).
