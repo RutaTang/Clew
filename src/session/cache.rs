@@ -203,7 +203,8 @@ use crate::incremental::Version;
 /// Dart's calls through a null assertion; twins beside imported files.
 /// 60: Ruby calls' and methods' positional arguments; Scala members'
 /// declared types as receivers; Zig globals' types; C++ `if MACRO (…)`.
-pub(crate) const CACHE_VERSION: u32 = 60;
+/// 61: Haskell's modules imported only `qualified`.
+pub(crate) const CACHE_VERSION: u32 = 61;
 
 /// A cached symbol (the index entry minus the paths, which are reconstructed
 /// from the project root + relative path on load).

@@ -1944,6 +1944,16 @@ pub fn context_in(src: &str, lang: Lang, symbols: &[Located]) -> FileContext {
         match (lang, keyword) {
             (Lang::Elixir, _) => elixir_modules_after(src, keyword),
             (Lang::Go, "import ") => go_import_names(src),
+            // Haskell's modules imported only `qualified`, whose names are
+            // no bare call's.
+            // (And what its header exports: `export:name`, a whole module's
+            // `export-module:M` — the names a plain import of it brings,
+            // wherever they are defined.)
+            (Lang::Haskell, "import ") => {
+                let mut out = haskell_qualified_only(src);
+                out.extend(haskell_exports(src));
+                out
+            }
             _ => Vec::new(),
         }
     };
@@ -3715,6 +3725,12 @@ impl ProjectCallGraph {
             .iter()
             .map(|n| nested_lines.contains(&(n.file.as_path(), n.line)))
             .collect();
+        // Each Haskell file's exports ([`haskell_exports`]), by file.
+        let haskell_exports_of: HashMap<&Path, &[String]> = files
+            .iter()
+            .filter(|f| f.lang == Lang::Haskell)
+            .map(|f| (f.file.as_path(), f.context.imports.as_slice()))
+            .collect();
         // The abstract declarations a class below theirs defines with a body
         // (`SizedIterable.count`, `LimitedSizedIterable.count` its own).
         let implemented: HashSet<usize> = {
@@ -5320,6 +5336,54 @@ impl ProjectCallGraph {
                     } else {
                         targets
                     }
+                } else {
+                    targets
+                };
+                // A bare Haskell name is none of a module's the file imports
+                // only `qualified` (`Key.fromString` is no bare
+                // `fromString`).
+                // (Unless a module the file sees exports it — `Data.Aeson`
+                // re-exporting `Data.Aeson.Decoding`'s `eitherDecode`.)
+                let unqualified: Vec<usize>;
+                let targets: &[usize] = if fc.lang == Lang::Haskell
+                    && !cs.method
+                    && cs.receiver.is_none()
+                    && cs.qualifier.is_none()
+                    && fc.context.imports.iter().any(|m| !m.starts_with("export"))
+                {
+                    let module_file = |m: &str, path: &str| {
+                        let file = m.replace('.', "/");
+                        path.ends_with(&format!("/{file}.hs"))
+                            || path.ends_with(&format!("/{file}.lhs"))
+                    };
+                    let reexported = |c: usize| {
+                        let path = nodes[c].file.to_string_lossy();
+                        site.imported.iter().any(|f| {
+                            f != &nodes[c].file
+                                && haskell_exports_of.get(f.as_path()).is_some_and(|exports| {
+                                    exports.iter().any(|e| {
+                                        e.strip_prefix("export:") == Some(callee_name)
+                                            || e.strip_prefix("export-module:")
+                                                .is_some_and(|m| module_file(m, &path))
+                                    })
+                                })
+                        })
+                    };
+                    let only_qualified = |c: usize| {
+                        let path = nodes[c].file.to_string_lossy();
+                        fc.context
+                            .imports
+                            .iter()
+                            .filter(|m| !m.starts_with("export"))
+                            .any(|m| module_file(m, &path))
+                            && !reexported(c)
+                    };
+                    unqualified = targets
+                        .iter()
+                        .copied()
+                        .filter(|&c| nodes[c].file == fc.file || !only_qualified(c))
+                        .collect();
+                    &unqualified
                 } else {
                     targets
                 };
@@ -8077,6 +8141,126 @@ fn scala_member_type(before: &str, name: &str) -> Option<String> {
     None
 }
 
+/// A Haskell file's modules imported only `qualified` (`import qualified
+/// Data.Aeson.Key as Key`, `import Data.Map qualified as M`), none of them
+/// also imported plain: a bare name is none of theirs.
+fn haskell_qualified_only(src: &str) -> Vec<String> {
+    let mut qualified: Vec<String> = Vec::new();
+    let mut plain: HashSet<String> = HashSet::new();
+    for line in src.lines() {
+        let Some(rest) = line.strip_prefix("import ") else {
+            continue;
+        };
+        let words: Vec<&str> = rest.split_whitespace().collect();
+        let is_qualified = words.contains(&"qualified");
+        let Some(module) = words
+            .iter()
+            .find(|w| *w != &"qualified" && !w.starts_with('"') && *w != &"safe" && *w != &"{-#")
+            .map(|w| w.trim_end_matches(['(', ',']))
+        else {
+            continue;
+        };
+        if is_qualified {
+            qualified.push(module.to_string());
+        } else {
+            plain.insert(module.to_string());
+        }
+    }
+    qualified.retain(|m| !plain.contains(m));
+    qualified.sort();
+    qualified.dedup();
+    qualified
+}
+
+/// What a Haskell module's header exports, as [`FileContext::imports`]
+/// entries: `export:eitherDecode` for a name, `export-module:Data.Aeson.Types`
+/// for a module re-exported whole.
+fn haskell_exports(src: &str) -> Vec<String> {
+    let Some(start) = src
+        .match_indices("module ")
+        .map(|(at, _)| at)
+        .find(|&at| at == 0 || src.as_bytes()[at - 1] == b'\n')
+    else {
+        return Vec::new();
+    };
+    let header = &src[start..];
+    let Some(open) = header.find('(') else {
+        return Vec::new();
+    };
+    let Some(end) = header.find(" where").or_else(|| header.find("\nwhere")) else {
+        return Vec::new();
+    };
+    if open > end {
+        return Vec::new();
+    }
+    // (Comments in the list aside.)
+    let list: String = header[open + 1..end]
+        .lines()
+        .map(|l| l.split("--").next().unwrap_or(""))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut out = Vec::new();
+    let mut words = list
+        .split(|c: char| !(c.is_alphanumeric() || matches!(c, '_' | '.' | '\'')))
+        .filter(|w| !w.is_empty())
+        .peekable();
+    while let Some(w) = words.next() {
+        if w == "module" {
+            if let Some(m) = words.next() {
+                out.push(format!("export-module:{m}"));
+            }
+        } else if w != "pattern" && w != "type" {
+            out.push(format!("export:{w}"));
+        }
+    }
+    out
+}
+
+/// Whether a Zig file's own top-level `const name = std.…;` (or `=
+/// @import("std")…`) names a standard-library namespace.
+fn zig_global_is_std(src: &str, name: &str) -> bool {
+    src.lines().any(|line| {
+        if line.starts_with([' ', '\t']) {
+            return false;
+        }
+        let rest = line.strip_prefix("pub ").unwrap_or(line);
+        let Some(rest) = rest.strip_prefix("const ") else {
+            return false;
+        };
+        let Some(rest) = rest.trim_start().strip_prefix(name) else {
+            return false;
+        };
+        let Some(value) = rest.trim_start().strip_prefix('=') else {
+            return false;
+        };
+        let value = value.trim_start();
+        // (Or through another such name: `const posix = std.posix;` then
+        // `pub const system = posix.system;`.)
+        let first = value.split(['.', ';']).next().unwrap_or("");
+        value.starts_with("std.")
+            || value.starts_with("@import(\"std\")")
+            || (first != name
+                && is_plain_name(first)
+                && value[first.len()..].starts_with('.')
+                && zig_std_alias(src, first))
+    })
+}
+
+/// Whether a Zig file's own `const name = std…;` (directly) names a
+/// standard-library namespace — [`zig_global_is_std`]'s one step back.
+fn zig_std_alias(src: &str, name: &str) -> bool {
+    src.lines().any(|line| {
+        let rest = line.strip_prefix("pub ").unwrap_or(line);
+        rest.strip_prefix("const ")
+            .and_then(|r| r.trim_start().strip_prefix(name))
+            .and_then(|r| r.trim_start().strip_prefix('='))
+            .is_some_and(|v| {
+                let v = v.trim_start();
+                v.starts_with("std.") || v.starts_with("@import(\"std\")")
+            })
+    })
+}
+
 /// The type a Zig file's own top-level `var` or `const` named `name` is
 /// declared with: `Server` for `var default_server: Server(void) =
 /// undefined;`, `Pool` for `pub var pool: *Pool = …` — a project type's
@@ -10679,6 +10863,12 @@ fn receiver_of(
         && let Some(ty) = zig_global_type(src, receiver)
     {
         return Some(Receiver::Type(ty));
+    }
+    // A Zig name of the file's for a standard-library namespace (`const
+    // system = std.posix.system;`): the library's, never a project function
+    // of the name (`system.close(fd)` in a `close` of its own).
+    if lang == Lang::Zig && is_plain_name(receiver) && zig_global_is_std(src, receiver) {
+        return Some(Receiver::Type("std".to_string()));
     }
     // Nor a field: in Scala, a package or an object (`os` in `os.read(p)`),
     // or a member inherited from a trait; in Go, an imported package
@@ -18438,6 +18628,85 @@ def main():
             .find(|&n| g.node(n).name == "pure")
             .unwrap();
         assert!(g.callees_of(pure).is_empty(), "{:?}", edges(&g));
+    }
+
+    /// Audit 16's: a bare Haskell name is none of a module imported only
+    /// `qualified` (`fromString` is no `Key.fromString` under `import
+    /// qualified Data.Aeson.Key as Key`, which `Key.fromString` reaches);
+    /// a Zig name for a standard-library namespace (`const system =
+    /// std.posix.system;`) calls the library's, not the project's `close`
+    /// around the call.
+    #[test]
+    fn audit_16_shapes() {
+        let key = "/p/src/Data/Aeson/Key.hs";
+        let to_json = "/p/src/Data/Aeson/Types/ToJSON.hs";
+        let files = [
+            (
+                key,
+                "module Data.Aeson.Key where\n\nfromString :: String -> Key\nfromString = Key\n",
+            ),
+            (
+                to_json,
+                "module Data.Aeson.Types.ToJSON where\n\nimport qualified Data.Aeson.Key as Key\n\nbare :: String -> Value\nbare s = fromString s\n\nnamed :: String -> Key\nnamed s = Key.fromString s\n",
+            ),
+            (
+                "/p/src/posix.zig",
+                "const std = @import(\"std\");\nconst posix = std.posix;\npub const system = posix.system;\n\npub fn close(fd: i32) void {\n    system.close(fd);\n}\n",
+            ),
+            (
+                "/p/src/Data/Aeson/Decoding.hs",
+                "module Data.Aeson.Decoding (eitherDecode) where\n\neitherDecode :: String -> Value\neitherDecode s = Value\n",
+            ),
+            (
+                "/p/src/Data/Aeson.hs",
+                "module Data.Aeson\n    ( eitherDecode\n    , encode\n    ) where\n\nimport Data.Aeson.Decoding (eitherDecode)\n\nencode :: Value -> String\nencode v = \"\"\n",
+            ),
+            (
+                "/p/tests/PropUtils.hs",
+                "module PropUtils where\n\nimport Data.Aeson (eitherDecode, encode)\nimport qualified Data.Aeson.Decoding as Dec\n\nroundTrip :: String -> Value\nroundTrip s = eitherDecode s\n",
+            ),
+        ];
+        let sources: Vec<(PathBuf, String)> = files
+            .iter()
+            .map(|(f, s)| (PathBuf::from(f), s.to_string()))
+            .collect();
+        let scope = HashMap::from([
+            (PathBuf::from(to_json), HashSet::from([PathBuf::from(key)])),
+            (
+                PathBuf::from("/p/tests/PropUtils.hs"),
+                HashSet::from([
+                    PathBuf::from("/p/src/Data/Aeson.hs"),
+                    PathBuf::from("/p/src/Data/Aeson/Decoding.hs"),
+                ]),
+            ),
+        ]);
+        let g = ProjectCallGraph::build(defs_of(&files), &sources, &scope);
+        let e = edges(&g);
+        assert!(
+            !has(&g, &format!("{to_json}:bare"), &format!("{key}:fromString")),
+            "{e:?}"
+        );
+        assert!(
+            has(
+                &g,
+                &format!("{to_json}:named"),
+                &format!("{key}:fromString")
+            ),
+            "{e:?}"
+        );
+        assert!(
+            !has(&g, "/p/src/posix.zig:close", "/p/src/posix.zig:close"),
+            "{e:?}"
+        );
+        // (A name a module the file imports plainly re-exports stays.)
+        assert!(
+            has(
+                &g,
+                "/p/tests/PropUtils.hs:roundTrip",
+                "/p/src/Data/Aeson/Decoding.hs:eitherDecode"
+            ),
+            "{e:?}"
+        );
     }
 
     /// A Ruby method's result is the class its last statement builds —
