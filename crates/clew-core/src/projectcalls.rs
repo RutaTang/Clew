@@ -3519,12 +3519,20 @@ impl ProjectCallGraph {
                 ) else {
                     continue;
                 };
-                // Ruby's `Cart.new(…)` runs `Cart#initialize`, its own or the
-                // one it inherits — never a method named `new` (a Rails
+                // Ruby's `Cart.new(…)`: the class's own `new` where it (or a
+                // class above it) defines one (`Sinatra::Base.new`, a `def
+                // self.new`), else `Cart#initialize`, its own or the one it
+                // inherits — never another class's `new` (a Rails
                 // controller's action).
                 if fc.lang == Lang::Ruby && cs.method && cs.callee == "new" {
                     if let Some(Receiver::Type(ty) | Receiver::Declared(ty)) = &cs.receiver {
-                        for callee in family(ty, "initialize", false) {
+                        let own_new = family(ty, "new", false);
+                        let found = if own_new.is_empty() {
+                            family(ty, "initialize", false)
+                        } else {
+                            own_new
+                        };
+                        for callee in found {
                             if edges.len() < MAX_EDGES
                                 && (in_test || !test_node[callee])
                                 && facts[callee].takes_call(cs, fc.lang, owner[callee])
@@ -4189,8 +4197,10 @@ impl ProjectCallGraph {
                 } else if !cs.method && cs.qualifier.is_none() && fc.lang == Lang::Java {
                     // A Java bare call: a method of its class or a base, of a
                     // class around it (its file's), a constructor, or one a
-                    // `static` import brings — never another class's of the
-                    // package it neither inherits nor imports.
+                    // `static` import brings, where one has the name — not
+                    // another class's of the package it neither inherits nor
+                    // imports. (With none, an anonymous class's base's: `new
+                    // PetType() {{ setName(…); }}`.)
                     kept = targets
                         .iter()
                         .copied()
@@ -4207,7 +4217,7 @@ impl ProjectCallGraph {
                                 })
                         })
                         .collect();
-                    &kept
+                    if kept.is_empty() { targets } else { &kept }
                 } else if elixir_bare {
                     let reached = bare_scopes.get(fc.file.as_path());
                     kept = targets
@@ -15118,6 +15128,20 @@ def main():
             .map(|&c| format!("{}:{}", g.node(c).name, g.node(c).line))
             .collect();
         assert_eq!(reached, ["initialize:2"], "{:?}", edges(&g));
+        // A class's own `new` (`class << self; def new`), its subclass's
+        // too, and a module's `def self.new`: that `new`.
+        let base = "module Sinatra\n  class Base\n    class << self\n      def new(*args)\n      end\n    end\n  end\n  def self.new(base = Base)\n  end\nend\nclass TestMiddleware < Sinatra::Base\nend\n";
+        let test = "class BaseTest\n  def test_new\n    TestMiddleware.new(1)\n    Sinatra.new\n  end\nend\n";
+        let g = graph(&[
+            ("/p/lib/sinatra/base.rb", base),
+            ("/p/test/base_test.rb", test),
+        ]);
+        let at = (0..g.node_count())
+            .find(|&n| g.node(n).name == "test_new")
+            .unwrap();
+        let mut reached: Vec<usize> = g.callees_of(at).iter().map(|&c| g.node(c).line).collect();
+        reached.sort_unstable();
+        assert_eq!(reached, [4, 8], "{:?}", edges(&g));
     }
 
     /// Scala reads that call no `def`: a case class's field (`res.exitCode`,
@@ -15287,13 +15311,15 @@ def main():
         let util = "package com.squareup.moshi;\npublic final class TestUtil {\n  public static JsonReader newReader(String json) { return null; }\n}\n";
         let other = "package com.squareup.moshi;\nclass JsonReaderTest {\n  JsonReader newReader(String json) { return null; }\n}\n";
         let moshi = "package com.squareup.moshi;\npublic class Moshi {\n  public <T> JsonAdapter<T> adapter(Type type) { return null; }\n  public <T> JsonAdapter<T> adapter(Class<T> type) { return null; }\n}\n";
-        let test = "package com.squareup.moshi;\nimport static com.squareup.moshi.TestUtil.newReader;\nclass JsonUtf8ReaderTest {\n  void reads(Moshi moshi) {\n    newReader(\"[]\");\n    moshi.adapter(Pizza.class);\n  }\n}\n";
+        let test = "package com.squareup.moshi;\nimport static com.squareup.moshi.TestUtil.newReader;\nclass JsonUtf8ReaderTest {\n  void reads(Moshi moshi) {\n    newReader(\"[]\");\n    moshi.adapter(Pizza.class);\n  }\n  void types() {\n    new Named() {{\n      setName(\"Dog\");\n    }};\n  }\n}\n";
+        let named = "package com.squareup.moshi;\nclass Named {\n  void setName(String n) {}\n}\n";
         let dir = "/p/moshi/src/test/java/com/squareup/moshi";
         let files = [
             (format!("{dir}/TestUtil.java"), util),
             (format!("{dir}/JsonReaderTest.java"), other),
             (format!("{dir}/Moshi.java"), moshi),
             (format!("{dir}/JsonUtf8ReaderTest.java"), test),
+            (format!("{dir}/Named.java"), named),
         ];
         let files: Vec<(&str, &str)> = files.iter().map(|(f, s)| (f.as_str(), *s)).collect();
         let sources: Vec<(PathBuf, String)> = files
@@ -15326,6 +15352,24 @@ def main():
             "{:?}",
             edges(&g)
         );
+        // (In an anonymous class's body, with none of its own class's
+        // nor imported, its base's: `new Named() {{ setName(…); }}`.)
+        let types = (0..g.node_count())
+            .find(|&n| g.node(n).name == "types")
+            .unwrap();
+        let reached: Vec<String> = g
+            .callees_of(types)
+            .iter()
+            .map(|&c| {
+                g.node(c)
+                    .file
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert_eq!(reached, ["Named.java"], "{:?}", edges(&g));
     }
 
     /// Audit 8's shapes: Go's `new(bytes.Buffer)` is the library's value; a
