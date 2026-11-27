@@ -3038,9 +3038,16 @@ impl ProjectCallGraph {
         let mut exact_bases_of: HashMap<&str, Vec<&str>> = HashMap::new();
         let mut subtypes_of: HashMap<&str, Vec<&str>> = HashMap::new();
         let mut declared_types: HashSet<&str> = HashSet::new();
+        // The files declaring each type: one in several is a twin (a
+        // library's jdbc and r2dbc `SizedIterable`s).
+        let mut type_files: HashMap<&str, HashSet<&Path>> = HashMap::new();
         for f in files.iter().copied() {
             for (ty, bases) in &f.context.types {
                 declared_types.insert(ty.as_str());
+                type_files
+                    .entry(ty.as_str())
+                    .or_default()
+                    .insert(f.file.as_path());
                 for base in bases {
                     exact_bases_of
                         .entry(ty.as_str())
@@ -4120,12 +4127,24 @@ impl ProjectCallGraph {
             // the ones beside a file it sees — a twin reached through a base
             // the file imports (`IntEntityClass`'s `EntityClass`) is the one
             // in that base's module.
-            let prefer_seen_twins = |found: &mut Vec<usize>| {
+            // (Only the receiver's own type or a base of it: twins below it
+            // — two `Rfc3339DateJsonAdapter`s implementing the `JsonAdapter`
+            // a value is declared as — are each a class the call may
+            // dispatch to. But for a type that is itself a twin, whose
+            // twins' subtypes are each its twin's: the jdbc and r2dbc
+            // `SizedIterable`s' implementations.)
+            let prefer_seen_twins = |found: &mut Vec<usize>, ty: &str| {
+                let ty = ty.rsplit(['.', ':']).next().unwrap_or(ty);
+                let twinned = type_files.get(ty).is_some_and(|files| files.len() > 1);
+                let above = |o: &str| {
+                    let o = o.rsplit(['.', ':']).next().unwrap_or(o);
+                    twinned || o == ty || descends(ty, o)
+                };
                 let visible = |c: usize| nodes[c].file == fc.file || site.sees(&nodes[c].file);
                 let twins: HashSet<&str> = {
                     let mut files_of: HashMap<&str, HashSet<&Path>> = HashMap::new();
                     for &c in found.iter() {
-                        if let Some(o) = owner[c] {
+                        if let Some(o) = owner[c].filter(|o| above(o)) {
                             files_of
                                 .entry(o)
                                 .or_default()
@@ -4152,12 +4171,31 @@ impl ProjectCallGraph {
                         .parent()
                         .is_some_and(|dir| seen_dirs.contains(dir))
                 };
+                // (One import further: the files those files import — a
+                // test's `EntityTestsData` is declared where `dao`'s
+                // `IntEntityClass` is imported.)
+                let further_dirs: std::cell::OnceCell<HashSet<&Path>> = std::cell::OnceCell::new();
+                let further = |c: usize| {
+                    let dirs = further_dirs.get_or_init(|| {
+                        site.imported
+                            .iter()
+                            .filter_map(|f| scope.get(f))
+                            .flatten()
+                            .filter_map(|f| f.parent())
+                            .collect()
+                    });
+                    nodes[c].file.parent().is_some_and(|dir| dirs.contains(dir))
+                };
                 for twin in twins {
                     let of_twin = |c: &usize| owner[*c] == Some(twin);
                     if found.iter().filter(|c| of_twin(c)).any(|&c| visible(c)) {
                         found.retain(|c| !of_twin(c) || visible(*c));
                     } else if found.iter().filter(|c| of_twin(c)).any(|&c| beside(c)) {
                         found.retain(|c| !of_twin(c) || beside(*c));
+                    } else if found.iter().filter(|c| of_twin(c)).any(|&c| further(c))
+                        && !found.iter().filter(|c| of_twin(c)).all(|&c| further(c))
+                    {
+                        found.retain(|c| !of_twin(c) || further(*c));
                     }
                 }
             };
@@ -4688,7 +4726,7 @@ impl ProjectCallGraph {
                             found = extended;
                         }
                     }
-                    prefer_seen_twins(&mut found);
+                    prefer_seen_twins(&mut found, ty);
                     let declared_here = declared_types
                         .contains(ty.rsplit(['.', ':']).next().unwrap_or(ty))
                         || project_types.contains(ty);
@@ -4821,7 +4859,7 @@ impl ProjectCallGraph {
                     && let Some(Receiver::Type(ty)) = &cs.receiver
                 {
                     narrowed = family(ty, callee_name, false);
-                    prefer_seen_twins(&mut narrowed);
+                    prefer_seen_twins(&mut narrowed, ty);
                     if narrowed.len() > MAX_CANDIDATES {
                         narrowed.clear();
                     }
@@ -5110,6 +5148,25 @@ impl ProjectCallGraph {
                         &fitting_extensions
                     }
                     _ => targets,
+                };
+                // A method of twin classes (a library's jdbc and r2dbc
+                // modules): the twin this file sees, or the one beside the
+                // files it sees.
+                let one_twin: Vec<usize>;
+                let targets: &[usize] = if let Some(Receiver::Type(ty) | Receiver::Declared(ty)) =
+                    &cs.receiver
+                    && targets.len() > 1
+                {
+                    let mut kept = targets.to_vec();
+                    prefer_seen_twins(&mut kept, ty);
+                    if kept.len() < targets.len() {
+                        one_twin = kept;
+                        &one_twin
+                    } else {
+                        targets
+                    }
+                } else {
+                    targets
                 };
                 // A file built for some platforms (cats-effect's `core/js/`)
                 // reaches no definition built only for others
@@ -9760,6 +9817,31 @@ fn receiver_of(
             .all(|part| part.starts_with(char::is_uppercase) && is_plain_name(part))
     {
         return Some(Receiver::Type(receiver.to_string()));
+    }
+    // A nested class named through its outer one, its package's path
+    // before them or not (`JsonReader.Options.of(…)`,
+    // `com.squareup.moshi.JsonReader.Options.of(…)`): the nested class. (A
+    // constant's capitals, `Color.RED`, are no class's; nor, in C#, is a
+    // property's capital, `DateTime.Now`.)
+    if matches!(lang, Lang::Java | Lang::Kotlin | Lang::Scala) && receiver.contains('.') {
+        // (A Kotlin companion's members are its class's: `Foo.Companion`
+        // is `Foo`.)
+        let parts: Vec<&str> = receiver
+            .split('.')
+            .skip_while(|p| p.starts_with(char::is_lowercase) && is_plain_name(p))
+            .filter(|p| *p != "Companion")
+            .collect();
+        let class = |p: &&str| {
+            is_plain_name(p)
+                && p.starts_with(char::is_uppercase)
+                && p.chars().any(char::is_lowercase)
+        };
+        if parts.len() >= 2
+            && parts.iter().all(class)
+            && let Some(last) = parts.last()
+        {
+            return Some(Receiver::Type(last.to_string()));
+        }
     }
     // A Scala method eta-expanded (`(this.apply _).tupled`, `f _`): a
     // function value, whose methods are the library's.
@@ -17645,6 +17727,45 @@ def main():
         assert_eq!(reached("nulls"), [5], "{:?}", edges(&g));
     }
 
+    /// A nested class named through its outer one (`JsonReader.Options.of`)
+    /// calls the nested class's function — its companion's — not the outer
+    /// class's of the name, nor another class's.
+    #[test]
+    fn a_nested_class_named_through_its_outer_calls_its_own() {
+        let reader = "package m\n\npublic abstract class JsonReader {\n  public class Options\n  private constructor(\n    internal val strings: Array<out String>,\n  ) {\n    public companion object {\n      @JvmStatic\n      public fun of(vararg strings: String): Options = Options(arrayOf())\n    }\n  }\n\n  public companion object {\n    @JvmStatic\n    public fun of(source: String): JsonReader = TODO()\n  }\n}\n";
+        let writer = "package m\n\npublic abstract class JsonWriter {\n  public companion object {\n    @JvmStatic\n    public fun of(sink: String): JsonWriter = TODO()\n  }\n}\n";
+        let test = "package m;\n\nclass ReaderTest {\n  void select() {\n    JsonReader.Options.of(\"x\");\n  }\n  void kt() {\n    JsonReader.of(\"y\");\n  }\n}\n";
+        let g = graph(&[
+            ("/p/src/main/java/m/JsonReader.kt", reader),
+            ("/p/src/main/java/m/JsonWriter.kt", writer),
+            ("/p/src/test/java/m/ReaderTest.java", test),
+        ]);
+        let reached = |name: &str| -> Vec<String> {
+            let at = (0..g.node_count())
+                .find(|&n| g.node(n).name == name)
+                .unwrap();
+            let mut out: Vec<String> = g
+                .callees_of(at)
+                .iter()
+                .map(|&c| format!("{}:{}", g.node(c).file.display(), g.node(c).line))
+                .collect();
+            out.sort();
+            out
+        };
+        assert_eq!(
+            reached("select"),
+            ["/p/src/main/java/m/JsonReader.kt:9"],
+            "{:?}",
+            edges(&g)
+        );
+        assert_eq!(
+            reached("kt"),
+            ["/p/src/main/java/m/JsonReader.kt:15"],
+            "{:?}",
+            edges(&g)
+        );
+    }
+
     /// A Ruby method's result is the class its last statement builds —
     /// assigned, memoized or returned, its arguments over lines too — and
     /// not one it calls a method on once built.
@@ -18002,8 +18123,16 @@ def main():
             (format!("{r2dbc}EntityClass.kt"), entity("org.x.dao.r2dbc")),
             (format!("{r2dbc}IntEntityClass.kt"), int("org.x.dao.r2dbc")),
             (
+                "/p/tests/src/test/kotlin/org/x/t/shared/Data.kt".to_string(),
+                "package org.x.t.shared\n\nimport org.x.dao.IntEntityClass\n\nobject Shared {\n    class Club {\n        companion object : IntEntityClass<Club>(1)\n    }\n}\n".to_string(),
+            ),
+            (
+                "/p/tests/src/test/kotlin/org/x/t/h2/MultiTest.kt".to_string(),
+                "package org.x.t.h2\n\nimport org.x.t.shared.Shared\n\nfun multi() {\n    Shared.Club.new { }\n}\n".to_string(),
+            ),
+            (
                 test.to_string(),
-                "package org.x.t\n\nimport org.x.dao.IntEntityClass\n\nclass Org {\n    companion object : IntEntityClass<Org>(1)\n}\n\nfun go() {\n    Org.new { }\n}\n".to_string(),
+                "package org.x.t\n\nimport org.x.dao.IntEntityClass\n\nclass Org {\n    companion object : IntEntityClass<Org>(1)\n}\n\nobject Data {\n    class Team {\n        companion object : IntEntityClass<Team>(1)\n    }\n}\n\nfun go() {\n    Org.new { }\n}\n\nfun nested() {\n    Data.Team.new { }\n}\n".to_string(),
             ),
         ];
         let files: Vec<(&str, &str)> = files_owned
@@ -18014,10 +18143,22 @@ def main():
             .iter()
             .map(|(f, s)| (PathBuf::from(f), s.to_string()))
             .collect();
-        let scope = HashMap::from([(
-            PathBuf::from(test),
-            HashSet::from([PathBuf::from(format!("{dao}IntEntityClass.kt"))]),
-        )]);
+        let scope = HashMap::from([
+            (
+                PathBuf::from(test),
+                HashSet::from([PathBuf::from(format!("{dao}IntEntityClass.kt"))]),
+            ),
+            (
+                PathBuf::from("/p/tests/src/test/kotlin/org/x/t/shared/Data.kt"),
+                HashSet::from([PathBuf::from(format!("{dao}IntEntityClass.kt"))]),
+            ),
+            (
+                PathBuf::from("/p/tests/src/test/kotlin/org/x/t/h2/MultiTest.kt"),
+                HashSet::from([PathBuf::from(
+                    "/p/tests/src/test/kotlin/org/x/t/shared/Data.kt",
+                )]),
+            ),
+        ]);
         let g = ProjectCallGraph::build(defs_of(&files), &sources, &scope);
         let go = format!("{test}:go");
         let e = edges(&g);
@@ -18026,6 +18167,60 @@ def main():
             !has(&g, &go, &format!("{r2dbc}EntityClass.kt:new")),
             "{e:?}"
         );
+        let multi = "/p/tests/src/test/kotlin/org/x/t/h2/MultiTest.kt:multi";
+        assert!(has(&g, multi, &format!("{dao}EntityClass.kt:new")), "{e:?}");
+        assert!(
+            !has(&g, multi, &format!("{r2dbc}EntityClass.kt:new")),
+            "{e:?}"
+        );
+        let nested = format!("{test}:nested");
+        assert!(
+            has(&g, &nested, &format!("{dao}EntityClass.kt:new")),
+            "{e:?}"
+        );
+        assert!(
+            !has(&g, &nested, &format!("{r2dbc}EntityClass.kt:new")),
+            "{e:?}"
+        );
+    }
+
+    /// Twin classes below a value's declared type (two
+    /// `Rfc3339DateJsonAdapter`s implementing `JsonAdapter`) are each one
+    /// the call may dispatch to: both stay, whichever the file sees.
+    #[test]
+    fn twins_below_the_declared_type_both_stay() {
+        let base = "/p/moshi/src/main/java/m/JsonAdapter.kt";
+        let a = "/p/adapters/src/main/java/m/Rfc3339DateJsonAdapter.kt";
+        let b = "/p/adapters/src/main/java/m/adapters/Rfc3339DateJsonAdapter.kt";
+        let test = "/p/moshi/src/test/java/m/AdapterTest.kt";
+        let files = [
+            (
+                base,
+                "package m\n\nabstract class JsonAdapter<T> {\n    abstract fun fromJson(s: String): T\n}\n",
+            ),
+            (
+                a,
+                "package m\n\nclass Rfc3339DateJsonAdapter : JsonAdapter<Int>() {\n    override fun fromJson(s: String): Int = 1\n}\n",
+            ),
+            (
+                b,
+                "package m.adapters\n\nimport m.JsonAdapter\n\nclass Rfc3339DateJsonAdapter : JsonAdapter<Int>() {\n    override fun fromJson(s: String): Int = 2\n}\n",
+            ),
+            (
+                test,
+                "package m\n\nfun go(adapter: JsonAdapter<Int>) {\n    adapter.fromJson(\"x\")\n}\n",
+            ),
+        ];
+        let sources: Vec<(PathBuf, String)> = files
+            .iter()
+            .map(|(f, s)| (PathBuf::from(f), s.to_string()))
+            .collect();
+        let scope = HashMap::from([(PathBuf::from(test), HashSet::from([PathBuf::from(base)]))]);
+        let g = ProjectCallGraph::build(defs_of(&files), &sources, &scope);
+        let go = format!("{test}:go");
+        let e = edges(&g);
+        assert!(has(&g, &go, &format!("{a}:fromJson")), "{e:?}");
+        assert!(has(&g, &go, &format!("{b}:fromJson")), "{e:?}");
     }
 
     /// A closure is where its own names are bound: sibling tests' `var
