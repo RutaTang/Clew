@@ -2171,6 +2171,7 @@ pub fn context_in(src: &str, lang: Lang, symbols: &[Located]) -> FileContext {
             Lang::Cpp | Lang::Kotlin | Lang::Scala | Lang::CSharp | Lang::Java => {
                 type_aliases(src, lang)
             }
+            Lang::Zig => zig_type_aliases(src),
             _ => Vec::new(),
         },
         extension_receivers,
@@ -3796,6 +3797,18 @@ impl ProjectCallGraph {
                 }
             })
             .collect();
+        // (A Zig function's result of a name for a type function's struct,
+        // `*StringKeyValue` for `KeyValue(…)`: that struct.)
+        let node_returns: Vec<Option<String>> = node_returns
+            .into_iter()
+            .zip(nodes.iter())
+            .map(|(ty, n)| match ty {
+                Some(t) if n.file.extension().is_some_and(|e| e == "zig") => {
+                    Some(unaliased(&alias_of, &t).to_string())
+                }
+                ty => ty,
+            })
+            .collect();
         let mut returned_types: HashMap<String, Option<String>> = HashMap::new();
         // Its overloads: the definitions of its name and owner (for a free
         // function, its file), whichever take kinds.
@@ -4220,13 +4233,7 @@ impl ProjectCallGraph {
             let Some(arguments) = cs.arguments.as_deref() else {
                 return true;
             };
-            // (A function's result says which overloads it fits, not which
-            // of those is nearest: ranked as a value of no type known.)
-            let ranking: String = arguments
-                .split(',')
-                .map(|a| if a.starts_with(RETURNED) { "?" } else { a })
-                .collect::<Vec<_>>()
-                .join(",");
+            let original = arguments;
             // A function's result (`→runtime`): of the type its definitions
             // agree it returns — or of none this can tell.
             let resolved: String;
@@ -4264,6 +4271,21 @@ impl ProjectCallGraph {
             } else {
                 arguments
             };
+            // (A function's result says which overloads it fits, and which
+            // is nearest only by its class exactly — `named_arg<T, Char>` is
+            // `emplace_arg(const named_arg<T, Char>&)`'s before a template's
+            // `const T&`; ranked by nothing nearer, `!`, as a template's
+            // `const S&` is no nearer than the `wformat_string` it converts
+            // to.)
+            let ranking: String = original
+                .split(',')
+                .zip(arguments.split(','))
+                .map(|(a, kind)| match a.starts_with(RETURNED) {
+                    true => format!("!{kind}"),
+                    false => a.to_string(),
+                })
+                .collect::<Vec<_>>()
+                .join(",");
             let named = arguments.contains('=');
             if node_parameters[callee].is_none() && !named {
                 return true;
@@ -4347,9 +4369,16 @@ impl ProjectCallGraph {
                                 .split(',')
                                 .zip(params.split(','))
                                 .filter(|(a, _)| {
+                                    let a = a.trim_start_matches('!');
                                     (a.starts_with('T') || a.starts_with('G')) && !a.contains('=')
                                 })
                                 .map(|(a, p)| {
+                                    // (A function's result: by its class
+                                    // exactly, or not at all.)
+                                    let (a, result) = match a.strip_prefix('!') {
+                                        Some(a) => (a, true),
+                                        None => (a, false),
+                                    };
                                     // (A C++ template's own type parameter
                                     // ranks as its name.)
                                     let a = match a.strip_prefix('G') {
@@ -4383,6 +4412,8 @@ impl ProjectCallGraph {
                                         });
                                     if same && !either {
                                         2
+                                    } else if result {
+                                        0
                                     } else if either
                                     || p.is_empty()
                                     // (A C++ template's parameter its
@@ -6921,7 +6952,35 @@ fn scala_class_fields(src: &str, symbols: &[Located]) -> Vec<(String, String, St
         let Some(Parameters::At(open, close)) = parameter_list(text, name, Lang::Scala) else {
             continue;
         };
-        for part in split_top_level(&text[open + 1..close]) {
+        // Every list of the constructor's, its implicit one too (`class
+        // NodeJSConsole[F[_]](stdout: js.Dynamic)(implicit F: Async[F])`).
+        let mut lists = vec![(open, close)];
+        let mut at = close + 1;
+        while let Some(next) = text[at..].trim_start().strip_prefix('(') {
+            let open = text.len() - next.len() - 1;
+            let mut depth = 0i32;
+            let Some(close) = text[open..].char_indices().find_map(|(i, c)| {
+                match c {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return Some(open + i);
+                        }
+                    }
+                    _ => {}
+                }
+                None
+            }) else {
+                break;
+            };
+            lists.push((open, close));
+            at = close + 1;
+        }
+        for part in lists
+            .iter()
+            .flat_map(|&(open, close)| split_top_level(&text[open + 1..close]))
+        {
             let mut part = part.trim();
             // Past annotations and modifiers (`@JsonProperty("x")`,
             // `private[os] val`, `override val`).
@@ -7057,6 +7116,32 @@ fn zig_chain(
     (!ty.starts_with(THROUGH)).then_some(ty)
 }
 
+/// A Zig file's names for a type function's struct (`pub const
+/// StringKeyValue = KeyValue([]const u8, strHash);`): the struct named for
+/// the function ([`FileContext::aliases`]).
+fn zig_type_aliases(src: &str) -> Vec<(String, String)> {
+    src.lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            let line = line.strip_prefix("pub ").unwrap_or(line);
+            let (name, value) = line.strip_prefix("const ")?.split_once('=')?;
+            let name = name.trim();
+            let value = value.trim().strip_suffix(';')?.trim_end();
+            let open = value.find('(')?;
+            let path = &value[..open];
+            let function = path.rsplit('.').next()?;
+            (is_plain_name(name)
+                && name.starts_with(char::is_uppercase)
+                && !path.starts_with('@')
+                && path.split('.').all(is_plain_name)
+                && function.starts_with(char::is_uppercase)
+                && function != name
+                && balanced_call(&value[open..]))
+            .then(|| (name.to_string(), function.to_string()))
+        })
+        .collect()
+}
+
 /// Whether `args` (from its `(`) is one parenthesized list, closing at its
 /// end: `(a, f(b))`, never `(a).b(c)`.
 fn balanced_call(args: &str) -> bool {
@@ -7092,6 +7177,51 @@ fn kotlin_imports(src: &str) -> Vec<String> {
             .then(|| path.replace('`', ""))
         })
         .collect()
+}
+
+/// The type a constructor parameter `name` of the Scala class around `node`
+/// is declared as, in any of its lists (`Async` for `(implicit F:
+/// Async[F])`).
+fn scala_constructor_parameter(node: Node, name: &str, src: &str) -> Option<String> {
+    let mut at = node.parent();
+    let class = loop {
+        let n = at?;
+        if n.kind() == "class_definition" {
+            break n;
+        }
+        at = n.parent();
+    };
+    let mut cursor = class.walk();
+    let body = class
+        .children(&mut cursor)
+        .find(|c| c.kind() == "template_body")
+        .map_or(class.end_byte(), |b| b.start_byte());
+    let header = src.get(class.start_byte()..body)?;
+    let word = |c: char| c == '_' || c.is_alphanumeric();
+    let mut from = 0;
+    while let Some(i) = header[from..].find(name) {
+        let begin = from + i;
+        from = begin + name.len();
+        let before = header[..begin].trim_end();
+        let after = header[begin + name.len()..].trim_start();
+        if header[..begin].ends_with(word) || header[begin + name.len()..].starts_with(word) {
+            continue;
+        }
+        let parameter = before.ends_with(['(', ','])
+            || ["implicit", "val", "var", "using"]
+                .iter()
+                .any(|w| before.ends_with(w) && !before[..before.len() - w.len()].ends_with(word));
+        let Some(ty) = after.strip_prefix(':').filter(|_| parameter) else {
+            continue;
+        };
+        let ty = ty.trim_start();
+        let ty: String = ty.chars().take_while(|&c| word(c) || c == '.').collect();
+        let ty = ty.rsplit('.').next().unwrap_or(&ty).to_string();
+        if type_like(&ty, Lang::Scala) {
+            return Some(ty);
+        }
+    }
+    None
 }
 
 /// The type the self-type of the Scala class, trait or object around
@@ -11538,6 +11668,16 @@ fn receiver_of(
         Said::Unknown => return None,
         Said::Nothing => {}
     }
+    // A Scala class's constructor parameter named as a type is (`class
+    // NodeJSConsole[F[_]](…)(implicit F: Async[F])`, cats' idiom): a value
+    // of the type class it is declared as, whichever instance it is.
+    if lang == Lang::Scala
+        && is_plain_name(receiver)
+        && receiver.starts_with(char::is_uppercase)
+        && let Some(ty) = scala_constructor_parameter(call, receiver, src)
+    {
+        return Some(Receiver::Declared(ty));
+    }
     // Not bound in the function: a field of its class, used bare
     // (`owners.findById(…)` in Java, Kotlin, C#, Dart, C++).
     // (C# names its properties and static fields in Pascal case, as its
@@ -13360,10 +13500,28 @@ fn returned_call(rhs: &str, lang: Lang) -> Option<String> {
             _ => {}
         }
     }
-    let expr = expr[..end]
-        .trim_end()
-        .trim_end_matches(['!', '?'])
-        .trim_end();
+    let mut expr = expr[..end].trim_end();
+    // Zig's `req.query() catch unreachable`, `map.get(k) orelse d`: the
+    // call's, past what handles its error or its null.
+    if lang == Lang::Zig {
+        let mut depth = 0i32;
+        let bytes = expr.as_bytes();
+        let cut = (0..bytes.len()).find(|&i| {
+            match bytes[i] {
+                b'(' | b'[' | b'{' => depth += 1,
+                b')' | b']' | b'}' => depth -= 1,
+                _ => {}
+            }
+            depth == 0
+                && (expr[i..].starts_with(" catch ")
+                    || expr[i..].starts_with(" catch|")
+                    || expr[i..].starts_with(" orelse "))
+        });
+        if let Some(at) = cut {
+            expr = expr[..at].trim_end();
+        }
+    }
+    let expr = expr.trim_end_matches(['!', '?']).trim_end();
     let inner = expr.strip_suffix(')')?;
     // Back to the parenthesis that opens the last call's arguments.
     let mut depth = 1i32;
@@ -20088,13 +20246,15 @@ def main():
 
     /// A C++ function's result narrows which overloads an argument fits,
     /// but ranks none above another: `format_to_n(…, runtime(L"{}"), …)`
-    /// keeps the `wformat_string` overload beside a template's `const S&`.
+    /// keeps the `wformat_string` overload beside a template's `const S&` —
+    /// but by its class exactly it does (`emplace_arg(fmt::arg("x", v))` is
+    /// the `named_arg` overload).
     /// Nor does a catch-all `(...)` say what it returns: fmt's `gmtime_r(...)
     /// -> null<>` stands in for the C library's, so `handle(gmtime_r(…))`
     /// is either `handle`.
     #[test]
     fn a_cpp_call_result_narrows_but_ranks_no_overload() {
-        let header = "namespace fmt {\nstruct null {};\nstruct tm {};\ntemplate <typename Char = char> struct runtime_format_string {\n  int str;\n};\ninline auto runtime(wstring_view s) -> runtime_format_string<wchar_t> { return {}; }\ntemplate <typename OutputIt, typename... T>\nauto format_to_n(OutputIt out, size_t n, wformat_string<T...> fmt, T&&... args) -> int {\n  return 0;\n}\ntemplate <typename OutputIt, typename S, typename... T>\nauto format_to_n(OutputIt out, size_t n, const S& fmt, T&&... args) -> int {\n  return 1;\n}\ninline auto gmtime_r(...) -> null { return null(); }\nstruct dispatcher {\n  tm tm_;\n  auto run() -> bool { return handle(gmtime_r(&tm_)); }\n  auto handle(tm* t) -> bool { return t != nullptr; }\n  auto handle(null) -> bool { return false; }\n};\n}\n";
+        let header = "namespace fmt {\nstruct null {};\nstruct tm {};\ntemplate <typename Char = char> struct runtime_format_string {\n  int str;\n};\ninline auto runtime(wstring_view s) -> runtime_format_string<wchar_t> { return {}; }\ntemplate <typename OutputIt, typename... T>\nauto format_to_n(OutputIt out, size_t n, wformat_string<T...> fmt, T&&... args) -> int {\n  return 0;\n}\ntemplate <typename OutputIt, typename S, typename... T>\nauto format_to_n(OutputIt out, size_t n, const S& fmt, T&&... args) -> int {\n  return 1;\n}\ninline auto gmtime_r(...) -> null { return null(); }\nstruct dispatcher {\n  tm tm_;\n  auto run() -> bool { return handle(gmtime_r(&tm_)); }\n  auto handle(tm* t) -> bool { return t != nullptr; }\n  auto handle(null) -> bool { return false; }\n};\ntemplate <typename T, typename Char> struct named_arg {\n  const Char* name;\n};\ntemplate <typename T> auto arg(const char* name, const T& value) -> named_arg<T, char> {\n  return {name};\n}\nclass dynamic_format_arg_store {\n public:\n  template <typename T> void emplace_arg(const T& value) {}\n  template <typename T> void emplace_arg(const named_arg<T, char>& value) {}\n  template <typename T> void push_back(const T& value) { emplace_arg(fmt::arg(\"x\", value)); }\n};\n}\n";
         let main = "#include \"fmt.h\"\nvoid wide() {\n  wchar_t buffer[4];\n  fmt::format_to_n(buffer, 3, fmt::runtime(L\"{}\"), 12345);\n}\n";
         let files = [("/p/fmt.h", header), ("/p/main.cc", main)];
         let sources: Vec<(PathBuf, String)> = files
@@ -20121,6 +20281,10 @@ def main():
         };
         assert_eq!(lines("wide", "format_to_n"), [9, 13], "{:?}", edges(&g));
         assert_eq!(lines("run", "handle"), [20, 21], "{:?}", edges(&g));
+        // (By its class exactly, a function's result does rank: fmt's
+        // `named_arg<T, Char>` is `emplace_arg(const named_arg<T, Char>&)`'s,
+        // never the template's `const T&`.)
+        assert_eq!(lines("push_back", "emplace_arg"), [32], "{:?}", edges(&g));
     }
 
     /// A Kotlin function of another package's top level, or an extension
@@ -20285,6 +20449,62 @@ def main():
                 )
             ),
             [(5, "spdlog::details::os".to_string())]
+        );
+    }
+
+    /// Audit 20's: a Scala class's implicit constructor parameter named as
+    /// a type (`(implicit F: Async[F])`, then `F.async_`) is a value of its
+    /// type class — whichever instance, an override (`IOAsync.async_`)
+    /// included; and a Zig value bound past what handles its error (`const
+    /// query = req.query() catch unreachable;`) is what the call returns.
+    #[test]
+    fn audit_20_shapes() {
+        let async_ = "package cats.effect.kernel\n\ntrait Async[F[_]] {\n  def async_[A](k: Int): F[A] = ???\n}\n";
+        let io = "package cats.effect\n\nobject IO {\n  private[this] final class IOAsync extends kernel.Async[IO] {\n    override def async_[A](k: Int): IO[A] = ???\n  }\n}\n";
+        let console = "package cats.effect.std\n\nobject Console {\n  private final class NodeJSConsole[F[_]](stdout: Int)(\n      implicit F: Async[F])\n      extends Console[F] {\n    private def write(s: String): F[Unit] =\n      F.async_[Unit](1)\n  }\n}\n";
+        let kv = "pub fn KeyValue(comptime V: type) type {\n    return struct {\n        const Self = @This();\n        pub fn get(self: *Self, key: []const u8) ?V {\n            _ = self;\n            _ = key;\n            return null;\n        }\n    };\n}\n\npub const StringKeyValue = KeyValue([]const u8);\n";
+        let request = "const StringKeyValue = @import(\"key_value.zig\").StringKeyValue;\n\npub const Request = struct {\n    qs: StringKeyValue,\n    pub fn query(self: *Request) !*StringKeyValue {\n        return &self.qs;\n    }\n    pub const Cookie = struct {\n        pub fn get(self: Cookie, name: []const u8) ?[]const u8 {\n            _ = self;\n            _ = name;\n            return null;\n        }\n    };\n};\n";
+        let handler = "const Request = @import(\"request.zig\").Request;\n\nfn handle(req: *Request) void {\n    const query = req.query() catch unreachable;\n    _ = query.get(\"name\");\n}\n";
+        let g = graph(&[
+            (
+                "/p/kernel/shared/src/main/scala/cats/effect/kernel/Async.scala",
+                async_,
+            ),
+            ("/p/core/shared/src/main/scala/cats/effect/IO.scala", io),
+            (
+                "/p/std/js/src/main/scala/cats/effect/std/Console.scala",
+                console,
+            ),
+            ("/p/src/key_value.zig", kv),
+            ("/p/src/request.zig", request),
+            ("/p/src/httpz.zig", handler),
+        ]);
+        let reached = |name: &str| -> Vec<String> {
+            let at = (0..g.node_count())
+                .find(|&n| g.node(n).name == name)
+                .unwrap();
+            let mut out: Vec<String> = g
+                .callees_of(at)
+                .iter()
+                .map(|&c| format!("{}:{}", g.node(c).file.display(), g.node(c).line))
+                .collect();
+            out.sort();
+            out
+        };
+        assert_eq!(
+            reached("write"),
+            [
+                "/p/core/shared/src/main/scala/cats/effect/IO.scala:5",
+                "/p/kernel/shared/src/main/scala/cats/effect/kernel/Async.scala:4"
+            ],
+            "{:?}",
+            edges(&g)
+        );
+        assert!(
+            reached("handle").contains(&"/p/src/key_value.zig:4".to_string())
+                && !reached("handle").contains(&"/p/src/request.zig:9".to_string()),
+            "{:?}",
+            edges(&g)
         );
     }
 

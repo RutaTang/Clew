@@ -210,7 +210,9 @@ use crate::incremental::Version;
 /// 63: Erlang record fields only from `-record`s (a function's clauses
 /// matching a record are one); Kotlin's imports; Zig type functions'
 /// structs; C++ functions' namespaces.
-pub(crate) const CACHE_VERSION: u32 = 63;
+/// 64: Scala classes' every constructor list; Zig type functions' aliases
+/// and calls handled by `catch`/`orelse`.
+pub(crate) const CACHE_VERSION: u32 = 64;
 
 /// A cached symbol (the index entry minus the paths, which are reconstructed
 /// from the project root + relative path on load).
