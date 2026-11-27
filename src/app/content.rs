@@ -401,18 +401,18 @@ impl App {
         operation::scroll_to(ui::outline_scroll_id(), AbsoluteOffset { x: 0.0, y })
     }
 
-    /// The `impl` blocks heading the items of `v`'s outline: a Rust file's,
-    /// read once per text of it.
+    /// The blocks heading the items of `v`'s outline — a Rust file's `impl`
+    /// blocks, a Haskell file's instances — read once per text of it.
     pub(crate) fn outline_groups(&self, v: &Viewer) -> Arc<Vec<clew_core::outline::ImplBlock>> {
-        if v.lang_key != Some("rust") {
-            return Arc::default();
-        }
+        let read: fn(&str) -> Vec<clew_core::outline::ImplBlock> = match v.lang_key {
+            Some("rust") => clew_core::outline::rust_impl_blocks,
+            Some("haskell") => clew_core::outline::haskell_instance_blocks,
+            _ => return Arc::default(),
+        };
         self.proj
             .view_memo
             .outline_groups
-            .get_or((v.abs.clone(), Arc::clone(&v.source)), || {
-                clew_core::outline::rust_impl_blocks(&v.source)
-            })
+            .get_or((v.abs.clone(), Arc::clone(&v.source)), || read(&v.source))
     }
 
     /// Where function `name` (its `ordinal`th of the name) starts in `v`'s
@@ -817,6 +817,7 @@ mod outline_rows_tests {
             line,
             end_line,
             label: "impl Cart".into(),
+            kind: "implementation",
         };
         let groups = [block(12, 12), block(13, 15), block(20, 20)];
         assert_eq!(

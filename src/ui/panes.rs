@@ -3883,12 +3883,12 @@ fn outline_group_row<'a>(
     let label = row![
         // An empty one stays, quieter: it says what the type implements,
         // with nothing under it to read.
-        text(short_kind("implementation"))
+        text(short_kind(group.kind))
             .size(ts::CAPTION)
             .color(if empty {
                 theme::dim()
             } else {
-                theme::kind_color("implementation")
+                theme::kind_color(group.kind)
             })
             .width(34),
         text(shown)
@@ -3913,7 +3913,11 @@ fn outline_group_row<'a>(
     ]
     .spacing(2)
     .align_y(iced::alignment::Vertical::Top);
-    let name = format!("impl {}", group.label);
+    let word = match group.kind {
+        "instance" => "instance",
+        _ => "impl",
+    };
+    let name = format!("{word} {}", group.label);
     let whole = name.clone();
     let row = button(face)
         .style(theme::list_row(false))

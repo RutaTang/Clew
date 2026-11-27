@@ -162,6 +162,10 @@ pub struct FileContext {
     /// parameters, by its definition line ([`parameter_kinds`]): what
     /// arguments it can take, to tell its overloads of one arity apart.
     pub parameters: Vec<(usize, String)>,
+    /// The names of each Kotlin, Scala and C# function's parameters, by its
+    /// definition line, comma-separated: which overloads a call naming an
+    /// argument (`withTables(excludeSettings = …)`) can be of.
+    pub parameter_names: Vec<(usize, String)>,
     /// A Go file's struct fields and their types (`("Context", "Request",
     /// "http.Request")`), pointers and embedding read through — a Zig
     /// file's, a C++ file's classes' (`("logger", "sinks_",
@@ -176,6 +180,21 @@ pub struct FileContext {
     /// name, and the kinds of the first parameter of each constructor of
     /// it a value converts by, comma-separated ([`cpp_conversions`]).
     pub converts: Vec<(String, String)>,
+    /// What each Haskell definition's signature says its result is, by its
+    /// line ([`haskell_signatures`]): a function's one type (`Pandoc`), a
+    /// class method's `=` where it returns its class's parameter.
+    pub signatures: Vec<(usize, String)>,
+    /// Definition lines of a Haskell file's instances' methods (`instance
+    /// HasMeta Pandoc where setMeta …`): no name's own definition, reached
+    /// by a class method's call at their type.
+    pub instance_methods: Vec<usize>,
+    /// A Ruby file's singleton methods' lines (`def self.build`, a `def`
+    /// in `class << self`): called on the class, not on its instances.
+    pub singletons: Vec<usize>,
+    /// The type aliases a file declares, each with the type it names
+    /// ([`type_aliases`]): `memory_buffer` for `basic_memory_buffer` — one
+    /// type, which a value of either passes for exactly.
+    pub aliases: Vec<(String, String)>,
 }
 
 /// The fewest arguments of a Scala definition with no parameter list (`def
@@ -1240,13 +1259,22 @@ fn go_element(ty: &str) -> Option<&str> {
 
 /// A Go file's struct fields with their types ([`FileContext::fields`]):
 /// `Request *http.Request` is `Request` of type `http.Request`, `a, b int`
-/// two, an embedded `*Engine` the field `Engine`; a field of a slice or map
-/// (`Errors []*Error`) of type `[]Error`, and a named slice or map type
-/// (`type errorMsgs []*Error`) the field `[]` of its element's type — what
-/// an index (`c.Errors[0]`) is. A field of a function or inline struct
-/// type is none this follows.
+/// two, an embedded `*Engine` the field `Engine` — and `*Engine`, marking
+/// it embedded, whose fields and methods the struct has; a field of a slice
+/// or map (`Errors []*Error`) of type `[]Error`, and a named slice or map
+/// type (`type errorMsgs []*Error`) the field `[]` of its element's type —
+/// what an index (`c.Errors[0]`) is. An interface's methods are its
+/// `Name()` fields, of the one type each returns (`Params() Params`), and
+/// the interfaces it embeds (`http.ResponseWriter`) its `*ResponseWriter`.
+/// A field of a function or inline struct type is none this follows.
 fn go_struct_fields(src: &str, symbols: &[Located]) -> Vec<(String, String, String)> {
     let mut out = Vec::new();
+    let simple = |t: &str| {
+        let t = t.trim_start_matches('*');
+        !t.is_empty()
+            && t.chars()
+                .all(|c| c == '_' || c == '.' || c.is_alphanumeric())
+    };
     for l in symbols
         .iter()
         .filter(|l| is_type_kind(&l.symbol.kind, Lang::Go))
@@ -1261,6 +1289,59 @@ fn go_struct_fields(src: &str, symbols: &[Located]) -> Vec<(String, String, Stri
             && let Some(element) = go_element(rest.lines().next().unwrap_or(""))
         {
             out.push((l.symbol.name.clone(), "[]".to_string(), element.to_string()));
+            continue;
+        }
+        // `type ResponseWriter interface { http.ResponseWriter; Params()
+        // Params }`.
+        if let Some(rest) = spec.strip_prefix(l.symbol.name.as_str())
+            && let Some(body) = rest.trim_start().strip_prefix("interface")
+            && let Some(body) = body.trim_start().strip_prefix('{')
+        {
+            for line in body.lines() {
+                let code = line.split("//").next().unwrap_or("").trim();
+                let code = code.trim_end_matches('}').trim();
+                if code.is_empty() {
+                    continue;
+                }
+                if !code.contains('(') {
+                    if simple(code) && !code.contains(char::is_whitespace) {
+                        let ty = code.trim_start_matches('*');
+                        let name = ty.rsplit('.').next().unwrap_or(ty);
+                        out.push((l.symbol.name.clone(), format!("*{name}"), ty.to_string()));
+                    }
+                    continue;
+                }
+                // `Name(params) Result`: one result of a type alone.
+                let Some((name, after)) = code.split_once('(') else {
+                    continue;
+                };
+                let name = name.trim();
+                let mut depth = 1i32;
+                let close = after.char_indices().find_map(|(i, c)| {
+                    match c {
+                        '(' => depth += 1,
+                        ')' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                return Some(i);
+                            }
+                        }
+                        _ => {}
+                    }
+                    None
+                });
+                let Some(close) = close else {
+                    continue;
+                };
+                let result = after[close + 1..].trim();
+                if is_plain_name(name) && simple(result) {
+                    out.push((
+                        l.symbol.name.clone(),
+                        format!("{name}()"),
+                        result.trim_start_matches('*').to_string(),
+                    ));
+                }
+            }
             continue;
         }
         let Some(open) = text
@@ -1297,17 +1378,12 @@ fn go_struct_fields(src: &str, symbols: &[Located]) -> Vec<(String, String, Stri
                 }
                 continue;
             }
-            let simple = |t: &str| {
-                let t = t.trim_start_matches('*');
-                !t.is_empty()
-                    && t.chars()
-                        .all(|c| c == '_' || c == '.' || c.is_alphanumeric())
-            };
             match tokens.as_slice() {
                 [embedded] if simple(embedded) => {
                     let ty = embedded.trim_start_matches('*');
                     let name = ty.rsplit('.').next().unwrap_or(ty);
                     out.push((l.symbol.name.clone(), name.to_string(), ty.to_string()));
+                    out.push((l.symbol.name.clone(), format!("*{name}"), ty.to_string()));
                 }
                 [names @ .., ty] if !names.is_empty() && simple(ty) => {
                     let ty = ty.trim_start_matches('*');
@@ -1895,6 +1971,15 @@ pub fn context_in(src: &str, lang: Lang, symbols: &[Located]) -> FileContext {
             .collect(),
         _ => Vec::new(),
     };
+    // (Where a call can name its arguments.)
+    let parameter_names = match lang {
+        Lang::Kotlin | Lang::Scala | Lang::CSharp => symbols
+            .iter()
+            .filter(|l| is_callable(&l.symbol.kind))
+            .filter_map(|l| Some((l.symbol.line, parameter_names_of(src, l, lang)?)))
+            .collect(),
+        _ => Vec::new(),
+    };
     let returns = match lang {
         Lang::Java
         | Lang::Kotlin
@@ -1950,6 +2035,7 @@ pub fn context_in(src: &str, lang: Lang, symbols: &[Located]) -> FileContext {
         arities,
         returns,
         parameters,
+        parameter_names,
         fields: match lang {
             Lang::Go => {
                 let mut fields = go_struct_fields(src, symbols);
@@ -1973,7 +2059,221 @@ pub fn context_in(src: &str, lang: Lang, symbols: &[Located]) -> FileContext {
             Lang::Cpp => cpp_conversions(src, symbols),
             _ => Vec::new(),
         },
+        signatures: match lang {
+            Lang::Haskell => haskell_signatures(src, symbols),
+            _ => Vec::new(),
+        },
+        instance_methods: match lang {
+            Lang::Haskell => haskell_instance_methods(src, symbols),
+            _ => Vec::new(),
+        },
+        singletons: match lang {
+            Lang::Ruby => ruby_singletons(src, symbols),
+            _ => Vec::new(),
+        },
+        aliases: match lang {
+            Lang::Cpp | Lang::Kotlin | Lang::Scala | Lang::CSharp | Lang::Java => {
+                type_aliases(src, lang)
+            }
+            _ => Vec::new(),
+        },
     }
+}
+
+/// The lines of a Ruby file's singleton methods ([`FileContext::
+/// singletons`]): a `def self.build` (or `def Job.build`), and each `def`
+/// inside a `class << self … end`.
+fn ruby_singletons(src: &str, symbols: &[Located]) -> Vec<usize> {
+    let lines: Vec<&str> = src.lines().collect();
+    let indent = |line: &str| line.len() - line.trim_start().len();
+    // Each `class << self` block's lines, to its `end` at its indentation.
+    let mut blocks: Vec<(usize, usize)> = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        let t = line.trim();
+        if t == "class << self"
+            || t.starts_with("class << self ")
+            || t.starts_with("class << self;")
+        {
+            let end = (i + 1..lines.len())
+                .find(|&j| {
+                    indent(lines[j]) == indent(line) && lines[j].trim_start().starts_with("end")
+                })
+                .unwrap_or(lines.len());
+            blocks.push((i + 1, end + 1));
+        }
+    }
+    symbols
+        .iter()
+        .filter(|l| l.symbol.kind == "method")
+        .filter(|l| {
+            let head = src.get(l.declaration.0..l.declaration.1).unwrap_or("");
+            let name = head
+                .trim_start()
+                .strip_prefix("def ")
+                .map(str::trim_start)
+                .and_then(|rest| rest.split(['(', ' ', '\n', ';', '=']).next())
+                .unwrap_or("");
+            let line = l.symbol.line;
+            (name.contains('.') && !name.starts_with('.'))
+                || blocks.iter().any(|&(a, b)| a < line && line < b)
+        })
+        .map(|l| l.symbol.line)
+        .collect()
+}
+
+/// What a Ruby method call is made on, where its receiver says: the class
+/// itself — a constant (`Job.kind`, `Shop::Job.kind`) or `self.class`
+/// (`(false, "class")`, `(true, "class")` for the caller's own) — or an
+/// instance the caller's own class builds (`new(*args).perform`,
+/// `self.new.perform`: `(true, "new")`).
+fn ruby_made_on(call: Node, callee: &str, src: &str) -> Option<(bool, &'static str)> {
+    let receiver = receiver_text(node_text(call, src), callee)?.trim();
+    if receiver == "self.class" {
+        return Some((true, "class"));
+    }
+    let constant = receiver
+        .trim_start_matches("::")
+        .split("::")
+        .all(|part| part.starts_with(char::is_uppercase) && is_plain_name(part));
+    if constant {
+        return Some((false, "class"));
+    }
+    let built = receiver.strip_prefix("self.").unwrap_or(receiver);
+    let built = built
+        .strip_prefix("new")
+        .filter(|rest| rest.is_empty() || (rest.starts_with('(') && rest.ends_with(')')));
+    built.map(|_| (true, "new"))
+}
+
+/// The definition lines of a Haskell file's instances' methods
+/// ([`FileContext::instance_methods`]): the methods inside an `instance …
+/// where` declaration's span.
+fn haskell_instance_methods(src: &str, symbols: &[Located]) -> Vec<usize> {
+    // Each instance declaration's byte span, read off its `instance` line
+    // and the indented lines after it.
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    let mut offset = 0;
+    let mut open: Option<usize> = None;
+    for line in src.split_inclusive('\n') {
+        let top = !line.starts_with([' ', '\t']) && !line.trim().is_empty();
+        if top {
+            if let Some(start) = open.take() {
+                spans.push((start, offset));
+            }
+            // (`instance` alone on its line, its head on the next.)
+            if line.split_whitespace().next() == Some("instance") {
+                open = Some(offset);
+            }
+        }
+        offset += line.len();
+    }
+    if let Some(start) = open {
+        spans.push((start, offset));
+    }
+    symbols
+        .iter()
+        .filter(|l| is_callable(&l.symbol.kind))
+        .filter(|l| {
+            spans
+                .iter()
+                .any(|&(a, b)| a <= l.declaration.0 && l.declaration.0 < b)
+        })
+        .map(|l| l.symbol.line)
+        .collect()
+}
+
+/// What each Haskell definition's signature says its result is
+/// ([`FileContext::signatures`]): a function's, the one type it returns
+/// whole (`setAuthors :: [Inlines] -> Pandoc -> Pandoc`: `Pandoc`; none for
+/// `Maybe (f a)` or a type variable); a single-parameter class's method
+/// that returns that parameter (`setMeta :: Text -> b -> a -> a` in `class
+/// HasMeta a`), `=`.
+fn haskell_signatures(src: &str, symbols: &[Located]) -> Vec<(usize, String)> {
+    let lines: Vec<&str> = src.lines().collect();
+    let indent = |line: &str| line.len() - line.trim_start().len();
+    // The result after a signature's context and its last arrow, whole.
+    let result = |text: &str| -> Option<String> {
+        let ty = text.split_once("::")?.1;
+        let ty = ty.rsplit("=>").next().unwrap_or(ty);
+        let ty = ty.rsplit("->").next().unwrap_or(ty).trim();
+        let ty = ty.trim_start_matches('(').trim_end_matches(')').trim();
+        let plain = !ty.is_empty()
+            && ty
+                .chars()
+                .all(|c| c == '_' || c == '.' || c == '\'' || c.is_alphanumeric());
+        plain.then(|| ty.rsplit('.').next().unwrap_or(ty).to_string())
+    };
+    // Each top-level class's line span and its one parameter, where one.
+    let mut classes: Vec<(usize, usize, Option<String>)> = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        let Some(head) = line.strip_prefix("class ") else {
+            continue;
+        };
+        let end = (i + 1..lines.len())
+            .find(|&j| !lines[j].trim().is_empty() && indent(lines[j]) == 0)
+            .unwrap_or(lines.len());
+        let head = head.split(" where").next().unwrap_or(head);
+        let head = head.rsplit("=>").next().unwrap_or(head);
+        let words: Vec<&str> = head.split_whitespace().collect();
+        let param = match words.as_slice() {
+            [_, var] if var.starts_with(char::is_lowercase) => Some(var.to_string()),
+            _ => None,
+        };
+        classes.push((i, end, param));
+    }
+    let mut out = Vec::new();
+    for l in symbols
+        .iter()
+        .filter(|l| matches!(l.symbol.kind.as_str(), "function" | "method"))
+    {
+        let name = l.symbol.name.as_str();
+        let at = l.symbol.line.saturating_sub(1);
+        // A class's method signature: its own line(s).
+        if let Some((_, _, param)) = classes.iter().find(|(a, b, _)| *a < at && at < *b) {
+            let text: String = lines[at..]
+                .iter()
+                .take_while(|line| {
+                    std::ptr::eq(*line, &lines[at]) || indent(line) > indent(lines[at])
+                })
+                .copied()
+                .collect::<Vec<_>>()
+                .join(" ");
+            if param.is_some() && result(&text).as_deref() == param.as_deref() {
+                out.push((l.symbol.line, "=".to_string()));
+            }
+            continue;
+        }
+        // A function's: the signature just above, past its continuation
+        // lines, blank lines and comments — no other declaration between.
+        let own = lines.get(at).map_or(0, |line| indent(line));
+        let mut start = None;
+        for i in (at.saturating_sub(40)..at).rev() {
+            let line = lines[i];
+            let t = line.trim_start();
+            if t.strip_prefix(name)
+                .is_some_and(|rest| rest.trim_start().starts_with("::"))
+            {
+                start = Some(i);
+                break;
+            }
+            if !(t.is_empty() || t.starts_with("--") || t.starts_with("{-") || indent(line) > own) {
+                break;
+            }
+        }
+        let Some(start) = start else {
+            continue;
+        };
+        let text: String = lines[start..at]
+            .iter()
+            .filter(|line| !line.trim_start().starts_with("--"))
+            .copied()
+            .collect::<Vec<_>>()
+            .join(" ");
+        if let Some(ty) = result(&text).filter(|t| t.starts_with(char::is_uppercase)) {
+            out.push((l.symbol.line, ty));
+        }
+    }
+    out
 }
 
 /// The package (namespace) a file declares: Go's `package cart`, Java's,
@@ -2442,9 +2742,37 @@ impl ProjectCallGraph {
         // it finds: scanning every same-named definition, or every
         // definition of the file, per call cost calls × definitions.
         let mut defs = Defs::default();
+        // A Haskell instance's method (`instance HasMeta Pandoc where
+        // setMeta …`): no name's own definition — a call of the class's
+        // method reaches it where the caller's signature names its type.
+        // Ruby's singleton methods ([`FileContext::singletons`]).
+        let ruby_singletons: HashSet<(&Path, usize)> = files
+            .iter()
+            .filter(|f| f.lang == Lang::Ruby)
+            .flat_map(|f| {
+                f.context
+                    .singletons
+                    .iter()
+                    .map(move |&line| (f.file.as_path(), line))
+            })
+            .collect();
+        let singleton_node: Vec<bool> = nodes
+            .iter()
+            .map(|n| ruby_singletons.contains(&(n.file.as_path(), n.line)))
+            .collect();
+        let haskell_instances: HashSet<(&Path, usize)> = files
+            .iter()
+            .filter(|f| f.lang == Lang::Haskell)
+            .flat_map(|f| {
+                f.context
+                    .instance_methods
+                    .iter()
+                    .map(move |&line| (f.file.as_path(), line))
+            })
+            .collect();
         for (i, n) in nodes.iter().enumerate() {
             // A test calls; no call lands on one.
-            if calls_only(&n.kind) {
+            if calls_only(&n.kind) || haskell_instances.contains(&(n.file.as_path(), n.line)) {
                 defs.callers
                     .entry((n.file.as_path(), n.name.as_str()))
                     .or_default()
@@ -2604,6 +2932,20 @@ impl ProjectCallGraph {
             .iter()
             .map(|n| parameters.get(&(n.file.as_path(), n.line)).copied())
             .collect();
+        // Their names ([`FileContext::parameter_names`]).
+        let parameter_names: HashMap<(&Path, usize), &str> = files
+            .iter()
+            .flat_map(|f| {
+                f.context
+                    .parameter_names
+                    .iter()
+                    .map(|(line, names)| ((f.file.as_path(), *line), names.as_str()))
+            })
+            .collect();
+        let node_parameter_names: Vec<Option<&str>> = nodes
+            .iter()
+            .map(|n| parameter_names.get(&(n.file.as_path(), n.line)).copied())
+            .collect();
         let family = |ty: &str, callee: &str, overrides: bool| -> Vec<usize> {
             let last = ty.rsplit(['.', ':']).next().unwrap_or(ty);
             let mut out: Vec<usize> = Vec::new();
@@ -2659,6 +3001,13 @@ impl ProjectCallGraph {
             out.retain(|&c| !facts[c].bodyless || !bodied.contains(&node_parameters[c]));
             out
         };
+        // Each type alias's type ([`FileContext::aliases`]), followed to the
+        // end: one type, whichever name a value is declared by.
+        let alias_of: HashMap<&str, &str> = files
+            .iter()
+            .flat_map(|f| f.context.aliases.iter())
+            .map(|(alias, ty)| (alias.as_str(), ty.as_str()))
+            .collect();
         // Whether the type `child` has `base` above it, as written: C#'s
         // `Ping : IRequest<Pong>` is an `IRequest`1`, no `IRequest`.
         let descends_exactly = |child: &str, base: &str| -> bool {
@@ -3031,6 +3380,16 @@ impl ProjectCallGraph {
             }
         }
         let declared = |ty: &str| declared_types.contains(ty);
+        // Each Haskell function's signature's type names, by its definition.
+        let signature_types: HashMap<(&Path, usize), &str> = files
+            .iter()
+            .flat_map(|f| {
+                f.context
+                    .signatures
+                    .iter()
+                    .map(move |(line, types)| ((f.file.as_path(), *line), types.as_str()))
+            })
+            .collect();
         // Whether a class of the project's has a base above it this does not
         // read — a library's, whose own bases are unknown: a value of it may
         // be of any library type. One whose bases are all the project's is
@@ -3099,6 +3458,29 @@ impl ProjectCallGraph {
                     .map(|(owner, field, ty)| ((owner.as_str(), field.as_str()), ty.as_str()))
             })
             .collect();
+        // The same, with the file each is declared in: two files' structs
+        // of one name (http.zig's `response.zig` and `testing.zig` each
+        // have a `Response` with `headers`) are two types.
+        let mut field_sources: HashMap<(&str, &str), Vec<(&Path, &str)>> = HashMap::new();
+        for f in files.iter() {
+            for (owner, field, ty) in f.context.fields.iter().filter(|(o, _, _)| !o.is_empty()) {
+                field_sources
+                    .entry((owner.as_str(), field.as_str()))
+                    .or_default()
+                    .push((f.file.as_path(), ty.as_str()));
+            }
+        }
+        // A field's type, as the struct of the name in the file `from` (where
+        // a value of it is used) declares it — or, declared elsewhere, as
+        // every such struct agrees.
+        let field_type = |ty: &str, field: &str, from: &Path| -> Option<&str> {
+            let all = field_sources.get(&(ty, field))?;
+            if let Some((_, own)) = all.iter().find(|(file, _)| *file == from) {
+                return Some(own);
+            }
+            let first = all.first()?.1;
+            all.iter().all(|(_, t)| *t == first).then_some(first)
+        };
         // Whether the class `ty`, or a class above it, has the field `name`.
         let has_field = |ty: &str, name: &str| -> bool {
             let mut level: Vec<&str> = vec![ty.rsplit(['.', ':']).next().unwrap_or(ty)];
@@ -3137,9 +3519,23 @@ impl ProjectCallGraph {
                 .split_once('.')
                 .is_some_and(|(pkg, _)| !go_packages.contains_key(pkg)),
         };
+        // The types each Go type embeds (`*Engine`, `*ResponseWriter`
+        // fields), by its name.
+        let mut embeds: HashMap<&str, Vec<&str>> = HashMap::new();
+        for f in files.iter().filter(|f| f.lang == Lang::Go) {
+            for (owner, field, ty) in &f.context.fields {
+                if field.starts_with('*') {
+                    embeds.entry(owner.as_str()).or_default().push(ty.as_str());
+                }
+            }
+        }
         // The type a chain of fields ends in ([`THROUGH`]): `None` where a
         // field is none this has read; the field of an embedded struct is
-        // its embedder's too.
+        // its embedder's too. A Go method's result (`Params()`): what the
+        // type's own method returns, where its definitions agree, or its
+        // interface's method declares — and, a method only a library's type
+        // it embeds has (`Header()` of `http.ResponseWriter`), a library's
+        // value.
         let through = |chain: &str, lang: Lang, from: &Path| -> Option<String> {
             let mut parts = chain.split('|');
             let root = parts.next()?;
@@ -3164,24 +3560,56 @@ impl ProjectCallGraph {
                 if library(&ty, lang) {
                     return Some(ty);
                 }
+                if let Some(method) = field.strip_suffix("()") {
+                    let found = family(&ty, method, false);
+                    if !found.is_empty() {
+                        let mut types = found.iter().map(|&i| node_returns[i].as_deref());
+                        let first = types.next().flatten()?;
+                        if !types.all(|t| t == Some(first)) {
+                            return None;
+                        }
+                        ty = first.to_string();
+                        continue;
+                    }
+                }
                 let mut level: Vec<String> = vec![ty.rsplit('.').next().unwrap_or(&ty).to_string()];
+                let mut seen: Vec<String> = Vec::new();
                 let mut next = None;
                 for _ in 0..4 {
                     if let Some(found) = level
                         .iter()
-                        .find_map(|t| field_types.get(&(t.as_str(), field)))
+                        .find_map(|t| field_type(t.as_str(), field, from))
                     {
                         next = Some(found.to_string());
                         break;
                     }
+                    seen.extend(level.iter().cloned());
                     level = level
                         .iter()
                         .flat_map(|t| bases_of.get(t.as_str()).into_iter().flatten())
-                        .map(|b| b.to_string())
+                        .chain(
+                            level
+                                .iter()
+                                .flat_map(|t| embeds.get(t.as_str()).into_iter().flatten())
+                                .filter(|e| !library(e, lang)),
+                        )
+                        .map(|b| b.rsplit('.').next().unwrap_or(b).to_string())
                         .collect();
                     if level.is_empty() {
                         break;
                     }
+                }
+                // (None of the project's types has it, but one embeds a
+                // library's: that type's field or method.)
+                if next.is_none() && lang == Lang::Go {
+                    next = seen.iter().find_map(|t| {
+                        embeds
+                            .get(t.as_str())
+                            .into_iter()
+                            .flatten()
+                            .find(|e| library(e, lang))
+                            .map(|e| e.to_string())
+                    });
                 }
                 ty = next?;
             }
@@ -3196,26 +3624,48 @@ impl ProjectCallGraph {
             .collect();
         // Whether what `cs` passes fits `callee`'s parameters — or, if not,
         // no overload of it fits either (the kinds then say nothing).
+        // Whether the arguments `arguments` passes fit the parameters of
+        // `i`: each against the parameter it is passed for — its place's,
+        // or a named one's (`excludeSettings = …`), of no overload without
+        // a parameter of the name.
+        let fits_kinds = |i: usize, arguments: &str, lang: Lang| -> bool {
+            let kinds: Vec<&str> = node_parameters[i]
+                .map(|params| params.split(',').collect())
+                .unwrap_or_default();
+            let names = node_parameter_names[i];
+            arguments.split(',').enumerate().all(|(at, a)| {
+                let (at, a) = match a.split_once('=') {
+                    Some((name, kind)) => match names {
+                        Some(names) => match names.split(',').position(|n| n == name) {
+                            Some(at) => (at, kind),
+                            None => return false,
+                        },
+                        None => return true,
+                    },
+                    None => (at, a),
+                };
+                kinds.get(at).is_none_or(|p| {
+                    passes(
+                        a,
+                        p,
+                        lang,
+                        &declared,
+                        &descends_exactly,
+                        &converts,
+                        &reaches_library,
+                    )
+                })
+            })
+        };
         let fits_arguments = |callee: usize, cs: &CallSite, lang: Lang| -> bool {
-            let (Some(arguments), Some(_)) = (cs.arguments.as_deref(), node_parameters[callee])
-            else {
+            let Some(arguments) = cs.arguments.as_deref() else {
                 return true;
             };
-            let fits = |i: usize| {
-                node_parameters[i].is_none_or(|params| {
-                    arguments.split(',').zip(params.split(',')).all(|(a, p)| {
-                        passes(
-                            a,
-                            p,
-                            lang,
-                            &declared,
-                            &descends_exactly,
-                            &converts,
-                            &reaches_library,
-                        )
-                    })
-                })
-            };
+            let named = arguments.contains('=');
+            if node_parameters[callee].is_none() && !named {
+                return true;
+            }
+            let fits = |i: usize| fits_kinds(i, arguments, lang);
             let file = owner[callee]
                 .is_none()
                 .then_some(nodes[callee].file.as_path());
@@ -3273,8 +3723,14 @@ impl ProjectCallGraph {
                         arguments
                             .split(',')
                             .zip(params.split(','))
-                            .filter(|(a, _)| a.starts_with('T'))
+                            .filter(|(a, _)| {
+                                (a.starts_with('T') || a.starts_with('G')) && !a.contains('=')
+                            })
                             .map(|(a, p)| {
+                                // (A C++ template's own type parameter
+                                // ranks as its name.)
+                                let a = a.replacen('G', "T", 1);
+                                let a = a.as_str();
                                 // (A nullable mark trimmed, a type parameter's
                                 // `?` is nothing.)
                                 let (a, p) = (a.trim_end_matches('?'), p.trim_end_matches('?'));
@@ -3289,10 +3745,24 @@ impl ProjectCallGraph {
                                     && !a.contains('`')
                                     && generic_named.contains(&a[1..])
                                     && without_arity(p) == a;
-                                if a == p && !either {
+                                // (Or the one an alias of the other:
+                                // `memory_buffer` is `basic_memory_buffer`;
+                                // two aliases of one template, of other
+                                // arguments — `string_view_t`,
+                                // `wstring_view_t` — two types.)
+                                let same = a == p
+                                    || p.strip_prefix('T').is_some_and(|class| {
+                                        unaliased(&alias_of, &a[1..]) == class
+                                            || unaliased(&alias_of, class) == &a[1..]
+                                    });
+                                if same && !either {
                                     2
                                 } else if either
                                     || p.is_empty()
+                                    // (A C++ template's parameter its
+                                    // `enable_if` constrains: a type
+                                    // parameter still.)
+                                    || p.starts_with('K')
                                     || p.strip_prefix('T')
                                         .is_some_and(|class| descends_exactly(&a[1..], class))
                                 {
@@ -3316,9 +3786,10 @@ impl ProjectCallGraph {
                     })
                 };
                 let prefers_exact = matches!(lang, Lang::Kotlin | Lang::CSharp)
-                    && !arguments
-                        .split(',')
-                        .any(|a| a.trim_end_matches('?').is_empty() || a == "?")
+                    && !arguments.split(',').any(|a| {
+                        let a = a.split_once('=').map_or(a, |(_, kind)| kind);
+                        a.trim_end_matches('?').is_empty() || a == "?"
+                    })
                     && defaulted(callee);
                 return !others().filter(|&i| fits(i)).any(|i| {
                     let other = rank(i);
@@ -3423,6 +3894,21 @@ impl ProjectCallGraph {
                                     || (fc.lang == Lang::Go && library(first, fc.lang))))
                             .then(|| first.to_string())
                         });
+                        // A Go interface's method (`w.Params()`): the type it
+                        // declares it returns — a library's value, where only
+                        // a library's type it embeds has the method
+                        // (`w.Header()` of `http.ResponseWriter`).
+                        let owned = match owned {
+                            None if fc.lang == Lang::Go => {
+                                match function.split_once('#').and_then(|(ty, method)| {
+                                    through(&format!("{ty}|{method}()"), fc.lang, &fc.file)
+                                }) {
+                                    Some(ty) if library(&ty, fc.lang) => continue,
+                                    ty => ty,
+                                }
+                            }
+                            owned => owned,
+                        };
                         let function = function.split_once('#').map_or(function, |(_, m)| m);
                         let returned = owned.or_else(|| {
                             (!function.is_empty())
@@ -3506,6 +3992,21 @@ impl ProjectCallGraph {
                 if is_library_call(fc.lang, cs) {
                     continue;
                 }
+                // A Kotlin infix call on a value of no type known (`Users.id
+                // eq 1`, a property this reads no type of): every overload of
+                // the name across the DSL's receivers (`eq` has a dozen) says
+                // nothing of which — none, rather than all.
+                if fc.lang == Lang::Kotlin
+                    && cs.qualifier.as_deref() == Some("infix")
+                    && (guessed
+                        || !matches!(
+                            &cs.receiver,
+                            Some(Receiver::Type(t) | Receiver::Declared(t))
+                                if !t.starts_with(RETURNED) && !t.starts_with(THROUGH)
+                        ))
+                {
+                    continue;
+                }
                 let Some(caller_name) = cs.caller.as_deref() else {
                     continue; // a top-level call has no caller function node
                 };
@@ -3519,14 +4020,48 @@ impl ProjectCallGraph {
                 ) else {
                     continue;
                 };
+                // Which kind of Ruby method the call wants: a singleton
+                // (`true`) or an instance's — and, of methods of the class,
+                // those of that kind where one is (with none, the others:
+                // `module_function`, `extend self`).
+                let ruby_wants: Option<bool> = (fc.lang == Lang::Ruby)
+                    .then(|| match (cs.qualifier.as_deref(), &cs.receiver) {
+                        (Some("class"), _) => Some(true),
+                        (Some("new"), _) => Some(false),
+                        (_, Some(Receiver::Type(_) | Receiver::Declared(_))) => Some(false),
+                        (_, Some(Receiver::Own)) => Some(singleton_node[caller]),
+                        (_, None) if !cs.method => Some(singleton_node[caller]),
+                        _ => None,
+                    })
+                    .flatten();
+                let ruby_kind = |found: &mut Vec<usize>| {
+                    if let Some(wants) = ruby_wants
+                        && found
+                            .iter()
+                            .any(|&c| owner[c].is_some() && singleton_node[c] == wants)
+                    {
+                        found.retain(|&c| owner[c].is_none() || singleton_node[c] == wants);
+                    }
+                };
                 // Ruby's `Cart.new(…)`: the class's own `new` where it (or a
                 // class above it) defines one (`Sinatra::Base.new`, a `def
                 // self.new`), else `Cart#initialize`, its own or the one it
                 // inherits — never another class's `new` (a Rails
                 // controller's action).
-                if fc.lang == Lang::Ruby && cs.method && cs.callee == "new" {
-                    if let Some(Receiver::Type(ty) | Receiver::Declared(ty)) = &cs.receiver {
-                        let own_new = family(ty, "new", false);
+                // (Bare, or on `self`: the caller's own class's.)
+                if fc.lang == Lang::Ruby
+                    && cs.callee == "new"
+                    && (cs.method || cs.receiver.is_none())
+                {
+                    let ty = match &cs.receiver {
+                        Some(Receiver::Type(ty) | Receiver::Declared(ty)) => Some(ty.as_str()),
+                        Some(Receiver::Own) | None => owner[caller],
+                    };
+                    if let Some(ty) = ty {
+                        let mut own_new = family(ty, "new", false);
+                        // (A class's `new` is its own singleton's; a
+                        // controller's `new` action is no constructor.)
+                        own_new.retain(|&c| singleton_node[c]);
                         let found = if own_new.is_empty() {
                             family(ty, "initialize", false)
                         } else {
@@ -3808,6 +4343,32 @@ impl ProjectCallGraph {
                     && matches!(cs.receiver, Some(Receiver::Own | Receiver::Declared(_)))
                 {
                     let mut found = family(ty, callee_name, true);
+                    ruby_kind(&mut found);
+                    // Kotlin: where no member of the name takes what the call
+                    // passes (`c eq 3`, `Column.eq(Column)` the member), an
+                    // extension of the name that does (the `infix fun <T>
+                    // ExpressionWithColumnType<T>.eq(t: T)` a builder
+                    // declares).
+                    if fc.lang == Lang::Kotlin
+                        && let Some(arguments) = cs.arguments.as_deref()
+                        && !found.is_empty()
+                        && found.iter().all(|&c| !fits_kinds(c, arguments, fc.lang))
+                    {
+                        let extended: Vec<usize> = defs
+                            .named
+                            .get(callee_name)
+                            .into_iter()
+                            .flat_map(|named| named.all.iter().copied())
+                            .filter(|&c| {
+                                extension_nodes.contains(&c)
+                                    && (nodes[c].file == fc.file || site.sees(&nodes[c].file))
+                                    && fits_kinds(c, arguments, fc.lang)
+                            })
+                            .collect();
+                        if !extended.is_empty() {
+                            found = extended;
+                        }
+                    }
                     // Classes of one name in several files (a library's
                     // twin modules: `exposed-dao`'s `Entity` and
                     // `exposed-dao-r2dbc`'s): of each name, the ones this
@@ -3989,6 +4550,7 @@ impl ProjectCallGraph {
                     && let Some(own) = owner[caller]
                 {
                     let mut found = family(own, callee_name, true);
+                    ruby_kind(&mut found);
                     if found.len() > MAX_CANDIDATES {
                         found.clear();
                     }
@@ -4193,6 +4755,44 @@ impl ProjectCallGraph {
                             }
                         })
                         .collect();
+                    &kept
+                } else if fc.lang == Lang::Haskell
+                    && !cs.method
+                    && cs.arity.is_some_and(|n| n >= 1)
+                    && targets.iter().any(|&c| owner[c].is_some())
+                {
+                    // A Haskell class's method: the instance at a type the
+                    // caller's signature names (`setAuthors :: … -> Pandoc`
+                    // calls `instance HasMeta Pandoc`'s `setMeta`); with none,
+                    // the class's own signature, at a type it cannot tell.
+                    let name = logical_name(&cs.callee, Some(fc.lang));
+                    let returns_its_type = targets.iter().any(|&c| {
+                        owner[c].is_some()
+                            && signature_types.get(&(nodes[c].file.as_path(), nodes[c].line))
+                                == Some(&"=")
+                    });
+                    kept = signature_types
+                        .get(&(nodes[caller].file.as_path(), nodes[caller].line))
+                        .filter(|_| returns_its_type)
+                        .into_iter()
+                        .flat_map(|ty| by_owner.get(&(*ty, name)).into_iter().flatten())
+                        .copied()
+                        .filter(|&c| {
+                            haskell_instances.contains(&(nodes[c].file.as_path(), nodes[c].line))
+                        })
+                        .collect();
+                    if kept.is_empty() { targets } else { &kept }
+                } else if ruby_wants.is_some() {
+                    // Ruby: a call on the class itself (`Job.kind`,
+                    // `self.class.kind`) is a singleton method's (`def
+                    // self.kind`); on an instance (`job.kind`,
+                    // `new(*args).perform`) an instance method's; on
+                    // `self` or bare, the kind the caller is.
+                    kept = {
+                        let mut found = targets.to_vec();
+                        ruby_kind(&mut found);
+                        found
+                    };
                     &kept
                 } else if !cs.method && cs.qualifier.is_none() && fc.lang == Lang::Java {
                     // A Java bare call: a method of its class or a base, of a
@@ -5430,7 +6030,10 @@ fn lang_spec(lang: Lang) -> Option<LangSpec> {
         Lang::Zig => spec(&["function_declaration"], &["call_expression"]),
         // `Foo(…)` constructs a class as a function is called; `a.b(…)`
         // is a `navigation_expression` callee.
-        Lang::Kotlin => spec(&["function_declaration"], &["call_expression"]),
+        Lang::Kotlin => spec(
+            &["function_declaration"],
+            &["call_expression", "infix_expression"],
+        ),
         // `new Foo(…)` is an `instance_expression`; `Foo(…)` (a case class,
         // an `apply`) a call.
         Lang::Scala => spec(
@@ -5518,7 +6121,99 @@ pub fn calls_in(tree: &Tree, source: &str, lang: Lang, symbols: &[Located]) -> V
     if lang == Lang::Zig {
         zig_aliases(&mut out, source);
     }
+    if lang == Lang::Haskell {
+        haskell_locals(&mut out, tree.root_node(), source);
+    }
     out
+}
+
+/// Haskell calls of a name the definition around them binds itself — a
+/// `where` or `let` function (`go`), a parameter or a pattern's variable
+/// (`f x` with `f` passed in, `\f -> f x`, `f <- ask`) — go: that binding
+/// is what they call, and it hides any function of the name elsewhere.
+fn haskell_locals(calls: &mut Vec<CallSite>, root: Node, src: &str) {
+    // Each top-level (or class or instance) equation's lines, and the names
+    // bound inside it.
+    let mut scopes: Vec<(usize, usize, HashSet<String>)> = Vec::new();
+    let mut stack = vec![root];
+    while let Some(n) = stack.pop() {
+        let top = matches!(n.kind(), "function" | "bind")
+            && n.parent().is_some_and(|p| {
+                matches!(
+                    p.kind(),
+                    "declarations" | "class_declarations" | "instance_declarations"
+                )
+            });
+        if !top {
+            stack.extend(n.named_children(&mut n.walk()));
+            continue;
+        }
+        let mut names = HashSet::new();
+        let mut inner = vec![n];
+        while let Some(x) = inner.pop() {
+            if x.id() != n.id()
+                && matches!(x.kind(), "function" | "bind")
+                && let Some(name) = x.child_by_field_name("name")
+            {
+                let name = match name.kind() {
+                    "prefix_id" => name.named_child(0).unwrap_or(name),
+                    _ => name,
+                };
+                names.insert(node_text(name, src).to_string());
+            }
+            // What a pattern binds: its variables (`go acc (x:xs)`,
+            // `p@(a :* b)`); an infix head's operands (`a <+> b = …`).
+            let mut cursor = x.walk();
+            for (i, child) in x.children(&mut cursor).enumerate() {
+                let field = x.field_name_for_child(i as u32);
+                let binds = matches!(field, Some("patterns" | "pattern" | "bind"))
+                    || (child.kind() == "infix"
+                        && x.kind() == "function"
+                        && x.child_by_field_name("name").is_none());
+                if binds {
+                    haskell_pattern_variables(child, src, &mut names);
+                }
+                if child.is_named() {
+                    inner.push(child);
+                }
+            }
+        }
+        if !names.is_empty() {
+            scopes.push((n.start_position().row + 1, n.end_position().row + 1, names));
+        }
+    }
+    if scopes.is_empty() {
+        return;
+    }
+    calls.retain(|c| {
+        c.method
+            || c.qualifier.is_some()
+            || !scopes
+                .iter()
+                .any(|(a, b, names)| *a <= c.line && c.line <= *b && names.contains(&c.callee))
+    });
+}
+
+/// The variables a Haskell pattern binds: `x` and `xs` of `(x:xs)`, `p` of
+/// `p@(…)`, a punned field's (`Foo{bar}`) — not a view pattern's function
+/// (`(skipSpace -> bs)` binds `bs`), a signature's type, a field's name
+/// given a pattern of its own, or a splice's.
+fn haskell_pattern_variables(pattern: Node, src: &str, names: &mut HashSet<String>) {
+    let mut stack = vec![pattern];
+    while let Some(v) = stack.pop() {
+        match v.kind() {
+            "variable" => {
+                names.insert(node_text(v, src).to_string());
+            }
+            "view_pattern" | "signature" => stack.extend(v.child_by_field_name("pattern")),
+            "field_pattern" => match v.child_by_field_name("pattern") {
+                Some(p) => stack.push(p),
+                None => stack.extend(v.child_by_field_name("field")),
+            },
+            "splice" | "quasiquote" | "qualified" | "operator" | "literal" => {}
+            _ => stack.extend(v.named_children(&mut v.walk())),
+        }
+    }
 }
 
 /// A Zig file's names for what it imports, read off its top-level `const`s:
@@ -5774,12 +6469,31 @@ fn walk(
                 _ if lang == Lang::Rust => rust_path_receiver(node, src),
                 _ => None,
             };
-            let qualifier = unbound.filter(|_| receiver.is_none()).or_else(|| {
-                // C++'s `Cart::make()`: the class (or namespace) it names.
-                (lang == Lang::Cpp && !method)
-                    .then(|| cpp_call_scope(node, src))
-                    .flatten()
-            });
+            // Ruby's call on the class itself, or on an instance its own
+            // class builds ([`ruby_made_on`]): `class` or `new`.
+            let made_on = (lang == Lang::Ruby && method)
+                .then(|| ruby_made_on(node, &callee, src))
+                .flatten();
+            let receiver = match made_on {
+                Some((true, _)) => Some(Receiver::Own),
+                _ => receiver,
+            };
+            let unbound = match made_on {
+                Some((_, on)) if receiver.is_some() => {
+                    // (Kept with the receiver, below.)
+                    Some(on.to_string())
+                }
+                _ => unbound,
+            };
+            let ruby_on = made_on.is_some() && receiver.is_some();
+            let qualifier = unbound
+                .filter(|_| receiver.is_none() || ruby_on)
+                .or_else(|| {
+                    // C++'s `Cart::make()`: the class (or namespace) it names.
+                    (lang == Lang::Cpp && !method)
+                        .then(|| cpp_call_scope(node, src))
+                        .flatten()
+                });
             // Zig's decl literal (`.of(a, b)`, its type the one expected):
             // `.`, a function every argument of which it passes.
             let qualifier = qualifier.or_else(|| {
@@ -5788,6 +6502,11 @@ fn walk(
                         f.kind() == "field_expression" && f.child_by_field_name("object").is_none()
                     }))
                 .then(|| ".".to_string())
+            });
+            // A Kotlin infix call (`c eq 3`): `infix`, linked only where
+            // what it is called on is of a type known (see the graph).
+            let qualifier = qualifier.or_else(|| {
+                (lang == Lang::Kotlin && kind == "infix_expression").then(|| "infix".to_string())
             });
             let arity = call_arity(node, parent, src, lang);
             let arguments = matches!(
@@ -5982,6 +6701,33 @@ fn call_arity(call: Node, parent: Option<Node>, src: &str, lang: Lang) -> Option
             .filter(|a| a.kind() != "comment")
             .count()
     };
+    // Haskell: the arguments the name is applied to, one `apply` each
+    // (`setMeta "author"` one; `toJSON` passed as an argument none).
+    if lang == Lang::Haskell {
+        let mut n = 0u8;
+        // (The call may be an `apply` itself, its function a chain of them.)
+        let mut head = call;
+        while head.kind() == "apply" {
+            n = n.saturating_add(1);
+            match head.child_by_field_name("function") {
+                Some(f) => head = f,
+                None => break,
+            }
+        }
+        let mut at = call;
+        while let Some(p) = at.parent() {
+            if p.kind() == "apply"
+                && p.child_by_field_name("function")
+                    .is_some_and(|f| f.id() == at.id())
+            {
+                n = n.saturating_add(1);
+                at = p;
+            } else {
+                break;
+            }
+        }
+        return Some(n);
+    }
     let n = match (lang, call.kind()) {
         // `fun f/2`, `fun m:f/2`.
         (Lang::Erlang, "internal_fun" | "external_fun") => {
@@ -6038,6 +6784,7 @@ fn call_arity(call: Node, parent: Option<Node>, src: &str, lang: Lang) -> Option
         }
         // Kotlin's `h(3) { … }`: its arguments and its trailing lambda — and
         // the lambda of a call around it (`h(3) { … }` is a call of the call).
+        (Lang::Kotlin, "infix_expression") => 1,
         (Lang::Kotlin, "call_expression") => {
             let mut cursor = call.walk();
             let children: Vec<Node> = call.named_children(&mut cursor).collect();
@@ -6107,8 +6854,9 @@ fn call_arity(call: Node, parent: Option<Node>, src: &str, lang: Lang) -> Option
 }
 
 /// The kinds of what `call` passes, argument by argument
-/// ([`CallSite::arguments`]): `None` where it passes none, names one
-/// (`f(x = 1)`, C#'s `f(x: 1)`), or the grammar gives no argument list.
+/// ([`CallSite::arguments`]), a named one's after its name (`x=i` for
+/// `f(x = 1)`, C#'s `f(x: 1)`): `None` where it passes none, or the
+/// grammar gives no argument list.
 fn argument_kinds(
     call: Node,
     scope: &Scope,
@@ -6119,6 +6867,12 @@ fn argument_kinds(
     let mut lists: Vec<Node> = Vec::new();
     let mut trailing_lambdas = 0;
     match lang {
+        // `a eq b`: its right operand.
+        Lang::Kotlin if call.kind() == "infix_expression" => {
+            let right = call.named_child(2)?;
+            let text = node_text(right, src).trim();
+            return Some(argument_kind(text, call, scope, src, lang, bindings));
+        }
         // `f(a)`, `f(a) { … }`: its value arguments, then its lambda.
         Lang::Kotlin => {
             let mut cursor = call.walk();
@@ -6159,6 +6913,15 @@ fn argument_kinds(
                 .find(|c| matches!(c.kind(), "argument_list" | "arguments"))
         })?),
     }
+    // A C++ template's own type parameters around the call (`Float` in
+    // `template <typename Float> void check()`): of any type the call is
+    // made with, whatever else bears the name — `GFloat`, which passes
+    // for any parameter and ranks as its name does.
+    let template_params = if lang == Lang::Cpp {
+        cpp_template_params_around(call, src)
+    } else {
+        Vec::new()
+    };
     let mut kinds: Vec<String> = Vec::new();
     for list in lists {
         let mut cursor = list.walk();
@@ -6167,22 +6930,65 @@ fn argument_kinds(
                 continue;
             }
             let text = node_text(argument, src).trim();
-            // A named argument: `x = 1` (Kotlin, Scala), `x: 1` (C#).
-            let named = matches!(lang, Lang::Kotlin | Lang::Scala | Lang::CSharp)
-                && text.find(['=', ':']).is_some_and(|at| {
-                    let (name, rest) = (text[..at].trim(), &text[at..]);
-                    is_plain_name(name) && !rest.starts_with("==") && !rest.starts_with("::")
-                });
-            if named {
-                return None;
+            // A named argument: `x = 1` (Kotlin, Scala), `x: 1` (C#) — the
+            // parameter of its name's, `x=i`.
+            let mark = match lang {
+                Lang::Kotlin | Lang::Scala => Some('='),
+                Lang::CSharp => Some(':'),
+                _ => None,
+            };
+            let named = mark.and_then(|mark| {
+                let at = text.find(mark)?;
+                let (name, rest) = (text[..at].trim(), &text[at + 1..]);
+                (is_plain_name(name) && !rest.starts_with(['=', '>', ':']))
+                    .then(|| (name, rest.trim()))
+            });
+            if let Some((name, value)) = named {
+                let kind = argument_kind(value, call, scope, src, lang, bindings);
+                kinds.push(format!("{name}={kind}"));
+                continue;
             }
-            kinds.push(argument_kind(text, call, scope, src, lang, bindings));
+            let kind = argument_kind(text, call, scope, src, lang, bindings);
+            // (`G`: of one, whatever it is called with.)
+            let kind = match kind.strip_prefix('T') {
+                Some(class) if template_params.iter().any(|t| t == class) => format!("G{class}"),
+                _ => kind,
+            };
+            kinds.push(kind);
         }
     }
     // (A Kotlin lambda, `L`: passed for a function's type, or a library's
     // interface it converts to.)
     kinds.extend(std::iter::repeat_n("L".to_string(), trailing_lambdas));
     (!kinds.is_empty()).then(|| kinds.join(","))
+}
+
+/// The type parameters of the C++ templates around `node`: `Float` for a
+/// call inside `template <typename Float> void check_isfinite() { … }`.
+fn cpp_template_params_around(node: Node, src: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut at = node.parent();
+    while let Some(n) = at {
+        if n.kind() == "template_declaration"
+            && let Some(list) = n.child_by_field_name("parameters")
+        {
+            let mut cursor = list.walk();
+            for parameter in list.named_children(&mut cursor) {
+                let name = match parameter.kind() {
+                    "type_parameter_declaration" | "variadic_type_parameter_declaration" => {
+                        parameter.named_child(0)
+                    }
+                    "optional_type_parameter_declaration" => parameter.child_by_field_name("name"),
+                    _ => None,
+                };
+                if let Some(name) = name.filter(|n| n.kind() == "type_identifier") {
+                    names.push(node_text(name, src).to_string());
+                }
+            }
+        }
+        at = n.parent();
+    }
+    names
 }
 
 /// What one argument is, as far as its text says: a literal's kind — `s` a
@@ -6474,6 +7280,13 @@ fn parameter_kinds(src: &str, l: &Located, lang: Lang) -> Option<String> {
             .split(['<', '[', '&', '*', ' ', '?'])
             .next()
             .unwrap_or("");
+        if lang == Lang::Cpp
+            && generic.iter().any(|g| g == base)
+            && let Some(kind) = cpp_constraint(&text[..open], &text[close + 1..], base)
+        {
+            kinds.push(kind);
+            continue;
+        }
         if generic.iter().any(|g| g == base) {
             // C#'s `TRequest request` with `where TRequest : IRequest`: an
             // `IRequest`, as its constraint says.
@@ -6486,6 +7299,38 @@ fn parameter_kinds(src: &str, l: &Located, lang: Lang) -> Option<String> {
         kinds.push(type_kind(ty, lang));
     }
     (!kinds.is_empty()).then(|| kinds.join(","))
+}
+
+/// The names of the parameters of the Kotlin, Scala or C# function `l`
+/// declares in `src` ([`FileContext::parameter_names`]), in order and
+/// comma-separated — a variadic one's and those after it too, which
+/// [`parameter_kinds`] leaves out. `None` where its list cannot be read,
+/// or it takes none.
+fn parameter_names_of(src: &str, l: &Located, lang: Lang) -> Option<String> {
+    let text = src.get(l.declaration.0..l.declaration.1)?;
+    let Parameters::At(open, close) = parameter_list(text, &l.symbol.name, lang)? else {
+        return None;
+    };
+    let inner = text[open + 1..close].trim();
+    let mut names: Vec<String> = Vec::new();
+    for (i, part) in split_top_level(inner).enumerate() {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        // C#'s extension `this`: passed by the dot, not in the list.
+        if i == 0 && lang == Lang::CSharp && part.starts_with("this ") {
+            continue;
+        }
+        // (Its annotations aside: Kotlin's `@Suppress("x") name: T`.)
+        let part = part
+            .split_whitespace()
+            .skip_while(|w| w.starts_with('@'))
+            .collect::<Vec<_>>()
+            .join(" ");
+        names.push(parameter_name(&part, lang)?);
+    }
+    (!names.is_empty()).then(|| names.join(","))
 }
 
 /// The class or interface C#'s `where` clause after a parameter list
@@ -6507,6 +7352,122 @@ fn csharp_constraint<'a>(rest: &'a str, name: &str) -> Option<&'a str> {
             )
             && c.starts_with(|ch: char| ch.is_alphabetic() || ch == '_')
     })
+}
+
+/// `ty` as the type it aliases ([`FileContext::aliases`]), followed to the
+/// end: one type, whichever name a value is declared by.
+fn unaliased<'x>(alias_of: &HashMap<&str, &'x str>, ty: &'x str) -> &'x str {
+    let mut ty = ty;
+    for _ in 0..4 {
+        match alias_of.get(ty) {
+            Some(&next) if next != ty => ty = next,
+            _ => break,
+        }
+    }
+    ty
+}
+
+/// The kind of value a C++ template's type parameter `name` is constrained
+/// to by its `enable_if` — fmt's `FMT_ENABLE_IF(…)`, `std::enable_if_t<…>`,
+/// or C++20's `requires` — in the declaration's text before its parameter
+/// list (`head`) or after it (`tail`): `Ki` for `std::is_integral<T>`, `K!i`
+/// for its negation, `Kf` a floating-point type, `Ka` an arithmetic one
+/// ([`cpp_satisfies`]). `None` where none says, or a disjunction does.
+fn cpp_constraint(head: &str, tail: &str, name: &str) -> Option<String> {
+    let tail = tail.split('{').next().unwrap_or(tail);
+    let mut conditions: Vec<&str> = Vec::new();
+    for text in [head, tail] {
+        for opener in ["FMT_ENABLE_IF(", "enable_if_t<", "enable_if<"] {
+            let mut rest = text;
+            while let Some(at) = rest.find(opener) {
+                let after = &rest[at + opener.len()..];
+                let mut depth = 1i32;
+                let mut end = after.len();
+                for (i, c) in after.char_indices() {
+                    match c {
+                        '(' | '<' | '[' => depth += 1,
+                        ')' | '>' | ']' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                end = i;
+                                break;
+                            }
+                        }
+                        ',' if depth == 1 && opener != "FMT_ENABLE_IF(" => {
+                            end = i;
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+                conditions.push(&after[..end]);
+                rest = &after[end..];
+            }
+        }
+        if let Some(at) = text.find("requires ") {
+            conditions.push(&text[at + "requires ".len()..]);
+        }
+    }
+    let of = |trait_: &str| [format!("{trait_}<{name}>"), format!("{trait_}_v<{name}>")];
+    for condition in conditions {
+        if condition.contains("||") {
+            continue;
+        }
+        for conjunct in condition.split("&&") {
+            let conjunct = conjunct.trim().trim_start_matches('(').trim();
+            let (negated, body) = match conjunct.strip_prefix('!') {
+                Some(body) => (true, body.trim_start_matches('(')),
+                None => (false, conjunct),
+            };
+            let kind = if of("is_integral").iter().any(|t| body.contains(t.as_str()))
+                || body.contains(&format!("std::integral<{name}>"))
+            {
+                "i"
+            } else if of("is_floating_point")
+                .iter()
+                .any(|t| body.contains(t.as_str()))
+                || body.contains(&format!("std::floating_point<{name}>"))
+            {
+                "f"
+            } else if of("is_arithmetic")
+                .iter()
+                .any(|t| body.contains(t.as_str()))
+            {
+                "a"
+            } else {
+                continue;
+            };
+            return Some(format!("K{}{kind}", if negated { "!" } else { "" }));
+        }
+    }
+    None
+}
+
+/// Whether an argument of kind `arg` satisfies the constraint `rule` of
+/// [`cpp_constraint`] (`i`, `!i`, `f`, …): an integer, a character or a
+/// boolean is integral, a floating-point number is not; either is
+/// arithmetic; a string, or a class the project declares (`declared`), is
+/// neither. A type of no class this knows (the caller's own template's
+/// `Float`) may be any.
+fn cpp_satisfies(arg: &str, rule: &str, declared: &dyn Fn(&str) -> bool) -> bool {
+    if arg
+        .strip_prefix('T')
+        .is_some_and(|class| !declared(class.trim_end_matches('?')))
+    {
+        return true;
+    }
+    let integral = matches!(arg, "i" | "0" | "c" | "b");
+    let floating = arg == "f";
+    let (negated, rule) = match rule.strip_prefix('!') {
+        Some(rule) => (true, rule),
+        None => (false, rule),
+    };
+    let holds = match rule {
+        "i" => integral,
+        "f" => floating,
+        _ => integral || floating,
+    };
+    holds != negated
 }
 
 /// The type parameters a declaration's text before its parameter list
@@ -6923,6 +7884,14 @@ fn passes(
     let a = arg.trim_end_matches('?');
     let primitive = |k: &str| matches!(k, "i" | "f" | "b" | "c");
     if lang == Lang::Cpp {
+        // A value of the calling template's own type parameter: any.
+        if a.starts_with('G') {
+            return true;
+        }
+        // A template's parameter its `enable_if` constrains.
+        if let Some(rule) = p.strip_prefix('K') {
+            return cpp_satisfies(a, rule, declared);
+        }
         // A literal for a class of the project's: only by a constructor it
         // converts by ([`FileContext::converts`]) — `"{}"` is no
         // `text_style`, whose one takes an `emphasis`.
@@ -7721,6 +8690,19 @@ fn callee_name(call: Node, parent: Option<Node>, src: &str, lang: Lang) -> Optio
         }
         // Kotlin: the callee is the call's first child — a name, or a
         // navigation whose last part is the method (`repo.findAll()`).
+        // An infix call (`Users.id eq 1`): the function between, called
+        // on its left.
+        // (Only on a name — a parameter or a local, whose type its binding
+        // says — or `this`: on a property (`Users.id eq 1`), of a type this
+        // reads none of, every overload of the name would be as likely.)
+        (Lang::Kotlin, "infix_expression") => {
+            let function = call.named_child(1).filter(|f| f.kind() == "identifier")?;
+            let left = call.named_child(0)?;
+            if !matches!(left.kind(), "identifier" | "this_expression") {
+                return None;
+            }
+            return Some((node_text(function, src).to_string(), true));
+        }
         (Lang::Kotlin, "call_expression") => {
             let callee = call.named_child(0)?;
             return match callee.kind() {
@@ -7971,7 +8953,12 @@ fn receiver_of(
     fields: &mut HashMap<(usize, String), Option<String>>,
     unbound: &mut Option<String>,
 ) -> Option<Receiver> {
-    let receiver = receiver_text(node_text(call, src), callee)?.trim();
+    // (A Kotlin infix call's is its left operand: `Users.id` of `Users.id
+    // eq 1`.)
+    let receiver = match call.kind() {
+        "infix_expression" if lang == Lang::Kotlin => node_text(call.named_child(0)?, src).trim(),
+        _ => receiver_text(node_text(call, src), callee)?.trim(),
+    };
     // A null assertion leaves the value's type as it was: Dart's, C#'s and
     // TypeScript's `cart!.add()`, Kotlin's `cart!!.add()`.
     let receiver = match lang {
@@ -8229,6 +9216,27 @@ fn receiver_of(
                     Lang::Go => Receiver::Type(marker),
                     _ => Receiver::Declared(marker),
                 });
+            }
+            // Go's method of a field (`c.Writer.Header()`): what it returns,
+            // through the chain of fields to it.
+            if lang == Lang::Go
+                && let Some((root, path)) = base.split_once('.')
+                && is_plain_name(root)
+                && path.split('.').all(is_plain_name)
+            {
+                let places = scope.places;
+                if let Said::Type(ty, _) = bindings
+                    .entry((scope.from, root.to_string()))
+                    .or_insert_with(|| Bindings::from(scope.from, places))
+                    .said_before(call.start_byte(), root, scope, src, lang)
+                    && !ty.starts_with(RETURNED)
+                    && !ty.starts_with(THROUGH)
+                {
+                    return Some(Receiver::Type(format!(
+                        "{THROUGH}{ty}|{}|{method}()",
+                        path.replace('.', "|")
+                    )));
+                }
             }
         }
         return None;
@@ -10096,6 +11104,41 @@ fn owner_from(node: Node, src: &str, lang: Lang) -> Option<String> {
                 if let Some(name) = n.child_by_field_name("name") {
                     return base_type_name(node_text(name, src));
                 }
+            }
+            // A Haskell instance's method (`instance HasMeta Pandoc where
+            // setMeta …`): the type's, the class's where it names none.
+            "instance" if lang == Lang::Haskell => {
+                let class = n.child_by_field_name("name").map(|c| node_text(c, src));
+                // (Of a class of several parameters, `Walkable Inline
+                // Block`, no one type's: its head, which a signature names
+                // none of.)
+                let single = n
+                    .child_by_field_name("patterns")
+                    .is_some_and(|p| p.named_child_count() == 1);
+                let ty = n
+                    .child_by_field_name("patterns")
+                    .filter(|_| single)
+                    .and_then(|p| {
+                        let mut stack = vec![p];
+                        while let Some(x) = stack.pop() {
+                            if x.kind() == "name" {
+                                return Some(node_text(x, src));
+                            }
+                            let mut cursor = x.walk();
+                            let children: Vec<Node> = x.named_children(&mut cursor).collect();
+                            stack.extend(children.into_iter().rev());
+                        }
+                        None
+                    });
+                // (One of no type's, `Walkable a (t b)`: its head's
+                // patterns, which name no type a signature does.)
+                return ty.map(str::to_string).or_else(|| {
+                    let patterns = n.child_by_field_name("patterns").map(|p| node_text(p, src));
+                    match (class, patterns) {
+                        (Some(class), Some(patterns)) => Some(format!("{class} {patterns}")),
+                        (class, _) => class.map(str::to_string),
+                    }
+                });
             }
             // Dart's `mixin M on B { … }` names itself in an unnamed child.
             "mixin_declaration" if lang == Lang::Dart => {
@@ -15229,6 +16272,131 @@ def main():
         assert_eq!(drop, [4, 5], "{:?}", edges(&g));
     }
 
+    /// A Go interface's method returns what it declares (`Params()
+    /// Params`), through a chain of fields too (`c.Writer.Params().Get`);
+    /// a method only a library's interface it embeds has (`Header()` of
+    /// `http.ResponseWriter`) returns a library's value, whose methods are
+    /// none of the project's.
+    #[test]
+    fn a_go_interface_method_returns_what_it_declares() {
+        let go = "package gin\n\nimport \"net/http\"\n\ntype ResponseWriter interface {\n\thttp.ResponseWriter\n\tStatus() int\n\tParams() Params\n}\n\ntype Context struct {\n\tWriter ResponseWriter\n}\n\ntype Params []string\n\nfunc (ps Params) Get(name string) (string, bool) { return \"\", false }\n\nfunc (c *Context) Get(key string) (any, bool) { return nil, false }\n\nfunc header(c *Context) {\n\tc.Writer.Header().Get(\"x\")\n}\n\nfunc params(c *Context) {\n\tc.Writer.Params().Get(\"a\")\n}\n\nfunc direct(w ResponseWriter) {\n\tw.Header().Get(\"x\")\n\tw.Params().Get(\"a\")\n}\n";
+        let g = graph(&[("/p/gin/context.go", go)]);
+        let reached = |name: &str| -> Vec<usize> {
+            let at = (0..g.node_count())
+                .find(|&n| g.node(n).name == name)
+                .unwrap();
+            g.callees_of(at).iter().map(|&c| g.node(c).line).collect()
+        };
+        assert_eq!(reached("header"), [] as [usize; 0], "{:?}", edges(&g));
+        assert_eq!(reached("params"), [17], "{:?}", edges(&g));
+        assert_eq!(reached("direct"), [17], "{:?}", edges(&g));
+    }
+
+    /// A Ruby call on the class itself — a constant (`Job.kind`) or
+    /// `self.class` — is a singleton method's (`def self.kind`, a `def` in
+    /// `class << self`); one on an instance (`x.perform` after `x =
+    /// Job.new`, `new(*args).perform` in a singleton method) an instance
+    /// method's; one on `self`, or bare, of the caller's own kind. A bare
+    /// `new` builds the caller's own class.
+    #[test]
+    fn a_ruby_call_on_the_class_is_its_singleton_methods() {
+        let rb = "class Job\n  def self.build\n    Job.kind\n    x = Job.new\n    x.perform\n    self.kind\n    kind\n  end\n\n  class << self\n    def made\n      kind\n    end\n  end\n\n  def self.perform(*args)\n    new(*args).perform\n  end\n\n  def initialize(*args)\n  end\n\n  def perform\n  end\n\n  def kind\n    self.class.kind\n  end\n\n  def self.kind\n    \"job\"\n  end\nend\n\nclass Other\n  def perform\n  end\n\n  def kind\n  end\nend\n\nmodule Util\n  module_function\n\n  def helper\n  end\nend\n\nclass Caller\n  def call\n    Util.helper\n  end\nend\n";
+        let g = graph(&[("/p/app/job.rb", rb)]);
+        let reached = |line: usize| -> Vec<usize> {
+            let at = (0..g.node_count())
+                .find(|&n| g.node(n).line == line)
+                .unwrap();
+            let mut lines: Vec<usize> = g.callees_of(at).iter().map(|&c| g.node(c).line).collect();
+            lines.sort_unstable();
+            lines
+        };
+        assert_eq!(reached(2), [20, 23, 30], "build: {:?}", edges(&g));
+        assert_eq!(reached(11), [30], "made: {:?}", edges(&g));
+        assert_eq!(reached(16), [20, 23], "self.perform: {:?}", edges(&g));
+        assert_eq!(reached(26), [30], "kind: {:?}", edges(&g));
+        // (A module's `module_function`: an instance method called on it.)
+        assert_eq!(reached(51), [46], "Util.helper: {:?}", edges(&g));
+    }
+
+    /// A C++ value of a type alias (`memory_buffer`) passes for the type it
+    /// names exactly (`basic_memory_buffer<T, SIZE>`), before a template's
+    /// any type; and a template parameter its `enable_if` constrains takes
+    /// only what satisfies it — `42` is `to_string(T)` with `T` integral,
+    /// never the one for types not integral.
+    #[test]
+    fn a_cpp_alias_and_an_enable_if_choose_the_overload() {
+        let cpp = "#include <string>\nnamespace fmt {\ntemplate <typename T, size_t SIZE = 500> class basic_memory_buffer {};\nusing memory_buffer = basic_memory_buffer<char>;\ntemplate <typename T, FMT_ENABLE_IF(std::is_integral<T>::value)>\nauto to_string(T value) -> std::string { return {}; }\ntemplate <typename T, FMT_ENABLE_IF(!std::is_integral<T>::value && detail::has_format_as<T>::value)>\nauto to_string(const T& value) -> std::string { return {}; }\ntemplate <typename T, size_t SIZE>\nauto to_string(const basic_memory_buffer<T, SIZE>& buf) -> std::basic_string<T> { return {}; }\ntemplate <typename T, typename = std::enable_if_t<std::is_floating_point<T>::value>>\nauto round(T value) -> T { return value; }\nauto round(const std::string& s) -> std::string { return s; }\nvoid use() { memory_buffer out; to_string(out); }\nvoid use_int() { to_string(42); }\nvoid use_float() { round(1.5); }\ntemplate <typename Float> void use_own() { round(Float(0.5)); }\nclass Float {};\n}\n";
+        let g = graph(&[("/p/fmt/format.h", cpp)]);
+        let reached = |name: &str| -> Vec<usize> {
+            let at = (0..g.node_count())
+                .find(|&n| g.node(n).name == name)
+                .unwrap();
+            g.callees_of(at).iter().map(|&c| g.node(c).line).collect()
+        };
+        assert_eq!(reached("use"), [10], "{:?}", edges(&g));
+        assert_eq!(reached("use_int"), [6], "{:?}", edges(&g));
+        assert_eq!(reached("use_float"), [12], "{:?}", edges(&g));
+        // (Its own template's `Float`, whatever else bears the name: of any
+        // type, the template's overload before one of a class.)
+        let mut own = reached("use_own");
+        own.sort_unstable();
+        assert_eq!(own, [12], "{:?}", edges(&g));
+    }
+
+    /// A Kotlin infix call (`c eq 3`) is a call of the function between,
+    /// on its left with its right: the member of the name where one takes
+    /// it, else an extension of the name that does (Exposed's `infix fun <T>
+    /// ExpressionWithColumnType<T>.eq(t: T)` in `ISqlExpressionBuilder`).
+    #[test]
+    fn a_kotlin_infix_call_is_its_function() {
+        let core = "package org.x\ninterface ISqlExpressionBuilder {\n    infix fun <T> ExpressionWithColumnType<T>.eq(t: T): Op<Boolean> = EqOp(this, t)\n}\nobject SqlExpressionBuilder : ISqlExpressionBuilder\nopen class ExpressionWithColumnType<T>\nclass Column<T> : ExpressionWithColumnType<T>() {\n    infix fun eq(other: Column<T>): Boolean = true\n}\n";
+        let user = "package org.x\nfun literal(c: Column<Int>) {\n    c eq 3\n}\nfun column(c: Column<Int>, d: Column<Int>) {\n    c eq d\n}\n";
+        let g = graph(&[
+            ("/p/core/src/main/kotlin/org/x/Op.kt", core),
+            ("/p/app/src/main/kotlin/org/x/User.kt", user),
+        ]);
+        let reached = |name: &str| -> Vec<usize> {
+            let at = (0..g.node_count())
+                .find(|&n| g.node(n).name == name)
+                .unwrap();
+            g.callees_of(at).iter().map(|&c| g.node(c).line).collect()
+        };
+        assert_eq!(reached("literal"), [3], "{:?}", edges(&g));
+        assert_eq!(reached("column"), [8], "{:?}", edges(&g));
+    }
+
+    /// A named argument (`excludeSettings = …`, C#'s `flag: true`) is
+    /// passed for the parameter of its name: only overloads that have one
+    /// take the call, and its value must fit it. A Scala lambda (`x => …`)
+    /// names nothing.
+    #[test]
+    fn a_named_argument_takes_the_overloads_with_its_name() {
+        let kt = "open class Base {\n  fun withTables(excludeSettings: Collection<Int>, vararg tables: Table, statement: () -> Unit) {}\n  fun withTables(vararg tables: Table, statement: () -> Unit) {}\n}\nobject Users : Table()\nclass T : Base() {\n  fun excluding() = withTables(excludeSettings = listOf(1), Users) { }\n  fun last() = withTables(Users, statement = { })\n}\n";
+        let cs = "class S {\n  void Put(string key, int count) {}\n  void Put(string name, bool flag) {}\n  void Counted() { Put(key: \"a\", count: 1); }\n  void Flagged() { Put(name: \"b\", flag: true); }\n  void Wrong() { Put(name: \"b\", flag: 1); }\n}\n";
+        let scala = "object M {\n  def f(a: Int, b: String): Int = 0\n  def f(x: Int, y: Int): Int = 1\n  def g(h: Int => Int): Int = 2\n  def g(h: Int => Int, n: Int): Int = 3\n  def named() = f(x = 1, y = 2)\n  def lambda() = g(x => x + 1)\n}\n";
+        let g = graph(&[
+            ("/p/src/T.kt", kt),
+            ("/p/src/S.cs", cs),
+            ("/p/src/M.scala", scala),
+        ]);
+        let reached = |name: &str| -> Vec<usize> {
+            let at = (0..g.node_count())
+                .find(|&n| g.node(n).name == name)
+                .unwrap();
+            let mut lines: Vec<usize> = g.callees_of(at).iter().map(|&c| g.node(c).line).collect();
+            lines.sort_unstable();
+            lines
+        };
+        assert_eq!(reached("excluding"), [2], "{:?}", edges(&g));
+        assert_eq!(reached("last"), [2, 3], "{:?}", edges(&g));
+        assert_eq!(reached("Counted"), [2], "{:?}", edges(&g));
+        assert_eq!(reached("Flagged"), [3], "{:?}", edges(&g));
+        // (Fitting none by its kinds, it says nothing of which.)
+        assert_eq!(reached("Wrong"), [2, 3], "{:?}", edges(&g));
+        assert_eq!(reached("named"), [3], "{:?}", edges(&g));
+        assert_eq!(reached("lambda"), [4], "{:?}", edges(&g));
+    }
+
     /// A base named by its path (`extends kernel.Async[IO]`) is the class
     /// `Async`: a trait's call of its own abstract method reaches the
     /// override there, which it missed under the name `kernel.Async`.
@@ -15370,6 +16538,65 @@ def main():
             })
             .collect();
         assert_eq!(reached, ["Named.java"], "{:?}", edges(&g));
+    }
+
+    /// A Haskell class method applied where the caller's signature's result
+    /// is a type with an instance (`setAuthors :: [Inlines] -> Pandoc ->
+    /// Pandoc`) is that instance's — the code that runs; at a type variable
+    /// (`setAny :: HasMeta a => a -> a`), or passed rather than applied, the
+    /// class's own signature.
+    #[test]
+    fn a_haskell_class_method_is_its_instance_at_the_type_named() {
+        let src = "module Text.Pandoc.Builder where\nclass HasMeta a where\n  setMeta :: Text -> b -> a -> a\ninstance HasMeta Pandoc where\n  setMeta k v (Pandoc m bs) = Pandoc m bs\ninstance HasMeta Meta where\n  setMeta k v m = m\nsetAuthors :: [Inlines] -> Pandoc -> Pandoc\nsetAuthors = setMeta \"author\"\nsetAny :: HasMeta a => a -> a\nsetAny = setMeta \"x\" 1\nsetAll :: [Text] -> Pandoc\nsetAll = foldr setMeta mempty\n";
+        let g = graph(&[("/p/src/Text/Pandoc/Builder.hs", src)]);
+        let reached = |name: &str| -> Vec<usize> {
+            let at = (0..g.node_count())
+                .find(|&n| g.node(n).name == name)
+                .unwrap();
+            g.callees_of(at).iter().map(|&c| g.node(c).line).collect()
+        };
+        assert_eq!(reached("setAuthors"), [5], "{:?}", edges(&g));
+        assert_eq!(reached("setAny"), [3], "{:?}", edges(&g));
+        // (Passed, not applied — `foldr setMeta`: at whatever type `foldr`
+        // gives it, the class's.)
+        assert_eq!(reached("setAll"), [3], "{:?}", edges(&g));
+        // An instance whose head follows `instance` on lines of its own is
+        // one too: its method's own call, at another type, is the class's.
+        let multi = "module M where\nclass FromUntaggedValue arity f where\n    parseUntaggedValue :: TypeName :* Options :* FromArgs arity a\n                       -> Value\n                       -> Parser (f a)\n\ninstance\n    ( FromUntaggedValue    arity a\n    , FromUntaggedValue    arity b\n    ) => FromUntaggedValue arity (a :+: b)\n  where\n    parseUntaggedValue p value =\n        L1 <$> parseUntaggedValue p value <|>\n        R1 <$> parseUntaggedValue p value\n    {-# INLINE parseUntaggedValue #-}\n\ninstance {-# OVERLAPPABLE #-}\n    ( ConsFromJSON arity a\n    ) => FromUntaggedValue arity (C1 c a)\n  where\n    parseUntaggedValue p = consParseJSON p\n\nparseNonAllNullarySum :: forall f c arity.\n                         ( FromUntaggedValue arity f\n                         ) => TypeName :* Options :* FromArgs arity c\n                           -> Value -> Parser (f c)\nparseNonAllNullarySum p@(tname :* opts :* _) =\n    case sumEncoding opts of\n      UntaggedValue -> parseUntaggedValue p\n";
+        let g = graph(&[("/p/src/M.hs", multi)]);
+        let by_line = |line: usize| -> Vec<usize> {
+            let at = (0..g.node_count())
+                .find(|&n| g.node(n).line == line)
+                .unwrap();
+            g.callees_of(at).iter().map(|&c| g.node(c).line).collect()
+        };
+        assert_eq!(by_line(12), [3], "{:?}", edges(&g));
+        assert_eq!(by_line(27), [3], "{:?}", edges(&g));
+    }
+
+    /// A Haskell function a definition binds itself — in its `where`, a
+    /// `let`, as a parameter or a pattern's variable — is what a call of the
+    /// name inside it calls, not a function of the name elsewhere.
+    #[test]
+    fn a_haskell_local_binding_hides_a_function_of_its_name() {
+        let a = "module A where\nclass C f where\n    parseU :: Int -> Parser (f a)\nrun :: Int -> Int\nrun x = x\n";
+        let b = "module B where\nimport A\nconsFrom :: Int -> Q Exp\nconsFrom jc = do\n  pure (lamExpr 1)\n  where\n    lamExpr value = case value of\n      _ -> parseU value 2\n\n    parseU v w =\n        v\nwith :: (Int -> Int) -> Int\nwith run = run 1\nlambda :: Int\nlambda = (\\run -> run 2) id\nbound :: IO Int\nbound = do\n  run <- pure id\n  pure (run 3)\nlet' :: Int\nlet' = let parseU = id in parseU 4\nglobal :: Int\nglobal = run 5 + parseU 6\nviewed :: Int -> Int\nviewed (run -> n) = run n\n";
+        let g = graph(&[("/p/src/A.hs", a), ("/p/src/B.hs", b)]);
+        let reached = |name: &str| -> Vec<usize> {
+            let at = (0..g.node_count())
+                .find(|&n| g.node(n).name == name)
+                .unwrap();
+            let mut lines: Vec<usize> = g.callees_of(at).iter().map(|&c| g.node(c).line).collect();
+            lines.sort_unstable();
+            lines
+        };
+        for local in ["consFrom", "with", "lambda", "bound", "let'"] {
+            assert_eq!(reached(local), [] as [usize; 0], "{local}: {:?}", edges(&g));
+        }
+        assert_eq!(reached("global"), [3, 5], "{:?}", edges(&g));
+        // (A view pattern binds what it matches, not the function it
+        // applies: `(run -> n)` calls `run`.)
+        assert_eq!(reached("viewed"), [5], "{:?}", edges(&g));
     }
 
     /// Audit 8's shapes: Go's `new(bytes.Buffer)` is the library's value; a

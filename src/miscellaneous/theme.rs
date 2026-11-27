@@ -1536,7 +1536,7 @@ fn kind_ink(t: &TokenColors, kind: &str) -> Option<u32> {
         "function" | "method" | "macro" | "test" => Some(t.function),
         "class" | "struct" | "enum" | "union" | "trait" | "interface" | "type" | "table"
         | "view" | "inductive" => Some(t.type_),
-        "module" | "implementation" | "suite" => Some(t.keyword),
+        "module" | "implementation" | "instance" | "suite" => Some(t.keyword),
         "rule" => Some(t.type_),
         "field" => Some(t.property),
         "constant" | "static" | "variant" | "theorem" | "example" | "axiom" => Some(t.number),

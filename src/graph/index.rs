@@ -336,9 +336,14 @@ fn to_cached_calls(calls: &FileCalls) -> CachedCalls {
             .collect(),
         returns: calls.context.returns.clone(),
         parameters: calls.context.parameters.clone(),
+        parameter_names: calls.context.parameter_names.clone(),
         fields: calls.context.fields.clone(),
         nested: calls.context.nested.clone(),
         converts: calls.context.converts.clone(),
+        signatures: calls.context.signatures.clone(),
+        instance_methods: calls.context.instance_methods.clone(),
+        singletons: calls.context.singletons.clone(),
+        aliases: calls.context.aliases.clone(),
     }
 }
 
@@ -459,9 +464,14 @@ fn from_cached_calls(abs: &Path, cached: &CachedCalls) -> Option<FileCalls> {
                 .collect::<Option<Vec<_>>>()?,
             returns: cached.returns.clone(),
             parameters: cached.parameters.clone(),
+            parameter_names: cached.parameter_names.clone(),
             fields: cached.fields.clone(),
             nested: cached.nested.clone(),
             converts: cached.converts.clone(),
+            signatures: cached.signatures.clone(),
+            instance_methods: cached.instance_methods.clone(),
+            singletons: cached.singletons.clone(),
+            aliases: cached.aliases.clone(),
         },
     })
 }

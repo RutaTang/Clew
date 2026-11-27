@@ -188,7 +188,12 @@ use crate::incremental::Version;
 /// `pub const X = @This()` file structs' fields; C++ built-in types.
 /// 56: C++ `std::` and Go package-qualified return types kept whole; class
 /// literals' kinds; Zig re-exported types.
-pub(crate) const CACHE_VERSION: u32 = 56;
+/// 57: Haskell instance methods; signatures' result types; calls of a
+/// name the definition binds itself dropped. Parameters' names; named
+/// arguments' kinds. Go interfaces' methods and embedded types; chains of
+/// fields ending in a method's result. Ruby's singleton methods. Type
+/// aliases; C++ templates' `enable_if` constraints.
+pub(crate) const CACHE_VERSION: u32 = 57;
 
 /// A cached symbol (the index entry minus the paths, which are reconstructed
 /// from the project root + relative path on load).
@@ -324,6 +329,10 @@ pub struct CachedCalls {
     /// (`clew_core::projectcalls::FileContext::parameters`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub parameters: Vec<(usize, String)>,
+    /// The names of each function's parameters, by its definition line
+    /// (`clew_core::projectcalls::FileContext::parameter_names`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parameter_names: Vec<(usize, String)>,
     /// A Go file's struct fields and their types
     /// (`clew_core::projectcalls::FileContext::fields`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -336,6 +345,22 @@ pub struct CachedCalls {
     /// (`clew_core::projectcalls::FileContext::converts`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub converts: Vec<(String, String)>,
+    /// What each Haskell definition's signature says it returns
+    /// (`clew_core::projectcalls::FileContext::signatures`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub signatures: Vec<(usize, String)>,
+    /// A Haskell file's instances' methods' lines
+    /// (`clew_core::projectcalls::FileContext::instance_methods`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub instance_methods: Vec<usize>,
+    /// A Ruby file's singleton methods' lines
+    /// (`clew_core::projectcalls::FileContext::singletons`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub singletons: Vec<usize>,
+    /// A file's type aliases and the types they name
+    /// (`clew_core::projectcalls::FileContext::aliases`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<(String, String)>,
 }
 
 /// Everything cached about one file: how to confirm it is unchanged (mtime,
@@ -469,9 +494,14 @@ mod tests {
                 arities: vec![3, 1, 2],
                 returns: vec![(3, "Cart".into())],
                 parameters: vec![(3, "s,i".into())],
+                parameter_names: vec![(3, "name,count".into())],
                 fields: vec![("Context".into(), "Request".into(), "http.Request".into())],
                 nested: vec![9],
                 converts: vec![("text_style".into(), "Temphasis".into())],
+                signatures: vec![(9, "Pandoc".into())],
+                instance_methods: vec![5],
+                singletons: vec![7],
+                aliases: vec![("memory_buffer".into(), "basic_memory_buffer".into())],
             }),
         }
     }

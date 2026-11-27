@@ -367,6 +367,9 @@ pub struct ImplBlock {
     pub line: usize,
     pub end_line: usize,
     pub label: String,
+    /// What the block is: `"implementation"` (Rust's `impl`) or
+    /// `"instance"` (Haskell's `instance HasMeta Pandoc`).
+    pub kind: &'static str,
 }
 
 /// The `impl` blocks of Rust `source`, in order: a module's, and those
@@ -401,6 +404,7 @@ pub fn rust_impl_blocks(source: &str) -> Vec<ImplBlock> {
                 line: node.start_position().row + 1,
                 end_line: node.end_position().row + 1,
                 label,
+                kind: "implementation",
             });
         }
         if cursor.goto_first_child() {
@@ -413,6 +417,47 @@ pub fn rust_impl_blocks(source: &str) -> Vec<ImplBlock> {
         }
     }
     out
+}
+
+/// The `instance` declarations of Haskell `source`, in order, each labelled
+/// by its head without its context: `HasMeta Pandoc` for `instance HasMeta
+/// Pandoc where`, `FromJSON (Maybe a)` for `instance FromJSON a => FromJSON
+/// (Maybe a)`. A file's instances define methods of one name each (two
+/// `toJSON`s): the heading says whose each is.
+pub fn haskell_instance_blocks(source: &str) -> Vec<ImplBlock> {
+    let Some(tree) = crate::highlight::parse(source, Lang::Haskell) else {
+        return Vec::new();
+    };
+    let words = |node: Node| -> Option<String> {
+        let text = source.get(node.byte_range())?;
+        Some(text.split_whitespace().collect::<Vec<_>>().join(" "))
+    };
+    let root = tree.root_node();
+    let mut cursor = root.walk();
+    let declarations = root
+        .named_children(&mut cursor)
+        .find(|n| n.kind() == "declarations");
+    let Some(declarations) = declarations else {
+        return Vec::new();
+    };
+    let mut cursor = declarations.walk();
+    declarations
+        .named_children(&mut cursor)
+        .filter(|n| n.kind() == "instance")
+        .filter_map(|n| {
+            let class = n.child_by_field_name("name").and_then(words)?;
+            let label = match n.child_by_field_name("patterns").and_then(words) {
+                Some(types) => format!("{class} {types}"),
+                None => class,
+            };
+            Some(ImplBlock {
+                line: n.start_position().row + 1,
+                end_line: n.end_position().row + 1,
+                label,
+                kind: "instance",
+            })
+        })
+        .collect()
 }
 
 /// `text` with every path's qualifiers dropped: `std::fmt::Display` as
@@ -5842,6 +5887,22 @@ mod language_tests {
         let facts: Vec<_> = hs.iter().filter(|(_, n, _, _)| n == "fact").collect();
         assert_eq!(facts.len(), 1, "{hs:?}");
         assert_eq!((facts[0].2, facts[0].3), (26, 27));
+        // An instance's method is in it, under a heading saying whose.
+        assert!(has(&hs, "method", "priceOf", 20), "{hs:?}");
+        let blocks = haskell_instance_blocks(
+            "module M where\ninstance Priced Item where\n  priceOf = cost\ninstance\n  (Priced a) => Priced (Maybe a)\n  where\n    priceOf = maybe 0 priceOf\nderiving instance Show Item\n",
+        );
+        let heads: Vec<(usize, usize, &str, &str)> = blocks
+            .iter()
+            .map(|b| (b.line, b.end_line, b.label.as_str(), b.kind))
+            .collect();
+        assert_eq!(
+            heads,
+            [
+                (2, 3, "Priced Item", "instance"),
+                (4, 7, "Priced (Maybe a)", "instance")
+            ]
+        );
     }
 
     /// Kotlin's, Scala's and Elixir's outlines: each declaration by its

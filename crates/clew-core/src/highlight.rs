@@ -1086,6 +1086,10 @@ const HASKELL_TAGS: &str = r#"
 (class name: (name) @name) @definition.class
 (class_declarations (signature name: (variable) @name) @definition.method)
 (class_declarations (signature name: (prefix_id (operator) @name)) @definition.method)
+(instance_declarations (function name: (variable) @name) @definition.method)
+(instance_declarations (bind name: (variable) @name) @definition.method)
+(instance_declarations (function name: (prefix_id (operator) @name)) @definition.method)
+(instance_declarations (function (infix operator: (operator) @name)) @definition.method)
 (infix
   left_operand: (apply function: (variable) @_fn argument: (literal (string) @name))
   (#any-of? @_fn "it" "specify" "prop" "testCase" "testProperty")) @definition.test
