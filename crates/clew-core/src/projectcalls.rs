@@ -3430,6 +3430,8 @@ impl ProjectCallGraph {
                     Some(o) if matches!(fc.lang, Lang::Go | Lang::Zig) => {
                         o == ty.rsplit('.').next().unwrap_or(ty)
                     }
+                    // Ruby's class by its path (`DependencyParser::Ruby::Parse`).
+                    Some(o) if fc.lang == Lang::Ruby => o == ty.rsplit("::").next().unwrap_or(ty),
                     o => o == Some(ty),
                 };
                 let mut narrowed: Vec<usize> = wanted
@@ -3470,7 +3472,7 @@ impl ProjectCallGraph {
                     )
                     && let Some(ty) = wanted
                 {
-                    let last = ty.rsplit('.').next().unwrap_or(ty);
+                    let last = ty.rsplit(['.', ':']).next().unwrap_or(ty);
                     narrowed = by_owner
                         .get(&(last, callee_name))
                         .into_iter()
@@ -3492,6 +3494,25 @@ impl ProjectCallGraph {
                     narrowed = family(ty, callee_name, false);
                     if narrowed.len() > MAX_CANDIDATES {
                         narrowed.clear();
+                    }
+                }
+                // Ruby's class by its path: of the classes of its name, the
+                // one in the file its path names, as Ruby's autoloading lays
+                // them out (`DependencyParser::Ruby::Parse` in
+                // `dependency_parser/ruby/parse.rb`), where one is.
+                if fc.lang == Lang::Ruby
+                    && let Some(ty) = wanted.filter(|ty| ty.contains("::"))
+                {
+                    let file: String =
+                        ty.split("::").map(snake_case).collect::<Vec<_>>().join("/") + ".rb";
+                    let at_path = |c: &usize| {
+                        nodes[*c]
+                            .file
+                            .to_string_lossy()
+                            .ends_with(&format!("/{file}"))
+                    };
+                    if narrowed.iter().any(at_path) {
+                        narrowed.retain(at_path);
                     }
                 }
                 // A bare call in a method that names nothing in scope: the
@@ -4456,6 +4477,29 @@ fn cpp_class_fields(src: &str, symbols: &[Located]) -> Vec<(String, String, Stri
     out
 }
 
+/// A Ruby constant's file name: `DependencyParser` is `dependency_parser`,
+/// `HTTPClient` `http_client`.
+fn snake_case(name: &str) -> String {
+    let chars: Vec<char> = name.chars().collect();
+    let mut out = String::new();
+    for (i, &c) in chars.iter().enumerate() {
+        if c.is_uppercase() {
+            let after_lower =
+                i > 0 && (chars[i - 1].is_lowercase() || chars[i - 1].is_ascii_digit());
+            let before_lower = i > 0
+                && chars.get(i + 1).is_some_and(|n| n.is_lowercase())
+                && chars[i - 1].is_uppercase();
+            if after_lower || before_lower {
+                out.push('_');
+            }
+            out.extend(c.to_lowercase());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// Each language's closures (see [`LangSpec::scope_kinds`]).
 fn closure_kinds(lang: Lang) -> &'static [&'static str] {
     match lang {
@@ -5302,7 +5346,9 @@ fn argument_kinds(
             kinds.push(argument_kind(text, call, scope, src, lang, bindings));
         }
     }
-    kinds.extend(std::iter::repeat_n("?".to_string(), trailing_lambdas));
+    // (A Kotlin lambda, `L`: passed for a function's type, or a library's
+    // interface it converts to.)
+    kinds.extend(std::iter::repeat_n("L".to_string(), trailing_lambdas));
     (!kinds.is_empty()).then(|| kinds.join(","))
 }
 
@@ -5326,6 +5372,10 @@ fn argument_kind(
     }
     if let Some(kind) = literal_kind(t, lang) {
         return kind.to_string();
+    }
+    // A Kotlin lambda (`{ it.name }`).
+    if lang == Lang::Kotlin && t.starts_with('{') && t.ends_with('}') {
+        return "L".to_string();
     }
     // A cast says the type (`(IRequest<TResponse>) request`, `x as Foo`):
     // what an overload is picked by.
@@ -5985,6 +6035,16 @@ fn passes(
         );
     }
     let strict = matches!(lang, Lang::Java | Lang::Kotlin | Lang::CSharp);
+    // A Kotlin lambda for a function's type (read as any), or a library's
+    // interface it converts to (`Runnable`) — never a string, a number or
+    // a class of the project's (`insert { … }` is no `insert(selectQuery:
+    // AbstractQuery<*>)`).
+    if a == "L" {
+        return !(primitive(p)
+            || matches!(p, "s" | "a" | "b" | "n")
+            || p.strip_prefix('T')
+                .is_some_and(|class| declared(without_arity(class))));
+    }
     // A string, number, character or boolean for a class: Java and Kotlin
     // convert none to one but those above them (`Number`, `Comparable`) —
     // no project class, nor a library's like `BufferedSource` (C# and Scala
@@ -8273,6 +8333,16 @@ fn constructed_type(rhs: &str, lang: Lang) -> Option<String> {
     } else {
         &['(', '{', '<']
     };
+    // Ruby's `DependencyParser::Ruby::Parse.new(…)`: the class by its
+    // whole path, which tells it from `DependencyParser::PHP::Parse`.
+    if lang == Lang::Ruby
+        && path.contains("::")
+        && let [scope @ .., ty, "new"] = segments.as_slice()
+        && typed(ty)
+        && !scope.is_empty()
+    {
+        return whole_expression(rest).then(|| format!("{}::{ty}", scope.join("::")));
+    }
     let ty = match segments.as_slice() {
         // `Cart::new(…)`, `Cart.new`: the type before its constructor.
         [.., ty, "new"] if lang != Lang::Go && typed(ty) => *ty,
@@ -13475,6 +13545,43 @@ def main():
         assert_eq!(scala_summoned("Ref[IO](1)"), None);
     }
 
+    /// A Ruby class named by its path (`DependencyParser::Ruby::Parse.new`)
+    /// is the one in the file its path names, as autoloading lays them out
+    /// — never `DependencyParser::PHP::Parse`; one named bare keeps both.
+    #[test]
+    fn a_ruby_class_by_its_path_is_the_one_its_path_names() {
+        let ruby = "module DependencyParser\n  module Ruby\n    class Parse\n      def call\n      end\n    end\n  end\nend\n";
+        let php = "module DependencyParser\n  module PHP\n    class Parse\n      def call\n      end\n    end\n  end\nend\n";
+        let test = "require_relative '../app/models/dependency_parser/ruby/parse'\nrequire_relative '../app/models/dependency_parser/php/parse'\nclass T\n  def go\n    parser = DependencyParser::Ruby::Parse.new(x)\n    parser.call\n  end\n  def bare\n    Parse.new(y).call\n  end\nend\n";
+        let g = graph(&[
+            ("/p/app/models/dependency_parser/ruby/parse.rb", ruby),
+            ("/p/app/models/dependency_parser/php/parse.rb", php),
+            ("/p/test/parse_test.rb", test),
+        ]);
+        let reached = |caller: &str| {
+            let at = (0..g.node_count())
+                .find(|&n| g.node(n).name == caller)
+                .unwrap();
+            let mut out: Vec<String> = g
+                .callees_of(at)
+                .iter()
+                .map(|&c| g.node(c).file.to_string_lossy().to_string())
+                .collect();
+            out.sort();
+            out
+        };
+        assert_eq!(
+            reached("go"),
+            ["/p/app/models/dependency_parser/ruby/parse.rb"],
+            "{:?}",
+            edges(&g)
+        );
+        assert_eq!(reached("bare").len(), 2, "{:?}", edges(&g));
+        assert_eq!(snake_case("DependencyParser"), "dependency_parser");
+        assert_eq!(snake_case("HTTPClient"), "http_client");
+        assert_eq!(snake_case("PHP"), "php");
+    }
+
     /// A C++ member function defined apart from its class calls its fields'
     /// methods as the class's header declares them: `formatters_.push_back`
     /// with `std::vector<…> formatters_;` is the library's, never another
@@ -13552,6 +13659,25 @@ def main():
         );
         assert_eq!(go_indexed_path("items[0].Name"), None);
         assert_eq!(go_element("map[string]*Route"), Some("Route"));
+    }
+
+    /// A Kotlin lambda is passed for a function's type, never for a class of
+    /// the project's: `t.insert { … }` is `insert(body: T.(Int) -> Unit)`,
+    /// no `insert(selectQuery: AbstractQuery, …)`.
+    #[test]
+    fn a_kotlin_lambda_is_passed_for_a_function_type() {
+        let kt = "abstract class AbstractQuery\nopen class Table\nfun <T : Table> T.insert(body: T.(Int) -> Unit): Int = 0\nfun <T : Table> T.insert(selectQuery: AbstractQuery, columns: List<Int>? = null): Int = 0\nfun go(t: Table) {\n    t.insert { it }\n}\nfun copy(t: Table, q: AbstractQuery) {\n    t.insert(q)\n}\n";
+        let g = graph(&[("/p/src/Queries.kt", kt)]);
+        let reached = |caller: &str| {
+            let at = (0..g.node_count())
+                .find(|&n| g.node(n).name == caller)
+                .unwrap();
+            let mut lines: Vec<usize> = g.callees_of(at).iter().map(|&c| g.node(c).line).collect();
+            lines.sort_unstable();
+            lines
+        };
+        assert_eq!(reached("go"), [3], "{:?}", edges(&g));
+        assert_eq!(reached("copy"), [4], "{:?}", edges(&g));
     }
 
     /// A cast picks the overload: `Handle((IRequest<int>) request)` is

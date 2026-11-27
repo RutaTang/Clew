@@ -175,7 +175,8 @@ use crate::incremental::Version;
 /// elements, and an index in a chain of fields.
 /// 50: C++ classes' fields (and a member defined apart from its class
 /// reading them); a Zig file struct's own fields.
-pub(crate) const CACHE_VERSION: u32 = 50;
+/// 51: a Kotlin lambda's argument kind; a Ruby class built by its path.
+pub(crate) const CACHE_VERSION: u32 = 51;
 
 /// A cached symbol (the index entry minus the paths, which are reconstructed
 /// from the project root + relative path on load).

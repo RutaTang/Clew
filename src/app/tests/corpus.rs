@@ -239,7 +239,7 @@ fn live_a_projects_reading() {
             ) = &site.receiver
                 && !ty.starts_with(clew_core::projectcalls::RETURNED)
                 && !ty.starts_with(clew_core::projectcalls::THROUGH)
-                && !project_types.contains(ty.rsplit('.').next().unwrap_or(ty))
+                && !project_types.contains(ty.rsplit(['.', ':']).next().unwrap_or(ty))
             {
                 library_calls += 1;
                 continue;
