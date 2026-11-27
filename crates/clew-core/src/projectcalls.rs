@@ -3704,10 +3704,15 @@ impl ProjectCallGraph {
         // constructor at most.
         let converts = |class: &str, arg: &str| -> Option<bool> {
             let kinds = conversions.get(class)?;
+            // (A class's value converts by a constructor taking it, or a
+            // library's class — never by one taking a number or a string.)
+            let of_class = arg.starts_with('T');
             Some(kinds.iter().any(|&k| match k {
                 "?" => true,
                 "K" => false,
+                k if k == arg => true,
                 k if k.starts_with('T') => !conversions.contains_key(&k[1..]),
+                _ if of_class => false,
                 k => cpp_passes(arg, k),
             }))
         };
@@ -3733,11 +3738,14 @@ impl ProjectCallGraph {
             .collect();
         // The abstract declarations a class below theirs defines with a body
         // (`SizedIterable.count`, `LimitedSizedIterable.count` its own).
-        let implemented: HashSet<usize> = {
+        // (Apart from tests: what a call outside them reaches — a test's
+        // implementation is no other code's.)
+        let implemented_by = |tests: bool| -> HashSet<usize> {
             let mut bodied_owners: HashMap<&str, Vec<&str>> = HashMap::new();
             for (i, n) in nodes.iter().enumerate() {
                 if !facts[i].bodyless
                     && !nested_node[i]
+                    && (tests || !test_node[i])
                     && let Some(o) = owner[i]
                 {
                     bodied_owners
@@ -3759,6 +3767,8 @@ impl ProjectCallGraph {
                 })
                 .collect()
         };
+        let implemented = implemented_by(true);
+        let implemented_apart_from_tests = implemented_by(false);
         // The platforms each definition's source is built for, where its
         // path says ([`source_platforms`]): `core/js/…` for JavaScript alone.
         let node_platforms: Vec<Option<&'static [&'static str]>> =
@@ -3980,7 +3990,28 @@ impl ProjectCallGraph {
                 .map(|params| params.split(',').collect())
                 .unwrap_or_default();
             let names = node_parameter_names[i];
+            let trailing = arguments.split(',').filter(|a| *a == "^L").count();
+            let mut last = 0;
             arguments.split(',').enumerate().all(|(at, a)| {
+                // A Kotlin trailing lambda: for the last parameters.
+                if a == "^L" {
+                    last += 1;
+                    return kinds
+                        .len()
+                        .checked_sub(trailing + 1 - last)
+                        .and_then(|at| kinds.get(at))
+                        .is_none_or(|p| {
+                            passes(
+                                "L",
+                                p,
+                                lang,
+                                &declared,
+                                &descends_exactly,
+                                &converts,
+                                &reaches_library,
+                            )
+                        });
+                }
                 let (at, a) = match a.split_once('=') {
                     Some((name, kind)) => match names {
                         Some(names) => match names.split(',').position(|n| n == name) {
@@ -4007,6 +4038,35 @@ impl ProjectCallGraph {
         let fits_arguments = |callee: usize, cs: &CallSite, lang: Lang| -> bool {
             let Some(arguments) = cs.arguments.as_deref() else {
                 return true;
+            };
+            // A function's result (`→runtime`): of the type its definitions
+            // agree it returns — or of none this can tell.
+            let resolved: String;
+            let arguments = if arguments.contains(RETURNED) {
+                resolved = arguments
+                    .split(',')
+                    .map(|a| match a.strip_prefix(RETURNED) {
+                        Some(function) => {
+                            let mut types = defs
+                                .named
+                                .get(function)
+                                .into_iter()
+                                .flat_map(|named| named.all.iter().copied())
+                                .map(|i| node_returns[i].as_deref());
+                            match types.next().flatten() {
+                                Some(first) if types.all(|t| t == Some(first)) => {
+                                    type_kind(first, lang)
+                                }
+                                _ => "?".to_string(),
+                            }
+                        }
+                        None => a.to_string(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",");
+                resolved.as_str()
+            } else {
+                arguments
             };
             let named = arguments.contains('=');
             if node_parameters[callee].is_none() && !named {
@@ -4361,7 +4421,63 @@ impl ProjectCallGraph {
                             }
                             owned => owned,
                         };
+                        // A Ruby library class's method (`Rack::MockRequest.new(app)
+                        // .get("/")`): its result is the library's — but for a
+                        // container's or a callable's, which gives back what was
+                        // put in it.
+                        if owned.is_none()
+                            && fc.lang == Lang::Ruby
+                            && fallback.is_none()
+                            && let Some((ty, _)) = function.split_once('#')
+                        {
+                            let path = ty.trim_start_matches("::");
+                            let last = path.rsplit("::").next().unwrap_or(path);
+                            if last.starts_with(char::is_uppercase)
+                                && !declared_types.contains(last)
+                                && !RUBY_HOLDERS.contains(&last)
+                            {
+                                continue;
+                            }
+                        }
                         let function = function.split_once('#').map_or(function, |(_, m)| m);
+                        // A Ruby method called bare (`fetcher.fetch_spec`)
+                        // is self's: the calling file's own `def fetcher`,
+                        // where it has one, before another class's of the
+                        // name.
+                        let owned = match owned {
+                            None if fc.lang == Lang::Ruby
+                                && fallback.is_none()
+                                && !function.is_empty() =>
+                            {
+                                let own: Vec<usize> = defs
+                                    .named
+                                    .get(logical_name(function, Some(fc.lang)))
+                                    .into_iter()
+                                    .flat_map(|named| named.all.iter().copied())
+                                    .filter(|&i| nodes[i].file == fc.file)
+                                    .collect();
+                                let mut types = own.iter().map(|&i| node_returns[i].as_deref());
+                                match types.next().flatten() {
+                                    Some(first) if types.all(|t| t == Some(first)) => {
+                                        let path = first.trim_start_matches("::");
+                                        let head = path.split("::").next().unwrap_or(path);
+                                        let last = path.rsplit("::").next().unwrap_or(path);
+                                        if declared_types.contains(last) {
+                                            Some(first.to_string())
+                                        } else if path.contains("::")
+                                            && !declared_types.contains(head)
+                                        {
+                                            // A library's class it builds.
+                                            continue;
+                                        } else {
+                                            None
+                                        }
+                                    }
+                                    _ => None,
+                                }
+                            }
+                            owned => owned,
+                        };
                         let returned = owned.or_else(|| {
                             (!function.is_empty())
                                 .then(|| {
@@ -4463,8 +4579,15 @@ impl ProjectCallGraph {
                         if ty.as_deref().is_some_and(|ty| library(ty, fc.lang)) {
                             continue;
                         }
+                        // (A Scala self-type's member, typed: no longer a name
+                        // unbound.)
+                        let qualifier = match ty {
+                            Some(_) if fc.lang == Lang::Scala => None,
+                            _ => cs.qualifier.clone(),
+                        };
                         typed_call = CallSite {
                             receiver: ty.map(Receiver::Type),
+                            qualifier,
                             ..cs.clone()
                         };
                         &typed_call
@@ -4576,7 +4699,14 @@ impl ProjectCallGraph {
                         &nodes,
                         &facts,
                         &owner,
-                        (&implemented, &nested_node),
+                        (
+                            if in_test {
+                                &implemented
+                            } else {
+                                &implemented_apart_from_tests
+                            },
+                            &nested_node,
+                        ),
                         cs,
                         &site,
                     )
@@ -6599,6 +6729,39 @@ fn scala_class_fields(src: &str, symbols: &[Located]) -> Vec<(String, String, St
             }
         }
     }
+    // A body's `def`s of no parameter list declared with their type
+    // (`implicit def asyncForIO: kernel.Async[IO] = …`), its innermost
+    // class's or object's.
+    for l in symbols
+        .iter()
+        .filter(|l| matches!(l.symbol.kind.as_str(), "function" | "method"))
+    {
+        let around = classes
+            .iter()
+            .filter(|c| c.declaration.0 < l.declaration.0 && l.declaration.1 <= c.declaration.1)
+            .max_by_key(|c| c.declaration.0);
+        let Some(class) = around else {
+            continue;
+        };
+        let Some(text) = src.get(l.declaration.0..l.declaration.1) else {
+            continue;
+        };
+        let head = format!("def {}", l.symbol.name);
+        let Some(at) = text.find(&head) else {
+            continue;
+        };
+        let rest = &text[at + head.len()..];
+        if !rest.starts_with([' ', ':']) {
+            continue;
+        }
+        let Some(ty) = rest.trim_start().strip_prefix(':') else {
+            continue;
+        };
+        let ty = type_of(ty.lines().next().unwrap_or(""));
+        if type_like(&ty, Lang::Scala) {
+            out.push((class.symbol.name.clone(), l.symbol.name.clone(), ty));
+        }
+    }
     // A body's `val`s and `var`s, its innermost class's or object's.
     for l in symbols.iter().filter(|l| l.symbol.kind == "property") {
         let around = classes
@@ -6615,6 +6778,32 @@ fn scala_class_fields(src: &str, symbols: &[Located]) -> Vec<(String, String, St
         }
     }
     out
+}
+
+/// The type the self-type of the Scala class, trait or object around
+/// `node` names (`IO` for `this: IO.type =>`, `Foo` for `self: Foo[F] with
+/// Bar =>`): whose members its body names bare.
+fn scala_self_type(node: Node, src: &str) -> Option<String> {
+    let mut at = node.parent();
+    while let Some(n) = at {
+        if n.kind() == "template_body" {
+            let mut cursor = n.walk();
+            let declared = n
+                .named_children(&mut cursor)
+                .find(|c| c.kind() == "self_type")
+                .map(|c| node_text(c, src).to_string());
+            let ty = declared?;
+            let ty = ty.split_once(':')?.1;
+            let ty = ty.split("=>").next()?.trim();
+            let ty = ty.split(" with ").next()?.trim();
+            let ty = ty.strip_suffix(".type").unwrap_or(ty);
+            let ty = ty.split('[').next()?.trim();
+            let ty = ty.rsplit('.').next()?;
+            return type_like(ty, Lang::Scala).then(|| ty.to_string());
+        }
+        at = n.parent();
+    }
+    None
 }
 
 /// A C++ file's classes' fields and their types ([`FileContext::fields`]):
@@ -7452,8 +7641,12 @@ fn walk(
                 _ => unbound,
             };
             let ruby_on = made_on.is_some() && receiver.is_some();
+            // (A Scala member of a self-type's, its name kept for where the
+            // type has none of the name.)
+            let scala_member = lang == Lang::Scala
+                && matches!(&receiver, Some(Receiver::Type(t)) if t.starts_with(THROUGH));
             let qualifier = unbound
-                .filter(|_| receiver.is_none() || ruby_on)
+                .filter(|_| receiver.is_none() || ruby_on || scala_member)
                 .or_else(|| {
                     // C++'s `Cart::make()`: the class (or namespace) it names.
                     (lang == Lang::Cpp && !method)
@@ -8050,8 +8243,10 @@ fn argument_kinds(
         }
     }
     // (A Kotlin lambda, `L`: passed for a function's type, or a library's
-    // interface it converts to.)
-    kinds.extend(std::iter::repeat_n("L".to_string(), trailing_lambdas));
+    // interface it converts to — a trailing one, `^L`, for the last
+    // parameter, past any a default fills: `update({ … }) { … }` is
+    // `update(where, limit = null, body)`.)
+    kinds.extend(std::iter::repeat_n("^L".to_string(), trailing_lambdas));
     (!kinds.is_empty()).then(|| kinds.join(","))
 }
 
@@ -8523,6 +8718,13 @@ fn argument_kind(
     if let Some(ty) = constructed_type(t, lang) {
         return type_kind(&ty, lang);
     }
+    // A C++ function's result (`runtime("{0:#")`): of the type it declares
+    // it returns, once every file is read (`→runtime`).
+    if lang == Lang::Cpp
+        && let Some(function) = cpp_called_function(t)
+    {
+        return format!("{RETURNED}{function}");
+    }
     if is_plain_name(t) {
         let (_, said) = said_around(t, call.start_byte(), scope, src, lang, bindings);
         if let Said::Type(ty, _) = said
@@ -8572,6 +8774,59 @@ fn said_around(
         from = outer;
     }
     (from, now)
+}
+
+/// The function a C++ argument calls for its value, the whole argument
+/// (`runtime` of `fmt::runtime("{}")`) — none for a call on a value
+/// (`s.size()`), a template's (`get<int>(x)`) or a call of a call's result.
+fn cpp_called_function(t: &str) -> Option<&str> {
+    let t = t.trim();
+    if !t.ends_with(')') {
+        return None;
+    }
+    let open = t.find('(')?;
+    let path = t[..open].trim_end().trim_start_matches("::");
+    if path.is_empty()
+        || !path
+            .split("::")
+            .all(|part| !part.is_empty() && part.chars().all(|c| c == '_' || c.is_alphanumeric()))
+    {
+        return None;
+    }
+    // Its argument list closes at the very end.
+    let mut depth = 0i32;
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    for (i, c) in t[open..].char_indices() {
+        if let Some(q) = quote {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == q {
+                quote = None;
+            }
+            continue;
+        }
+        match c {
+            '"' | '\'' => quote = Some(c),
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    if open + i + 1 != t.len() {
+                        return None;
+                    }
+                    let function = path.rsplit("::").next()?;
+                    return function
+                        .starts_with(|c: char| c.is_lowercase() || c == '_')
+                        .then_some(function);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// The type an argument is cast to: Java's and C#'s `(Type) value`, C#'s
@@ -9401,6 +9656,18 @@ fn passes(
         if matches!(a, "s" | "w" | "i" | "f" | "b" | "c")
             && let Some(class) = p.strip_prefix('T')
             && let Some(takes) = converts(class, a)
+        {
+            return takes;
+        }
+        // A value of a class of the project's for another: only one it
+        // extends, or one with a constructor converting it — a
+        // `runtime_format_string<>` is an `fstring`'s, by `fstring(
+        // runtime_format_string<>)`, and no `locale_ref`.
+        if let (Some(from), Some(to)) = (a.strip_prefix('T'), p.strip_prefix('T'))
+            && from != to
+            && declared(from)
+            && !descends(from, to)
+            && let Some(takes) = converts(to, a)
         {
             return takes;
         }
@@ -10982,6 +11249,18 @@ fn receiver_of(
     if lang == Lang::Zig && is_plain_name(receiver) && zig_global_is_std(src, receiver) {
         return Some(Receiver::Type("std".to_string()));
     }
+    // A Scala member of the type a trait's self-type names (`asyncForIO`
+    // in a trait of `this: IO.type =>`, `IO`'s `implicit def asyncForIO:
+    // kernel.Async[IO]`): of the type that member declares, once every
+    // file is read — or, none of the type's, as an unbound name is.
+    if lang == Lang::Scala
+        && is_plain_name(receiver)
+        && receiver.starts_with(char::is_lowercase)
+        && let Some(own) = scala_self_type(call, src)
+    {
+        *unbound = Some(receiver.to_string());
+        return Some(Receiver::Type(format!("{THROUGH}{own}|{receiver}")));
+    }
     // Nor a field: in Scala, a package or an object (`os` in `os.read(p)`),
     // or a member inherited from a trait; in Go, an imported package
     // (`require.Error(t, err)`) or a package-level variable.
@@ -11359,7 +11638,23 @@ impl Bindings {
             // What follows it in the file, past what is read so far: a
             // statement read up to a call in it goes on after the call.
             let after = &src[self.from + end..];
-            let binding = binding_at(head, after, lang);
+            // A C# lambda's parameter for an element of the sequence a LINQ
+            // method runs over (`(next, pipeline) => pipeline.Handle(…)` in
+            // `….GetServices<IPipelineBehavior<…>>().Reverse().Aggregate(…)`):
+            // of its type — read in the file, the lambda's own scope
+            // starting at it.
+            let element = (lang == Lang::CSharp)
+                .then(|| {
+                    csharp_lambda_element(
+                        &src[..self.from + start],
+                        after.trim_start_matches([' ', '\t']),
+                    )
+                })
+                .flatten();
+            let binding = match element {
+                Some(ty) => Binding::Typed(ty, false),
+                None => binding_at(head, after, lang),
+            };
             if binding == Binding::Not {
                 continue;
             }
@@ -11457,6 +11752,320 @@ enum Binding {
     /// Bound to what cannot be told: a function's result, a loop's or a
     /// closure's parameter, one of several unpacked.
     Unknown,
+}
+
+/// LINQ methods whose lambda's (first) parameter is an element of the
+/// sequence they run over.
+const CSHARP_ELEMENT_LAMBDAS: &[&str] = &[
+    "Select",
+    "SelectMany",
+    "Where",
+    "Any",
+    "All",
+    "First",
+    "FirstOrDefault",
+    "Last",
+    "LastOrDefault",
+    "Single",
+    "SingleOrDefault",
+    "Count",
+    "LongCount",
+    "OrderBy",
+    "OrderByDescending",
+    "ThenBy",
+    "ThenByDescending",
+    "ForEach",
+    "GroupBy",
+    "ToDictionary",
+    "ToLookup",
+    "Sum",
+    "Max",
+    "Min",
+    "Average",
+    "TakeWhile",
+    "SkipWhile",
+    "DistinctBy",
+    "MaxBy",
+    "MinBy",
+    "Exists",
+    "Find",
+    "FindAll",
+    "FindLast",
+    "RemoveAll",
+    "TrueForAll",
+    "FindIndex",
+];
+
+/// LINQ methods that give back a sequence of the elements they run over.
+const CSHARP_SAME_ELEMENTS: &[&str] = &[
+    "Where",
+    "Reverse",
+    "OrderBy",
+    "OrderByDescending",
+    "ThenBy",
+    "ThenByDescending",
+    "ToList",
+    "ToArray",
+    "ToHashSet",
+    "Distinct",
+    "DistinctBy",
+    "Skip",
+    "Take",
+    "SkipWhile",
+    "TakeWhile",
+    "SkipLast",
+    "TakeLast",
+    "AsEnumerable",
+    "AsQueryable",
+    "AsReadOnly",
+    "Concat",
+    "Union",
+    "Intersect",
+    "Except",
+    "Append",
+    "Prepend",
+    "ToImmutableList",
+    "ToImmutableArray",
+];
+
+/// The element type of the C# sequence a lambda's parameter stands for,
+/// the parameter `head` ends before and `after` follows: a LINQ method's
+/// lambda (`.Select(h => …)`, `.Aggregate(seed, (acc, x) => …)`) over a
+/// sequence whose elements' type is known — what .NET's dependency
+/// injection resolves (`GetServices<T>()`), what `OfType<T>()` or
+/// `Cast<T>()` keeps, or a local's or parameter's declared collection
+/// (`IEnumerable<T> handlers`, `List<T> xs = new …`, `T[] xs`) — through
+/// the methods that keep the elements (`Reverse()`, `Where(…)`).
+fn csharp_lambda_element(head: &str, after: &str) -> Option<String> {
+    let word = |c: char| c == '_' || c.is_alphanumeric();
+    // The parameter's place in its lambda's list, and where the list starts.
+    let (place, start) = if after.starts_with("=>") && !after.starts_with("=>>") {
+        (0, head.len())
+    } else {
+        let close = after.find(')')?;
+        let inside = &after[..close];
+        if !inside.chars().all(|c| word(c) || matches!(c, ',' | ' ')) {
+            return None;
+        }
+        if !after[close + 1..].trim_start().starts_with("=>") {
+            return None;
+        }
+        let open = head.rfind('(')?;
+        let before = &head[open + 1..];
+        if !before.chars().all(|c| word(c) || matches!(c, ',' | ' ')) {
+            return None;
+        }
+        (before.matches(',').count(), open)
+    };
+    let lead = head[..start].trim_end();
+    if !lead.ends_with(['(', ',']) {
+        return None;
+    }
+    // The call the lambda is an argument of: its `(`, and the lambda's
+    // place among its arguments.
+    let bytes = lead.as_bytes();
+    let mut depth = 0i32;
+    let mut commas = 0usize;
+    let mut open = None;
+    for i in (0..bytes.len()).rev() {
+        match bytes[i] {
+            b')' | b']' | b'}' => depth += 1,
+            b'(' | b'[' | b'{' if depth > 0 => depth -= 1,
+            b'(' => {
+                open = Some(i);
+                break;
+            }
+            b'[' | b'{' => return None,
+            b',' if depth == 0 => commas += 1,
+            b';' if depth == 0 => return None,
+            _ => {}
+        }
+    }
+    let open = open?;
+    let argument = commas;
+    let (method, receiver) = csharp_called_method(&lead[..open])?;
+    let element = match method {
+        "Aggregate" => match argument {
+            0 => place <= 1,
+            _ => place == 1,
+        },
+        m if CSHARP_ELEMENT_LAMBDAS.contains(&m) => place == 0,
+        _ => false,
+    };
+    if !element {
+        return None;
+    }
+    csharp_sequence_element(receiver, head)
+}
+
+/// The method a C# call's text before its `(` names, and the text of what
+/// it is called on: `("Aggregate", "….Reverse()")` for `….Reverse()
+/// .Aggregate`, its type arguments (`GetServices<T>`) dropped.
+fn csharp_called_method(text: &str) -> Option<(&str, &str)> {
+    let mut text = text.trim_end();
+    if text.ends_with('>') {
+        let mut depth = 0i32;
+        let at = text.char_indices().rev().find_map(|(i, c)| {
+            match c {
+                '>' => depth += 1,
+                '<' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(i);
+                    }
+                }
+                _ => {}
+            }
+            None
+        })?;
+        text = &text[..at];
+    }
+    let name_at = text
+        .char_indices()
+        .rev()
+        .take_while(|&(_, c)| c == '_' || c.is_alphanumeric())
+        .last()
+        .map(|(i, _)| i)?;
+    let name = &text[name_at..];
+    let receiver = text[..name_at].trim_end().strip_suffix('.')?.trim_end();
+    Some((name, receiver))
+}
+
+/// The type of the elements of the C# sequence `receiver` is, `head` the
+/// function's text before it ([`csharp_lambda_element`]).
+fn csharp_sequence_element(receiver: &str, head: &str) -> Option<String> {
+    let mut receiver = receiver.trim_end();
+    let last_segment = |t: &str| -> Option<String> {
+        let t = t.split('<').next()?.trim();
+        let t = t.rsplit('.').next()?;
+        type_like(t, Lang::CSharp).then(|| t.to_string())
+    };
+    for _ in 0..16 {
+        if receiver.ends_with(')') {
+            // The call's `(`, matched.
+            let bytes = receiver.as_bytes();
+            let mut depth = 0i32;
+            let open = (0..bytes.len()).rev().find(|&i| {
+                match bytes[i] {
+                    b')' => depth += 1,
+                    b'(' => {
+                        depth -= 1;
+                        return depth == 0;
+                    }
+                    _ => {}
+                }
+                false
+            })?;
+            let called = &receiver[..open];
+            let (method, on) = csharp_called_method(called)?;
+            if CSHARP_SAME_ELEMENTS.contains(&method) {
+                receiver = on;
+                continue;
+            }
+            if matches!(
+                method,
+                "GetServices" | "GetKeyedServices" | "OfType" | "Cast"
+            ) {
+                let generic = called.trim_end().strip_suffix('>')?;
+                let generic = &generic[generic.rfind(&format!("{method}<"))? + method.len() + 1..];
+                return last_segment(generic);
+            }
+            return None;
+        }
+        // A local's or a parameter's name: its declared collection.
+        let name = receiver.strip_prefix("this.").unwrap_or(receiver);
+        if !is_plain_name(name) {
+            return None;
+        }
+        return csharp_collection_element(head, name);
+    }
+    None
+}
+
+/// The element type of the collection `head` declares `name` as: `IEnumerable<
+/// IPipelineBehavior<T, U>> name`, `List<Cart> name = …`, `var name = new
+/// List<Cart>()`, `Cart[] name`.
+fn csharp_collection_element(head: &str, name: &str) -> Option<String> {
+    const COLLECTIONS: &[&str] = &[
+        "IEnumerable",
+        "List",
+        "IList",
+        "ICollection",
+        "IReadOnlyList",
+        "IReadOnlyCollection",
+        "HashSet",
+        "ISet",
+        "IReadOnlySet",
+        "IQueryable",
+        "Collection",
+        "ImmutableArray",
+        "ImmutableList",
+        "IAsyncEnumerable",
+        "LinkedList",
+        "Queue",
+        "Stack",
+    ];
+    let word = |c: char| c == '_' || c.is_alphanumeric();
+    let element = |declared: &str| -> Option<String> {
+        let declared = declared.trim_end();
+        if let Some(array) = declared.strip_suffix("[]") {
+            let t = array
+                .trim()
+                .rsplit(|c: char| !(word(c) || c == '.'))
+                .next()?;
+            let t = t.rsplit('.').next()?;
+            return type_like(t, Lang::CSharp).then(|| t.to_string());
+        }
+        let inner = declared.strip_suffix('>')?;
+        let open = inner.find('<')?;
+        let collection = inner[..open].trim();
+        let collection = collection
+            .rsplit(|c: char| !(word(c) || c == '.'))
+            .next()?
+            .rsplit('.')
+            .next()?;
+        if !COLLECTIONS.contains(&collection) {
+            return None;
+        }
+        let t = inner[open + 1..].split('<').next()?.trim();
+        let t = t.rsplit('.').next()?;
+        type_like(t, Lang::CSharp).then(|| t.to_string())
+    };
+    let mut found = None;
+    let mut from = 0;
+    while let Some(i) = head[from..].find(name) {
+        let at = from + i;
+        from = at + name.len();
+        let before = &head[..at];
+        let rest = &head[at + name.len()..];
+        if before.ends_with(word) || rest.starts_with(word) {
+            continue;
+        }
+        let rest = rest.trim_start();
+        // `T name` / `T name =` / `T name)` / `T name,` / `T name;`
+        if rest.starts_with(['=', ')', ',', ';']) && !rest.starts_with("==") {
+            let declared = before.trim_end();
+            if let Some(t) = element(declared) {
+                found = Some(t);
+                continue;
+            }
+            // `var name = new List<Cart>()`, `= new Cart[n]`.
+            if declared.ends_with("var")
+                && let Some(made) = rest.strip_prefix('=').map(str::trim_start)
+                && let Some(made) = made.strip_prefix("new ")
+            {
+                let made = made.split(['(', '{', ';']).next().unwrap_or("").trim();
+                let made = match made.split_once('[') {
+                    Some((t, _)) => format!("{t}[]"),
+                    None => made.to_string(),
+                };
+                if let Some(t) = element(&made) {
+                    found = Some(t);
+                }
+            }
+        }
+    }
+    found
 }
 
 /// What an occurrence of a name, with `head` before it in its function and
@@ -13489,6 +14098,36 @@ pub fn is_library_call(lang: Lang, call: &CallSite) -> bool {
 
 /// The methods Ruby's core classes and Rails' models give every value: a
 /// call of one on a value whose type is not known is theirs.
+/// Ruby's library classes whose methods give back what was put in them,
+/// or what a block returns: their results may be a project's objects.
+const RUBY_HOLDERS: &[&str] = &[
+    "Hash",
+    "Array",
+    "Set",
+    "Struct",
+    "OpenStruct",
+    "Queue",
+    "SizedQueue",
+    "Enumerator",
+    "Map",
+    "ConnectionPool",
+    "Thread",
+    "Fiber",
+    "Proc",
+    "Method",
+    "Ractor",
+    "WeakMap",
+    "Delegator",
+    "SimpleDelegator",
+    "Object",
+    "BasicObject",
+    "Kernel",
+    "Module",
+    "Class",
+    "Future",
+    "Promise",
+];
+
 const RUBY_CORE_METHODS: &[&str] = &[
     "each",
     "each_with_index",
@@ -14825,7 +15464,9 @@ mod edge_tests {
     fn defs_of(files: &[(&str, &str)]) -> Vec<Def> {
         let mut defs = Vec::new();
         for (file, src) in files {
-            let lang = crate::highlight::detect(Path::new(file)).unwrap();
+            // (By its text too, as the app reads it: a C++ header's `.h`.)
+            let key = crate::highlight::detect(Path::new(file)).unwrap();
+            let lang = Lang::for_source(key, src).map_or(key, Lang::key);
             for s in crate::outline::extract(src, lang) {
                 defs.push(Def {
                     name: s.name,
@@ -18855,6 +19496,212 @@ def main():
             .find(|&n| g.node(n).name == "fetch_spec")
             .unwrap();
         assert!(g.callees_of(at).is_empty(), "{:?}", edges(&g));
+    }
+
+    /// Audit 18's: a Ruby method of the calling file's own (`fetcher`)
+    /// gives what that file's definition builds, whatever another class's
+    /// `fetcher` gives; a library class's method (`Rack::MockRequest#get`)
+    /// gives a library's value; a Scala trait's self-type (`this: IO.type
+    /// =>`) has the members its body names bare (`asyncForIO`, of
+    /// `kernel.Async[IO]`); a C# LINQ lambda's parameter is an element of
+    /// the sequence (`GetServices<IPipelineBehavior<…>>()`).
+    #[test]
+    fn audit_18_shapes() {
+        let parse = "module DependencyParser\n  class Parse\n    def fetch_spec(name:, version: nil)\n      full_spec = fetcher.fetch_spec([name, version])\n    end\n\n    private\n\n    def fetcher\n      @fetcher ||= Bundler::Fetcher.new(Bundler::Source::Rubygems::Remote.new(\"x\"))\n    end\n  end\nend\n";
+        let repo =
+            "class Repo\n  def fetcher\n    GithubFetcher::Repo.new(full_name)\n  end\nend\n";
+        let github =
+            "module GithubFetcher\n  class Repo\n    def initialize(name)\n    end\n  end\nend\n";
+        let helpers = "module Sinatra\n  module Helpers\n    def status(value = nil)\n      response.status = value\n    end\n  end\nend\n";
+        let test = "class HostAuthorizationTest\n  def test_bad_host\n    request = Rack::MockRequest.new(@app)\n    response = request.get(\"/\", {})\n    assert_equal 403, response.status\n  end\nend\n";
+        let platform = "package cats.effect\n\nabstract class IOCompanionPlatform { this: IO.type =>\n\n  def fromPromise[A](iop: IO[Promise[A]]): IO[A] =\n    asyncForIO.fromPromise(iop)\n}\n";
+        let io = "package cats.effect\n\nobject IO extends IOCompanionPlatform {\n  implicit def asyncForIO: kernel.Async[IO] = _asyncForIO\n}\n";
+        let async_platform = "package cats.effect.kernel\n\ntrait AsyncPlatform[F[_]] { this: Async[F] =>\n  def fromPromise[A](iop: F[Promise[A]]): F[A] = fromThenable(iop)\n}\n";
+        let async_ = "package cats.effect.kernel\n\ntrait Async[F[_]] extends AsyncPlatform[F] {\n  def never[A]: F[A]\n}\n";
+        let behavior = "namespace MediatR;\n\npublic interface IPipelineBehavior<in TRequest, TResponse>\n{\n    Task<TResponse> Handle(TRequest request, RequestHandlerDelegate<TResponse> next, CancellationToken cancellationToken);\n}\n";
+        let pre = "namespace MediatR.Pipeline;\n\npublic class RequestPreProcessorBehavior<TRequest, TResponse> : IPipelineBehavior<TRequest, TResponse>\n{\n    public async Task<TResponse> Handle(TRequest request, RequestHandlerDelegate<TResponse> next, CancellationToken cancellationToken)\n    {\n        return await next();\n    }\n}\n";
+        let wrapper = "namespace MediatR.Wrappers;\n\npublic abstract class RequestHandlerBase\n{\n    public abstract Task<object?> Handle(object request, IServiceProvider serviceProvider, CancellationToken cancellationToken);\n}\n\npublic class RequestHandlerWrapperImpl<TRequest, TResponse> : RequestHandlerBase\n{\n    public override Task<object?> Handle(object request, IServiceProvider serviceProvider, CancellationToken cancellationToken)\n    {\n        return serviceProvider\n            .GetServices<IPipelineBehavior<TRequest, TResponse>>()\n            .Reverse()\n            .Aggregate((RequestHandlerDelegate<TResponse>) Handler,\n                (next, pipeline) => (t) => pipeline.Handle((TRequest) request, next, t == default ? cancellationToken : t))();\n    }\n}\n";
+        let g = graph(&[
+            ("/p/lib/dependency_parser/ruby/parse.rb", parse),
+            ("/p/app/models/repo.rb", repo),
+            ("/p/lib/github_fetcher/repo.rb", github),
+            ("/p/lib/sinatra/base.rb", helpers),
+            ("/p/test/host_authorization_test.rb", test),
+            (
+                "/p/core/js/src/main/scala/cats/effect/IOCompanionPlatform.scala",
+                platform,
+            ),
+            ("/p/core/shared/src/main/scala/cats/effect/IO.scala", io),
+            (
+                "/p/kernel/js/src/main/scala/cats/effect/kernel/AsyncPlatform.scala",
+                async_platform,
+            ),
+            (
+                "/p/kernel/shared/src/main/scala/cats/effect/kernel/Async.scala",
+                async_,
+            ),
+            ("/p/src/MediatR/IPipelineBehavior.cs", behavior),
+            (
+                "/p/src/MediatR/Pipeline/RequestPreProcessorBehavior.cs",
+                pre,
+            ),
+            ("/p/src/MediatR/Wrappers/RequestHandlerWrapper.cs", wrapper),
+        ]);
+        let callees = |file: &str, name: &str| -> Vec<String> {
+            let at = (0..g.node_count())
+                .rfind(|&n| g.node(n).name == name && g.node(n).file.ends_with(file))
+                .unwrap();
+            let mut out: Vec<String> = g
+                .callees_of(at)
+                .iter()
+                .map(|&c| format!("{}:{}", g.node(c).file.display(), g.node(c).line))
+                .collect();
+            out.sort();
+            out
+        };
+        let none: Vec<String> = Vec::new();
+        assert_eq!(callees("parse.rb", "fetch_spec"), none, "{:?}", edges(&g));
+        assert_eq!(
+            callees("host_authorization_test.rb", "test_bad_host"),
+            none,
+            "{:?}",
+            edges(&g)
+        );
+        assert_eq!(
+            callees("IOCompanionPlatform.scala", "fromPromise"),
+            ["/p/kernel/js/src/main/scala/cats/effect/kernel/AsyncPlatform.scala:4"],
+            "{:?}",
+            edges(&g)
+        );
+        assert_eq!(
+            callees("RequestHandlerWrapper.cs", "Handle"),
+            ["/p/src/MediatR/Pipeline/RequestPreProcessorBehavior.cs:5"],
+            "{:?}",
+            edges(&g)
+        );
+        // A Kotlin trailing lambda is for the last parameter, past those a
+        // default fills: `Boards.update({ … }) { … }` is `update(where,
+        // limit = null, body)`, never `update(limit, body)`.
+        let queries = "package org.jetbrains.exposed.v1.r2dbc\n\nsuspend fun <T : Table> T.update(\n    where: () -> Op<Boolean>,\n    limit: Int? = null,\n    body: T.(UpdateStatement) -> Unit\n): Int {\n    return 0\n}\n\nsuspend fun <T : Table> T.update(\n    limit: Int? = null,\n    body: T.(UpdateStatement) -> Unit\n): Int {\n    return 1\n}\n";
+        let boards = "package org.jetbrains.exposed.v1.r2dbc\n\nopen class Table\n\nobject Boards : Table()\n\nsuspend fun rename() {\n    Boards.update({ Boards.id eq 1 }) {\n        it[name] = \"relevant2\"\n    }\n}\n\nsuspend fun limited() {\n    Boards.update(limit = 1) {\n        it[name] = \"x\"\n    }\n}\n";
+        let kt = graph(&[
+            (
+                "/p/exposed-r2dbc/src/main/kotlin/org/jetbrains/exposed/v1/r2dbc/Queries.kt",
+                queries,
+            ),
+            (
+                "/p/exposed-r2dbc/src/main/kotlin/org/jetbrains/exposed/v1/r2dbc/Boards.kt",
+                boards,
+            ),
+        ]);
+        let reached = |name: &str| -> Vec<usize> {
+            let at = (0..kt.node_count())
+                .find(|&n| kt.node(n).name == name)
+                .unwrap();
+            let mut lines: Vec<usize> =
+                kt.callees_of(at).iter().map(|&c| kt.node(c).line).collect();
+            lines.sort();
+            lines
+        };
+        assert_eq!(reached("rename"), [3], "{:?}", edges(&kt));
+        assert_eq!(reached("limited"), [11], "{:?}", edges(&kt));
+    }
+
+    /// A C# value of a type parameter (`(TRequest) request`, `TRequest
+    /// request`) may be of any type the parameter takes: it fits an
+    /// implementation's parameter of a concrete type (`Handle(Ping
+    /// request, …)`). Where the only implementations are tests', code
+    /// apart from them calls the interface's declaration.
+    #[test]
+    fn a_csharp_type_parameter_value_fits_any_implementation() {
+        let handler = "namespace MediatR;\n\npublic interface IRequestHandler<in TRequest>\n    where TRequest : IRequest\n{\n    Task Handle(TRequest request, CancellationToken cancellationToken);\n}\n";
+        let ping = "namespace MediatR.Examples;\n\npublic class Ping : IRequest { }\n\npublic class PingHandler : IRequestHandler<Ping>\n{\n    public Task Handle(Ping request, CancellationToken cancellationToken)\n    {\n        return Task.CompletedTask;\n    }\n}\n";
+        let wrapper = "namespace MediatR.Wrappers;\n\npublic class RequestHandlerWrapperImpl<TRequest> where TRequest : IRequest\n{\n    public Task Cast(object request, IServiceProvider serviceProvider, CancellationToken cancellationToken)\n    {\n        return serviceProvider.GetRequiredService<IRequestHandler<TRequest>>()\n            .Handle((TRequest) request, cancellationToken);\n    }\n\n    public Task Typed(TRequest request, IRequestHandler<TRequest> handler, CancellationToken cancellationToken)\n    {\n        return handler.Handle(request, cancellationToken);\n    }\n}\n";
+        let g = graph(&[
+            ("/p/src/MediatR/IRequestHandler.cs", handler),
+            ("/p/src/MediatR.Examples/Ping.cs", ping),
+            ("/p/src/MediatR/Wrappers/RequestHandlerWrapper.cs", wrapper),
+        ]);
+        assert!(
+            has(
+                &g,
+                "/p/src/MediatR/Wrappers/RequestHandlerWrapper.cs:Cast",
+                "/p/src/MediatR.Examples/Ping.cs:Handle"
+            ),
+            "{:?}",
+            edges(&g)
+        );
+        assert!(
+            has(
+                &g,
+                "/p/src/MediatR/Wrappers/RequestHandlerWrapper.cs:Typed",
+                "/p/src/MediatR.Examples/Ping.cs:Handle"
+            ),
+            "{:?}",
+            edges(&g)
+        );
+        let tested = graph(&[
+            ("/p/src/MediatR/IRequestHandler.cs", handler),
+            ("/p/test/MediatR.Tests/Ping.cs", ping),
+            ("/p/src/MediatR/Wrappers/RequestHandlerWrapper.cs", wrapper),
+        ]);
+        for caller in ["Cast", "Typed"] {
+            assert!(
+                has(
+                    &tested,
+                    &format!("/p/src/MediatR/Wrappers/RequestHandlerWrapper.cs:{caller}"),
+                    "/p/src/MediatR/IRequestHandler.cs:Handle"
+                ),
+                "{:?}",
+                edges(&tested)
+            );
+        }
+    }
+
+    /// A C++ string literal is no class whose one converting constructor
+    /// takes only a type with a member (`locale_ref(const Locale&)` of
+    /// `sizeof(Locale::collate) != 0`), its body split by `#if`: `fmt::
+    /// format("{:#.0f}", 0.01)` is `format(format_string<T...>, T&&...)`.
+    /// Nor is a function's result of another type (`runtime("{0:#")`, a
+    /// `runtime_format_string<>`).
+    #[test]
+    fn a_string_literal_is_no_locale_ref() {
+        let core = "namespace fmt {\nclass locale_ref {\n#if FMT_USE_LOCALE\n private:\n  const void* locale_;\n\n public:\n  constexpr locale_ref() : locale_(nullptr) {}\n\n  template <typename Locale, FMT_ENABLE_IF(sizeof(Locale::collate) != 0)>\n  locale_ref(const Locale& loc) : locale_(&loc) {\n    detail::ignore_unused(sizeof(isalpha('x', loc)));\n  }\n\n  inline explicit operator bool() const noexcept { return locale_ != nullptr; }\n#else\n public:\n  inline explicit operator bool() const noexcept { return false; }\n#endif  // FMT_USE_LOCALE\n\n public:\n  template <typename Locale> auto get() const -> Locale;\n};\n\ntemplate <typename... T> struct fstring {\n public:\n  string_view str;\n  using t = fstring;\n\n  template <size_t N>\n  FMT_CONSTEVAL FMT_ALWAYS_INLINE fstring(const char (&s)[N]) : str(s, N - 1) {}\n  template <typename S,\n            FMT_ENABLE_IF(std::is_convertible<const S&, string_view>::value)>\n  FMT_CONSTEVAL FMT_ALWAYS_INLINE fstring(const S& s) : str(s) {}\n  fstring(runtime_format_string<> fmt) : str(fmt.str) {}\n};\n\ntemplate <typename Char = char> struct runtime_format_string {\n  basic_string_view<Char> str;\n};\n\ninline auto runtime(string_view s) -> runtime_format_string<> { return {{s}}; }\n\ntemplate <typename... T> using format_string = typename fstring<T...>::t;\n}\n";
+        let format = "#include \"core.h\"\nnamespace fmt {\ntemplate <typename... T>\nFMT_INLINE auto format(locale_ref loc, format_string<T...> fmt, T&&... args)\n    -> std::string {\n  return vformat(loc, fmt.str, vargs<T...>{{args...}});\n}\n\ntemplate <typename... T>\nFMT_NODISCARD FMT_INLINE auto format(format_string<T...> fmt, T&&... args)\n    -> std::string {\n  return vformat(fmt.str, vargs<T...>{{args...}});\n}\n}\n";
+        let test = "#include \"fmt/format.h\"\nvoid check() {\n  auto s = fmt::format(\"{:#.0f}\", 0.01);\n  auto r = fmt::format(fmt::runtime(\"{0:#\"), 'c');\n}\n";
+        let files = [
+            ("/p/include/fmt/core.h", core),
+            ("/p/include/fmt/format.h", format),
+            ("/p/test/format-test.cc", test),
+        ];
+        let sources: Vec<(PathBuf, String)> = files
+            .iter()
+            .map(|(f, s)| (PathBuf::from(f), s.to_string()))
+            .collect();
+        let scope: HashMap<PathBuf, HashSet<PathBuf>> = HashMap::from([
+            (
+                PathBuf::from("/p/test/format-test.cc"),
+                HashSet::from([
+                    PathBuf::from("/p/include/fmt/format.h"),
+                    PathBuf::from("/p/include/fmt/core.h"),
+                ]),
+            ),
+            (
+                PathBuf::from("/p/include/fmt/format.h"),
+                HashSet::from([PathBuf::from("/p/include/fmt/core.h")]),
+            ),
+        ]);
+        let g = ProjectCallGraph::build(defs_of(&files), &sources, &scope);
+        let at = (0..g.node_count())
+            .find(|&n| g.node(n).name == "check")
+            .unwrap();
+        let lines: Vec<usize> = g
+            .callees_of(at)
+            .iter()
+            .filter(|&&c| g.node(c).name == "format")
+            .map(|&c| g.node(c).line)
+            .collect();
+        assert_eq!(lines, [10], "{:?}", edges(&g));
     }
 
     /// More of audit 17's: a Kotlin property of the file's top level

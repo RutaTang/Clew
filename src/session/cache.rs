@@ -204,7 +204,10 @@ use crate::incremental::Version;
 /// 60: Ruby calls' and methods' positional arguments; Scala members'
 /// declared types as receivers; Zig globals' types; C++ `if MACRO (…)`.
 /// 61: Haskell's modules imported only `qualified`.
-pub(crate) const CACHE_VERSION: u32 = 61;
+/// 62: Scala self-types' members and parameterless `def`s' declared types;
+/// C# LINQ lambdas' elements; Kotlin trailing lambdas' places; C++ call
+/// results as arguments.
+pub(crate) const CACHE_VERSION: u32 = 62;
 
 /// A cached symbol (the index entry minus the paths, which are reconstructed
 /// from the project root + relative path on load).
