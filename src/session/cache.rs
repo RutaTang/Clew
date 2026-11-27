@@ -176,7 +176,9 @@ use crate::incremental::Version;
 /// 50: C++ classes' fields (and a member defined apart from its class
 /// reading them); a Zig file struct's own fields.
 /// 51: a Kotlin lambda's argument kind; a Ruby class built by its path.
-pub(crate) const CACHE_VERSION: u32 = 51;
+/// 52: Go's `new(T)`; Kotlin backticked type names and a call's outer
+/// lambda; C++ friends unowned, specializations' bases; Zig decl literals.
+pub(crate) const CACHE_VERSION: u32 = 52;
 
 /// A cached symbol (the index entry minus the paths, which are reconstructed
 /// from the project root + relative path on load).

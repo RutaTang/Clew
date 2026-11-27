@@ -1403,6 +1403,68 @@ fn without_arity(name: &str) -> &str {
     name.split('`').next().unwrap_or(name)
 }
 
+/// The bases each C++ class template specialization in `src` names
+/// (`template <> struct formatter<point> : nested_formatter<double> {` is
+/// `formatter`'s `nested_formatter`).
+fn cpp_specialization_bases(src: &str) -> Vec<(String, Vec<String>)> {
+    let mut out = Vec::new();
+    for line in src.lines() {
+        let t = line.trim_start();
+        let Some(rest) = t.strip_prefix("template") else {
+            continue;
+        };
+        let Some((_, rest)) = rest.split_once('>') else {
+            continue;
+        };
+        let rest = rest.trim_start();
+        let Some(rest) = rest
+            .strip_prefix("struct ")
+            .or_else(|| rest.strip_prefix("class "))
+        else {
+            continue;
+        };
+        let name: String = rest
+            .trim_start()
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        let after = &rest.trim_start()[name.len()..];
+        if name.is_empty() || !after.starts_with('<') {
+            continue;
+        }
+        // Past the specialization's arguments: its bases, to the body.
+        let mut depth = 0i32;
+        let mut end = None;
+        for (i, c) in after.char_indices() {
+            match c {
+                '<' => depth += 1,
+                '>' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(i + 1);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(end) = end else {
+            continue;
+        };
+        let header = after[end..].split('{').next().unwrap_or("");
+        let Some(list) = header.trim_start().strip_prefix(':') else {
+            continue;
+        };
+        let bases =
+            crate::heritage::inherited_names(&format!("struct {name} : {list}"), Some("cpp"));
+        let bases: Vec<String> = bases.into_iter().filter(|b| *b != name).collect();
+        if !bases.is_empty() {
+            out.push((name, bases));
+        }
+    }
+    out
+}
+
 /// A file's [`FileContext`], read off its source and outline.
 /// A file's types with its type aliases among them, each an alias of the
 /// type it names as its one base: `using daily_file_sink_st =
@@ -1551,10 +1613,38 @@ pub fn context_in(src: &str, lang: Lang, symbols: &[Located]) -> FileContext {
             }
             bases.retain(|b| *b != l.symbol.name);
             bases.dedup();
-            Some((l.symbol.name.clone(), bases))
+            // A Kotlin name in backticks (`` `-JsonUtf8Reader` ``) by the
+            // name its members' owner says (`JsonUtf8Reader`).
+            let name = if l.symbol.name.contains('`') {
+                l.symbol
+                    .name
+                    .chars()
+                    .filter(|c| c.is_alphanumeric() || *c == '_')
+                    .collect()
+            } else {
+                l.symbol.name.clone()
+            };
+            Some((name, bases))
         })
         .collect();
-    let types = with_aliases(types, src, lang);
+    let mut types = with_aliases(types, src, lang);
+    // A C++ class template's specialization (`template <> struct
+    // formatter<point> : nested_formatter<double> {`), no type of the
+    // outline's: its bases are the template's too.
+    if lang == Lang::Cpp {
+        for (name, bases) in cpp_specialization_bases(src) {
+            match types.iter_mut().find(|(t, _)| *t == name) {
+                Some((_, known)) => {
+                    for base in bases {
+                        if !known.contains(&base) {
+                            known.push(base);
+                        }
+                    }
+                }
+                None => types.push((name, bases)),
+            }
+        }
+    }
     // The types whose methods extend another: Dart's `extension … on`,
     // Scala's `implicit class`.
     let extension_spans: Vec<(usize, usize)> = symbols
@@ -3617,9 +3707,11 @@ impl ProjectCallGraph {
                     );
                 // A bare call in Dart, JavaScript, Python or PHP is a
                 // function's, or one of the caller's own class (or its
-                // bases): another class's method needs its object.
+                // bases): another class's method needs its object — in
+                // C++ too, named with no scope (`run()` in `main` is no
+                // `ExampleQt::run`).
                 let own_or_free = !cs.method
-                    && matches!(
+                    && (matches!(
                         fc.lang,
                         Lang::Dart
                             | Lang::JavaScript
@@ -3627,7 +3719,7 @@ impl ProjectCallGraph {
                             | Lang::Tsx
                             | Lang::Python
                             | Lang::Php
-                    );
+                    ) || (fc.lang == Lang::Cpp && cs.qualifier.is_none()));
                 // An Elixir bare call: a function of its own file, or of a
                 // module it imports.
                 let elixir_bare = !cs.method && fc.lang == Lang::Elixir;
@@ -4171,6 +4263,13 @@ impl NodeFacts {
     /// (`Async.asyncForWriterT(async, L0)`). From Java or Kotlin, it is the
     /// JVM method Scala compiles it to: its implicits its parameters.
     fn takes_call(&self, cs: &CallSite, lang: Lang, owner: Option<&str>) -> bool {
+        // Zig's decl literal passes every parameter (none by a dot).
+        if lang == Lang::Zig
+            && cs.qualifier.as_deref() == Some(".")
+            && let (Some(n), Some((_, most))) = (cs.arity, self.arity)
+        {
+            return n == most;
+        }
         if !self.takes(cs.arity) {
             return false;
         }
@@ -4970,6 +5069,15 @@ fn walk(
                     .then(|| cpp_call_scope(node, src))
                     .flatten()
             });
+            // Zig's decl literal (`.of(a, b)`, its type the one expected):
+            // `.`, a function every argument of which it passes.
+            let qualifier = qualifier.or_else(|| {
+                (lang == Lang::Zig
+                    && node.child_by_field_name("function").is_some_and(|f| {
+                        f.kind() == "field_expression" && f.child_by_field_name("object").is_none()
+                    }))
+                .then(|| ".".to_string())
+            });
             let arity = call_arity(node, parent, src, lang);
             let arguments = matches!(
                 lang,
@@ -5319,6 +5427,20 @@ fn argument_kinds(
                     }
                     _ => {}
                 }
+            }
+            // `exec("x") { row -> … }`: the call is the first child of one
+            // around it, which holds the lambda.
+            if let Some(outer) = call.parent()
+                && outer.kind() == "call_expression"
+                && outer
+                    .named_child(0)
+                    .is_some_and(|first| first.id() == call.id())
+            {
+                let mut c = outer.walk();
+                trailing_lambdas += outer
+                    .named_children(&mut c)
+                    .filter(|n| n.kind() == "annotated_lambda")
+                    .count();
             }
         }
         _ => lists.push(call.child_by_field_name("arguments").or_else(|| {
@@ -6042,8 +6164,27 @@ fn passes(
     if a == "L" {
         return !(primitive(p)
             || matches!(p, "s" | "a" | "b" | "n")
-            || p.strip_prefix('T')
-                .is_some_and(|class| declared(without_arity(class))));
+            || p.strip_prefix('T').is_some_and(|class| {
+                declared(without_arity(class))
+                    // (A collection or a value, no interface a lambda is.)
+                    || matches!(
+                        class,
+                        "Iterable"
+                            | "Collection"
+                            | "List"
+                            | "MutableList"
+                            | "Set"
+                            | "MutableSet"
+                            | "Map"
+                            | "MutableMap"
+                            | "Sequence"
+                            | "Array"
+                            | "Pair"
+                            | "Triple"
+                            | "Number"
+                            | "Any"
+                    )
+            }));
     }
     // A string, number, character or boolean for a class: Java and Kotlin
     // convert none to one but those above them (`Number`, `Comparable`) —
@@ -6081,10 +6222,17 @@ fn passes(
                         Some(arg) => (arg, true),
                         None => (&a[1..], false),
                     };
-                    !declared(without_arity(class))
-                        || class == arg
-                        || (!plain && !arg.contains('`') && without_arity(class) == arg)
-                        || descends(arg, class)
+                    // (A class written to be the plain `IRequest`, never
+                    // `IRequest<T>`, is none of the latter, whoever declares
+                    // them.)
+                    let only_plain = class.contains('`')
+                        && descends(arg, without_arity(class))
+                        && !descends(arg, class);
+                    !only_plain
+                        && (!declared(without_arity(class))
+                            || class == arg
+                            || (!plain && !arg.contains('`') && without_arity(class) == arg)
+                            || descends(arg, class))
                 }
                 None => !(primitive(p) || p == "s"),
             }
@@ -8299,13 +8447,27 @@ const CPP_NOT_TYPES: &[&str] = &[
 ];
 
 /// The type a constructor expression builds: `Cart(…)`, `Cart { … }`,
-/// `Cart::new(…)`, `new Cart(…)`, `&Cart{…}`, `Cart.new`, `Cart<T>(…)`,
+/// `Cart::new(…)`, `new Cart(…)`, `&Cart{…}`, Go's `new(Cart)`, `Cart.new`,
+/// `Cart<T>(…)`,
 /// `models.Cart(…)` — when it is the whole expression: what is called or
 /// read off it (`Cart(p).load()`) is of a type of its own. A function of a
 /// type other than `new` (`Config::builder()`) returns what it returns, and
 /// `Shape::Circle(c)` is a value of `Shape`, not a `Circle`.
 fn constructed_type(rhs: &str, lang: Lang) -> Option<String> {
     let mut rhs = rhs.trim_start();
+    // Go's `new(bytes.Buffer)`: a pointer to the type it names.
+    if lang == Lang::Go
+        && let Some(inner) = rhs.strip_prefix("new(")
+        && let Some(close) = inner.find(')')
+        && whole_expression(&inner[close + 1..])
+    {
+        let ty = inner[..close].trim().trim_start_matches('*');
+        return (!ty.is_empty()
+            && ty
+                .chars()
+                .all(|c| c == '_' || c == '.' || c.is_alphanumeric()))
+        .then(|| ty.to_string());
+    }
     let mut built_with_new = false;
     // (Dart's `const Pipeline()` builds one as `new` does.)
     for prefix in ["new ", "const ", "&mut ", "&"] {
@@ -8919,6 +9081,17 @@ pub fn owners_in(
     symbols
         .iter()
         .filter(|l| is_callable(&l.symbol.kind))
+        // A C++ friend defined in its class (`friend auto add_compare(…)`)
+        // is no member of it: a free function its arguments find.
+        .filter(|l| {
+            lang != Lang::Cpp
+                || !(src
+                    .get(l.declaration.0..l.signature_end.max(l.declaration.0))
+                    .is_some_and(cpp_friend)
+                    || src
+                        .get(..l.declaration.0)
+                        .is_some_and(|before| before.trim_end().ends_with("friend")))
+        })
         .filter_map(|l| {
             // Inside the signature, past any decorator or doc comment the
             // declaration's span takes in.
@@ -8927,6 +9100,19 @@ pub fn owners_in(
             Some((l.symbol.line, owner_from(leaf, src, lang)?))
         })
         .collect()
+}
+
+/// Whether a C++ declaration's text declares a friend: `friend` among the
+/// words before its parameters, past a template's header (`template <…>
+/// friend auto f(…)`). (Where the grammar's friend declaration holds the
+/// definition, `friend` is just before its text.)
+fn cpp_friend(text: &str) -> bool {
+    let head = text.split('(').next().unwrap_or(text);
+    let head = match head.trim_start().strip_prefix("template") {
+        Some(rest) => rest.rsplit_once('>').map_or(rest, |(_, after)| after),
+        None => head,
+    };
+    head.split_whitespace().any(|w| w == "friend")
 }
 
 /// The class a definition at `node` (any node inside it) belongs to.
@@ -13703,6 +13889,71 @@ def main():
         assert_eq!(cast_type("(count) - 1", Lang::Java), None);
         assert_eq!(cast_type("(a + b)", Lang::Java), None);
         assert_eq!(cast_type("x as? Foo", Lang::Kotlin), Some("Foo"));
+    }
+
+    /// Audit 8's shapes: Go's `new(bytes.Buffer)` is the library's value; a
+    /// C++ bare call in a free function reaches no class's member; a Kotlin
+    /// lambda is passed for no `Iterable`; Zig's decl literal `.of(1, 2)`
+    /// takes every argument it passes (no `of(a, b, c)`); a C# class
+    /// written to be the plain `IRequest` (a library's) is no
+    /// `IRequest<T>`.
+    #[test]
+    fn audit_8_shapes_reach_what_they_name() {
+        let reached = |g: &ProjectCallGraph, caller: &str| -> Vec<usize> {
+            let at = (0..g.node_count())
+                .find(|&n| g.node(n).name == caller)
+                .unwrap();
+            let mut lines: Vec<usize> = g.callees_of(at).iter().map(|&c| g.node(c).line).collect();
+            lines.sort_unstable();
+            lines
+        };
+        let go = "package cobra\n\nimport \"bytes\"\n\ntype multi []string\n\nfunc (c *multi) String() string { return \"\" }\n\nfunc TestX(t *testing.T) {\n\tbuf := new(bytes.Buffer)\n\t_ = buf.String()\n}\n";
+        let g = graph(&[("/p/x_test.go", go)]);
+        assert_eq!(reached(&g, "TestX"), Vec::<usize>::new(), "{:?}", edges(&g));
+        let cpp = "class ExampleQt {\npublic:\n    void run() {}\n    void start() { run(); }\n};\nint main() {\n    run();\n    return 0;\n}\n";
+        let g = graph(&[("/p/example.cpp", cpp)]);
+        assert_eq!(reached(&g, "main"), Vec::<usize>::new(), "{:?}", edges(&g));
+        assert_eq!(reached(&g, "start"), [3], "{:?}", edges(&g));
+        // A friend defined in its class is a free function.
+        let friend = "class bigint {\n  friend auto add_compare(const bigint& a, const bigint& b) -> int { return 0; }\n};\nint dragon(bigint& n) {\n  return add_compare(n, n);\n}\n";
+        let g = graph(&[("/p/format.h", friend)]);
+        assert_eq!(reached(&g, "dragon"), [2], "{:?}", edges(&g));
+        // A specialization's member calls the template's base's bare.
+        let nested = "template <typename U> struct nested_formatter {\n  auto nested(const U& value) const -> int { return 0; }\n};\ntemplate <> struct formatter<point> : nested_formatter<double> {\n  auto format(point p) const -> int {\n    return nested(p.x);\n  }\n};\n";
+        let g = graph(&[("/p/test/format-test.cc", nested)]);
+        assert_eq!(reached(&g, "format"), [2], "{:?}", edges(&g));
+        assert!(cpp_friend(
+            "template <typename T>\nfriend FMT_CONSTEXPR auto f(T t)"
+        ));
+        assert!(!cpp_friend("auto friendly(int a)"));
+        let kt = "fun exec(stmt: String, args: Iterable<Int> = emptyList()): Int = 0\nfun exec(stmt: String, transform: (Int) -> Int): Int = 0\nfun go() {\n    exec(\"x\") { it }\n}\n";
+        let g = graph(&[("/p/src/Exec.kt", kt)]);
+        assert_eq!(reached(&g, "go"), [2], "{:?}", edges(&g));
+        let zig = "const ResolveOptions = struct {\n    pub fn of(a: u8, b: u8) ResolveOptions {\n        return .{};\n    }\n};\nconst ReferencedType = struct {\n    pub fn of(a: u8, b: u8, c: u8) ReferencedType {\n        return .{};\n    }\n};\nfn resolve(opts: ResolveOptions) void {}\nfn go() void {\n    resolve(.of(1, 2));\n}\n";
+        let g = graph(&[("/p/src/a.zig", zig)]);
+        assert_eq!(reached(&g, "go"), [2, 11], "{:?}", edges(&g));
+        let cs = "public class DeleteCmd : IRequest {}\npublic class TestApp\n{\n    public static Task<T> SendAsync<T>(IRequest<T> request) => null;\n    public static Task SendAsync(IBaseRequest request) => null;\n}\npublic class Use\n{\n    public void A() { TestApp.SendAsync(new DeleteCmd()); }\n}\n";
+        let g = graph(&[("/p/src/Use.cs", cs)]);
+        assert_eq!(reached(&g, "A"), [5], "{:?}", edges(&g));
+    }
+
+    /// A Kotlin class named in backticks (`` `-JsonUtf8Reader` ``) is a
+    /// subtype like any: a call on its base reaches its override.
+    #[test]
+    fn a_kotlin_class_in_backticks_overrides_its_base() {
+        let base = "package m\n\nabstract class JsonReader {\n  abstract fun nextLong(): Long\n}\n";
+        let sub = "package m\n\ninternal class `-JsonUtf8Reader` : JsonReader() {\n  override fun nextLong(): Long {\n    return 0\n  }\n}\n";
+        let use_ = "package m\n\nclass T {\n  fun go(reader: JsonReader) {\n    reader.nextLong()\n  }\n}\n";
+        let g = graph(&[
+            ("/p/m/JsonReader.kt", base),
+            ("/p/m/-JsonUtf8Reader.kt", sub),
+            ("/p/m/T.kt", use_),
+        ]);
+        let e = edges(&g);
+        assert!(
+            has(&g, "/p/m/T.kt:go", "/p/m/-JsonUtf8Reader.kt:nextLong"),
+            "{e:?}"
+        );
     }
 
     /// Of overloads, each its own: an abstract `value(String?)` is reached
