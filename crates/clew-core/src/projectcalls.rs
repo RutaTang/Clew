@@ -984,10 +984,85 @@ fn zig_fields(src: &str, symbols: &[Located]) -> Vec<(String, String, String)> {
     out
 }
 
+/// A Go chain of fields with an index on a field (`c.Errors[0]`), each
+/// index an element (`c.Errors.[]`); `None` for none, or for a chain of
+/// anything else.
+fn go_indexed_path(receiver: &str) -> Option<String> {
+    if !receiver.contains('[') {
+        return None;
+    }
+    let mut out = String::new();
+    let mut chars = receiver.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '[' => {
+                let mut depth = 1usize;
+                for c in chars.by_ref() {
+                    match c {
+                        '[' => depth += 1,
+                        ']' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if depth != 0 || out.is_empty() || out.ends_with('.') {
+                    return None;
+                }
+                out.push_str(".[]");
+            }
+            c if c == '_' || c == '.' || c.is_alphanumeric() => out.push(c),
+            _ => return None,
+        }
+    }
+    // (An index on the root is a variable's element, of a type unread.)
+    let root = out.split('.').next()?;
+    (!root.is_empty() && root != "[]" && out.split('.').nth(1) != Some("[]")).then_some(out)
+}
+
+/// The element type of Go's slice, array or map type `ty` (`*Error` of
+/// `[]*Error`, `Foo` of `map[string]*Foo`), its pointer read through:
+/// `None` for no such type, or an element of no plain type.
+fn go_element(ty: &str) -> Option<&str> {
+    let ty = ty.trim();
+    let rest = if ty.starts_with('[') {
+        &ty[ty.find(']')? + 1..]
+    } else {
+        let keyed = ty.strip_prefix("map[")?;
+        let mut depth = 1usize;
+        let close = keyed.char_indices().find_map(|(i, c)| {
+            match c {
+                '[' => depth += 1,
+                ']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(i);
+                    }
+                }
+                _ => {}
+            }
+            None
+        })?;
+        &keyed[close + 1..]
+    };
+    let element = rest.trim().trim_start_matches('*');
+    (!element.is_empty()
+        && element
+            .chars()
+            .all(|c| c == '_' || c == '.' || c.is_alphanumeric()))
+    .then_some(element)
+}
+
 /// A Go file's struct fields with their types ([`FileContext::fields`]):
 /// `Request *http.Request` is `Request` of type `http.Request`, `a, b int`
-/// two, an embedded `*Engine` the field `Engine`; a field of a map, slice,
-/// function or inline struct type is none this follows.
+/// two, an embedded `*Engine` the field `Engine`; a field of a slice or map
+/// (`Errors []*Error`) of type `[]Error`, and a named slice or map type
+/// (`type errorMsgs []*Error`) the field `[]` of its element's type — what
+/// an index (`c.Errors[0]`) is. A field of a function or inline struct
+/// type is none this follows.
 fn go_struct_fields(src: &str, symbols: &[Located]) -> Vec<(String, String, String)> {
     let mut out = Vec::new();
     for l in symbols
@@ -997,6 +1072,15 @@ fn go_struct_fields(src: &str, symbols: &[Located]) -> Vec<(String, String, Stri
         let Some(text) = src.get(l.declaration.0..l.declaration.1) else {
             continue;
         };
+        // `type errorMsgs []*Error`: its elements.
+        let spec = text.trim_start();
+        let spec = spec.strip_prefix("type ").unwrap_or(spec).trim_start();
+        if let Some(rest) = spec.strip_prefix(l.symbol.name.as_str())
+            && let Some(element) = go_element(rest.lines().next().unwrap_or(""))
+        {
+            out.push((l.symbol.name.clone(), "[]".to_string(), element.to_string()));
+            continue;
+        }
         let Some(open) = text
             .find("struct")
             .and_then(|at| text[at..].find('{').map(|b| at + b))
@@ -1009,10 +1093,28 @@ fn go_struct_fields(src: &str, symbols: &[Located]) -> Vec<(String, String, Stri
             let code = code.split('`').next().unwrap_or("").trim();
             let at_top = depth == 1;
             depth += code.matches('{').count() as i32 - code.matches('}').count() as i32;
-            if !at_top || code.is_empty() || code.contains(['{', '}', '(', '[']) {
+            if !at_top || code.is_empty() || code.contains(['{', '}', '(']) {
                 continue;
             }
             let tokens: Vec<&str> = code.split_whitespace().collect();
+            // `Errors []*Error`, `byName map[string]*Route`: of its elements.
+            if code.contains('[') {
+                if let [names @ .., ty] = tokens.as_slice()
+                    && !names.is_empty()
+                    && let Some(element) = go_element(ty)
+                {
+                    for name in names.iter().flat_map(|n| n.split(',')) {
+                        if is_plain_name(name) {
+                            out.push((
+                                l.symbol.name.clone(),
+                                name.to_string(),
+                                format!("[]{element}"),
+                            ));
+                        }
+                    }
+                }
+                continue;
+            }
             let simple = |t: &str| {
                 let t = t.trim_start_matches('*');
                 !t.is_empty()
@@ -2664,6 +2766,13 @@ impl ProjectCallGraph {
                 None => root.to_string(),
             };
             for field in parts {
+                // An element of a slice or map field's (`[]Error`).
+                if field == "[]"
+                    && let Some(element) = ty.strip_prefix("[]")
+                {
+                    ty = element.to_string();
+                    continue;
+                }
                 // A library's value: its fields are the library's.
                 if library(&ty, lang) {
                     return Some(ty);
@@ -2775,7 +2884,14 @@ impl ProjectCallGraph {
                                 // (A nullable mark trimmed, a type parameter's
                                 // `?` is nothing.)
                                 let (a, p) = (a.trim_end_matches('?'), p.trim_end_matches('?'));
+                                // (C#'s cast to `IRequest` says it is no
+                                // `IRequest<T>`: `0.)
+                                let (a, plain) = match a.strip_suffix("`0") {
+                                    Some(a) => (a, true),
+                                    None => (a, false),
+                                };
                                 let either = lang == Lang::CSharp
+                                    && !plain
                                     && !a.contains('`')
                                     && generic_named.contains(&a[1..])
                                     && without_arity(p) == a;
@@ -4981,6 +5097,18 @@ fn argument_kind(
     if let Some(kind) = literal_kind(t, lang) {
         return kind.to_string();
     }
+    // A cast says the type (`(IRequest<TResponse>) request`, `x as Foo`):
+    // what an overload is picked by.
+    if let Some(ty) = cast_type(t, lang) {
+        let kind = type_kind(ty, lang);
+        // C#'s `(IRequest) r` is no `IRequest<T>`, which a variable read
+        // without its type's arguments may be.
+        return if lang == Lang::CSharp && kind.starts_with('T') && !kind.contains('`') {
+            format!("{}`0", kind.trim_end_matches('?'))
+        } else {
+            kind
+        };
+    }
     if let Some(ty) = constructed_type(t, lang) {
         return type_kind(&ty, lang);
     }
@@ -5033,6 +5161,70 @@ fn said_around(
         from = outer;
     }
     (from, now)
+}
+
+/// The type an argument is cast to: Java's and C#'s `(Type) value`, C#'s
+/// and Kotlin's `value as Type` (or `as?`). `None` for
+/// no cast — a parenthesized value (`(a + b) * c`, `(count) - 1`) is none.
+fn cast_type(t: &str, lang: Lang) -> Option<&str> {
+    let type_like = |ty: &str| {
+        let ty = ty.trim();
+        !ty.is_empty()
+            && ty.starts_with(|c: char| c.is_alphabetic() || c == '_')
+            && ty.chars().all(|c| {
+                c.is_alphanumeric()
+                    || matches!(c, '_' | '.' | '<' | '>' | ',' | ' ' | '?' | '[' | ']')
+            })
+    };
+    if matches!(lang, Lang::Java | Lang::CSharp)
+        && let Some(rest) = t.strip_prefix('(')
+    {
+        let mut depth = 1usize;
+        let close = rest.char_indices().find_map(|(i, c)| {
+            match c {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(i);
+                    }
+                }
+                _ => {}
+            }
+            None
+        })?;
+        let (ty, value) = (rest[..close].trim(), rest[close + 1..].trim_start());
+        let primitive = matches!(
+            ty,
+            "int"
+                | "long"
+                | "short"
+                | "byte"
+                | "double"
+                | "float"
+                | "char"
+                | "bool"
+                | "boolean"
+                | "string"
+                | "object"
+                | "decimal"
+                | "uint"
+                | "ulong"
+        );
+        // A type (a class's capital, or a primitive), then a value — not an
+        // operator.
+        let operand = value.starts_with(|c: char| {
+            c.is_alphanumeric() || matches!(c, '_' | '(' | '"' | '\'' | '@' | '$')
+        });
+        return (type_like(ty) && (primitive || ty.starts_with(char::is_uppercase)) && operand)
+            .then_some(ty);
+    }
+    if matches!(lang, Lang::CSharp | Lang::Kotlin) {
+        let (_, ty) = t.rsplit_once(" as? ").or_else(|| t.rsplit_once(" as "))?;
+        let ty = ty.trim();
+        return (type_like(ty) && ty.starts_with(char::is_uppercase)).then_some(ty);
+    }
+    None
 }
 
 /// The kind of a literal ([`argument_kind`]), or `None` for no literal.
@@ -5594,10 +5786,14 @@ fn passes(
         (a, p) if a.starts_with('T') && strict && declared(without_arity(&a[1..])) => {
             match p.strip_prefix('T') {
                 Some(class) => {
-                    let arg = &a[1..];
+                    // (`0: a cast's own word that it takes none.)
+                    let (arg, plain) = match a[1..].strip_suffix("`0") {
+                        Some(arg) => (arg, true),
+                        None => (&a[1..], false),
+                    };
                     !declared(without_arity(class))
                         || class == arg
-                        || (!arg.contains('`') && without_arity(class) == arg)
+                        || (!plain && !arg.contains('`') && without_arity(class) == arg)
                         || descends(arg, class)
                 }
                 None => !(primitive(p) || p == "s"),
@@ -6650,11 +6846,22 @@ fn receiver_of(
     }
     // A Go chain of fields from a value of a known type (`c.Request.Header`
     // with `c *Context`): the last field's type, once the structs are read.
+    let indexed;
+    let receiver = match (lang == Lang::Go)
+        .then(|| go_indexed_path(receiver))
+        .flatten()
+    {
+        Some(path) => {
+            indexed = path;
+            indexed.as_str()
+        }
+        None => receiver,
+    };
     if lang == Lang::Go
         && let Some((root, path)) = receiver.split_once('.')
         && is_plain_name(root)
         && root.starts_with(char::is_lowercase)
-        && path.split('.').all(is_plain_name)
+        && path.split('.').all(|p| p == "[]" || is_plain_name(p))
     {
         let places = scope.places;
         let said = bindings
@@ -12809,7 +13016,12 @@ def main():
             "Request".to_string(),
             "http.Request".to_string()
         )));
-        assert!(!fc.context.fields.iter().any(|(_, f, _)| f == "Keys"));
+        // A map's field is of its elements (`c.Keys["a"]` an `any`).
+        assert!(fc.context.fields.contains(&(
+            "Context".to_string(),
+            "Keys".to_string(),
+            "[]any".to_string()
+        )));
     }
 
     /// A Kotlin class's name calls its companion object's members, those it
@@ -13023,6 +13235,57 @@ def main():
         );
         assert_eq!(scala_summoned("summon[Async[F]]").as_deref(), Some("Async"));
         assert_eq!(scala_summoned("Ref[IO](1)"), None);
+    }
+
+    /// A Go index on a field is an element of its slice or map: of a named
+    /// slice type (`Errors errorMsgs` with `type errorMsgs []*Error`), of a
+    /// field's own (`Items []*Item`, `ByName map[string]*Item`).
+    #[test]
+    fn a_go_index_on_a_field_is_its_element() {
+        let go = "package gin\n\ntype Error struct{ Err error }\n\nfunc (msg *Error) Error() string { return \"\" }\n\ntype errorMsgs []*Error\n\ntype Context struct {\n\tErrors errorMsgs\n\tItems  []*Item\n\tByName map[string]*Item\n}\n\ntype Item struct{}\n\nfunc (i *Item) Error() string { return \"\" }\n\ntype other struct{}\n\nfunc (o other) Error() string { return \"\" }\n\nfunc use(c *Context) {\n\t_ = c.Errors[0].Error()\n}\n\nfunc use2(c *Context) { _ = c.Items[1].Error() }\n\nfunc use3(c *Context) { _ = c.ByName[\"a\"].Error() }\n";
+        let g = graph(&[("/p/gin/context.go", go)]);
+        let reached = |caller: &str| {
+            let at = (0..g.node_count())
+                .find(|&n| g.node(n).name == caller)
+                .unwrap();
+            let mut lines: Vec<usize> = g.callees_of(at).iter().map(|&c| g.node(c).line).collect();
+            lines.sort_unstable();
+            lines
+        };
+        assert_eq!(reached("use"), [5], "{:?}", edges(&g));
+        assert_eq!(reached("use2"), [17], "{:?}", edges(&g));
+        assert_eq!(reached("use3"), [17], "{:?}", edges(&g));
+        assert_eq!(
+            go_indexed_path("c.Errors[0]").as_deref(),
+            Some("c.Errors.[]")
+        );
+        assert_eq!(go_indexed_path("items[0].Name"), None);
+        assert_eq!(go_element("map[string]*Route"), Some("Route"));
+    }
+
+    /// A cast picks the overload: `Handle((IRequest<int>) request)` is
+    /// `Handle(IRequest<int>)`, `Handle((IRequest) r)` is `Handle(IRequest)`
+    /// — never `Handle(object)` around them.
+    #[test]
+    fn a_cast_picks_the_overload() {
+        let cs = "public interface IRequest {}\npublic interface IRequest<out T> {}\npublic class W\n{\n    public void Handle(object request) { Handle((IRequest<int>) request); }\n    public void Handle(IRequest<int> request) { }\n    public void Run(object r) { Handle((IRequest) r); }\n    public void Handle(IRequest request) { }\n    public void Go(object r) { Handle(r as IRequest); }\n}\n";
+        let g = graph(&[("/p/src/W.cs", cs)]);
+        let reached = |caller: &str, line: usize| {
+            let at = (0..g.node_count())
+                .find(|&n| g.node(n).name == caller && g.node(n).line == line)
+                .unwrap();
+            let mut lines: Vec<usize> = g.callees_of(at).iter().map(|&c| g.node(c).line).collect();
+            lines.sort_unstable();
+            lines
+        };
+        assert_eq!(reached("Handle", 5), [6], "{:?}", edges(&g));
+        assert_eq!(reached("Run", 7), [8], "{:?}", edges(&g));
+        assert_eq!(reached("Go", 9), [8], "{:?}", edges(&g));
+        assert_eq!(cast_type("(Foo) x", Lang::Java), Some("Foo"));
+        assert_eq!(cast_type("(int) n", Lang::CSharp), Some("int"));
+        assert_eq!(cast_type("(count) - 1", Lang::Java), None);
+        assert_eq!(cast_type("(a + b)", Lang::Java), None);
+        assert_eq!(cast_type("x as? Foo", Lang::Kotlin), Some("Foo"));
     }
 
     /// Of overloads, each its own: an abstract `value(String?)` is reached

@@ -171,7 +171,9 @@ use crate::incremental::Version;
 /// 47: a closure binds its own names (receivers and arguments read there).
 /// 48: Zig's `test` blocks bind their own names; Elixir's `fun` is a name
 /// in a head's arity; C++ macros alone on their line blanked at parse.
-pub(crate) const CACHE_VERSION: u32 = 48;
+/// 49: casts in argument kinds; Go fields of slices and maps, by their
+/// elements, and an index in a chain of fields.
+pub(crate) const CACHE_VERSION: u32 = 49;
 
 /// A cached symbol (the index entry minus the paths, which are reconstructed
 /// from the project root + relative path on load).
