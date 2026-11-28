@@ -5930,6 +5930,18 @@ impl ProjectCallGraph {
                     }
                     continue;
                 }
+                // A Play template named by its format alone, as a file that
+                // imports `views._` does (`html.list(cs, …)`): `views.html.list`.
+                if matches!(fc.lang, Lang::Java | Lang::Scala)
+                    && let Some(format) = cs.qualifier.as_deref()
+                    && matches!(format, "html" | "txt" | "xml" | "js")
+                    && let Some(&template) = templates.get(&format!("views.{format}.{}", cs.callee))
+                {
+                    if edges.len() < MAX_EDGES {
+                        edges.insert((caller, template));
+                    }
+                    continue;
+                }
                 // A Play template: `views.html.index(…)`, Java's
                 // `views.html.index.render(…)` — the function its file
                 // compiles to, no method of the name elsewhere.
@@ -6459,18 +6471,51 @@ impl ProjectCallGraph {
                 // (or a base's), where one has the name — name lookup finds
                 // the class's scope before any around it (`listeners()` in
                 // `UnitTestImpl` is `this->listeners()`, never `UnitTest`'s).
-                let cpp_own = (!cs.method && cs.qualifier.is_none() && fc.lang == Lang::Cpp)
-                    .then_some(owner[caller])
-                    .flatten()
-                    .map(|own| own.rsplit(['.', ':']).next().unwrap_or(own))
-                    .filter(|own| {
-                        targets.iter().any(|&c| {
-                            owner[c].is_some_and(|o| {
-                                let o = o.rsplit(['.', ':']).next().unwrap_or(o);
-                                o == *own || descends(own, o)
+                // So does one in Java, Scala, C# or Dart — or a subclass's
+                // override, `this` its value (`spawn(…)` in os-lib's `proc` is
+                // `proc.spawn`, never `ProcGroup.spawn` beside it). (Not in
+                // Kotlin, whose lambda with a receiver, `apply { add(x) }`,
+                // is that receiver's.)
+                let virtual_own = matches!(
+                    fc.lang,
+                    Lang::Java | Lang::Scala | Lang::CSharp | Lang::Dart
+                );
+                // (Scala's mixins too: `OptionTGenSpawn extends GenSpawn with
+                // OptionTMonadCancel` runs `OptionTMonadCancel.raiseError`
+                // for `GenSpawn`'s bare `raiseError`.)
+                let mixed_into = |own: &str, o: &str| {
+                    let mut stack: Vec<&str> = vec![own];
+                    let mut seen: HashSet<&str> = HashSet::from([own]);
+                    while let Some(t) = stack.pop() {
+                        for &sub in subtypes_of.get(t).into_iter().flatten() {
+                            if seen.len() > 500 || !seen.insert(sub) {
+                                continue;
+                            }
+                            if descends(sub, o) {
+                                return true;
+                            }
+                            stack.push(sub);
+                        }
+                    }
+                    false
+                };
+                let in_family = |own: &str, o: &str| {
+                    o == own
+                        || descends(own, o)
+                        || (virtual_own && (descends(o, own) || mixed_into(own, o)))
+                };
+                let cpp_own =
+                    (!cs.method && cs.qualifier.is_none() && (fc.lang == Lang::Cpp || virtual_own))
+                        .then_some(owner[caller])
+                        .flatten()
+                        .map(|own| own.rsplit(['.', ':']).next().unwrap_or(own))
+                        .filter(|own| {
+                            targets.iter().any(|&c| {
+                                owner[c].is_some_and(|o| {
+                                    in_family(own, o.rsplit(['.', ':']).next().unwrap_or(o))
+                                })
                             })
-                        })
-                    });
+                        });
                 // A method called on a value of no known type: no function
                 // declared inside another (a local `def`, an anonymous
                 // class's method) is the value's.
@@ -6719,8 +6764,7 @@ impl ProjectCallGraph {
                         .copied()
                         .filter(|&c| {
                             owner[c].is_some_and(|o| {
-                                let o = o.rsplit(['.', ':']).next().unwrap_or(o);
-                                o == own || descends(own, o)
+                                in_family(own, o.rsplit(['.', ':']).next().unwrap_or(o))
                             })
                         })
                         .collect();
@@ -14200,6 +14244,29 @@ fn binding_at(head: &str, after: &str, lang: Lang) -> Binding {
             .trim_start_matches("try ")
             .trim_start()
             .starts_with("std.")
+    {
+        return Binding::Typed("std".to_string(), true);
+    }
+    // A Zig allocator's `create(T)` of a standard library's type makes a
+    // `*T` (`const conn_arena = try allocator.create(std.heap.ArenaAllocator);`):
+    // the library's.
+    if lang == Lang::Zig
+        && let Some(rhs) = assigned
+        && let Some(statement) = rhs.split(';').next()
+        && let Some((allocator, rest)) = statement
+            .trim_start()
+            .trim_start_matches("try ")
+            .trim_start()
+            .split_once(".create(")
+        && !allocator.is_empty()
+        && allocator
+            .chars()
+            .all(|c| c == '_' || c == '.' || c.is_alphanumeric())
+        && rest.trim_start().starts_with("std.")
+        && rest.split_once(')').is_some_and(|(ty, _)| {
+            ty.chars()
+                .all(|c| c == '_' || c == '.' || c.is_alphanumeric())
+        })
     {
         return Binding::Typed("std".to_string(), true);
     }
@@ -24202,6 +24269,66 @@ function build() {
         );
     }
 
+    /// A bare call in a Scala (Java, C#, Dart) class's method that its
+    /// class has a method of is that one, or a subclass's override: os-lib's
+    /// `spawn(…)` in `proc.call` is `proc.spawn`, never `ProcGroup.spawn`
+    /// beside it in the file. And Play's template named by its format, as a
+    /// file importing `views._` names it (`html.list(cs)`), is that template,
+    /// not the controller's own `list`.
+    #[test]
+    fn a_bare_call_is_its_classs_method_and_a_template_by_its_format() {
+        let ops = "package os\n\ncase class proc(command: Shellable*) {\n  def call(cwd: Path = null): CommandResult = {\n    val sub = spawn(\n      cwd,\n      env\n    )\n    sub\n  }\n  def spawn(cwd: Path = null, env: Map[String, String] = null): SubProcess = ???\n}\n\ncase class ProcGroup private[os] (commands: Seq[proc]) {\n  def spawn(cwd: Path = null, env: Map[String, String] = null): ProcGroup = ???\n}\n";
+        let controller = "package controllers\n\nimport views._\n\nclass Application {\n  def list(page: Int) = Action { implicit request =>\n    Ok(html.list(page))\n  }\n}\n";
+        let template = "@(page: Int)\n\n<h1>@page</h1>\n";
+        let files = [
+            ("/p/os/ProcessOps.scala", ops),
+            ("/p/app/controllers/Application.scala", controller),
+        ];
+        let mut defs = defs_of(&files);
+        let t = crate::outline::twirl_template("app/views/list.scala.html", template).unwrap();
+        defs.push(Def {
+            name: t.symbol.name,
+            kind: t.symbol.kind,
+            file: PathBuf::from("/p/app/views/list.scala.html"),
+            line: t.symbol.line,
+        });
+        let sources: Vec<(PathBuf, String)> = files
+            .iter()
+            .map(|(f, s)| (PathBuf::from(f), s.to_string()))
+            .collect();
+        let g = ProjectCallGraph::build(defs, &sources, &HashMap::new());
+        let e = edges(&g);
+        let spawns: Vec<usize> = {
+            let call = g
+                .id_of(Path::new("/p/os/ProcessOps.scala"), "call")
+                .unwrap();
+            g.callees_of(call).iter().map(|&c| g.node(c).line).collect()
+        };
+        assert_eq!(spawns, [11], "{e:?}");
+        let app = "/p/app/controllers/Application.scala:list";
+        assert!(!e.contains(&(app.to_string(), app.to_string())), "{e:?}");
+        // (A class mixed into one below the caller's is `this`'s too:
+        // `GenSpawn`'s bare `raiseError` runs `OptionTMonadCancel`'s in an
+        // `OptionTGenSpawn extends GenSpawn with OptionTMonadCancel`.)
+        let kernel = "package cats.effect.kernel\n\ntrait MonadCancel[F[_]] {\n  def raiseError[A](e: Throwable): F[A]\n}\n\ntrait GenSpawn[F[_]] extends MonadCancel[F] {\n  def race[A](e: Throwable): F[A] = raiseError(e)\n}\n\ntrait OptionTMonadCancel[F[_]] extends MonadCancel[F] {\n  def raiseError[A](e: Throwable): F[A] = ???\n}\n\ntrait OptionTGenSpawn[F[_]] extends GenSpawn[F] with OptionTMonadCancel[F]\n\nclass Unrelated {\n  def raiseError[A](e: Throwable): Int = 1\n}\n";
+        let g = graph(&[("/p/kernel/Kernel.scala", kernel)]);
+        let race = g
+            .id_of(Path::new("/p/kernel/Kernel.scala"), "race")
+            .unwrap();
+        let mut lines: Vec<usize> = g.callees_of(race).iter().map(|&c| g.node(c).line).collect();
+        lines.sort_unstable();
+        assert!(
+            lines.contains(&12) && !lines.contains(&18),
+            "{lines:?}: {:?}",
+            edges(&g)
+        );
+        assert!(
+            e.iter()
+                .any(|(a, b)| a == app && b.starts_with("/p/app/views/list.scala.html")),
+            "{e:?}"
+        );
+    }
+
     /// A type after a colon binds no name: `PermSet.fromSet(…)` in `def
     /// apply(p: Path): PermSet = { … }` is on the object `PermSet`, not a
     /// value of that name the result type's `= {` seemed to assign.
@@ -24213,6 +24340,24 @@ function build() {
             .calls;
         let from_set = calls.iter().find(|c| c.callee == "fromSet").unwrap();
         assert_eq!(from_set.receiver, Some(Receiver::Type("PermSet".into())));
+    }
+
+    /// A Zig allocator's `create(T)` of a standard library's type makes a
+    /// `T`: `conn_arena.deinit()` on `try
+    /// allocator.create(std.heap.ArenaAllocator)` is the library's, no
+    /// project `deinit`.
+    #[test]
+    fn a_zig_allocators_create_makes_its_type() {
+        let worker = "const std = @import(\"std\");\n\nconst Pool = struct {\n    pub fn deinit(self: *Pool) void {\n        _ = self;\n    }\n};\n\nconst Blocking = struct {\n    pub fn deinit(self: *Blocking) void {\n        _ = self;\n    }\n};\n\nfn init(allocator: std.mem.Allocator) !void {\n    const conn_arena = try allocator.create(std.heap.ArenaAllocator);\n    errdefer conn_arena.deinit();\n    var pool = Pool{};\n    pool.deinit();\n}\n";
+        let g = graph(&[("/p/src/worker.zig", worker)]);
+        let id = g.id_of(Path::new("/p/src/worker.zig"), "init").unwrap();
+        let lines: Vec<usize> = g
+            .callees_of(id)
+            .iter()
+            .filter(|&&c| g.node(c).name == "deinit")
+            .map(|&c| g.node(c).line)
+            .collect();
+        assert_eq!(lines, [4], "{:?}", edges(&g));
     }
 
     /// A Zig call negated (`!tag_filter.contains(scope_tag)`, which the
