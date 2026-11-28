@@ -25392,6 +25392,7 @@ fn fill_project_session(app: &mut App) {
             owners: HashMap::new(),
             accessed: HashSet::new(),
             internal: HashSet::new(),
+            cpp_only: HashSet::new(),
             context: Default::default(),
         }),
     );

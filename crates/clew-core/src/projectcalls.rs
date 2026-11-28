@@ -3004,6 +3004,10 @@ pub struct FileCalls {
     /// see [`crate::outline::Located::internal`]): no other file's call
     /// reaches them.
     pub internal: HashSet<usize>,
+    /// Definition lines of C++ functions no C code can call (a template, a
+    /// class's member, one of a named namespace; see
+    /// [`crate::outline::Located::cpp_only`]).
+    pub cpp_only: HashSet<usize>,
     /// The file's package and the types it declares with their bases
     /// ([`FileContext`]).
     pub context: FileContext,
@@ -3064,6 +3068,7 @@ impl FileCalls {
             && self.owners.is_empty()
             && self.accessed.is_empty()
             && self.internal.is_empty()
+            && self.cpp_only.is_empty()
             && self.context.types.iter().all(|(_, bases)| bases.is_empty())
     }
 
@@ -3108,6 +3113,11 @@ impl FileCalls {
             internal: symbols
                 .iter()
                 .filter(|l| l.internal && is_callable(&l.symbol.kind))
+                .map(|l| l.symbol.line)
+                .collect(),
+            cpp_only: symbols
+                .iter()
+                .filter(|l| l.cpp_only && is_callable(&l.symbol.kind))
                 .map(|l| l.symbol.line)
                 .collect(),
             context: FileContext::default(),
@@ -3162,9 +3172,13 @@ impl ProjectCallGraph {
             })
             .collect();
 
-        let declarations: HashMap<&Path, (&HashSet<usize>, &HashSet<usize>)> = files
+        type Lines<'a> = &'a HashSet<usize>;
+        let declarations: HashMap<&Path, (Lines, Lines, Lines)> = files
             .iter()
-            .map(|f| (f.file.as_path(), (&f.declarations, &f.internal)))
+            .map(|f| {
+                let lines = (&f.declarations, &f.internal, &f.cpp_only);
+                (f.file.as_path(), lines)
+            })
             .collect();
         let arities: HashMap<(&Path, usize), (u8, u8)> = files
             .iter()
@@ -3181,10 +3195,13 @@ impl ProjectCallGraph {
                 arity: arities.get(&(n.file.as_path(), n.line)).copied(),
                 bodyless: declarations
                     .get(n.file.as_path())
-                    .is_some_and(|(d, _)| d.contains(&n.line)),
+                    .is_some_and(|(d, _, _)| d.contains(&n.line)),
                 internal: declarations
                     .get(n.file.as_path())
-                    .is_some_and(|(_, i)| i.contains(&n.line)),
+                    .is_some_and(|(_, i, _)| i.contains(&n.line)),
+                cpp_only: declarations
+                    .get(n.file.as_path())
+                    .is_some_and(|(_, _, c)| c.contains(&n.line)),
                 lang: crate::highlight::detect(&n.file).and_then(Lang::from_key),
             })
             .collect();
@@ -6677,6 +6694,8 @@ struct NodeFacts {
     bodyless: bool,
     /// A C or C++ function of its file alone (see [`FileCalls::internal`]).
     internal: bool,
+    /// A C++ function no C code can call (see [`FileCalls::cpp_only`]).
+    cpp_only: bool,
     /// The language of the node's file, by extension.
     lang: Option<Lang>,
     /// An Erlang or Elixir function's arities ([`FileContext::arities`]).
@@ -15250,6 +15269,26 @@ fn resolve_callees(
     nodes: &[SymNode],
     facts: &[NodeFacts],
     owner: &[Option<&str>],
+    scope: (&HashSet<usize>, &[bool]),
+    call: &CallSite,
+    site: &Site,
+) -> Vec<usize> {
+    let mut callees = resolve_callees_by_scope(defs, nodes, facts, owner, scope, call, site);
+    // C code calls no C++ template, member or namespace's function: a C
+    // file's `printf(…)` is libc's, not `fmt::printf`, its `fclose(…)` not
+    // a mock's `test::fclose`.
+    if site.lang == Lang::C {
+        callees.retain(|&i| !facts[i].cpp_only);
+    }
+    callees
+}
+
+/// [`resolve_callees`] by scope alone, before the C rule.
+fn resolve_callees_by_scope(
+    defs: &Defs,
+    nodes: &[SymNode],
+    facts: &[NodeFacts],
+    owner: &[Option<&str>],
     (implemented, nested): (&HashSet<usize>, &[bool]),
     call: &CallSite,
     site: &Site,
@@ -23468,6 +23507,60 @@ function build() {
             "{:?}",
             edges(&g)
         );
+    }
+
+    /// C code calls no C++ template, class member or named namespace's
+    /// function: fmt's C test's `printf(…)` is libc's, not the template
+    /// `fmt::printf` (its namespace a macro's, `FMT_BEGIN_NAMESPACE`), and
+    /// its `fclose(…)` not the mock `int test::fclose(FILE*)`. A C++
+    /// function `extern "C"`, or a plain one of the global namespace, it
+    /// still calls; and C++ calls them all.
+    #[test]
+    fn c_calls_no_cpp_template_member_or_namespaces_function() {
+        let printf = "FMT_BEGIN_NAMESPACE\ntemplate <typename... T>\ninline auto printf(string_view fmt, const T&... args) -> int {\n  return vfprintf(stdout, fmt, make_printf_args(args...));\n}\nFMT_END_NAMESPACE\n";
+        let mock = "#include \"posix-mock.hpp\"\nint test::fclose(FILE* stream) {\n  return ::fclose(stream);\n}\nnamespace util {\nint puts(const char* s) { return 0; }\n}\nstruct Box { int size() { return 1; } };\n";
+        let api = "extern \"C\" {\nint fmt_c_format(char* buf, const char* f) { return 0; }\n}\nint plain_count(int n) { return n; }\n";
+        let c = "#include <stdio.h>\n\nint main(void) {\n  FILE* file = fopen(\"x\", \"r\");\n  printf(\"Running\\n\");\n  fclose(file);\n  puts(\"x\");\n  size();\n  fmt_c_format(0, \"{}\");\n  return plain_count(1);\n}\n";
+        let cpp = "int run() {\n  fmt::printf(\"x\");\n  return test::fclose(nullptr);\n}\n";
+        let g = graph(&[
+            ("/p/include/fmt/printf.hpp", printf),
+            ("/p/test/posix-mock-test.cc", mock),
+            ("/p/src/fmt-c.cc", api),
+            ("/p/test/c-test.c", c),
+            ("/p/test/run.cc", cpp),
+        ]);
+        for (callee, target) in [
+            ("printf", "/p/include/fmt/printf.hpp:printf"),
+            ("fclose", "/p/test/posix-mock-test.cc:fclose"),
+            ("puts", "/p/test/posix-mock-test.cc:puts"),
+            ("size", "/p/test/posix-mock-test.cc:size"),
+        ] {
+            assert!(
+                !has(&g, "/p/test/c-test.c:main", target),
+                "{callee}: {:?}",
+                edges(&g)
+            );
+        }
+        for target in [
+            "/p/src/fmt-c.cc:fmt_c_format",
+            "/p/src/fmt-c.cc:plain_count",
+        ] {
+            assert!(
+                has(&g, "/p/test/c-test.c:main", target),
+                "{target}: {:?}",
+                edges(&g)
+            );
+        }
+        for target in [
+            "/p/include/fmt/printf.hpp:printf",
+            "/p/test/posix-mock-test.cc:fclose",
+        ] {
+            assert!(
+                has(&g, "/p/test/run.cc:run", target),
+                "{target}: {:?}",
+                edges(&g)
+            );
+        }
     }
 
     /// C and C++ link a program's files into one: a header declares what

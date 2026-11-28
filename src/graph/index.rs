@@ -306,6 +306,8 @@ fn to_cached_calls(calls: &FileCalls) -> CachedCalls {
     accessed.sort_unstable();
     let mut internal: Vec<usize> = calls.internal.iter().copied().collect();
     internal.sort_unstable();
+    let mut cpp_only: Vec<usize> = calls.cpp_only.iter().copied().collect();
+    cpp_only.sort_unstable();
     CachedCalls {
         lang: calls.lang.key().to_string(),
         names,
@@ -322,6 +324,7 @@ fn to_cached_calls(calls: &FileCalls) -> CachedCalls {
         owners,
         accessed,
         internal,
+        cpp_only,
         package: calls.context.package.clone(),
         enclosing: calls.context.enclosing.clone(),
         types: calls.context.types.clone(),
@@ -454,6 +457,7 @@ fn from_cached_calls(abs: &Path, cached: &CachedCalls) -> Option<FileCalls> {
         owners,
         accessed: cached.accessed.iter().copied().collect(),
         internal: cached.internal.iter().copied().collect(),
+        cpp_only: cached.cpp_only.iter().copied().collect(),
         context: clew_core::projectcalls::FileContext {
             package: cached.package.clone(),
             enclosing: cached.enclosing.clone(),

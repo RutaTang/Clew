@@ -212,6 +212,11 @@ pub struct Located {
     /// `static` outside a class, or in an anonymous namespace. No other
     /// file's call reaches it, whatever it declares.
     pub internal: bool,
+    /// A C++ function no C code can call: a template, a class's member, an
+    /// operator or destructor, or one of a named namespace (inside it, or
+    /// named through it, `test::fclose`) not declared `extern "C"`. A C
+    /// file's `printf(…)` is libc's, never `fmt::printf`.
+    pub cpp_only: bool,
 }
 
 /// Whether the C or C++ function `def` (its declarator, or any node of its
@@ -238,6 +243,51 @@ fn file_local(def: Node, lang: Lang, source: &str) -> bool {
     is_static
         || std::iter::successors(decl.parent(), |n| n.parent())
             .any(|n| n.kind() == "namespace_definition" && n.child_by_field_name("name").is_none())
+}
+
+/// Whether the C++ function at `def` is one no C code can call (see
+/// [`Located::cpp_only`]).
+fn cpp_only(def: Node, lang: Lang) -> bool {
+    if lang != Lang::Cpp {
+        return false;
+    }
+    let (mut template, mut c_linkage, mut scoped) = (false, false, false);
+    for n in std::iter::successors(def.parent(), |n| n.parent()) {
+        match n.kind() {
+            "template_declaration" => template = true,
+            "linkage_specification" => c_linkage = true,
+            "field_declaration_list" => scoped = true,
+            "namespace_definition" if n.child_by_field_name("name").is_some() => scoped = true,
+            _ => {}
+        }
+    }
+    // Its name: qualified (`int test::fclose(FILE*)`, `Cart::add`), an
+    // operator's or a destructor's.
+    let mut at = Some(def);
+    for _ in 0..16 {
+        let Some(n) = at else { break };
+        at = match n.kind() {
+            "function_definition"
+            | "declaration"
+            | "field_declaration"
+            | "pointer_declarator"
+            | "attributed_declarator"
+            | "function_declarator"
+            | "parenthesized_declarator" => n.child_by_field_name("declarator"),
+            // (Its declarator is no field of the grammar's: its last child.)
+            "reference_declarator" => n
+                .named_child_count()
+                .checked_sub(1)
+                .and_then(|last| u32::try_from(last).ok())
+                .and_then(|last| n.named_child(last)),
+            "qualified_identifier" | "operator_name" | "destructor_name" => {
+                scoped = true;
+                None
+            }
+            _ => None,
+        };
+    }
+    template || (scoped && !c_linkage)
 }
 
 /// Whether the C++ function declarator `def` belongs to a statement inside
@@ -600,6 +650,7 @@ fn c_tests(mut out: Vec<Located>, source: &str) -> Vec<Located> {
             },
             accessed: false,
             internal: false,
+            cpp_only: false,
         });
     }
     out.sort_by_key(|l| (l.symbol.line, l.declaration.0));
@@ -1103,6 +1154,7 @@ fn lean_where_helpers(command: &str, line: usize) -> Vec<Located> {
                 },
                 accessed: false,
                 internal: false,
+                cpp_only: false,
             }
         })
         .collect()
@@ -1168,6 +1220,7 @@ fn lean_fields(command: &str, line: usize, found: &mut Vec<Located>) {
             },
             accessed: false,
             internal: false,
+            cpp_only: false,
         };
         // `mk ::`: the constructor.
         if let Some(name) = t.strip_suffix("::").map(str::trim)
@@ -1232,6 +1285,7 @@ fn lean_head_located(command: &str, head: &crate::lean::Head, line: usize) -> Lo
         },
         accessed: false,
         internal: false,
+        cpp_only: false,
     }
 }
 
@@ -1378,6 +1432,7 @@ fn located_in_tree(tree: &Tree, source: &str, lang: Lang) -> Vec<Located> {
             owner: owner_of(def, source, lang),
             accessed: lang == Lang::Python && python_property(def, source),
             internal: file_local(def, lang, source),
+            cpp_only: cpp_only(def, lang),
         });
     }
     drop_overload_stubs(&mut out, &overloads);
@@ -2267,6 +2322,7 @@ pub fn twirl_template(rel: &str, content: &str) -> Option<Located> {
         },
         accessed: false,
         internal: false,
+        cpp_only: false,
     })
 }
 

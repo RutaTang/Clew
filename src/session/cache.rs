@@ -234,7 +234,9 @@ use crate::incremental::Version;
 /// heads; a C file's `__cplusplus` branches; a `#define` in a body.
 /// 74: a C function a macro makes (`TEST_BEGIN(test_x) { … }`) is named
 /// by the macro's argument.
-pub(crate) const CACHE_VERSION: u32 = 74;
+/// 75: C++ functions no C code can call (templates, members, a named
+/// namespace's) marked so.
+pub(crate) const CACHE_VERSION: u32 = 75;
 
 /// A cached symbol (the index entry minus the paths, which are reconstructed
 /// from the project root + relative path on load).
@@ -334,6 +336,10 @@ pub struct CachedCalls {
     /// (`clew_core::projectcalls::FileCalls::internal`).
     #[serde(default)]
     pub internal: Vec<usize>,
+    /// Definition lines of C++ functions no C code can call
+    /// (`clew_core::projectcalls::FileCalls::cpp_only`).
+    #[serde(default)]
+    pub cpp_only: Vec<usize>,
     /// The file's package (`clew_core::projectcalls::FileContext::package`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub package: Option<String>,
@@ -542,6 +548,7 @@ mod tests {
                 owners: vec![3, 1],
                 accessed: vec![3],
                 internal: vec![9],
+                cpp_only: vec![11],
                 package: Some("shop".into()),
                 enclosing: vec!["shop".into()],
                 types: vec![("Cart".into(), vec!["Base".into()])],
