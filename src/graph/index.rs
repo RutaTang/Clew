@@ -252,6 +252,13 @@ fn to_cached_calls(calls: &FileCalls) -> CachedCalls {
     let any_arity = calls.calls.iter().any(|site| site.arity.is_some());
     let mut call_arguments = Vec::new();
     let any_arguments = calls.calls.iter().any(|site| site.arguments.is_some());
+    let call_lists: Vec<(usize, u8)> = calls
+        .calls
+        .iter()
+        .enumerate()
+        .filter(|(_, site)| site.more_lists > 0)
+        .map(|(at, site)| (at, site.more_lists))
+        .collect();
     let mut previous = 0i64;
     for site in &calls.calls {
         let caller = match site.caller.as_deref() {
@@ -321,6 +328,7 @@ fn to_cached_calls(calls: &FileCalls) -> CachedCalls {
         qualifiers,
         call_arities,
         call_arguments,
+        call_lists,
         owners,
         accessed,
         internal,
@@ -339,6 +347,7 @@ fn to_cached_calls(calls: &FileCalls) -> CachedCalls {
             .iter()
             .flat_map(|&(line, fewest, most)| [line, usize::from(fewest), usize::from(most)])
             .collect(),
+        lists: calls.context.lists.clone(),
         returns: calls.context.returns.clone(),
         parameters: calls.context.parameters.clone(),
         parameter_names: calls.context.parameter_names.clone(),
@@ -386,6 +395,8 @@ fn from_cached_calls(abs: &Path, cached: &CachedCalls) -> Option<FileCalls> {
     }
     let mut previous = 0i64;
     let mut calls = Vec::with_capacity(cached.sites.len() / 3);
+    let more_lists: std::collections::HashMap<usize, u8> =
+        cached.call_lists.iter().copied().collect();
     for (at, (site, &receiver)) in cached
         .sites
         .chunks_exact(3)
@@ -425,6 +436,7 @@ fn from_cached_calls(abs: &Path, cached: &CachedCalls) -> Option<FileCalls> {
                 0 => None,
                 n => Some(name(n - 1)?),
             },
+            more_lists: more_lists.get(&at).copied().unwrap_or(0),
             line: usize::try_from(line).ok()?,
         });
     }
@@ -475,6 +487,7 @@ fn from_cached_calls(abs: &Path, cached: &CachedCalls) -> Option<FileCalls> {
                 .chunks_exact(3)
                 .map(|t| Some((t[0], u8::try_from(t[1]).ok()?, u8::try_from(t[2]).ok()?)))
                 .collect::<Option<Vec<_>>>()?,
+            lists: cached.lists.clone(),
             returns: cached.returns.clone(),
             parameters: cached.parameters.clone(),
             parameter_names: cached.parameter_names.clone(),

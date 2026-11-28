@@ -105,6 +105,11 @@ pub struct CallSite {
     /// "x")`, leads with `<>`: the template's parameters are not all
     /// deduced from what it passes.)
     pub arguments: Option<String>,
+    /// How many argument lists a Scala call passes after its first
+    /// (`F.flatMap(fa)(f)` one): a method of more lists than the call passes
+    /// in all is none it calls (`io.flatMap(f)` is no `flatMap(fa)(f)`).
+    /// 0 elsewhere.
+    pub more_lists: u8,
     /// 1-based line of the call.
     pub line: usize,
 }
@@ -165,6 +170,11 @@ pub struct FileContext {
     /// leave one out). A BEAM function is its name and its arity: `f/1` is
     /// no call of `f/2`.
     pub arities: Vec<(usize, u8, u8)>,
+    /// How many parameter lists each Scala definition of two or more
+    /// takes, its implicit or `using` one aside, by its definition line
+    /// (`flatMap[A, B](fa: IO[A])(f: A => IO[B])`, two): a call passing
+    /// fewer is no call of it ([`CallSite::more_lists`]).
+    pub lists: Vec<(usize, u8)>,
     /// Each function's declared return type, by its definition line, as
     /// its methods' class is named (`JsonAdapter` for `fun adapter():
     /// JsonAdapter<T>`): what a value assigned from a call of it is.
@@ -200,7 +210,10 @@ pub struct FileContext {
     /// by a class method's call at their type.
     pub instance_methods: Vec<usize>,
     /// A Ruby file's singleton methods' lines (`def self.build`, a `def`
-    /// in `class << self`): called on the class, not on its instances.
+    /// in `class << self`): called on the class, not on its instances. A
+    /// Scala or Kotlin file's, the methods of an `object` (a `companion
+    /// object`) of no supertype: called through its name, never on a value
+    /// of no type known ([`object_methods`]).
     pub singletons: Vec<usize>,
     /// The type aliases a file declares, each with the type it names
     /// ([`type_aliases`]): `memory_buffer` for `basic_memory_buffer` — one
@@ -1058,6 +1071,60 @@ fn return_type_name(raw: &str, lang: Lang) -> Option<String> {
     // A lower-case name is a type only where types are written so.
     let typed_lower = matches!(lang, Lang::Go | Lang::Cpp | Lang::C | Lang::Zig);
     (!primitive && (typed_lower || last.starts_with(char::is_uppercase))).then(|| last.to_string())
+}
+
+/// How many argument lists a Scala call passes after its first: the calls
+/// it is the function of (`F.flatMap(fa)(f)`: one).
+fn scala_more_lists(call: Node) -> u8 {
+    let mut more = 0u8;
+    let mut at = call;
+    while let Some(parent) = at.parent() {
+        if parent.kind() != "call_expression" || parent.child_by_field_name("function") != Some(at)
+        {
+            break;
+        }
+        more = more.saturating_add(1);
+        at = parent;
+    }
+    more
+}
+
+/// How many parameter lists the Scala definition `l` takes, an implicit or
+/// `using` one aside (`def flatMap[A, B](fa: IO[A])(f: A => IO[B])`: two).
+/// `None` with none.
+fn scala_parameter_lists(src: &str, l: &Located) -> Option<u8> {
+    let text = src.get(l.declaration.0..l.declaration.1)?;
+    let Parameters::At(_, close) = parameter_list(text, &l.symbol.name, Lang::Scala)? else {
+        return None;
+    };
+    let mut lists = 1u8;
+    let mut at = close + 1;
+    while let Some(rest) = text.get(at..).map(str::trim_start)
+        && rest.starts_with('(')
+    {
+        let open = text.len() - rest.len();
+        let mut depth = 0i32;
+        let end = text[open..].char_indices().find_map(|(i, c)| {
+            match c {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(open + i);
+                    }
+                }
+                _ => {}
+            }
+            None
+        })?;
+        let inner = text[open + 1..end].trim_start();
+        if inner.starts_with("implicit ") || inner.starts_with("using ") {
+            break;
+        }
+        lists = lists.saturating_add(1);
+        at = end + 1;
+    }
+    Some(lists)
 }
 
 /// The fewest and most arguments a function of a statically typed
@@ -2306,6 +2373,16 @@ pub fn context_in(src: &str, lang: Lang, symbols: &[Located]) -> FileContext {
             .collect(),
         _ => Vec::new(),
     };
+    let singletons = match lang {
+        Lang::Ruby => ruby_singletons(src, symbols),
+        // (Not an extension declared in one, `Byte.asChar()` in a
+        // `companion object`: a value of its type calls it.)
+        Lang::Scala | Lang::Kotlin => object_methods(src, symbols, lang)
+            .into_iter()
+            .filter(|line| !extensions.contains(line))
+            .collect(),
+        _ => Vec::new(),
+    };
     let (use_options, quoted_in) = match lang {
         Lang::Elixir => elixir_using_options(src),
         _ => Default::default(),
@@ -2320,6 +2397,17 @@ pub fn context_in(src: &str, lang: Lang, symbols: &[Located]) -> FileContext {
         quoted_in,
         imports: modules_after("import "),
         arities,
+        lists: match lang {
+            Lang::Scala => symbols
+                .iter()
+                .filter(|l| is_callable(&l.symbol.kind))
+                .filter_map(|l| {
+                    let n = scala_parameter_lists(src, l)?;
+                    (n >= 2).then_some((l.symbol.line, n))
+                })
+                .collect(),
+            _ => Vec::new(),
+        },
         returns,
         parameters,
         parameter_names,
@@ -2373,10 +2461,7 @@ pub fn context_in(src: &str, lang: Lang, symbols: &[Located]) -> FileContext {
             Lang::Haskell => haskell_instance_methods(src, symbols),
             _ => Vec::new(),
         },
-        singletons: match lang {
-            Lang::Ruby => ruby_singletons(src, symbols),
-            _ => Vec::new(),
-        },
+        singletons,
         generated: match lang {
             Lang::Ruby => ruby_generated(src, symbols),
             _ => Vec::new(),
@@ -2628,6 +2713,58 @@ fn ruby_singletons(src: &str, symbols: &[Located]) -> Vec<usize> {
         .collect()
 }
 
+/// The lines of a Scala or Kotlin file's methods of an `object` of no
+/// supertype ([`FileContext::singletons`]): cats-effect's `object Selector
+/// { def get = … }`, which `Selector.get` calls and no `ref.get` does. Its
+/// head is one line (`object Selector {`, `private[effect] object X {`,
+/// Kotlin's `companion object {`) naming no supertype; an `implicit
+/// object`, or one that `extends` a trait, is a value of that type too.
+fn object_methods(src: &str, symbols: &[Located], lang: Lang) -> Vec<usize> {
+    let plain_object = |scope_start: usize| -> bool {
+        let Some(before) = src.get(..scope_start) else {
+            return false;
+        };
+        if !src[scope_start..].starts_with('{') {
+            return false;
+        }
+        let head = before.rsplit('\n').next().unwrap_or(before).trim();
+        let mut words = head.split_whitespace().peekable();
+        // Its modifiers (`private[effect]`, `internal`, `case`).
+        while let Some(&w) = words.peek() {
+            let modifier = w.starts_with("private")
+                || w.starts_with("protected")
+                || matches!(
+                    w,
+                    "final" | "case" | "internal" | "public" | "data" | "companion"
+                );
+            if !modifier {
+                break;
+            }
+            words.next();
+        }
+        if words.next() != Some("object") {
+            return false;
+        }
+        let rest: Vec<&str> = words.collect();
+        let named = match lang {
+            // (Kotlin's `companion object` may have no name.)
+            Lang::Kotlin => rest.len() <= 1,
+            _ => rest.len() == 1,
+        };
+        named
+            && rest
+                .iter()
+                .all(|w| w.chars().all(|c| c == '_' || c.is_alphanumeric()))
+            && !head.contains("implicit")
+    };
+    symbols
+        .iter()
+        .filter(|l| is_callable(&l.symbol.kind))
+        .filter(|l| plain_object(l.owner.scope.0))
+        .map(|l| l.symbol.line)
+        .collect()
+}
+
 /// The methods a Ruby file's classes make with a macro, by class and name
 /// ([`FileContext::generated`]): an association's reader (`belongs_to
 /// :repo`, `has_one`, `has_many`, `has_and_belongs_to_many`) and, of one
@@ -2690,6 +2827,61 @@ fn ruby_generated(src: &str, symbols: &[Located]) -> Vec<(String, String, bool)>
         }
     }
     out
+}
+
+/// Whether the bare call `node` of `callee` in an RSpec spec is RSpec's
+/// own: a group's, an example's, a hook's or a `let` with its block
+/// (`describe '#report' do`, `it { … }`, `let(:x) { … }`), or a shared
+/// example's inclusion (`it_behaves_like 'a formatter'`) — in a group's
+/// block, or at the top level. In another block it is that block's
+/// receiver's (a `before { … }` in Sinatra's `mock_app { … }`, its filter).
+fn ruby_spec_dsl(node: Node, callee: &str, src: &str) -> bool {
+    let words = match callee {
+        "it_behaves_like"
+        | "it_should_behave_like"
+        | "include_examples"
+        | "include_context"
+        | "shared_examples"
+        | "shared_examples_for"
+        | "shared_context" => true,
+        "describe" | "context" | "feature" | "it" | "specify" | "example" | "scenario" | "its"
+        | "xit" | "xdescribe" | "xcontext" | "fit" | "fdescribe" | "fcontext" | "let" | "let!"
+        | "subject" | "before" | "after" | "around" => {
+            let mut cursor = node.walk();
+            node.children(&mut cursor)
+                .any(|c| matches!(c.kind(), "do_block" | "block"))
+        }
+        _ => false,
+    };
+    if !words {
+        return false;
+    }
+    let mut at = node.parent();
+    while let Some(n) = at {
+        match n.kind() {
+            "do_block" | "block" => {
+                return n
+                    .parent()
+                    .filter(|call| call.kind() == "call")
+                    .and_then(|call| call.child_by_field_name("method"))
+                    .is_some_and(|name| {
+                        matches!(
+                            node_text(name, src),
+                            "describe"
+                                | "context"
+                                | "feature"
+                                | "shared_examples"
+                                | "shared_examples_for"
+                                | "shared_context"
+                                | "example_group"
+                        )
+                    });
+            }
+            "method" | "singleton_method" | "class" | "module" => return false,
+            _ => at = n.parent(),
+        }
+    }
+    true
 }
 
 /// Whether the Ruby call `node` is inside a block (`do … end`, `{ … }`)
@@ -3394,10 +3586,20 @@ impl ProjectCallGraph {
                     .map(|&(line, fewest, most)| ((f.file.as_path(), line), (fewest, most)))
             })
             .collect();
+        let lists: HashMap<(&Path, usize), u8> = files
+            .iter()
+            .flat_map(|f| {
+                f.context
+                    .lists
+                    .iter()
+                    .map(|&(line, n)| ((f.file.as_path(), line), n))
+            })
+            .collect();
         let mut facts: Vec<NodeFacts> = nodes
             .iter()
             .map(|n| NodeFacts {
                 arity: arities.get(&(n.file.as_path(), n.line)).copied(),
+                lists: lists.get(&(n.file.as_path(), n.line)).copied(),
                 bodyless: declarations
                     .get(n.file.as_path())
                     .is_some_and(|(d, _, _)| d.contains(&n.line)),
@@ -3422,6 +3624,18 @@ impl ProjectCallGraph {
         let ruby_singletons: HashSet<(&Path, usize)> = files
             .iter()
             .filter(|f| f.lang == Lang::Ruby)
+            .flat_map(|f| {
+                f.context
+                    .singletons
+                    .iter()
+                    .map(move |&line| (f.file.as_path(), line))
+            })
+            .collect();
+        // The methods of Scala's and Kotlin's `object`s of no supertype
+        // ([`FileContext::singletons`]).
+        let object_methods: HashSet<(&Path, usize)> = files
+            .iter()
+            .filter(|f| matches!(f.lang, Lang::Scala | Lang::Kotlin))
             .flat_map(|f| {
                 f.context
                     .singletons
@@ -3545,6 +3759,11 @@ impl ProjectCallGraph {
         }
         // The project's own types (and traits): what defines a method here.
         let project_types: HashSet<&str> = owner.iter().flatten().copied().collect();
+        // Their last parts, Ruby's way (`Formatter` of `RuboCop::Formatter`).
+        let project_type_names: HashSet<&str> = project_types
+            .iter()
+            .map(|t| t.rsplit([':', '.']).next().unwrap_or(t))
+            .collect();
         // Each owned definition by its owner's last part and its name: a
         // type's (a module's) function, looked up wherever it is defined.
         let mut by_owner: HashMap<(&str, &str), Vec<usize>> = HashMap::new();
@@ -5519,7 +5738,7 @@ impl ProjectCallGraph {
                     qualifier_key,
                 );
                 let callees = resolved.entry(shape).or_insert_with(|| {
-                    resolve_callees(
+                    let mut found = resolve_callees(
                         &defs,
                         &nodes,
                         &facts,
@@ -5536,7 +5755,21 @@ impl ProjectCallGraph {
                         ),
                         cs,
                         &site,
-                    )
+                    );
+                    // A Scala or Kotlin method call on a value of no type
+                    // known (`ref.get`): no method of an `object` of no
+                    // supertype (`object Selector { def get … }`), which
+                    // only its name reaches.
+                    if matches!(fc.lang, Lang::Scala | Lang::Kotlin)
+                        && cs.method
+                        && cs.receiver.is_none()
+                        && cs.qualifier.is_none()
+                    {
+                        found.retain(|&c| {
+                            !object_methods.contains(&(nodes[c].file.as_path(), nodes[c].line))
+                        });
+                    }
+                    found
                 });
                 // A Ruby call of a method a class's macro makes: bare, in
                 // that class, it is that method (`attr_accessor :params`) —
@@ -6140,11 +6373,19 @@ impl ProjectCallGraph {
                     // (`Issue < ApplicationRecord < ActiveRecord::Base`):
                     // the library's (`issue.valid?`), never another
                     // class's of the name.
+                    // (And a constant the project names no class or module
+                    // of, `RSpec.describe`, `JSON.parse`: the library's.)
                     (Some(Receiver::Type(ty)), Lang::Ruby) => {
                         let last = ty.rsplit(':').next().unwrap_or(ty);
-                        declared_types.contains(last)
+                        (declared_types.contains(last)
                             && narrowed.is_empty()
-                            && ruby_library_above(last)
+                            && ruby_library_above(last))
+                            || (!declared_types.contains(last)
+                                && !ruby_modules.contains(last)
+                                && !project_type_names.contains(last)
+                                // (Not one that makes a class: `Class.new(base)`'s
+                                // value has the project's methods.)
+                                && !RUBY_HOLDERS.contains(&last))
                     }
                     // Zig's standard library's (`writer: *std.Io.Writer`).
                     (Some(Receiver::Type(ty)), Lang::Zig) => ty == "std" || ty.starts_with("std."),
@@ -7034,6 +7275,9 @@ struct NodeFacts {
     lang: Option<Lang>,
     /// An Erlang or Elixir function's arities ([`FileContext::arities`]).
     arity: Option<(u8, u8)>,
+    /// A Scala definition's parameter lists, of two or more
+    /// ([`FileContext::lists`]).
+    lists: Option<u8>,
 }
 
 impl NodeFacts {
@@ -7071,6 +7315,16 @@ impl NodeFacts {
     /// (`Async.asyncForWriterT(async, L0)`). From Java or Kotlin, it is the
     /// JVM method Scala compiles it to: its implicits its parameters.
     fn takes_call(&self, cs: &CallSite, lang: Lang, owner: Option<&str>) -> bool {
+        // A Scala call of fewer argument lists than the definition takes
+        // (`io.flatMap(f)`, of a type class instance's `flatMap(fa)(f)`).
+        if lang == Lang::Scala
+            && self.lang == Some(Lang::Scala)
+            && let Some(lists) = self.lists
+            && cs.arity.is_some_and(|n| n < ETA)
+            && cs.more_lists.saturating_add(1) < lists
+        {
+            return false;
+        }
         // Zig's decl literal passes every parameter (none by a dot).
         if lang == Lang::Zig
             && cs.qualifier.as_deref() == Some(".")
@@ -8795,6 +9049,8 @@ fn walk(
         .copied()
         .collect();
     let places = Places::read(root, &place_kinds);
+    // An RSpec spec's (`RSpec.describe Formatter do`).
+    let rspec = lang == Lang::Ruby && src.contains("RSpec.");
     while let Some((node, parent, before, enclosing, inner)) = stack.pop() {
         let kind = node.kind();
         if spec.skip_kinds.contains(&kind) {
@@ -8826,6 +9082,10 @@ fn walk(
             // A parameter called (`emit('done')` in `(event, emit) { … }`,
             // `cb()`) is the value passed, no function of the project's.
             && (method || !calls_a_parameter(node, &callee, src, lang, &mut parameters))
+            // RSpec's own, in a spec (`describe '#report' do`, `let(:x)
+            // { … }`, `it_behaves_like 'a formatter'`): no project method
+            // of the name (rubocop's cop's private `describe(cop)`).
+            && !(rspec && !method && ruby_spec_dsl(node, &callee, src))
         {
             // The receiver's name where nothing binds it (Scala's `os`).
             let mut unbound: Option<String> = None;
@@ -8953,6 +9213,10 @@ fn walk(
                 qualifier,
                 arity,
                 arguments,
+                more_lists: match lang {
+                    Lang::Scala => scala_more_lists(node),
+                    _ => 0,
+                },
                 line: node.start_position().row + 1,
             });
         }
@@ -8971,6 +9235,7 @@ fn walk(
                 qualifier: ruby_in_block(node).then(|| "block".to_string()),
                 arity: None,
                 arguments: None,
+                more_lists: 0,
                 line: node.start_position().row + 1,
             });
         }
@@ -9092,6 +9357,7 @@ fn macro_calls(tree: Node, src: &str, caller: Option<&str>, out: &mut Vec<CallSi
             qualifier: None,
             arity: None,
             arguments: None,
+            more_lists: 0,
             line: token.start_position().row + 1,
         });
     }
@@ -12214,6 +12480,10 @@ fn receiver_of(
         }
         // Ruby's `::UserMailer`: the top level's `UserMailer`.
         Lang::Ruby => receiver.trim_start_matches("::"),
+        // Zig's `!tag_filter.contains(x)`, which the grammar reads as a call
+        // on the error union type `!tag_filter`: the negation's, of the call
+        // on `tag_filter`.
+        Lang::Zig => receiver.trim_start_matches('!').trim_start(),
         _ => receiver,
     };
     // Ruby's class by its path (`GithubFetcher::Issue.new(…)`): that class.
@@ -13289,6 +13559,9 @@ impl Bindings {
             if head.ends_with(|c: char| word(c) || matches!(c, '.' | '$' | '@' | '>' | ':'))
                 || text[end..].starts_with(word)
                 || scope.places.opaque(self.from + start)
+                // (A type written after a colon, `def apply(p: Path): PermSet
+                // = {`: no name bound.)
+                || head.trim_end_matches([' ', '\t']).ends_with(':')
             {
                 continue; // part of a longer name, a member, a comment or a string
             }
@@ -23805,6 +24078,81 @@ function build() {
         );
     }
 
+    /// A Scala call passing fewer argument lists than a definition takes is
+    /// no call of it: `io.flatMap(a => …)`, of one, is `IO#flatMap(f)` and
+    /// never a type class instance's `flatMap(fa)(f)`, which
+    /// `F.flatMap(fa)(f)` calls.
+    #[test]
+    fn a_scala_call_of_fewer_argument_lists_is_no_call_of_more() {
+        let io = "package cats.effect\n\nclass IO[A] {\n  def flatMap[B](f: A => IO[B]): IO[B] = ???\n}\n\nobject IO {\n  implicit val asyncForIO: Async[IO] = new Async[IO] {\n    def flatMap[A, B](fa: IO[A])(f: A => IO[B]): IO[B] = fa.flatMap(f)\n  }\n}\n";
+        let usage = "package cats.effect\n\nobject Use {\n  def run(xs: Seq[Int]) = xs.map(n => n).flatMap(a => IO.pure(a))\n  def both(fa: IO[Int]) = asyncForIO.flatMap(fa)(a => fa)\n}\n";
+        let fc = FileCalls::read(Path::new("/p/core/Use.scala"), usage).unwrap();
+        let lists: Vec<u8> = fc
+            .calls
+            .iter()
+            .filter(|c| c.callee == "flatMap")
+            .map(|c| c.more_lists)
+            .collect();
+        assert!(lists.contains(&0) && lists.contains(&1), "{:?}", fc.calls);
+        let io_calls = FileCalls::read(Path::new("/p/core/IO.scala"), io).unwrap();
+        assert_eq!(io_calls.context.lists, [(9, 2)]);
+        let g = graph(&[("/p/core/IO.scala", io), ("/p/core/Use.scala", usage)]);
+        let id = g.id_of(Path::new("/p/core/Use.scala"), "run").unwrap();
+        let lines: Vec<usize> = g
+            .callees_of(id)
+            .iter()
+            .filter(|&&c| g.node(c).name == "flatMap")
+            .map(|&c| g.node(c).line)
+            .collect();
+        assert!(!lines.contains(&9), "{:?}", edges(&g));
+    }
+
+    /// A Scala or Kotlin `object` of no supertype is a value only its name
+    /// reaches: cats-effect's `object Selector { def get = … }` is what
+    /// `Selector.get` calls, never a `ref.get` on a value of no type known —
+    /// which still reaches a class's `get`. An object that extends a type
+    /// (`implicit object`, `object X extends Ref`) is a value of it, its
+    /// methods reached so.
+    #[test]
+    fn a_plain_objects_method_is_no_call_on_a_value_of_no_type_known() {
+        let selector = "package cats.effect\n\nobject Selector {\n  def find: IO[Option[Selector]] = ???\n\n  def get = find\n}\n";
+        let deferred = "package cats.effect\n\nfinal class IODeferred[A] {\n  def get: IO[A] = ???\n}\n\nobject Instances extends Ref {\n  def get: Int = 1\n}\n";
+        let kotlin = "package k\n\nclass Box {\n    companion object {\n        fun build(): Box = Box()\n    }\n\n    fun build(x: Int) = x\n}\n";
+        let usage = "package cats.effect\n\nobject Use {\n  def run(ds: Seq[IODeferred[Int]]) = ds.map(d => d.get)\n  def named = Selector.get\n}\n";
+        let kusage = "package k\n\nfun make(bs: List<Box>) {\n    Box.build()\n    bs.forEach { b -> b.build(1) }\n}\n";
+        let g = graph(&[
+            ("/p/core/Selector.scala", selector),
+            ("/p/core/IODeferred.scala", deferred),
+            ("/p/core/Use.scala", usage),
+            ("/p/k/Box.kt", kotlin),
+            ("/p/k/Use.kt", kusage),
+        ]);
+        let e = edges(&g);
+        let reached = |from: &str, to: &str| e.iter().any(|(a, b)| a == from && b == to);
+        assert!(
+            !reached("/p/core/Use.scala:run", "/p/core/Selector.scala:get"),
+            "{e:?}"
+        );
+        assert!(
+            reached("/p/core/Use.scala:run", "/p/core/IODeferred.scala:get"),
+            "{e:?}"
+        );
+        assert!(
+            reached("/p/core/Use.scala:named", "/p/core/Selector.scala:get"),
+            "{e:?}"
+        );
+        let objects = FileCalls::read(Path::new("/p/core/IODeferred.scala"), deferred)
+            .unwrap()
+            .context
+            .singletons;
+        assert!(objects.is_empty(), "{objects:?}");
+        let objects = FileCalls::read(Path::new("/p/k/Box.kt"), kotlin)
+            .unwrap()
+            .context
+            .singletons;
+        assert_eq!(objects, [5]);
+    }
+
     /// An Elixir `use M, :option` of a module whose `__using__(which)`
     /// applies its function of that name (Phoenix's `HexpmWeb`) injects what
     /// that one function imports alone: hexpm's tests' `use HexpmWeb,
@@ -23851,6 +24199,107 @@ function build() {
                 helpers
             ),
             "{edges:?}"
+        );
+    }
+
+    /// A type after a colon binds no name: `PermSet.fromSet(…)` in `def
+    /// apply(p: Path): PermSet = { … }` is on the object `PermSet`, not a
+    /// value of that name the result type's `= {` seemed to assign.
+    #[test]
+    fn a_scala_result_type_binds_no_name() {
+        let src = "package os\n\nobject PermsOps {\n  def apply(p: Path): PermSet = {\n    PermSet.fromSet(Files.getPosixFilePermissions(p.wrapped))\n  }\n}\n";
+        let calls = FileCalls::read(Path::new("/p/os/PermsOps.scala"), src)
+            .unwrap()
+            .calls;
+        let from_set = calls.iter().find(|c| c.callee == "fromSet").unwrap();
+        assert_eq!(from_set.receiver, Some(Receiver::Type("PermSet".into())));
+    }
+
+    /// A Zig call negated (`!tag_filter.contains(scope_tag)`, which the
+    /// grammar reads as a call on the error union type `!tag_filter`) is on
+    /// its value: a `std.EnumSet`'s, the library's — no `InternPool.contains`.
+    #[test]
+    fn a_negated_zig_call_is_on_its_value() {
+        let analysis = "const std = @import(\"std\");\n\npub fn innermost(tag_filter: std.EnumSet(Tag), tag: Tag) bool {\n    if (!tag_filter.contains(tag)) return false;\n    return true;\n}\n";
+        let pool = "pub fn contains(ip: *InternPool, key: u32) bool {\n    return key == 0;\n}\n";
+        let calls = FileCalls::read(Path::new("/p/src/analysis.zig"), analysis)
+            .unwrap()
+            .calls;
+        let contains = calls.iter().find(|c| c.callee == "contains").unwrap();
+        assert_eq!(
+            contains.receiver,
+            Some(Receiver::Type("std.EnumSet".into()))
+        );
+        let g = graph(&[
+            ("/p/src/analysis.zig", analysis),
+            ("/p/src/analyser/InternPool.zig", pool),
+        ]);
+        assert!(
+            !has(
+                &g,
+                "/p/src/analysis.zig:innermost",
+                "/p/src/analyser/InternPool.zig:contains"
+            ),
+            "{:?}",
+            edges(&g)
+        );
+    }
+
+    /// RSpec's own language is no call of the project's: a nested
+    /// `describe '#report_summary' do` in a spec is RSpec's, never
+    /// rubocop's cop's private `describe(cop)`, nor a `let(:x) { … }` or an
+    /// `it_behaves_like` a project `def` of the name — nor `RSpec.describe`,
+    /// on a constant the project names no class or module of. The cop's own
+    /// call of its `describe(cop)` still is.
+    #[test]
+    fn rspecs_own_language_is_no_call_of_the_projects() {
+        let cop = "module RuboCop\n  class RedundantCopDisableDirective\n    def message(cop)\n      describe(cop)\n    end\n\n    private\n\n    def describe(cop)\n      cop.to_s\n    end\n\n    def let(x)\n      x\n    end\n  end\nend\n";
+        let spec = "RSpec.describe RuboCop::Formatter do\n  let(:output) { StringIO.new }\n\n  describe '#report_summary' do\n    it_behaves_like 'report for severity', :fatal\n\n    it 'reports' do\n      expect(output).to be_empty\n    end\n  end\nend\n";
+        // (A filter in a block another call runs, `mock_app { before { … } }`
+        // in a spec, is that call's receiver's: Sinatra's `before`.)
+        let base = "module Sinatra\n  class Base\n    class << self\n      def before(path = nil, &block)\n        path\n      end\n    end\n  end\nend\n";
+        let app_spec = "RSpec.describe Sinatra::Namespace do\n  it 'filters' do\n    mock_app do\n      before { 1 }\n    end\n  end\nend\n";
+        let files = [
+            (
+                "/p/lib/rubocop/cop/lint/redundant_cop_disable_directive.rb",
+                cop,
+            ),
+            (
+                "/p/spec/rubocop/formatter/simple_text_formatter_spec.rb",
+                spec,
+            ),
+            ("/p/lib/sinatra/base.rb", base),
+            ("/p/spec/namespace_spec.rb", app_spec),
+        ];
+        let sources: Vec<(PathBuf, String)> = files
+            .iter()
+            .map(|(f, s)| (PathBuf::from(f), s.to_string()))
+            .collect();
+        let all: HashSet<PathBuf> = files.iter().map(|(f, _)| PathBuf::from(f)).collect();
+        let scope: HashMap<PathBuf, HashSet<PathBuf>> = files
+            .iter()
+            .map(|(f, _)| (PathBuf::from(f), all.clone()))
+            .collect();
+        let g = ProjectCallGraph::build(defs_of(&files), &sources, &scope);
+        let e = edges(&g);
+        let cop_file = "/p/lib/rubocop/cop/lint/redundant_cop_disable_directive.rb";
+        assert!(
+            !e.iter()
+                .any(|(a, b)| a.starts_with("/p/spec/") && b.starts_with(cop_file)),
+            "{e:?}"
+        );
+        assert!(
+            e.contains(&(
+                format!("{cop_file}:message"),
+                format!("{cop_file}:describe")
+            )),
+            "{e:?}"
+        );
+        assert!(
+            e.iter()
+                .any(|(a, b)| a.starts_with("/p/spec/namespace_spec.rb:")
+                    && b == "/p/lib/sinatra/base.rb:before"),
+            "{e:?}"
         );
     }
 

@@ -240,7 +240,10 @@ use crate::incremental::Version;
 /// `delegate`, `scope`); Scala constructors past their access (`class
 /// RelPath private[os] (…)`); a two-letter class (`Op`) no type parameter;
 /// Elixir `use` options and the functions a `__using__` applies.
-pub(crate) const CACHE_VERSION: u32 = 76;
+/// 77: the methods of Scala's and Kotlin's `object`s of no supertype; RSpec's
+/// own language no call; the argument lists of Scala's calls and
+/// parameter lists of its definitions.
+pub(crate) const CACHE_VERSION: u32 = 77;
 
 /// A cached symbol (the index entry minus the paths, which are reconstructed
 /// from the project root + relative path on load).
@@ -327,6 +330,11 @@ pub struct CachedCalls {
     /// their index in `names` plus one. Empty when no site has one.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub call_arguments: Vec<i64>,
+    /// Each Scala call that passes argument lists after its first, by its
+    /// index among the sites, and how many
+    /// (`clew_core::projectcalls::CallSite::more_lists`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub call_lists: Vec<(usize, u8)>,
     /// Two numbers per method whose class is known
     /// (`clew_core::projectcalls::FileCalls::owners`): its definition line,
     /// then the class's index in `names`.
@@ -380,6 +388,10 @@ pub struct CachedCalls {
     /// (`clew_core::projectcalls::FileContext::arities`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub arities: Vec<usize>,
+    /// Each Scala definition of two or more parameter lists, by its line,
+    /// and how many (`clew_core::projectcalls::FileContext::lists`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lists: Vec<(usize, u8)>,
     /// Each function's declared return type, by its definition line
     /// (`clew_core::projectcalls::FileContext::returns`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -561,6 +573,7 @@ mod tests {
                 qualifiers: vec![2],
                 call_arities: vec![3],
                 call_arguments: vec![1],
+                call_lists: vec![(0, 1)],
                 owners: vec![3, 1],
                 accessed: vec![3],
                 internal: vec![9],
@@ -574,6 +587,7 @@ mod tests {
                 use_options: vec![("HexpmWeb".into(), "controller".into())],
                 quoted_in: vec![("controller".into(), "Plug.Conn".into())],
                 arities: vec![3, 1, 2],
+                lists: vec![(4, 2)],
                 returns: vec![(3, "Cart".into())],
                 parameters: vec![(3, "s,i".into())],
                 parameter_names: vec![(3, "name,count".into())],

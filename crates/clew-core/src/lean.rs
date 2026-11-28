@@ -1045,6 +1045,7 @@ pub(crate) fn calls(
                         qualifier: None,
                         arity: None,
                         arguments: None,
+                        more_lists: 0,
                         line,
                     });
                 }
