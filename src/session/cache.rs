@@ -217,7 +217,8 @@ use crate::incremental::Version;
 /// on a value a call gave; C++ free functions' results as arguments.
 /// 67: Scala members a class takes from `super`; Zig type functions'
 /// structs' fields, and fields of `self` in them.
-pub(crate) const CACHE_VERSION: u32 = 67;
+/// 68: C++ templates' own type parameters constrained by nothing (`g`).
+pub(crate) const CACHE_VERSION: u32 = 68;
 
 /// A cached symbol (the index entry minus the paths, which are reconstructed
 /// from the project root + relative path on load).

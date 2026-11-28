@@ -101,6 +101,9 @@ pub struct CallSite {
     /// typed value's type, comma-separated — `s,i` for `put("a", 1)`,
     /// `TCart` for `add(cart)` with `Cart cart`. Which of same-arity
     /// overloads it can call. `None` elsewhere, or with an argument named.
+    /// (A C++ call naming its template's arguments, `write<Char>(out,
+    /// "x")`, leads with `<>`: the template's parameters are not all
+    /// deduced from what it passes.)
     pub arguments: Option<String>,
     /// 1-based line of the call.
     pub line: usize,
@@ -4271,6 +4274,12 @@ impl ProjectCallGraph {
             let Some(arguments) = cs.arguments.as_deref() else {
                 return true;
             };
+            // (Of a C++ call naming its template's arguments, `<>`: its
+            // template's parameters are not all deduced.)
+            let (deduced, arguments) = match arguments.strip_prefix("<>") {
+                Some(arguments) => (false, arguments),
+                None => (true, arguments),
+            };
             let original = arguments;
             // A function's result (`→runtime`): of the type its definitions
             // agree it returns — or of none this can tell.
@@ -4390,7 +4399,53 @@ impl ProjectCallGraph {
                 // (A literal, in the JVM languages and C#: the overload of its
                 // own kind before one it boxes or widens to — `value(1.0)` is
                 // `value(Double)`, not `value(Number?)`.)
+                // (A C++ argument ranks only where every overload that fits
+                // has a parameter of a kind known there — one a template's
+                // `const Char*`, its `enable_if`'s, or one of a template
+                // whose arguments the call names, may be the exact match —
+                // and none has one of a kind unknown anywhere: a template
+                // its `decltype` may take out of the overloads leaves the
+                // others to the call (gmock's `UnpackStructImpl(t, seq, 0)`,
+                // its `int` overload before the `char` ones it falls back to).)
+                let known: Vec<bool> = match lang {
+                    Lang::Cpp => {
+                        let rivals: Vec<usize> = std::iter::once(callee)
+                            .chain(others().filter(|&i| fits(i)))
+                            .collect();
+                        let plain = |p: &str| {
+                            matches!(p, "s" | "w" | "p" | "i" | "f" | "b" | "c")
+                                || (p == "g" && deduced)
+                                || (p.starts_with('T') && p.len() > 1)
+                        };
+                        let sure = rivals.iter().all(|&i| {
+                            node_parameters[i].is_some_and(|params| {
+                                params.split(',').all(|p| plain(p) || p == "v")
+                            })
+                        });
+                        (0..arguments.split(',').count())
+                            .map(|at| {
+                                sure && rivals.iter().all(|&i| {
+                                    node_parameters[i].is_some_and(|params| {
+                                        params.split(',').nth(at).is_none_or(plain)
+                                    })
+                                })
+                            })
+                            .collect()
+                    }
+                    _ => Vec::new(),
+                };
                 let literal_rank = |i: usize| -> usize {
+                    if lang == Lang::Cpp {
+                        return node_parameters[i].map_or(0, |params| {
+                            arguments
+                                .split(',')
+                                .zip(params.split(','))
+                                .zip(&known)
+                                .filter(|(_, known)| **known)
+                                .map(|((a, p), _)| cpp_literal_rank(a, p))
+                                .sum()
+                        });
+                    }
                     if !matches!(lang, Lang::Java | Lang::Kotlin | Lang::Scala | Lang::CSharp) {
                         return 0;
                     }
@@ -4460,9 +4515,10 @@ impl ProjectCallGraph {
                                         0
                                     } else if either
                                     || p.is_empty()
-                                    // (A C++ template's parameter its
-                                    // `enable_if` constrains: a type
-                                    // parameter still.)
+                                    // (A C++ template's parameter, bare
+                                    // (`g`) or one its `enable_if`
+                                    // constrains: a type parameter still.)
+                                    || p == "g"
                                     || p.starts_with('K')
                                     || p.strip_prefix('T')
                                         .is_some_and(|class| descends_exactly(&a[1..], class))
@@ -8232,7 +8288,13 @@ fn walk(
                 };
                 argument_kinds(node, &scope, src, lang, &mut bindings)
             })
-            .flatten();
+            .flatten()
+            .map(|kinds| {
+                match lang == Lang::Cpp && cpp_names_template_arguments(node) {
+                    true => format!("<>{kinds}"),
+                    false => kinds,
+                }
+            });
             out.push(CallSite {
                 caller: current.as_ref().map(|(name, _)| name.to_string()),
                 callee,
@@ -9550,6 +9612,22 @@ fn parameter_kinds(src: &str, l: &Located, lang: Lang) -> Option<String> {
             kinds.push(kind);
             continue;
         }
+        // A C++ template's own type parameter, bare (`const T&`, `T&&`, `T`)
+        // and constrained by nothing: deduced as whatever is passed — `g`,
+        // which a literal matches exactly ([`cpp_literal_rank`]).
+        if lang == Lang::Cpp
+            && generic.iter().any(|g| g == base)
+            && ty
+                .trim_start_matches("const ")
+                .trim_end_matches(['&', ' '])
+                .trim_end_matches(" const")
+                .trim()
+                == base
+            && cpp_unconstrained(&text[..open], &text[close + 1..])
+        {
+            kinds.push("g".to_string());
+            continue;
+        }
         if generic.iter().any(|g| g == base) {
             // C#'s `TRequest request` with `where TRequest : IRequest`: an
             // `IRequest`, as its constraint says.
@@ -9738,6 +9816,64 @@ fn cpp_constraint(head: &str, tail: &str, name: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Whether a C++ function template's declaration — its text before its
+/// parameter list (`head`) and after it (`tail`) — constrains none of its
+/// type parameters: each a plain `typename T` or `class T` (a pack's too),
+/// none defaulted, and no `enable_if`, `requires`, `decltype` or `void_t`
+/// to take it out of the overloads (SFINAE).
+fn cpp_unconstrained(head: &str, tail: &str) -> bool {
+    let tail = tail.split(['{', ';']).next().unwrap_or(tail);
+    let Some(at) = head.find("template") else {
+        return false;
+    };
+    let rest = head[at + "template".len()..].trim_start();
+    let Some(rest) = rest.strip_prefix('<') else {
+        return false;
+    };
+    let mut depth = 1i32;
+    let mut end = None;
+    for (i, c) in rest.char_indices() {
+        match c {
+            '<' | '(' => depth += 1,
+            '>' | ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = Some(i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let Some(end) = end else {
+        return false;
+    };
+    let plain = split_top_level(&rest[..end]).all(|p| {
+        let p = p.trim();
+        let Some(name) = p
+            .strip_prefix("typename")
+            .or_else(|| p.strip_prefix("class"))
+        else {
+            return false;
+        };
+        let name = name.trim_start().trim_start_matches("...").trim();
+        is_plain_name(name)
+    });
+    plain
+        && ![head, tail].iter().any(|text| {
+            [
+                "enable_if",
+                "ENABLE_IF",
+                "requires",
+                "decltype",
+                "void_t",
+                "concept",
+            ]
+            .iter()
+            .any(|word| text.contains(word))
+        })
 }
 
 /// Whether an argument of kind `arg` satisfies the constraint `rule` of
@@ -10180,7 +10316,7 @@ fn passes(
     if arg == "n" && param == "o" && lang == Lang::Kotlin {
         return false;
     }
-    if arg == "?" || matches!(param.trim_end_matches('?'), "" | "o" | "v") {
+    if arg == "?" || matches!(param.trim_end_matches('?'), "" | "o" | "v" | "g") {
         return true;
     }
     let nullable = param.ends_with('?');
@@ -10342,6 +10478,37 @@ fn cpp_passes(arg: &str, param: &str) -> bool {
             | ("i" | "f" | "b" | "c", "s" | "p" | "w")
             | ("n", "i" | "f" | "c")
     )
+}
+
+/// Whether the C++ call `call` names its template's arguments
+/// (`detail::write<Char>(out, "x")`, `buf.template get<T>()`).
+fn cpp_names_template_arguments(call: Node) -> bool {
+    let mut at = call.child_by_field_name("function");
+    while let Some(n) = at {
+        at = match n.kind() {
+            "template_function" | "template_method" => return true,
+            "qualified_identifier" => n.child_by_field_name("name"),
+            "field_expression" => n.child_by_field_name("field"),
+            _ => None,
+        };
+    }
+    false
+}
+
+/// How nearly a C++ value of the plain kind `arg` (a literal's, or a
+/// string's, a number's) matches a parameter of kind `param`: 2 exactly —
+/// a template's own type parameter deduced as it (`g`, spdlog's `info(const
+/// T&)`), one of its own kind, a narrow string's `const char*` — else 0, as
+/// by a conversion: a class's constructor (`info(format_string_t<Args...>,
+/// …)` for `info("…")`), a number's to another's.
+fn cpp_literal_rank(arg: &str, param: &str) -> usize {
+    let exact = match (arg, param) {
+        (_, "g") => matches!(arg, "s" | "w" | "i" | "0" | "f" | "b" | "c"),
+        ("s", "s" | "p") | ("w", "w") | ("0", "i") => true,
+        ("i" | "f" | "b" | "c", p) => p == arg,
+        _ => false,
+    };
+    usize::from(exact) * 2
 }
 
 /// Whether the bare call `call` of `callee` calls a parameter of a function
@@ -20577,6 +20744,44 @@ def main():
         assert_eq!(pooled.len(), 1, "{:?}", edges(&g));
     }
 
+    /// Audit 22's: a C++ literal matches a template's own type parameter
+    /// exactly (`info(const T&)` deduced as `const char[N]`), before an
+    /// overload it would reach by a class's constructor (`info(
+    /// format_string_t<Args...>, Args&&...)`) — spdlog's `info("…")` is the
+    /// template's; with more arguments, only the format string's takes them.
+    /// A number goes to its own kind's overload before another's, and a
+    /// template its `enable_if` constrains (fmt's `const S&`, for wide
+    /// strings) is no exact match this can tell, nor is a template's whose
+    /// arguments the call names (`write<Char>(out, "x")`); and where an
+    /// overload may be a template its `decltype` takes out (gmock's `int`
+    /// one before its `char` fallback), none ranks.
+    #[test]
+    fn a_cpp_literal_matches_a_templates_parameter_exactly() {
+        let spdlog = "#pragma once\nnamespace spdlog {\ntemplate <typename... Args>\nusing format_string_t = fmt::format_string<Args...>;\ntemplate <typename... Args>\nusing wformat_string_t = fmt::wformat_string<Args...>;\n\ntemplate <typename... Args>\ninline void info(format_string_t<Args...> fmt, Args &&...args) {}\n\ntemplate <typename... Args>\ninline void info(wformat_string_t<Args...> fmt, Args &&...args) {}\n\ntemplate <typename T>\ninline void info(const T &msg) {}\n\ninline void put(int n) {}\ninline void put(double d) {}\n\ntemplate <typename... T>\nauto format(format_string_t<T...> fmt, T&&... args) -> int {\n  return 0;\n}\ntemplate <typename S, typename... T, FMT_ENABLE_IF(!std::is_same<S, int>::value)>\nauto format(const S& fmt, T&&... args) -> int {\n  return 1;\n}\n}\n";
+        let bench = "void banner() {\n  spdlog::info(\"****\");\n}\nvoid report(int n) {\n  spdlog::info(\"{} threads\", n);\n}\nvoid count() {\n  spdlog::put(1);\n}\nvoid show() {\n  spdlog::format(\"{}\", 1);\n}\ntemplate <typename Char, typename OutputIt> auto write(OutputIt out, Char value) -> OutputIt { return out; }\ntemplate <typename Char, typename OutputIt> auto write(OutputIt out, const Char* value) -> OutputIt { return out; }\ntemplate <typename Char, typename OutputIt> auto write(OutputIt out, basic_string_view<Char> value) -> OutputIt { return out; }\nvoid quote(int out) { write<char>(out, \"x\"); }\ntemplate <typename T>\nauto Unpack(const T& t, Sequence s, int) -> decltype(std::tie(get<0>(t))) { return {}; }\ntemplate <typename T>\nauto Unpack(const T& t, Sequence s, char) { return 1; }\ntemplate <typename T>\nauto unpack(const T& t) { return Unpack(t, Sequence{}, 0); }\n";
+        let source = format!("{spdlog}{bench}");
+        let g = graph(&[("/p/include/spdlog/spdlog.h", source.as_str())]);
+        let reached = |caller: &str| -> Vec<usize> {
+            let at = (0..g.node_count())
+                .find(|&n| g.node(n).name == caller)
+                .unwrap();
+            let mut out: Vec<usize> = g.callees_of(at).iter().map(|&c| g.node(c).line).collect();
+            out.sort();
+            out
+        };
+        assert_eq!(reached("banner"), [15], "{:?}", edges(&g));
+        assert_eq!(reached("report"), [9], "{:?}", edges(&g));
+        assert_eq!(reached("count"), [17], "{:?}", edges(&g));
+        assert!(reached("show").contains(&21), "{:?}", edges(&g));
+        // (Fmt's `write<Char>(out, "x")`: `Char` named, no exact match a
+        // `Char value` is, and a template's `const Char*` one this cannot
+        // tell from a `basic_string_view<Char>` — none ranked.)
+        assert!(reached("quote").contains(&42), "{:?}", edges(&g));
+        // (Gmock's `int` overload, its `decltype` a test of the type, before
+        // the `char` one it falls back to: either.)
+        assert_eq!(reached("unpack"), [46, 48], "{:?}", edges(&g));
+    }
+
     /// A C++ call naming its namespace (`details::os::gmtime(…)`) reaches
     /// the functions of a namespace of that name, where one is — never
     /// `fmt::gmtime`, its namespace a macro's; and a prototype lends its
@@ -21011,7 +21216,9 @@ def main():
         };
         let fc = FileCalls::read(Path::new("/p/fmt.h"), header).unwrap();
         assert_eq!(lines("narrow"), [29], "{:?}", edges(&g));
-        assert_eq!(lines("wide"), [29, 37], "{:?}", edges(&g));
+        // (`L"{}"` matches `wformat_string` by its kind, the narrow
+        // `format_string` by no more than a conversion.)
+        assert_eq!(lines("wide"), [37], "{:?}", edges(&g));
         assert_eq!(lines("loads"), [40], "{:?}", edges(&g));
         assert_eq!(lines("puts"), [42, 43], "{:?}", edges(&g));
         let converts: HashMap<&str, &str> = fc
