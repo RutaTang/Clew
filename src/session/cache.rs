@@ -215,7 +215,9 @@ use crate::incremental::Version;
 /// 65: Zig values a method through fields makes (`a.b.iterator(…)`).
 /// 66: JVM, C# and Dart locals of a whole string literal; a method's result
 /// on a value a call gave; C++ free functions' results as arguments.
-pub(crate) const CACHE_VERSION: u32 = 66;
+/// 67: Scala members a class takes from `super`; Zig type functions'
+/// structs' fields, and fields of `self` in them.
+pub(crate) const CACHE_VERSION: u32 = 67;
 
 /// A cached symbol (the index entry minus the paths, which are reconstructed
 /// from the project root + relative path on load).

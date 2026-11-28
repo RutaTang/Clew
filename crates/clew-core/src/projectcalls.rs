@@ -1111,6 +1111,44 @@ fn zig_fields(src: &str, symbols: &[Located]) -> Vec<(String, String, String)> {
             }
         }
     }
+    // A type function's struct (`pub fn NonBlocking(…) type { return
+    // struct { active_list: ConcurrentList(Conn(WSH)), … }; }`): its fields,
+    // under the function's name, as its methods are (`zig_container_of`).
+    for l in symbols.iter().filter(|l| is_callable(&l.symbol.kind)) {
+        let Some(text) = src.get(l.declaration.0..l.declaration.1) else {
+            continue;
+        };
+        let Some(head_end) = text.find('{') else {
+            continue;
+        };
+        if !text[..head_end].trim_end().ends_with(") type") {
+            continue;
+        }
+        let Some(at) = text.find("return struct") else {
+            continue;
+        };
+        let Some(open) = text[at..].find('{').map(|i| at + i) else {
+            continue;
+        };
+        let mut depth = 0i32;
+        for line in text[open..].lines() {
+            let at_top = depth == 1;
+            let code = line.split("//").next().unwrap_or("");
+            depth += code.matches('{').count() as i32 - code.matches('}').count() as i32;
+            let t = line.trim_start();
+            if at_top
+                && !t.starts_with("pub ")
+                && !t.starts_with("fn ")
+                && !t.starts_with("const ")
+                && let Some((name, ty)) = field(t)
+            {
+                out.push((l.symbol.name.clone(), name, ty));
+            }
+            if depth <= 0 {
+                break;
+            }
+        }
+    }
     // A file that is a struct (`const Server = @This();`, `pub const`
     // too): its own fields,
     // at the file's top level (`diagnostics_collection:
@@ -7226,6 +7264,23 @@ fn kotlin_imports(src: &str) -> Vec<String> {
         .collect()
 }
 
+/// The name of the Scala class, trait or object around `node`.
+fn scala_enclosing_type(node: Node, src: &str) -> Option<String> {
+    let mut at = node.parent();
+    while let Some(n) = at {
+        if matches!(
+            n.kind(),
+            "class_definition" | "trait_definition" | "object_definition"
+        ) {
+            return n
+                .child_by_field_name("name")
+                .map(|name| node_text(name, src).to_string());
+        }
+        at = n.parent();
+    }
+    None
+}
+
 /// The type a constructor parameter `name` of the Scala class around `node`
 /// is declared as, in any of its lists (`Async` for `(implicit F:
 /// Async[F])`).
@@ -11409,6 +11464,13 @@ fn receiver_of(
             && (!ty.starts_with(RETURNED) || !ty.contains(['@', '|']))
             && !ty.starts_with(THROUGH)
         {
+            // (`self: *Self` with `const Self = @This();`: the container
+            // the function is in — a type function's struct by its
+            // function's name, `self.active_list.remove(…)`.)
+            let ty = match ty.as_str() {
+                "Self" => zig_container_of(call, src).unwrap_or_else(|| ty.clone()),
+                _ => ty.clone(),
+            };
             return Some(Receiver::Type(format!(
                 "{THROUGH}{ty}|{}",
                 path.replace('.', "|")
@@ -11745,6 +11807,19 @@ fn receiver_of(
         }
         Said::Unknown => return None,
         Said::Nothing => {}
+    }
+    // A Scala member that is its base's (`override protected final def
+    // delegate = super.delegate`): of the type a base declares for it
+    // (`delegate: MonadError[OptionT[F, *], E]`), once the classes are read
+    // — a library's, whose methods are none of the project's.
+    if lang == Lang::Scala
+        && is_plain_name(receiver)
+        && receiver.starts_with(char::is_lowercase)
+        && src.contains(&format!("def {receiver} = super.{receiver}"))
+        && let Some(class) = scala_enclosing_type(call, src)
+    {
+        *unbound = Some(receiver.to_string());
+        return Some(Receiver::Type(format!("{THROUGH}{class}|{receiver}")));
     }
     // A Scala class's constructor parameter named as a type is (`class
     // NodeJSConsole[F[_]](…)(implicit F: Async[F])`, cats' idiom): a value
@@ -20450,7 +20525,7 @@ def main():
     #[test]
     fn a_zig_type_function_and_a_library_chain() {
         let worker = "const std = @import(\"std\");\n\npub fn Blocking(comptime S: type) type {\n    return struct {\n        server: S,\n        const Self = @This();\n        pub fn init(s: S) Self {\n            return .{ .server = s };\n        }\n    };\n}\n\npub fn NonBlocking(comptime S: type) type {\n    return struct {\n        server: S,\n        const Self = @This();\n        pub fn init(s: S) Self {\n            return .{ .server = s };\n        }\n    };\n}\n\npub const HTTPConn = struct {\n    pub fn writeAll(self: *HTTPConn, data: []const u8) !void {\n        _ = self;\n        _ = data;\n    }\n};\n";
-        let httpz = "const std = @import(\"std\");\nconst Io = std.Io;\nconst worker = @import(\"worker.zig\");\n\npub const Server = struct {\n    const Self = @This();\n    pub fn init() Self {\n        return .{};\n    }\n    pub fn listen(self: *Self) !void {\n        var a = try worker.Blocking(*Self).init(self);\n        const Worker = worker.NonBlocking(*Self);\n        var b = try Worker.init(self);\n        _ = a;\n        _ = b;\n    }\n};\n\nfn testStream(port: u16) Io.net.Stream {\n    _ = port;\n    unreachable;\n}\n\ntest \"chunks\" {\n    const stream = testStream(5993);\n    var writer = stream.writer(&.{});\n    const w = &writer.interface;\n    try w.writeAll(\"GET\");\n}\n\npub fn Router(comptime H: type) type {\n    return struct {\n        const Self = @This();\n        pub fn get(self: *Self, path: []const u8) void {\n            _ = self;\n            _ = path;\n        }\n    };\n}\n\npub fn Built(comptime H: type) type {\n    return struct {\n        const Self = @This();\n        pub fn init(h: H) !Self {\n            _ = h;\n            return .{};\n        }\n        pub fn router(self: *Self) !Router(H) {\n            _ = self;\n            return .{};\n        }\n    };\n}\n\nfn routes(h: u8) !void {\n    var server = try Built(u8).init(h);\n    var r = try server.router();\n    r.get(\"/\");\n}\n\nconst Unresolved = struct {\n    has_been_checked: std.DynamicBitSet,\n};\n\npub fn List(comptime T: type) type {\n    return struct {\n        const Self = @This();\n        pub const Iterator = struct {\n            pub fn next(it: *Iterator) ?T {\n                _ = it;\n                return null;\n            }\n        };\n        pub fn iterator(self: *Self) Iterator {\n            _ = self;\n            return .{};\n        }\n    };\n}\n\nfn scan(unresolved: *Unresolved) void {\n    var it = unresolved.has_been_checked.iterator(.{});\n    while (it.next()) |i| {\n        _ = i;\n    }\n}\n";
+        let httpz = "const std = @import(\"std\");\nconst Io = std.Io;\nconst worker = @import(\"worker.zig\");\n\npub const Server = struct {\n    const Self = @This();\n    pub fn init() Self {\n        return .{};\n    }\n    pub fn listen(self: *Self) !void {\n        var a = try worker.Blocking(*Self).init(self);\n        const Worker = worker.NonBlocking(*Self);\n        var b = try Worker.init(self);\n        _ = a;\n        _ = b;\n    }\n};\n\nfn testStream(port: u16) Io.net.Stream {\n    _ = port;\n    unreachable;\n}\n\ntest \"chunks\" {\n    const stream = testStream(5993);\n    var writer = stream.writer(&.{});\n    const w = &writer.interface;\n    try w.writeAll(\"GET\");\n}\n\npub fn Router(comptime H: type) type {\n    return struct {\n        const Self = @This();\n        pub fn get(self: *Self, path: []const u8) void {\n            _ = self;\n            _ = path;\n        }\n    };\n}\n\npub fn Built(comptime H: type) type {\n    return struct {\n        const Self = @This();\n        pub fn init(h: H) !Self {\n            _ = h;\n            return .{};\n        }\n        pub fn router(self: *Self) !Router(H) {\n            _ = self;\n            return .{};\n        }\n    };\n}\n\nfn routes(h: u8) !void {\n    var server = try Built(u8).init(h);\n    var r = try server.router();\n    r.get(\"/\");\n}\n\nconst Unresolved = struct {\n    has_been_checked: std.DynamicBitSet,\n};\n\npub fn List(comptime T: type) type {\n    return struct {\n        const Self = @This();\n        pub const Iterator = struct {\n            pub fn next(it: *Iterator) ?T {\n                _ = it;\n                return null;\n            }\n        };\n        pub fn iterator(self: *Self) Iterator {\n            _ = self;\n            return .{};\n        }\n    };\n}\n\nfn scan(unresolved: *Unresolved) void {\n    var it = unresolved.has_been_checked.iterator(.{});\n    while (it.next()) |i| {\n        _ = i;\n    }\n}\n\npub fn Pool(comptime T: type) type {\n    return struct {\n        const Self = @This();\n        pub fn remove(self: *Self, t: T) void {\n            _ = self;\n            _ = t;\n        }\n    };\n}\n\npub fn Loop(comptime T: type) type {\n    return struct {\n        active: Pool(T),\n        const Self = @This();\n        pub fn remove(self: *Self, t: T) void {\n            _ = t;\n            self.active.remove(t);\n        }\n    };\n}\n";
         let g = graph(&[("/p/src/worker.zig", worker), ("/p/src/httpz.zig", httpz)]);
         let reached = |name: &str| -> Vec<String> {
             let at = (0..g.node_count())
@@ -20492,6 +20567,14 @@ def main():
         // has_been_checked.iterator(…)` of a `std.DynamicBitSet`): the
         // library's iterator, none of the project's `next`.
         assert!(reached("scan").is_empty(), "{:?}", edges(&g));
+        // A field of a type function's struct (`active: Pool(T)`): the
+        // struct `Pool` returns, never the calling struct's `remove`.
+        let pooled: Vec<String> = edges(&g)
+            .into_iter()
+            .filter(|(from, to)| from.ends_with(":remove") && to.ends_with(":remove"))
+            .map(|(_, to)| to)
+            .collect();
+        assert_eq!(pooled.len(), 1, "{:?}", edges(&g));
     }
 
     /// A C++ call naming its namespace (`details::os::gmtime(…)`) reaches
@@ -20667,6 +20750,30 @@ def main():
         assert!(whole_string_literal(" \"\"\"x\"\"\";"));
         assert!(!whole_string_literal(" \"abc\".length\n"));
         assert!(!whole_string_literal(" \"a\" + b\n"));
+    }
+
+    /// Audit 22's: a Scala member that is its base's (`override protected
+    /// final def delegate = super.delegate`) is of the type a base declares
+    /// for it — cats' `MonadError`, a library's — so `delegate.raiseError(e)`
+    /// is none of the project's `raiseError`s, the calling one's included.
+    #[test]
+    fn a_scala_member_from_super_is_its_base_type() {
+        let temporal = "package cats.effect.kernel\n\nobject GenTemporal {\n  private[kernel] trait OptionTTemporal[F[_], E] extends GenTemporal[OptionT[F, *], E] {\n    override protected def delegate: MonadError[OptionT[F, *], E] =\n      OptionT.catsDataMonadErrorForOptionT[F, E]\n  }\n}\n";
+        let async_ = "package cats.effect.kernel\n\nobject Async {\n  private[effect] trait OptionTAsync[F[_]]\n      extends Async[OptionT[F, *]]\n      with Temporal.OptionTTemporal[F, Throwable] {\n\n    override protected final def delegate = super.delegate\n\n    override def raiseError[A](e: Throwable): OptionT[F, A] =\n      delegate.raiseError(e)\n  }\n\n  private[effect] trait EitherTAsync[F[_], E] extends Async[EitherT[F, E, *]] {\n    override def raiseError[A](e: Throwable): EitherT[F, E, A] = ???\n  }\n}\n";
+        let g = graph(&[
+            (
+                "/p/kernel/shared/src/main/scala/cats/effect/kernel/GenTemporal.scala",
+                temporal,
+            ),
+            (
+                "/p/kernel/shared/src/main/scala/cats/effect/kernel/Async.scala",
+                async_,
+            ),
+        ]);
+        let at = (0..g.node_count())
+            .find(|&n| g.node(n).name == "raiseError" && g.node(n).line == 10)
+            .unwrap();
+        assert!(g.callees_of(at).is_empty(), "{:?}", edges(&g));
     }
 
     /// More of audit 17's: a Kotlin property of the file's top level
