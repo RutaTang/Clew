@@ -212,7 +212,8 @@ use crate::incremental::Version;
 /// structs; C++ functions' namespaces.
 /// 64: Scala classes' every constructor list; Zig type functions' aliases
 /// and calls handled by `catch`/`orelse`.
-pub(crate) const CACHE_VERSION: u32 = 64;
+/// 65: Zig values a method through fields makes (`a.b.iterator(…)`).
+pub(crate) const CACHE_VERSION: u32 = 65;
 
 /// A cached symbol (the index entry minus the paths, which are reconstructed
 /// from the project root + relative path on load).
