@@ -223,7 +223,9 @@ use crate::incremental::Version;
 /// returning a reference, and chains of fields.
 /// 70: Zig unions' fields, and fields of a standard-library type an alias
 /// names (`ip: Io.net.IpAddress`), in full.
-pub(crate) const CACHE_VERSION: u32 = 70;
+/// 71: C++ operators as functions; a test's block past a preprocessor's
+/// line; Dart factories, operators and initializer lists as callers.
+pub(crate) const CACHE_VERSION: u32 = 71;
 
 /// A cached symbol (the index entry minus the paths, which are reconstructed
 /// from the project root + relative path on load).

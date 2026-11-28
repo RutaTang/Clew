@@ -291,7 +291,10 @@ fn span_from(lines: &[&str], start: usize) -> usize {
     let mut last = start;
     for (i, line) in lines.iter().enumerate().skip(start + 1) {
         let t = line.trim();
-        if t.is_empty() {
+        // (Nor does a preprocessor's line, at its first column whatever
+        // block it is in — `#ifdef CATCH_PLATFORM_WINDOWS` in a
+        // `TEST_CASE`'s body — or a comment's, end the block.)
+        if t.is_empty() || t.starts_with('#') {
             continue;
         }
         if indent(line) > own {

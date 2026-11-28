@@ -8318,7 +8318,11 @@ fn walk(
         }
         // A function definition becomes the enclosing scope for its subtree —
         // under the first of its names that the file's outline has.
-        let own: Option<(Rc<str>, usize)> = if spec.fn_kinds.contains(&kind) {
+        // (And a Dart constructor's signature, whose initializer list —
+        // `ComplexBloc() : super(ComplexStateA())` — is its own.)
+        let own: Option<(Rc<str>, usize)> = if spec.fn_kinds.contains(&kind)
+            || (lang == Lang::Dart && matches!(kind, "method_signature" | "declaration"))
+        {
             fn_names(node, parent, before, src, lang)
                 .into_iter()
                 .find(|name| callable.is_none_or(|c| c.contains(name.as_str())))
@@ -10906,6 +10910,26 @@ fn fn_names(
                 .into_iter()
                 .collect();
         }
+        // A constructor's initializer list (`ComplexBloc() :
+        // super(ComplexStateA())`), with a body or none (`Headers.empty() :
+        // entries = make();`): the constructor's.
+        Lang::Dart if matches!(node.kind(), "method_signature" | "declaration") => {
+            let mut cursor = node.walk();
+            let constructor = node.named_children(&mut cursor).any(|c| {
+                matches!(
+                    c.kind(),
+                    "constructor_signature"
+                        | "constant_constructor_signature"
+                        | "factory_constructor_signature"
+                        | "redirecting_factory_constructor_signature"
+                )
+            });
+            // (A field's declaration names no function.)
+            return match constructor {
+                true => dart_sig_name(node, src).into_iter().collect(),
+                false => Vec::new(),
+            };
+        }
         _ => {}
     }
     let own = node
@@ -11066,6 +11090,11 @@ fn c_function_name(def: Node, src: &str) -> Option<String> {
                     return last_identifier(node_text(name, src).trim_start_matches('~'))
                         .map(|class| format!("~{class}"));
                 }
+                // An operator (`operator==`, `operator delete[]`): by its
+                // name as written, as the outline names it.
+                if name.kind() == "operator_name" {
+                    return Some(node_text(name, src).to_string());
+                }
                 return last_identifier(node_text(name, src));
             }
         };
@@ -11077,14 +11106,44 @@ fn c_function_name(def: Node, src: &str) -> Option<String> {
 /// (`function_`/`getter_`/`setter_signature`) carry a `name` field; a
 /// `method_signature` wraps one of those, so look one level in.
 fn dart_sig_name(sig: Node, src: &str) -> Option<String> {
-    if let Some(n) = sig.child_by_field_name("name") {
-        return Some(node_text(n, src).to_string());
+    // (A named constructor's, `Headers.empty()`: its last name, the
+    // outline's.)
+    let last_name = |n: Node| -> Option<String> {
+        let mut cursor = n.walk();
+        n.children_by_field_name("name", &mut cursor)
+            .last()
+            .map(|name| node_text(name, src).to_string())
+    };
+    if let Some(n) = last_name(sig) {
+        return Some(n);
+    }
+    // A factory's or a constant constructor's (`factory Headers.from(…)`,
+    // `const Headers.empty()`): its last name, as the outline names it; an
+    // operator's (`bool operator ==(…)`), the operator.
+    let unnamed = |c: Node| -> Option<String> {
+        let mut cursor = c.walk();
+        let children: Vec<Node> = c.named_children(&mut cursor).collect();
+        match c.kind() {
+            "factory_constructor_signature"
+            | "constant_constructor_signature"
+            | "redirecting_factory_constructor_signature" => children
+                .iter()
+                .take_while(|n| n.kind() == "identifier")
+                .last()
+                .map(|n| node_text(*n, src).to_string()),
+            "operator_signature" => children
+                .iter()
+                .find(|n| n.kind() == "binary_operator")
+                .map(|n| node_text(*n, src).to_string()),
+            _ => None,
+        }
+    };
+    if let Some(name) = unnamed(sig) {
+        return Some(name);
     }
     let mut cursor = sig.walk();
-    sig.children(&mut cursor).find_map(|c| {
-        c.child_by_field_name("name")
-            .map(|n| node_text(n, src).to_string())
-    })
+    sig.children(&mut cursor)
+        .find_map(|c| last_name(c).or_else(|| unnamed(c)))
 }
 
 /// The type a Rust path call names its function through: `Self::make()`
@@ -21061,6 +21120,54 @@ def main():
             .map(|(_, to)| to)
             .collect();
         assert_eq!(pooled.len(), 1, "{:?}", edges(&g));
+    }
+
+    /// Calls nothing held: a Catch2 test's after a preprocessor's line in
+    /// its body (`#ifdef CATCH_PLATFORM_WINDOWS`), a C++ operator's (`void
+    /// operator delete(…)`, `bool Foo::operator==(…)`), and a Dart
+    /// factory's, operator's (`operator ==`) and constructor's initializer
+    /// list's (`ComplexBloc() : super(ComplexStateA())`, `Headers.empty() :
+    /// entries = make();`) — each is now its function's.
+    #[test]
+    fn calls_of_tests_operators_factories_and_initializers_are_their_functions() {
+        let callers = |file: &str, src: &str| -> Vec<(String, Option<String>)> {
+            FileCalls::read(Path::new(file), src)
+                .unwrap()
+                .calls
+                .into_iter()
+                .map(|c| (c.callee, c.caller))
+                .collect()
+        };
+        let cpp = "TEST_CASE(\"env\", \"[cfg]\") {\n    drop(\"l1\");\n#ifdef CATCH_PLATFORM_WINDOWS\n    _putenv_s(\"SPDLOG_LEVEL\", \"l1=warn\");\n#else\n    setenv(\"SPDLOG_LEVEL\", \"l1=warn\", 1);\n#endif\n    load_env_levels();\n}\nvoid operator delete(void* ptr, std::size_t size) noexcept {\n  aligned_delete(ptr, size);\n}\nbool Foo::operator==(const Foo& o) const {\n  return equal(o);\n}\n";
+        let got = callers("/p/tests/test_cfg.cpp", cpp);
+        for (callee, caller) in [
+            ("setenv", "env"),
+            ("load_env_levels", "env"),
+            ("aligned_delete", "operator delete"),
+            ("equal", "operator=="),
+        ] {
+            assert!(
+                got.iter()
+                    .any(|(c, by)| c == callee && by.as_deref() == Some(caller)),
+                "{callee}: {got:?}"
+            );
+        }
+        let dart = "class Headers {\n  Headers._(this.entries);\n  final List<String> entries;\n  factory Headers.from(List<String> entries) {\n    return Headers._(entries);\n  }\n  factory Headers.json(Map json) => headersFromJson(json);\n  Headers.empty() : entries = make();\n  @override\n  bool operator ==(Object other) {\n    return listEquals(other, entries);\n  }\n}\nclass ComplexBloc extends Bloc {\n  ComplexBloc() : super(ComplexStateA()) {\n    on<Event>(handle);\n  }\n}\n";
+        let got = callers("/p/lib/headers.dart", dart);
+        for (callee, caller) in [
+            ("_", "from"),
+            ("headersFromJson", "json"),
+            ("make", "empty"),
+            ("listEquals", "=="),
+            ("ComplexStateA", "ComplexBloc"),
+            ("on", "ComplexBloc"),
+        ] {
+            assert!(
+                got.iter()
+                    .any(|(c, by)| c == callee && by.as_deref() == Some(caller)),
+                "{callee}: {got:?}"
+            );
+        }
     }
 
     /// Audit 23's Zig misses: a path from the file's name for the standard

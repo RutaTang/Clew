@@ -866,12 +866,14 @@ const RUBY_TEST_TAGS: &str = r#"
 
 /// A Dart constructor written with no body — `CounterCubit() : super(0);`,
 /// `const BlocProvider({…});`, `factory Cart.empty() = _EmptyCart;` — which
-/// the grammar's outline leaves out: what `CounterCubit()` calls.
+/// the grammar's outline leaves out: what `CounterCubit()` calls. So is an
+/// operator (`bool operator ==(Object other)`), named by its operator.
 const DART_CONSTRUCTOR_TAGS: &str = r#"
 (declaration (constructor_signature name: (identifier) @name)) @definition.method
 (declaration (constant_constructor_signature (identifier) @name)) @definition.method
 (declaration (factory_constructor_signature (identifier) @name)) @definition.method
 (declaration (redirecting_factory_constructor_signature (identifier) @name)) @definition.method
+(method_signature (operator_signature (binary_operator) @name)) @definition.method
 "#;
 
 /// package:test's tests (`test('adds', () { … })`, Flutter's `testWidgets`)
@@ -1518,7 +1520,9 @@ const PYTHON_EXTRA_TAGS: &str = r#"
 /// named through a namespace too (`detail::Box<T>::size`, `ns::Cls::f`) were
 /// no definitions, and the calls in their bodies had no function to belong
 /// to. So were a destructor's (`~FunctionMocker() override { … }`, `Foo::
-/// ~Foo()`), named `~` and its class's name ([`crate::outline`]).
+/// ~Foo()`), named `~` and its class's name ([`crate::outline`]), and an
+/// operator's (`bool Foo::operator==(…)`, `void operator delete(…)`), by
+/// its `operator` name.
 const CPP_EXTRA_TAGS: &str = r#"
 (function_declarator
   declarator: (qualified_identifier
@@ -1535,6 +1539,11 @@ const CPP_EXTRA_TAGS: &str = r#"
         name: (identifier) @name)))) @definition.method
 (function_declarator
   declarator: (destructor_name (identifier) @name)) @definition.method
+(function_declarator
+  declarator: (operator_name) @name) @definition.function
+(function_declarator
+  declarator: (qualified_identifier
+    name: (operator_name) @name)) @definition.method
 (function_declarator
   declarator: (qualified_identifier
     name: (destructor_name (identifier) @name))) @definition.method
