@@ -4242,12 +4242,18 @@ impl ProjectCallGraph {
                     .split(',')
                     .map(|a| match a.strip_prefix(RETURNED) {
                         Some(function) => {
-                            let found: Vec<usize> = defs
+                            let mut found: Vec<usize> = defs
                                 .named
                                 .get(function)
                                 .into_iter()
                                 .flat_map(|named| named.all.iter().copied())
                                 .collect();
+                            // (Called as a free function, `fmt::arg("x", v)`:
+                            // the free ones of the name — no class's `arg(int
+                            // id)` member.)
+                            if found.iter().any(|&i| owner[i].is_none()) {
+                                found.retain(|&i| owner[i].is_none());
+                            }
                             // (A catch-all `(...)` stands in for a library's
                             // function of the name — fmt's `gmtime_r(...) ->
                             // null<>` for the C library's: what it returns
@@ -4448,9 +4454,16 @@ impl ProjectCallGraph {
                         a.trim_end_matches('?').is_empty() || a == "?"
                     })
                     && defaulted(callee);
+                // (One of no default needed is an overload of its own file's
+                // class: a twin's elsewhere, jdbc's `EnumTable.
+                // initEnumColumn(sql)` beside r2dbc's of defaults, is none.)
                 return !others().filter(|&i| fits(i)).any(|i| {
                     let other = rank(i);
-                    other > own || (prefers_exact && other == own && !defaulted(i))
+                    other > own
+                        || (prefers_exact
+                            && other == own
+                            && !defaulted(i)
+                            && nodes[i].file == nodes[callee].file)
                 });
             }
             !others().any(fits)
@@ -4793,7 +4806,10 @@ impl ProjectCallGraph {
                     // A chain of fields: its last field's type. Another
                     // package's (`http.Header`) is a library's value, whose
                     // methods are none of the project's.
-                    Some(Receiver::Type(t)) if t.starts_with(THROUGH) => {
+                    Some(Receiver::Type(t) | Receiver::Declared(t)) if t.starts_with(THROUGH) => {
+                        // (Declared, as a method's result on a function's is:
+                        // of that type or one below it.)
+                        let declared = matches!(cs.receiver, Some(Receiver::Declared(_)));
                         // `.`: the calling file's own package.
                         let chain = &t[THROUGH.len()..];
                         let chain = match chain.strip_prefix(".|") {
@@ -4813,7 +4829,10 @@ impl ProjectCallGraph {
                             _ => cs.qualifier.clone(),
                         };
                         typed_call = CallSite {
-                            receiver: ty.map(Receiver::Type),
+                            receiver: ty.map(|ty| match declared {
+                                true => Receiver::Declared(ty),
+                                false => Receiver::Type(ty),
+                            }),
                             qualifier,
                             ..cs.clone()
                         };
@@ -7140,6 +7159,34 @@ fn zig_type_aliases(src: &str) -> Vec<(String, String)> {
             .then(|| (name.to_string(), function.to_string()))
         })
         .collect()
+}
+
+/// Whether `rhs` (to its statement's end) is a string literal and nothing
+/// more: `"{…}"`, Kotlin's and Scala's `"""…"""`, C#'s `@"…"` — no
+/// method on it (`"abc".length`), nor more joined to it.
+fn whole_string_literal(rhs: &str) -> bool {
+    let text = rhs.trim_start();
+    let text = text.strip_prefix('@').unwrap_or(text);
+    let end = |rest: &str| {
+        let rest = rest.trim_start_matches([' ', '\t']);
+        rest.is_empty() || rest.starts_with([';', '\n', '\r', ',', ')', '}'])
+    };
+    if let Some(body) = text.strip_prefix("\"\"\"") {
+        return body.find("\"\"\"").is_some_and(|at| end(&body[at + 3..]));
+    }
+    let Some(body) = text.strip_prefix('"') else {
+        return false;
+    };
+    let mut escaped = false;
+    for (i, c) in body.char_indices() {
+        match c {
+            '\n' => return false,
+            '\\' if !escaped => escaped = true,
+            '"' if !escaped => return end(&body[i + 1..]),
+            _ => escaped = false,
+        }
+    }
+    false
 }
 
 /// Whether `args` (from its `(`) is one parenthesized list, closing at its
@@ -11575,6 +11622,24 @@ fn receiver_of(
                     _ => Receiver::Declared(marker),
                 });
             }
+            // A value a function's call gives (`val moshi = Builder().add(f)
+            // .build()`, then `moshi.adapter<T>()`): the method's result on
+            // what that function returns, once the files are read.
+            if lang != Lang::Go && is_plain_name(base) {
+                let places = scope.places;
+                if let Said::Type(ty, _) = bindings
+                    .entry((scope.from, base.to_string()))
+                    .or_insert_with(|| Bindings::from(scope.from, places))
+                    .said_before(call.start_byte(), base, scope, src, lang)
+                    && let Some(function) = ty.strip_prefix(RETURNED)
+                    && !function.starts_with('@')
+                    && !function.contains('|')
+                {
+                    return Some(Receiver::Declared(format!(
+                        "{THROUGH}{RETURNED}{function}|{method}()"
+                    )));
+                }
+            }
             // Go's method of a field (`c.Writer.Header()`): what it returns,
             // through the chain of fields to it.
             if lang == Lang::Go
@@ -12715,6 +12780,16 @@ fn binding_at(head: &str, after: &str, lang: Lang) -> Binding {
     } else {
         None
     };
+    // A string literal, whole (`val json = "{…}"`): a string.
+    if matches!(
+        lang,
+        Lang::Java | Lang::Kotlin | Lang::Scala | Lang::CSharp | Lang::Dart
+    ) && let Some(rhs) = assigned
+        && whole_string_literal(rhs)
+    {
+        // (As declared: a project's extension of `String` is its method.)
+        return Binding::Typed("String".to_string(), false);
+    }
     // A Zig field of another of the function's values (`const w =
     // &writer.interface;`), or a method called through its fields (`var it
     // = unresolved.has_been_checked.iterator(…)`): the chain from it, read
@@ -20293,7 +20368,7 @@ def main():
     /// is either `handle`.
     #[test]
     fn a_cpp_call_result_narrows_but_ranks_no_overload() {
-        let header = "namespace fmt {\nstruct null {};\nstruct tm {};\ntemplate <typename Char = char> struct runtime_format_string {\n  int str;\n};\ninline auto runtime(wstring_view s) -> runtime_format_string<wchar_t> { return {}; }\ntemplate <typename OutputIt, typename... T>\nauto format_to_n(OutputIt out, size_t n, wformat_string<T...> fmt, T&&... args) -> int {\n  return 0;\n}\ntemplate <typename OutputIt, typename S, typename... T>\nauto format_to_n(OutputIt out, size_t n, const S& fmt, T&&... args) -> int {\n  return 1;\n}\ninline auto gmtime_r(...) -> null { return null(); }\nstruct dispatcher {\n  tm tm_;\n  auto run() -> bool { return handle(gmtime_r(&tm_)); }\n  auto handle(tm* t) -> bool { return t != nullptr; }\n  auto handle(null) -> bool { return false; }\n};\ntemplate <typename T, typename Char> struct named_arg {\n  const Char* name;\n};\ntemplate <typename T> auto arg(const char* name, const T& value) -> named_arg<T, char> {\n  return {name};\n}\nclass dynamic_format_arg_store {\n public:\n  template <typename T> void emplace_arg(const T& value) {}\n  template <typename T> void emplace_arg(const named_arg<T, char>& value) {}\n  template <typename T> void push_back(const T& value) { emplace_arg(fmt::arg(\"x\", value)); }\n};\n}\n";
+        let header = "namespace fmt {\nstruct null {};\nstruct tm {};\ntemplate <typename Char = char> struct runtime_format_string {\n  int str;\n};\ninline auto runtime(wstring_view s) -> runtime_format_string<wchar_t> { return {}; }\ntemplate <typename OutputIt, typename... T>\nauto format_to_n(OutputIt out, size_t n, wformat_string<T...> fmt, T&&... args) -> int {\n  return 0;\n}\ntemplate <typename OutputIt, typename S, typename... T>\nauto format_to_n(OutputIt out, size_t n, const S& fmt, T&&... args) -> int {\n  return 1;\n}\ninline auto gmtime_r(...) -> null { return null(); }\nstruct dispatcher {\n  tm tm_;\n  auto run() -> bool { return handle(gmtime_r(&tm_)); }\n  auto handle(tm* t) -> bool { return t != nullptr; }\n  auto handle(null) -> bool { return false; }\n};\ntemplate <typename T, typename Char> struct named_arg {\n  const Char* name;\n};\ntemplate <typename T> auto arg(const char* name, const T& value) -> named_arg<T, char> {\n  return {name};\n}\nclass format_args {\n public:\n  auto arg(int id) const -> int { return id; }\n};\nclass dynamic_format_arg_store {\n public:\n  template <typename T> void emplace_arg(const T& value) {}\n  template <typename T> void emplace_arg(const named_arg<T, char>& value) {}\n  template <typename T> void push_back(const T& value) { emplace_arg(fmt::arg(\"x\", value)); }\n};\n}\n";
         let main = "#include \"fmt.h\"\nvoid wide() {\n  wchar_t buffer[4];\n  fmt::format_to_n(buffer, 3, fmt::runtime(L\"{}\"), 12345);\n}\n";
         let files = [("/p/fmt.h", header), ("/p/main.cc", main)];
         let sources: Vec<(PathBuf, String)> = files
@@ -20323,7 +20398,7 @@ def main():
         // (By its class exactly, a function's result does rank: fmt's
         // `named_arg<T, Char>` is `emplace_arg(const named_arg<T, Char>&)`'s,
         // never the template's `const T&`.)
-        assert_eq!(lines("push_back", "emplace_arg"), [32], "{:?}", edges(&g));
+        assert_eq!(lines("push_back", "emplace_arg"), [36], "{:?}", edges(&g));
     }
 
     /// A Kotlin function of another package's top level, or an extension
@@ -20549,6 +20624,49 @@ def main():
             "{:?}",
             edges(&g)
         );
+    }
+
+    /// Audit 21's: a Kotlin value a function's call gives (`val moshi =
+    /// Builder().add(f).build()`) is of what that function returns, so
+    /// `moshi.adapter<T>().fromJson(json)` is `JsonAdapter`'s — and a local
+    /// of a whole string literal (`val json = "{…}"`) is a string, which picks
+    /// `fromJson(string: String)` of the overloads, never an unrelated
+    /// adapter's `fromJson(reader)` in the calling file.
+    #[test]
+    fn audit_21_shapes() {
+        let adapter = "package com.squareup.moshi\n\npublic abstract class JsonAdapter<T> {\n  public abstract fun fromJson(reader: JsonReader): T?\n\n  public fun fromJson(string: String): T? = null\n}\n";
+        let moshi = "package com.squareup.moshi\n\npublic class Moshi {\n  public fun <T> adapter(type: Type): JsonAdapter<T> = TODO()\n\n  public class Builder {\n    public fun add(factory: JsonAdapter.Factory): Builder = this\n    public fun build(): Moshi = Moshi()\n  }\n}\n";
+        let example = "package com.squareup.moshi.recipes\n\nimport com.squareup.moshi.JsonAdapter\nimport com.squareup.moshi.Moshi.Builder\n\nprivate class JsonStringJsonAdapter : JsonAdapter<String>() {\n  override fun fromJson(reader: JsonReader): String = \"\"\n}\n\nfun main() {\n  val json = \"{\\\"type\\\":1}\"\n  val moshi = Builder().add(JsonStringJsonAdapterFactory()).build()\n  val example = moshi.adapter<ExampleClass>(ExampleClass::class.java).fromJson(json)\n}\n";
+        let g = graph(&[
+            (
+                "/p/moshi/src/main/java/com/squareup/moshi/JsonAdapter.kt",
+                adapter,
+            ),
+            ("/p/moshi/src/main/java/com/squareup/moshi/Moshi.kt", moshi),
+            (
+                "/p/examples/src/main/java/com/squareup/moshi/recipes/JsonString.kt",
+                example,
+            ),
+        ]);
+        let at = (0..g.node_count())
+            .find(|&n| g.node(n).name == "main")
+            .unwrap();
+        let from_json: Vec<String> = g
+            .callees_of(at)
+            .iter()
+            .filter(|&&c| g.node(c).name == "fromJson")
+            .map(|&c| format!("{}:{}", g.node(c).file.display(), g.node(c).line))
+            .collect();
+        assert_eq!(
+            from_json,
+            ["/p/moshi/src/main/java/com/squareup/moshi/JsonAdapter.kt:6"],
+            "{:?}",
+            edges(&g)
+        );
+        assert!(whole_string_literal(" \"{\\\"a\\\":1}\"\n"));
+        assert!(whole_string_literal(" \"\"\"x\"\"\";"));
+        assert!(!whole_string_literal(" \"abc\".length\n"));
+        assert!(!whole_string_literal(" \"a\" + b\n"));
     }
 
     /// More of audit 17's: a Kotlin property of the file's top level
