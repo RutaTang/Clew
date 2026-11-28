@@ -3402,10 +3402,44 @@ impl ProjectCallGraph {
                     .or_default()
                     .insert(ty.as_str());
             }
+            // (One named a standard library's type each way — `filename_t`
+            // a `std::string` or a `std::wstring` as the platform has it —
+            // is the library's either way: either of them. Not one named
+            // so in two scopes, `using F = R(Args...)` and `using F =
+            // std::numeric_limits<From>`, whose name a template's parameter
+            // may have.)
+            const STANDARD: &[&str] = &[
+                "string",
+                "wstring",
+                "u8string",
+                "u16string",
+                "u32string",
+                "string_view",
+                "wstring_view",
+                "basic_string",
+                "basic_string_view",
+                "vector",
+                "array",
+                "deque",
+                "list",
+                "map",
+                "multimap",
+                "set",
+                "unordered_map",
+                "unordered_set",
+                "path",
+            ];
             targets
                 .into_iter()
-                .filter(|(_, tys)| tys.len() == 1)
-                .filter_map(|(alias, tys)| Some((alias, *tys.iter().next()?)))
+                .filter(|(_, tys)| {
+                    tys.len() == 1
+                        || tys.iter().all(|t| {
+                            STANDARD.contains(t)
+                                && !declared_types.contains(t)
+                                && !project_types.contains(t)
+                        })
+                })
+                .filter_map(|(alias, tys)| Some((alias, *tys.iter().min()?)))
                 .collect()
         };
         // Whether the type `child` has `base` above it, as written: C#'s
@@ -7337,6 +7371,114 @@ fn scala_enclosing_type(node: Node, src: &str) -> Option<String> {
     None
 }
 
+/// A C++ method call's receiver written as a chain of fields (`exp->
+/// prereqs_`, `a.b->c`): its root, and the fields in order, `|`-joined —
+/// each one `->` follows (or the call's own `->`, after the last; the
+/// root's too) marked `name->`, its pointee, as [`cpp_class_fields`]
+/// records it. `None` for a plain name, or anything but names and the two
+/// operators.
+fn cpp_field_path(call: Node, receiver: &str, src: &str) -> Option<(String, String)> {
+    let text: String = receiver.chars().filter(|c| !c.is_whitespace()).collect();
+    if !text.contains('.') && !text.contains("->") {
+        return None;
+    }
+    let mut names: Vec<(&str, bool)> = Vec::new();
+    let mut rest = text.as_str();
+    loop {
+        let end = rest
+            .find(|c: char| !(c == '_' || c.is_alphanumeric()))
+            .unwrap_or(rest.len());
+        let name = &rest[..end];
+        if !is_plain_name(name) {
+            return None;
+        }
+        rest = &rest[end..];
+        if rest.is_empty() {
+            names.push((name, false));
+            break;
+        }
+        let arrow = match rest.strip_prefix("->") {
+            Some(after) => {
+                rest = after;
+                true
+            }
+            None => {
+                rest = rest.strip_prefix('.')?;
+                false
+            }
+        };
+        names.push((name, arrow));
+    }
+    let &(root, root_arrow) = names.first()?;
+    if names.len() < 2 {
+        return None;
+    }
+    let called_by_arrow = call
+        .child_by_field_name("function")
+        .and_then(|f| f.child_by_field_name("operator"))
+        .is_some_and(|o| node_text(o, src) == "->");
+    let last = names.len() - 1;
+    let path: Vec<String> = names[1..]
+        .iter()
+        .enumerate()
+        .map(|(i, &(name, arrow))| {
+            let arrow = if i + 1 == last {
+                called_by_arrow
+            } else {
+                arrow
+            };
+            if arrow {
+                format!("{name}->")
+            } else {
+                name.to_string()
+            }
+        })
+        .collect();
+    // (A root `->` follows: `name->`, for where it is a field.)
+    let root = if root_arrow {
+        format!("{root}->")
+    } else {
+        root.to_string()
+    };
+    Some((root, path.join("|")))
+}
+
+/// The C++ class a member function at `node` is of: the one its
+/// definition's name qualifies (`void ExpectationBase::Find(…)`), or the
+/// class it is defined in.
+fn cpp_enclosing_class(node: Node, src: &str) -> Option<String> {
+    let mut at = node.parent();
+    while let Some(n) = at {
+        match n.kind() {
+            "function_definition" => {
+                let mut declarator = n.child_by_field_name("declarator");
+                while let Some(d) = declarator {
+                    if d.kind() == "function_declarator" {
+                        break;
+                    }
+                    declarator = d.child_by_field_name("declarator");
+                }
+                if let Some(qualified) = declarator
+                    .and_then(|d| d.child_by_field_name("declarator"))
+                    .filter(|q| q.kind() == "qualified_identifier")
+                {
+                    let scope = node_text(qualified.child_by_field_name("scope")?, src);
+                    let class = scope.split('<').next()?.rsplit("::").next()?.trim();
+                    return is_plain_name(class).then(|| class.to_string());
+                }
+            }
+            "class_specifier" | "struct_specifier" => {
+                let name = node_text(n.child_by_field_name("name")?, src);
+                let name = name.split('<').next()?.rsplit("::").next()?.trim();
+                return is_plain_name(name).then(|| name.to_string());
+            }
+            _ => {}
+        }
+        at = n.parent();
+    }
+    None
+}
+
 /// The type a constructor parameter `name` of the Scala class around `node`
 /// is declared as, in any of its lists (`Async` for `(implicit F:
 /// Async[F])`).
@@ -10885,18 +11027,24 @@ fn c_function_name(def: Node, src: &str) -> Option<String> {
     let mut node = def.child_by_field_name("declarator")?;
     for _ in 0..64 {
         node = match node.kind() {
-            "function_declarator"
-            | "pointer_declarator"
-            | "reference_declarator"
-            | "attributed_declarator" => node.child_by_field_name("declarator")?,
+            "function_declarator" | "pointer_declarator" | "attributed_declarator" => {
+                node.child_by_field_name("declarator")?
+            }
+            // (Its declarator is no field of the grammar's: `const T&
+            // get(…)`'s is its last child.)
+            "reference_declarator" => {
+                let last = u32::try_from(node.named_child_count().checked_sub(1)?).ok()?;
+                node.named_child(last)?
+            }
             "parenthesized_declarator" => node.named_child(0)?,
             _ => {
                 let name = innermost_name(node);
                 // `~Foo` reads as `Foo` to `last_identifier`, which attributed
-                // a destructor's calls to the constructor. The outline lists
-                // no destructor, so there is no node for them.
+                // a destructor's calls to the constructor: `~Foo`, as the
+                // outline names it.
                 if name.kind() == "destructor_name" {
-                    return None;
+                    return last_identifier(node_text(name, src).trim_start_matches('~'))
+                        .map(|class| format!("~{class}"));
                 }
                 return last_identifier(node_text(name, src));
             }
@@ -11552,6 +11700,8 @@ fn receiver_of(
         && let Some(field) = ["this.", "self.", "$this->", "this->"]
             .iter()
             .find_map(|p| receiver.strip_prefix(p))
+            // (C++'s `this->sinks_.front()`: a chain, below.)
+            .filter(|field| lang != Lang::Cpp || is_plain_name(field))
     {
         if !is_plain_name(field) {
             return None;
@@ -11745,6 +11895,46 @@ fn receiver_of(
                 "{THROUGH}{ty}|{}",
                 path.replace('.', "|")
             )));
+        }
+    }
+    // A C++ chain of fields (`exp->immediate_prerequisites_.begin()` with
+    // `const ExpectationBase* exp`, `e.prereqs_`, `this->sinks_.front()`,
+    // the class's own `impl_->listeners()`): the last field's type, a
+    // pointer's or a smart pointer's by its pointee where `->` reaches it,
+    // once the classes are read — a library's for the standard library's.
+    if lang == Lang::Cpp
+        && let Some((root, path)) = cpp_field_path(call, receiver, src)
+    {
+        let class = || cpp_enclosing_class(call, src);
+        let name = root.trim_end_matches("->");
+        let ty = match name {
+            "this" => class(),
+            _ => {
+                let places = scope.places;
+                match bindings
+                    .entry((scope.from, name.to_string()))
+                    .or_insert_with(|| Bindings::from(scope.from, places))
+                    .said_before(call.start_byte(), name, scope, src, lang)
+                {
+                    // (A smart pointer's own type says nothing of its
+                    // pointee's fields; a library's, nothing of the
+                    // project's.)
+                    Said::Type(ty, _)
+                        if !ty.starts_with(RETURNED)
+                            && !ty.starts_with(THROUGH)
+                            && !ty.starts_with("std::")
+                            && !matches!(ty.as_str(), "unique_ptr" | "shared_ptr" | "weak_ptr") =>
+                    {
+                        Some(ty)
+                    }
+                    // A field of the calling member function's class.
+                    Said::Nothing => class().map(|class| format!("{class}|{root}")),
+                    _ => None,
+                }
+            }
+        };
+        if let Some(ty) = ty {
+            return Some(Receiver::Declared(format!("{THROUGH}{ty}|{path}")));
         }
     }
     if !is_plain_name(receiver) {
@@ -20742,6 +20932,80 @@ def main():
             .map(|(_, to)| to)
             .collect();
         assert_eq!(pooled.len(), 1, "{:?}", edges(&g));
+    }
+
+    /// A C++ function returning a reference (`const Action<F>&
+    /// GetCurrentAction(…) const`, a free `const int& get(…)`) and a
+    /// destructor (`~FunctionMocker() override`, `Store::~Store()`) are the
+    /// callers of the calls in their bodies — the destructor named `~` and
+    /// its class's name, never the constructor.
+    #[test]
+    fn a_cpp_reference_returning_function_and_a_destructor_call_too() {
+        let src = "void one() {}\nvoid two() {}\nvoid three() {}\nvoid four() {}\nclass Store {\n public:\n  Store() { one(); }\n  const int& Get(int a) const {\n    two();\n    return a;\n  }\n  ~Store() { three(); }\n};\nconst int& Free(const int& a) {\n  four();\n  return a;\n}\n";
+        let g = graph(&[("/p/store.cc", src)]);
+        let calls: Vec<(String, String)> = edges(&g)
+            .into_iter()
+            .map(|(from, to)| {
+                let name = |s: &str| s.rsplit(':').next().unwrap_or(s).to_string();
+                (name(&from), name(&to))
+            })
+            .collect();
+        for (caller, callee) in [
+            ("Store", "one"),
+            ("Get", "two"),
+            ("~Store", "three"),
+            ("Free", "four"),
+        ] {
+            assert!(
+                calls.iter().any(|(f, t)| f == caller && t == callee),
+                "{caller} -> {callee}: {calls:?}"
+            );
+        }
+        let tree = crate::highlight::parse(src, Lang::Cpp).unwrap();
+        let names: Vec<String> = crate::outline::located_in(&tree, src, Lang::Cpp)
+            .into_iter()
+            .map(|l| l.symbol.name)
+            .collect();
+        assert!(names.iter().any(|n| n == "~Store"), "{names:?}");
+    }
+
+    /// Audit 22's gmock finding: a C++ chain of fields from a local, a
+    /// parameter, `this` or the class's own field (`exp->
+    /// immediate_prerequisites_.begin()` with `const ExpectationBase* exp`)
+    /// calls the last field's type's method — a pointer's or a smart
+    /// pointer's pointee's past `->`, the standard library's for a
+    /// `std::vector` — in a member function whose lock annotation follows
+    /// its parameter list too. A name aliased to the library's types on
+    /// every platform (`filename_t`) is the library's.
+    #[test]
+    fn a_cpp_chain_of_fields_is_its_last_fields_type() {
+        let src = "#include <memory>\n#include <vector>\nclass ExpectationSet {\n public:\n  int begin() const { return 0; }\n};\nclass NativeArray {\n public:\n  int begin() const { return 1; }\n};\nclass ParamGenerator {\n public:\n  int begin() const { return 2; }\n};\nstruct Node {\n  ExpectationSet inner_;\n};\nclass ExpectationBase {\n public:\n  void Find() const;\n  void Owned();\n  void Items();\n  ExpectationSet immediate_prerequisites_;\n  std::unique_ptr<Node> owned_;\n  std::vector<int> items_;\n};\nvoid ExpectationBase::Find() const GTEST_EXCLUSIVE_LOCK_REQUIRED_(g_gmock_mutex) {\n  const ExpectationBase* exp = this;\n  exp->immediate_prerequisites_.begin();\n}\nvoid ExpectationBase::Owned() {\n  owned_->inner_.begin();\n}\nvoid ExpectationBase::Items() {\n  items_.begin();\n}\n";
+        let g = graph(&[("/p/gmock.cc", src)]);
+        let reached = |caller: &str| -> Vec<usize> {
+            let at = (0..g.node_count())
+                .rev()
+                .find(|&n| g.node(n).name == caller)
+                .unwrap();
+            let mut out: Vec<usize> = g.callees_of(at).iter().map(|&c| g.node(c).line).collect();
+            out.sort();
+            out
+        };
+        assert_eq!(reached("Find"), [5], "{:?}", edges(&g));
+        assert_eq!(reached("Owned"), [5], "{:?}", edges(&g));
+        assert!(reached("Items").is_empty(), "{:?}", edges(&g));
+        // A name aliased to the library's types either way (`filename_t`, a
+        // `std::wstring` or a `std::string` by the platform) is the
+        // library's: no project class's `empty` (spdlog's `source_loc`'s).
+        let spdlog = "#ifdef SPDLOG_WCHAR_FILENAMES\nusing filename_t = std::wstring;\n#else\nusing filename_t = std::string;\n#endif\nstruct source_loc {\n  bool empty() const SPDLOG_NOEXCEPT { return line <= 0; }\n  int line{0};\n};\nbool exists(const filename_t &path) {\n  return path.empty();\n}\nbool sourced(const source_loc &loc) {\n  return loc.empty();\n}\n";
+        let g = graph(&[("/p/common.h", spdlog)]);
+        let reached = |caller: &str| -> usize {
+            let at = (0..g.node_count())
+                .find(|&n| g.node(n).name == caller)
+                .unwrap();
+            g.callees_of(at).len()
+        };
+        assert_eq!(reached("exists"), 0, "{:?}", edges(&g));
+        assert_eq!(reached("sourced"), 1, "{:?}", edges(&g));
     }
 
     /// Audit 22's: a C++ literal matches a template's own type parameter

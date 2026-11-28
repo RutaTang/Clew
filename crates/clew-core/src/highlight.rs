@@ -1517,7 +1517,8 @@ const PYTHON_EXTRA_TAGS: &str = r#"
 /// template's (`template <typename T> int Box<T>::size() const`) and one
 /// named through a namespace too (`detail::Box<T>::size`, `ns::Cls::f`) were
 /// no definitions, and the calls in their bodies had no function to belong
-/// to.
+/// to. So were a destructor's (`~FunctionMocker() override { … }`, `Foo::
+/// ~Foo()`), named `~` and its class's name ([`crate::outline`]).
 const CPP_EXTRA_TAGS: &str = r#"
 (function_declarator
   declarator: (qualified_identifier
@@ -1532,6 +1533,11 @@ const CPP_EXTRA_TAGS: &str = r#"
     name: (qualified_identifier
       name: (qualified_identifier
         name: (identifier) @name)))) @definition.method
+(function_declarator
+  declarator: (destructor_name (identifier) @name)) @definition.method
+(function_declarator
+  declarator: (qualified_identifier
+    name: (destructor_name (identifier) @name))) @definition.method
 "#;
 
 /// Added to tree-sitter-java's own tags query, which has no constructors: the
@@ -2597,14 +2603,182 @@ fn without_export_macros(source: &str, c: bool) -> Option<String> {
             spans.push((at, at + w.len()));
         }
     }
+    spans.extend(annotation_macros(source));
     if spans.is_empty() {
         return None;
     }
     let mut out = source.as_bytes().to_vec();
     for (start, end) in spans {
-        out[start..end].fill(b' ');
+        // (A macro's arguments across lines keep their line breaks: every
+        // line where it was.)
+        for b in &mut out[start..end] {
+            if !matches!(*b, b'\n' | b'\r') {
+                *b = b' ';
+            }
+        }
     }
     String::from_utf8(out).ok()
+}
+
+/// The spans of the annotation macros after a C or C++ function's
+/// parameter list — thread-safety's (`GTEST_LOCK_EXCLUDED_(mutex_)`,
+/// `ABSL_LOCKS_EXCLUDED(mu_)`), a `noexcept`'s stand-in (`SPDLOG_NOEXCEPT`),
+/// an attribute's (`REDISMODULE_ATTR`) — past the qualifiers there (`const`,
+/// `noexcept`, `override`), and before its body, its `;`, `= 0`, an
+/// initializer list or a trailing return type: read as the function's
+/// name, they made it none or the macro's. A control statement's
+/// condition (`if (x) LOG(y);`), a macro's own call (`CONF_HANDLE_BOOL(…)`
+/// before another) and a preprocessor line are no list.
+fn annotation_macros(source: &str) -> Vec<(usize, usize)> {
+    let bytes = source.as_bytes();
+    let word = |c: u8| c == b'_' || c.is_ascii_alphanumeric();
+    let capitals = |w: &str| {
+        w.len() > 2
+            && w.bytes()
+                .all(|c| c == b'_' || c.is_ascii_uppercase() || c.is_ascii_digit())
+            && w.bytes().any(|c| c == b'_')
+            && w.bytes().next().is_some_and(|c| c.is_ascii_uppercase())
+    };
+    let skip_space = |mut i: usize| {
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        i
+    };
+    // Past a balanced `(…)` at `i`, if one is there.
+    let past_group = |i: usize| -> Option<usize> {
+        if bytes.get(i) != Some(&b'(') {
+            return None;
+        }
+        let mut depth = 0i32;
+        for (k, &c) in bytes[i..].iter().enumerate() {
+            match c {
+                b'(' => depth += 1,
+                b')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(i + k + 1);
+                    }
+                }
+                // (No macro's arguments: a statement's, a block's.)
+                b';' | b'{' | b'}' => return None,
+                _ => {}
+            }
+        }
+        None
+    };
+    let mut spans = Vec::new();
+    for (close, _) in source.match_indices(')') {
+        // The list's opening, and the name before it.
+        let mut depth = 0i32;
+        let mut open = None;
+        for k in (0..=close).rev() {
+            match bytes[k] {
+                b')' => depth += 1,
+                b'(' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        open = Some(k);
+                        break;
+                    }
+                }
+                b';' | b'{' | b'}' => break,
+                _ => {}
+            }
+        }
+        let Some(open) = open else {
+            continue;
+        };
+        let mut end = open;
+        while end > 0 && bytes[end - 1] == b' ' {
+            end -= 1;
+        }
+        let mut start = end;
+        while start > 0 && word(bytes[start - 1]) {
+            start -= 1;
+        }
+        let name = &source[start..end];
+        // (A macro's own call is no function's list: jemalloc's
+        // `CONF_HANDLE_BOOL(…)` lines, one after another with no `;`.)
+        if name.is_empty()
+            || capitals(name)
+            || name.bytes().next().is_some_and(|c| c.is_ascii_digit())
+            || matches!(
+                name,
+                "if" | "while"
+                    | "for"
+                    | "switch"
+                    | "catch"
+                    | "return"
+                    | "sizeof"
+                    | "alignof"
+                    | "decltype"
+                    | "noexcept"
+                    | "static_assert"
+                    | "defined"
+                    | "throw"
+            )
+        {
+            continue;
+        }
+        // (No preprocessor line's: `#define F(x) G(x) {`.)
+        let line = source[..close].rfind('\n').map_or(0, |i| i + 1);
+        if source[line..close].trim_start().starts_with('#')
+            || source[..line].trim_end_matches('\n').ends_with('\\')
+        {
+            continue;
+        }
+        let mut i = skip_space(close + 1);
+        let mut found: Vec<(usize, usize)> = Vec::new();
+        loop {
+            let from = i;
+            while i < bytes.len() && word(bytes[i]) {
+                i += 1;
+            }
+            let w = &source[from..i];
+            match w {
+                "const" | "volatile" | "override" | "final" | "mutable" => {
+                    i = skip_space(i);
+                    continue;
+                }
+                "noexcept" | "throw" => {
+                    let after = skip_space(i);
+                    i = skip_space(past_group(after).unwrap_or(after));
+                    continue;
+                }
+                _ if capitals(w) => {
+                    let after = skip_space(i);
+                    let end = past_group(after).unwrap_or(i);
+                    found.push((from, end));
+                    i = skip_space(end);
+                    continue;
+                }
+                "" if matches!(bytes.get(i), Some(b'&')) => {
+                    while matches!(bytes.get(i), Some(b'&')) {
+                        i += 1;
+                    }
+                    i = skip_space(i);
+                    continue;
+                }
+                "" => {}
+                _ => {
+                    found.clear();
+                }
+            }
+            break;
+        }
+        if found.is_empty() {
+            continue;
+        }
+        let rest = &source[i.min(source.len())..];
+        let ends = rest.starts_with(['{', ';', '='])
+            || rest.starts_with("->")
+            || (rest.starts_with(':') && !rest.starts_with("::"));
+        if ends {
+            spans.extend(found);
+        }
+    }
+    spans
 }
 
 thread_local! {
@@ -3055,6 +3229,45 @@ mod tests {
         let flex = "YY_BUFFER_STATE yy_scan_string ( const char *yy_str );\n";
         assert_eq!(without_export_macros(flex, true), None);
         assert!(!parse(flex, Lang::C).unwrap().root_node().has_error());
+    }
+
+    /// Audit 22's: an annotation macro after a C++ function's parameter
+    /// list — gtest's `GTEST_LOCK_EXCLUDED_(mutex_)` on the next line,
+    /// Abseil's `ABSL_LOCKS_EXCLUDED(mu_)`, `SPDLOG_NOEXCEPT` — is no part of
+    /// its name, in a definition or a class's declaration; a macro called in
+    /// a control statement's body (`if (lvl) LOG_IT(lvl);`) is kept.
+    #[test]
+    fn a_cpp_function_before_its_annotation_macro_is_read_whole() {
+        let src = "void flush_() SPDLOG_NOEXCEPT {\n  go();\n}\nvoid Plain() ABSL_LOCKS_EXCLUDED(mu_) {\n  go();\n}\nvoid Two(int a)\n    GTEST_LOCK_EXCLUDED_(mutex_) {\n  go();\n}\nclass Logger {\n public:\n  void flush() SPDLOG_NOEXCEPT;\n  void log(int lvl) const GTEST_LOCK_EXCLUDED_(mu_);\n  virtual void sink() GTEST_MUST_USE_RESULT_ = 0;\n};\nvoid Logger::log(int lvl) const GTEST_LOCK_EXCLUDED_(mu_) {\n  if (lvl) LOG_IT(lvl);\n}\nvoid Wide(int a) ABSL_LOCKS_EXCLUDED(mu_,\n    other_) {\n  go();\n}\n";
+        let readable = without_export_macros(src, false).expect(src);
+        assert_eq!(readable.len(), src.len());
+        // (Every line where it was.)
+        assert_eq!(readable.lines().count(), src.lines().count(), "{readable}");
+        // A macro's calls, one after another with no `;`, are kept.
+        let conf = "void conf() {\n  CONF_HANDLE_BOOL(opt_abort, \"abort\")\n  CONF_HANDLE_SIZE_T(opt_x,\n      \"x\", 1)\n  CONF_HANDLE_BOOL(opt_y, \"y\");\n}\n";
+        assert_eq!(annotation_macros(conf), []);
+        assert!(readable.contains("LOG_IT(lvl)"), "{readable}");
+        assert!(
+            !readable.contains("ABSL_")
+                && !readable.contains("GTEST_")
+                && !readable.contains("SPDLOG_"),
+            "{readable}"
+        );
+        let tree = parse(src, Lang::Cpp).unwrap();
+        assert!(!tree.root_node().has_error(), "{readable}");
+        let names: Vec<String> = crate::outline::located_in(&tree, src, Lang::Cpp)
+            .into_iter()
+            .map(|l| l.symbol.name)
+            .collect();
+        for name in [
+            "flush_", "Plain", "Two", "Logger", "flush", "log", "sink", "Wide",
+        ] {
+            assert!(names.iter().any(|n| n == name), "{name}: {names:?}");
+        }
+        assert!(
+            names.iter().all(|n| !n.ends_with('_') || n == "flush_"),
+            "{names:?}"
+        );
     }
 
     /// Kotlin the grammar reads as an error that swallows the rest of a

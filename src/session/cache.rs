@@ -218,7 +218,10 @@ use crate::incremental::Version;
 /// 67: Scala members a class takes from `super`; Zig type functions'
 /// structs' fields, and fields of `self` in them.
 /// 68: C++ templates' own type parameters constrained by nothing (`g`).
-pub(crate) const CACHE_VERSION: u32 = 68;
+/// 69: C and C++ functions before an annotation macro (`… const
+/// GTEST_LOCK_EXCLUDED_(mu) {`); C++ destructors (`~Store`), functions
+/// returning a reference, and chains of fields.
+pub(crate) const CACHE_VERSION: u32 = 69;
 
 /// A cached symbol (the index entry minus the paths, which are reconstructed
 /// from the project root + relative path on load).
