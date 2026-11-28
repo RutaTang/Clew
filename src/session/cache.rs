@@ -236,7 +236,11 @@ use crate::incremental::Version;
 /// by the macro's argument.
 /// 75: C++ functions no C code can call (templates, members, a named
 /// namespace's) marked so.
-pub(crate) const CACHE_VERSION: u32 = 75;
+/// 76: Ruby methods a class's macro makes (`belongs_to :repo`, `attr_reader`,
+/// `delegate`, `scope`); Scala constructors past their access (`class
+/// RelPath private[os] (…)`); a two-letter class (`Op`) no type parameter;
+/// Elixir `use` options and the functions a `__using__` applies.
+pub(crate) const CACHE_VERSION: u32 = 76;
 
 /// A cached symbol (the index entry minus the paths, which are reconstructed
 /// from the project root + relative path on load).
@@ -363,6 +367,14 @@ pub struct CachedCalls {
     /// (`clew_core::projectcalls::FileContext::imports`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub imports: Vec<String>,
+    /// The option each Elixir `use` passes
+    /// (`clew_core::projectcalls::FileContext::use_options`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub use_options: Vec<(String, String)>,
+    /// Each function's own imports and uses, in a module whose `__using__`
+    /// applies one (`clew_core::projectcalls::FileContext::quoted_in`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub quoted_in: Vec<(String, String)>,
     /// Three numbers per Erlang or Elixir function: its definition line,
     /// and the fewest and most arguments it takes
     /// (`clew_core::projectcalls::FileContext::arities`).
@@ -412,6 +424,10 @@ pub struct CachedCalls {
     /// (`clew_core::projectcalls::FileContext::modules`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub modules: Vec<String>,
+    /// The methods a Ruby file's classes make with a macro, by class and
+    /// name (`clew_core::projectcalls::FileContext::generated`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub generated: Vec<(String, String, bool)>,
     /// The type each extension function extends
     /// (`clew_core::projectcalls::FileContext::extension_receivers`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -555,6 +571,8 @@ mod tests {
                 extensions: vec![3],
                 uses: vec!["Shop.Context".into()],
                 imports: vec!["Ecto.Query".into()],
+                use_options: vec![("HexpmWeb".into(), "controller".into())],
+                quoted_in: vec![("controller".into(), "Plug.Conn".into())],
                 arities: vec![3, 1, 2],
                 returns: vec![(3, "Cart".into())],
                 parameters: vec![(3, "s,i".into())],
@@ -567,6 +585,7 @@ mod tests {
                 singletons: vec![7],
                 aliases: vec![("memory_buffer".into(), "basic_memory_buffer".into())],
                 modules: vec!["Helpers".into()],
+                generated: vec![("Issue".into(), "repo".into(), true)],
                 extension_receivers: vec![(4, "Column".into())],
                 namespaces: vec![(6, "spdlog::details::os".into())],
                 primaries: vec![(5, "TCollection".into())],

@@ -331,6 +331,8 @@ fn to_cached_calls(calls: &FileCalls) -> CachedCalls {
         extensions: calls.context.extensions.clone(),
         uses: calls.context.uses.clone(),
         imports: calls.context.imports.clone(),
+        use_options: calls.context.use_options.clone(),
+        quoted_in: calls.context.quoted_in.clone(),
         arities: calls
             .context
             .arities
@@ -348,6 +350,7 @@ fn to_cached_calls(calls: &FileCalls) -> CachedCalls {
         singletons: calls.context.singletons.clone(),
         aliases: calls.context.aliases.clone(),
         modules: calls.context.modules.clone(),
+        generated: calls.context.generated.clone(),
         extension_receivers: calls.context.extension_receivers.clone(),
         namespaces: calls.context.namespaces.clone(),
         primaries: calls.context.primaries.clone(),
@@ -465,6 +468,8 @@ fn from_cached_calls(abs: &Path, cached: &CachedCalls) -> Option<FileCalls> {
             extensions: cached.extensions.clone(),
             uses: cached.uses.clone(),
             imports: cached.imports.clone(),
+            use_options: cached.use_options.clone(),
+            quoted_in: cached.quoted_in.clone(),
             arities: cached
                 .arities
                 .chunks_exact(3)
@@ -481,6 +486,7 @@ fn from_cached_calls(abs: &Path, cached: &CachedCalls) -> Option<FileCalls> {
             singletons: cached.singletons.clone(),
             aliases: cached.aliases.clone(),
             modules: cached.modules.clone(),
+            generated: cached.generated.clone(),
             extension_receivers: cached.extension_receivers.clone(),
             namespaces: cached.namespaces.clone(),
             primaries: cached.primaries.clone(),

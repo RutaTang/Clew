@@ -152,6 +152,14 @@ pub struct FileContext {
     /// `__using__` does): the only ones whose functions it calls bare — an
     /// `alias` names a module, and brings none of its functions.
     pub imports: Vec<String>,
+    /// The option each Elixir `use` passes (`HexpmWeb`, `verified_routes`
+    /// for `use HexpmWeb, :verified_routes`; [`elixir_using_options`]).
+    pub use_options: Vec<(String, String)>,
+    /// In an Elixir module whose `__using__(which)` applies its function of
+    /// that name (`apply(__MODULE__, which, [])`), each function's own
+    /// `import`s and `use`s (`controller`, `HexpmWeb.ControllerHelpers`):
+    /// what a `use` of it with that option alone injects.
+    pub quoted_in: Vec<(String, String)>,
     /// Each Erlang or Elixir function's arities, by its definition line:
     /// fewest and most arguments it takes (an Elixir default lets a call
     /// leave one out). A BEAM function is its name and its arity: `f/1` is
@@ -201,6 +209,14 @@ pub struct FileContext {
     /// A Ruby file's modules (`module Helpers`): what classes include, whose
     /// methods a bare call in any of them may be.
     pub modules: Vec<String>,
+    /// The methods a Ruby file's classes make with a macro, not a `def`
+    /// (`belongs_to :repo`, `has_many :issues`, `attr_reader :name`,
+    /// `delegate :title, to: :post`, `scope :open`), by class and name, and
+    /// whether a Rails association or scope made it ([`ruby_generated`]): a
+    /// bare call of the name in the class is that method, no `def`; and a
+    /// call of an association's on a value of no type known (`issue.repo`)
+    /// is as likely that as any class's `def repo`.
+    pub generated: Vec<(String, String, bool)>,
     /// Each C++ function's namespaces, by its definition line
     /// (`spdlog::details::os` for `gmtime` in `namespace spdlog { namespace
     /// details { namespace os {`): what a call naming its scope
@@ -265,6 +281,7 @@ fn is_type_kind(kind: &str, lang: Lang) -> bool {
 /// at compile time (`import unquote(__MODULE__)`) names none.
 fn elixir_modules_after(src: &str, keyword: &str) -> Vec<String> {
     let src = src.strip_prefix('\u{feff}').unwrap_or(src);
+    let src = &elixir_without_heredocs(src);
     let is_name = |c: char| c.is_alphanumeric() || matches!(c, '_' | '.');
     let mut out = Vec::new();
     for (at, line) in src.split('\n').scan(0usize, |offset, line| {
@@ -304,6 +321,104 @@ fn elixir_modules_after(src: &str, keyword: &str) -> Vec<String> {
         }
     }
     out
+}
+
+/// An Elixir source with its heredocs' lines blank (a `@moduledoc """`'s
+/// example `use HexpmWeb, :controller`, no `use` of the module's own), every
+/// line kept.
+fn elixir_without_heredocs(src: &str) -> std::borrow::Cow<'_, str> {
+    const QUOTES: [&str; 2] = ["\"\"\"", "'''"];
+    if !QUOTES.iter().any(|q| src.contains(q)) {
+        return src.into();
+    }
+    let mut out = String::with_capacity(src.len());
+    let mut inside: Option<&str> = None;
+    for line in src.split_inclusive('\n') {
+        let blank = inside.is_some();
+        for quote in QUOTES {
+            if inside.is_none_or(|open| open == quote) && line.matches(quote).count() % 2 == 1 {
+                inside = match inside {
+                    Some(_) => None,
+                    None => Some(quote),
+                };
+            }
+        }
+        if blank {
+            out.extend(line.chars().map(|c| if c == '\n' { '\n' } else { ' ' }));
+        } else {
+            out.push_str(line);
+        }
+    }
+    out.into()
+}
+
+/// An Elixir file's `use`s' options and, in a module whose `__using__`
+/// applies the function an option names, each function's own imports and
+/// uses ([`FileContext::use_options`], [`FileContext::quoted_in`]).
+#[allow(clippy::type_complexity)]
+fn elixir_using_options(src: &str) -> (Vec<(String, String)>, Vec<(String, String)>) {
+    let src = &elixir_without_heredocs(src);
+    let mut options = Vec::new();
+    for line in src.lines() {
+        let Some(rest) = line.trim_start().strip_prefix("use ") else {
+            continue;
+        };
+        let Some((module, option)) = rest.split_once(',') else {
+            continue;
+        };
+        let module = module.trim();
+        let option = option.trim();
+        if let Some(atom) = option.strip_prefix(':')
+            && module.starts_with(|c: char| c.is_uppercase())
+            && module
+                .chars()
+                .all(|c| c.is_alphanumeric() || matches!(c, '_' | '.'))
+            && !atom.is_empty()
+            && atom.chars().all(|c| c.is_alphanumeric() || c == '_')
+        {
+            options.push((module.to_string(), atom.to_string()));
+        }
+    }
+    let mut quoted = Vec::new();
+    if src.contains("apply(__MODULE__,") {
+        let lines: Vec<&str> = src.lines().collect();
+        let indent = |line: &str| line.len() - line.trim_start().len();
+        let mut offsets = Vec::with_capacity(lines.len() + 1);
+        let mut at = 0;
+        for line in &lines {
+            offsets.push(at);
+            at += line.len() + 1;
+        }
+        offsets.push(src.len());
+        for (i, line) in lines.iter().enumerate() {
+            let t = line.trim_start();
+            let Some(rest) = t.strip_prefix("def ").or_else(|| t.strip_prefix("defp ")) else {
+                continue;
+            };
+            let name: String = rest
+                .chars()
+                .take_while(|&c| c.is_alphanumeric() || c == '_')
+                .collect();
+            if name.is_empty() {
+                continue;
+            }
+            // Its body: to the `end` at its indentation.
+            let Some(end) = (i + 1..lines.len())
+                .find(|&j| indent(lines[j]) <= indent(line) && !lines[j].trim().is_empty())
+            else {
+                continue;
+            };
+            let Some(body) = src.get(offsets[i + 1].min(src.len())..offsets[end]) else {
+                continue;
+            };
+            for keyword in ["import ", "use "] {
+                for module in elixir_modules_after(body, keyword) {
+                    quoted.push((name.clone(), module));
+                }
+            }
+        }
+    }
+    (options, quoted)
 }
 
 /// Whether a class is named as a test class is: `CartTest`, `CartTests`,
@@ -592,6 +707,22 @@ fn parameter_list(text: &str, name: &str, lang: Lang) -> Option<Parameters> {
                 None
             })?;
             rest = rest[end..].trim_start();
+        }
+        // (Past a Scala class's constructor's access: `class RelPath
+        // private[os] (segments0: Array[String], val ups: Int)`.)
+        if lang == Lang::Scala {
+            for word in ["private", "protected"] {
+                if let Some(after) = rest.strip_prefix(word)
+                    && !after.starts_with(is_name)
+                {
+                    let after = after.trim_start();
+                    rest = match after.strip_prefix('[') {
+                        Some(scoped) => scoped.split_once(']').map_or("", |(_, r)| r),
+                        None => after,
+                    }
+                    .trim_start();
+                }
+            }
         }
         if rest.starts_with('(') {
             break text.len() - rest.len();
@@ -2175,12 +2306,18 @@ pub fn context_in(src: &str, lang: Lang, symbols: &[Located]) -> FileContext {
             .collect(),
         _ => Vec::new(),
     };
+    let (use_options, quoted_in) = match lang {
+        Lang::Elixir => elixir_using_options(src),
+        _ => Default::default(),
+    };
     FileContext {
         package: package_of(src, lang),
         enclosing: enclosing_packages(src, lang),
         types,
         extensions,
         uses: modules_after("use "),
+        use_options,
+        quoted_in,
         imports: modules_after("import "),
         arities,
         returns,
@@ -2238,6 +2375,10 @@ pub fn context_in(src: &str, lang: Lang, symbols: &[Located]) -> FileContext {
         },
         singletons: match lang {
             Lang::Ruby => ruby_singletons(src, symbols),
+            _ => Vec::new(),
+        },
+        generated: match lang {
+            Lang::Ruby => ruby_generated(src, symbols),
             _ => Vec::new(),
         },
         aliases: match lang {
@@ -2485,6 +2626,70 @@ fn ruby_singletons(src: &str, symbols: &[Located]) -> Vec<usize> {
         })
         .map(|l| l.symbol.line)
         .collect()
+}
+
+/// The methods a Ruby file's classes make with a macro, by class and name
+/// ([`FileContext::generated`]): an association's reader (`belongs_to
+/// :repo`, `has_one`, `has_many`, `has_and_belongs_to_many`) and, of one
+/// record, its `build_` and `create_` ones; each attribute an `attr_reader`,
+/// `attr_accessor` or `attr_writer` names; each method `delegate` passes on
+/// (with no `prefix:`); a `scope`.
+fn ruby_generated(src: &str, symbols: &[Located]) -> Vec<(String, String, bool)> {
+    let classes: Vec<&Located> = symbols
+        .iter()
+        .filter(|l| matches!(l.symbol.kind.as_str(), "class" | "module"))
+        .collect();
+    let mut out = Vec::new();
+    for (i, line) in src.lines().enumerate() {
+        let line_no = i + 1;
+        let t = line.trim_start();
+        let Some((word, rest)) = t.split_once([' ', '(']) else {
+            continue;
+        };
+        // (An association's or a scope's names one method; an attribute
+        // macro's, or `delegate`'s, each symbol it lists.)
+        let association = match word {
+            "belongs_to" | "has_one" | "has_many" | "has_and_belongs_to_many" | "scope" => true,
+            "attr_reader" | "attr_accessor" | "attr_writer" | "delegate" => false,
+            _ => continue,
+        };
+        let one = association;
+        if word == "delegate" && rest.contains("prefix:") {
+            continue;
+        }
+        // Its symbols, up to the first option (`to: :post`, `-> { … }`).
+        let mut names: Vec<&str> = Vec::new();
+        for part in rest.split(',') {
+            let part = part.trim().trim_start_matches('(');
+            let Some(name) = part.strip_prefix(':') else {
+                break;
+            };
+            let name = name.trim_end_matches(')').trim();
+            if name.is_empty() || !name.chars().all(|c| c == '_' || c.is_alphanumeric()) {
+                break;
+            }
+            names.push(name);
+            if one {
+                break;
+            }
+        }
+        let Some(class) = classes
+            .iter()
+            .filter(|c| c.symbol.line <= line_no && line_no <= c.symbol.end_line)
+            .max_by_key(|c| c.symbol.line)
+        else {
+            continue;
+        };
+        for name in names {
+            out.push((class.symbol.name.clone(), name.to_string(), association));
+            if matches!(word, "belongs_to" | "has_one") {
+                for made in ["build_", "create_"] {
+                    out.push((class.symbol.name.clone(), format!("{made}{name}"), true));
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Whether the Ruby call `node` is inside a block (`do … end`, `{ … }`)
@@ -3224,6 +3429,26 @@ impl ProjectCallGraph {
                     .map(move |&line| (f.file.as_path(), line))
             })
             .collect();
+        // The methods Ruby classes make with a macro, by class and name
+        // ([`FileContext::generated`]); and the names Rails associations
+        // and scopes make.
+        let ruby_generated_in: HashSet<(&str, &str)> = files
+            .iter()
+            .filter(|f| f.lang == Lang::Ruby)
+            .flat_map(|f| {
+                f.context
+                    .generated
+                    .iter()
+                    .map(|(class, name, _)| (class.as_str(), name.as_str()))
+            })
+            .collect();
+        let ruby_associations: HashSet<&str> = files
+            .iter()
+            .filter(|f| f.lang == Lang::Ruby)
+            .flat_map(|f| f.context.generated.iter())
+            .filter(|(_, _, association)| *association)
+            .map(|(_, name, _)| name.as_str())
+            .collect();
         // Ruby's modules, by name ([`FileContext::modules`]).
         let ruby_modules: HashSet<&str> = files
             .iter()
@@ -3507,6 +3732,43 @@ impl ProjectCallGraph {
             out.retain(|&c| !facts[c].bodyless || !bodied.contains(&node_parameters[c]));
             out
         };
+        // The methods named `callee` of the classes above the nearest one
+        // (of `ty`, or above it) that has some: a Java, Kotlin, C# or Scala
+        // class's overloads it inherits beside its own (`JsonAdapter`'s
+        // `fromJson(String)` an `EnumJsonAdapter` has with its own
+        // `fromJson(JsonReader)`) — unlike C++'s, whose own hide a base's.
+        let overloads_above = |ty: &str, callee: &str| -> Vec<usize> {
+            let last = ty.rsplit(['.', ':']).next().unwrap_or(ty);
+            let mut out: Vec<usize> = Vec::new();
+            let mut level: Vec<&str> = vec![last];
+            let mut seen: HashSet<&str> = HashSet::from([last]);
+            let mut nearest = false;
+            for _ in 0..12 {
+                let found = level
+                    .iter()
+                    .flat_map(|t| by_owner.get(&(*t, callee)))
+                    .flatten()
+                    .copied()
+                    .filter(|&c| !calls_only(&nodes[c].kind));
+                match nearest {
+                    true => out.extend(found),
+                    false => nearest = found.count() > 0,
+                }
+                level = level
+                    .iter()
+                    .flat_map(|t| bases_of.get(t))
+                    .flatten()
+                    .copied()
+                    .filter(|b| seen.insert(b))
+                    .collect();
+                if level.is_empty() {
+                    break;
+                }
+            }
+            out.sort_unstable();
+            out.dedup();
+            out
+        };
         // Each type alias's type ([`FileContext::aliases`]), followed to the
         // end: one type, whichever name a value is declared by. A name
         // aliased to several types (fmt's `using iterator = …` in a dozen
@@ -3778,10 +4040,23 @@ impl ProjectCallGraph {
             }
             let mut injected: HashSet<&Path> = HashSet::new();
             let mut imported: Vec<&str> = fc.context.imports.iter().map(String::as_str).collect();
-            let mut pending: Vec<&str> = fc.context.uses.iter().map(String::as_str).collect();
-            let mut used: HashSet<&str> = HashSet::new();
-            while let Some(module) = pending.pop() {
-                if !used.insert(module) {
+            // (With the option each `use` passes: `use HexpmWeb,
+            // :verified_routes`.)
+            let option_of = |ctx: &'a FileContext, module: &str| -> Option<&'a str> {
+                ctx.use_options
+                    .iter()
+                    .find(|(m, _)| m == module)
+                    .map(|(_, option)| option.as_str())
+            };
+            let mut pending: Vec<(&str, Option<&str>)> = fc
+                .context
+                .uses
+                .iter()
+                .map(|m| (m.as_str(), option_of(&fc.context, m)))
+                .collect();
+            let mut used: HashSet<(&str, Option<&str>)> = HashSet::new();
+            while let Some((module, option)) = pending.pop() {
+                if !used.insert((module, option)) {
                     continue;
                 }
                 let Some(&file) = module_files.get(module) else {
@@ -3789,8 +4064,23 @@ impl ProjectCallGraph {
                 };
                 injected.insert(file);
                 if let Some(ctx) = context_of.get(file) {
-                    imported.extend(ctx.imports.iter().map(String::as_str));
-                    pending.extend(ctx.uses.iter().map(String::as_str));
+                    // Of a module whose `__using__(which)` applies its
+                    // function of that name, what that one imports and uses
+                    // — not what another does (`controller`'s `import
+                    // HexpmWeb.ControllerHelpers` for `:verified_routes`).
+                    let kept = |m: &&String| {
+                        let mut of = ctx.quoted_in.iter().filter(|(_, q)| q == *m).peekable();
+                        of.peek().is_none()
+                            || option.is_none()
+                            || of.any(|(function, _)| Some(function.as_str()) == option)
+                    };
+                    imported.extend(ctx.imports.iter().filter(kept).map(String::as_str));
+                    pending.extend(
+                        ctx.uses
+                            .iter()
+                            .filter(kept)
+                            .map(|m| (m.as_str(), option_of(ctx, m))),
+                    );
                 }
             }
             let mut reached = injected.clone();
@@ -5248,6 +5538,31 @@ impl ProjectCallGraph {
                         &site,
                     )
                 });
+                // A Ruby call of a method a class's macro makes: bare, in
+                // that class, it is that method (`attr_accessor :params`) —
+                // or a subclass's `def` of the name, which overrides it
+                // (rubocop's `Source#to_s` calling `name`); of an
+                // association's (`issue.repo`, with `belongs_to :repo` in
+                // `Issue`) on a value of no type known, the project's one
+                // `def repo` is a guess as likely wrong.
+                if fc.lang == Lang::Ruby && cs.receiver.is_none() {
+                    let name = logical_name(&cs.callee, Some(fc.lang));
+                    let made = match cs.method {
+                        true => ruby_associations.contains(name),
+                        false => owner[caller].is_some_and(|class| {
+                            let class = class.rsplit("::").next().unwrap_or(class);
+                            ruby_generated_in.contains(&(class, name))
+                                && !callees.iter().any(|&c| {
+                                    owner[c].is_some_and(|o| {
+                                        descends(o.rsplit("::").next().unwrap_or(o), class)
+                                    })
+                                })
+                        }),
+                    };
+                    if made {
+                        continue;
+                    }
+                }
                 // Dart's `http.Response(…)`, `shelf_io.serve(…)`: a top-level
                 // function or a class of the library imported under that
                 // prefix — none of the project's where it lies outside it.
@@ -5538,6 +5853,25 @@ impl ProjectCallGraph {
                     }
                     let mut found = family(ty, callee_name, true);
                     ruby_kind(&mut found);
+                    // Where no method of the name the class has takes what
+                    // the call passes (`adapter.fromJson("…")`, its own
+                    // `fromJson(JsonReader)`), an overload it inherits that
+                    // does (`JsonAdapter.fromJson(String)`).
+                    if matches!(
+                        fc.lang,
+                        Lang::Java | Lang::Kotlin | Lang::CSharp | Lang::Scala
+                    ) && let Some(arguments) = cs.arguments.as_deref()
+                        && !found.is_empty()
+                        && found.iter().all(|&c| !fits_kinds(c, arguments, fc.lang))
+                    {
+                        let inherited: Vec<usize> = overloads_above(ty, callee_name)
+                            .into_iter()
+                            .filter(|&c| fits_kinds(c, arguments, fc.lang))
+                            .collect();
+                        if !inherited.is_empty() {
+                            found = inherited;
+                        }
+                    }
                     // Kotlin: where no member of the name takes what the call
                     // passes (`c eq 3`, `Column.eq(Column)` the member), an
                     // extension of the name that does (the `infix fun <T>
@@ -10581,10 +10915,15 @@ fn type_kind(ty: &str, lang: Lang) -> String {
         _ => "?",
     };
     let kind = match kind {
-        // A class, by name; a type parameter (`T`, `TValue`) takes anything.
+        // A class, by name; a type parameter (`T`, `TK`, `T1`, C#'s
+        // `TValue`) takes anything — not Exposed's `Op`, a class.
         "" if last.starts_with(|c: char| c.is_alphabetic() || c == '_')
             && last.chars().all(|c| c == '_' || c.is_alphanumeric())
-            && !(last.len() <= 2 && last.starts_with(char::is_uppercase))
+            && !(last.len() <= 2
+                && last.starts_with(char::is_uppercase)
+                && last[1..]
+                    .chars()
+                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()))
             && !(lang == Lang::CSharp
                 && last.len() > 1
                 && last.starts_with('T')
@@ -23464,6 +23803,191 @@ function build() {
             "a call landed on the prototype: {:?}",
             edges(&g)
         );
+    }
+
+    /// An Elixir `use M, :option` of a module whose `__using__(which)`
+    /// applies its function of that name (Phoenix's `HexpmWeb`) injects what
+    /// that one function imports alone: hexpm's tests' `use HexpmWeb,
+    /// :verified_routes` brings no `controller`'s `import
+    /// HexpmWeb.ControllerHelpers`, so a test's `audit_data(user)` is
+    /// `Hexpm.TestHelpers`'s alone — nor does the example in its
+    /// `@moduledoc`, `use HexpmWeb, :controller`, which is no `use`. A `use
+    /// HexpmWeb, :controller` still brings it.
+    #[test]
+    fn an_elixir_use_with_an_option_injects_that_functions_imports_alone() {
+        let web = "defmodule HexpmWeb do\n  @moduledoc \"\"\"\n  Use it as:\n\n      use HexpmWeb, :controller\n      import HexpmWeb.ControllerHelpers\n  \"\"\"\n\n  def controller() do\n    quote do\n      import HexpmWeb.ControllerHelpers\n    end\n  end\n\n  def verified_routes do\n    quote do\n      use Phoenix.VerifiedRoutes\n    end\n  end\n\n  defmacro __using__(which) when is_atom(which) do\n    apply(__MODULE__, which, [])\n  end\nend\n";
+        let controller_helpers =
+            "defmodule HexpmWeb.ControllerHelpers do\n  def audit_data(conn), do: conn\nend\n";
+        let test_helpers = "defmodule Hexpm.TestHelpers do\n  def audit_data(user, opts \\\\ []), do: {user, opts}\nend\n";
+        let conn_case = "defmodule HexpmWeb.ConnCase do\n  use ExUnit.CaseTemplate\n\n  using do\n    quote do\n      import Hexpm.TestHelpers\n      use HexpmWeb, :verified_routes\n    end\n  end\nend\n";
+        let test = "defmodule HexpmWeb.OrganizationTFATest do\n  use HexpmWeb.ConnCase\n\n  test \"removes\" do\n    audit_data(user)\n  end\nend\n";
+        let controller = "defmodule HexpmWeb.PackageController do\n  use HexpmWeb, :controller\n\n  def show(conn) do\n    audit_data(conn)\n  end\nend\n";
+        let g = graph(&[
+            ("/p/lib/hexpm_web/web.ex", web),
+            (
+                "/p/lib/hexpm_web/controllers/controller_helpers.ex",
+                controller_helpers,
+            ),
+            ("/p/test/support/test_helpers.ex", test_helpers),
+            ("/p/test/support/conn_case.ex", conn_case),
+            ("/p/test/hexpm_web/organization_tfa_test.exs", test),
+            (
+                "/p/lib/hexpm_web/controllers/package_controller.ex",
+                controller,
+            ),
+        ]);
+        let edges = edges(&g);
+        let from = |file: &str, to: &str| edges.iter().any(|(a, b)| a.starts_with(file) && b == to);
+        let tfa = "/p/test/hexpm_web/organization_tfa_test.exs:";
+        let helpers = "/p/lib/hexpm_web/controllers/controller_helpers.ex:audit_data";
+        assert!(
+            from(tfa, "/p/test/support/test_helpers.ex:audit_data"),
+            "{edges:?}"
+        );
+        assert!(!from(tfa, helpers), "{edges:?}");
+        assert!(
+            from(
+                "/p/lib/hexpm_web/controllers/package_controller.ex:",
+                helpers
+            ),
+            "{edges:?}"
+        );
+    }
+
+    /// A Ruby method a class's macro makes (`belongs_to :repo` in `Issue`)
+    /// is no `def`: `issue.repo` on a value of no type known is no call of
+    /// the project's one `def repo` (`MailBuilder::GroupedIssuesDocs`'s),
+    /// which a value known to be of that class still calls; bare in the
+    /// class, `repo` is the association — but for a subclass's `def` of
+    /// the name, which overrides it. (An attribute's name, which any class
+    /// may also `def`, is no sign on a value of no type known.)
+    #[test]
+    fn a_ruby_method_a_macro_makes_is_no_other_classs_def() {
+        let issue = "class Issue < ActiveRecord::Base\n  belongs_to :repo\n  has_many :comments\n  attr_reader :token, :secret\n  delegate :full_name, :owner, to: :repo\n\n  def title_line\n    repo.name\n  end\n\n  def to_s\n    secret\n  end\nend\n\nclass PullIssue < Issue\n  def secret\n    2\n  end\nend\n";
+        let docs = "module MailBuilder\n  class GroupedIssuesDocs\n    def initialize(repo)\n      @repo = repo\n    end\n\n    def repo\n      @repo\n    end\n\n    def token\n      1\n    end\n  end\nend\n";
+        let preview = "class UserPreview\n  def first(issue)\n    issue.repo.id\n    issue.token\n  end\n\n  def second\n    g = MailBuilder::GroupedIssuesDocs.new(1)\n    g.repo\n  end\nend\n";
+        let files = [
+            ("/p/app/models/issue.rb", issue),
+            ("/p/app/models/mail_builder/grouped_issues_docs.rb", docs),
+            ("/p/test/user_preview.rb", preview),
+        ];
+        let sources: Vec<(PathBuf, String)> = files
+            .iter()
+            .map(|(f, s)| (PathBuf::from(f), s.to_string()))
+            .collect();
+        let all: HashSet<PathBuf> = files.iter().map(|(f, _)| PathBuf::from(f)).collect();
+        let scope: HashMap<PathBuf, HashSet<PathBuf>> = files
+            .iter()
+            .map(|(f, _)| (PathBuf::from(f), all.clone()))
+            .collect();
+        let g = ProjectCallGraph::build(defs_of(&files), &sources, &scope);
+        let docs_repo = "/p/app/models/mail_builder/grouped_issues_docs.rb:repo";
+        let docs_token = "/p/app/models/mail_builder/grouped_issues_docs.rb:token";
+        for (from, to) in [
+            ("/p/test/user_preview.rb:first", docs_repo),
+            ("/p/app/models/issue.rb:title_line", docs_repo),
+        ] {
+            assert!(!has(&g, from, to), "{from} -> {to}: {:?}", edges(&g));
+        }
+        // (An attribute's name, which any class may also `def`, still
+        // reaches the `def` on a value of no type known.)
+        assert!(
+            has(&g, "/p/test/user_preview.rb:first", docs_token),
+            "{:?}",
+            edges(&g)
+        );
+        assert!(
+            has(&g, "/p/test/user_preview.rb:second", docs_repo),
+            "{:?}",
+            edges(&g)
+        );
+        // (Nor is it, bare, where a subclass's `def` overrides it.)
+        assert!(
+            has(
+                &g,
+                "/p/app/models/issue.rb:to_s",
+                "/p/app/models/issue.rb:secret"
+            ),
+            "{:?}",
+            edges(&g)
+        );
+        let made = FileCalls::read(Path::new("/p/app/models/issue.rb"), issue)
+            .unwrap()
+            .context
+            .generated;
+        let names: Vec<(&str, bool)> = made.iter().map(|(_, n, a)| (n.as_str(), *a)).collect();
+        assert_eq!(
+            names,
+            [
+                ("repo", true),
+                ("build_repo", true),
+                ("create_repo", true),
+                ("comments", true),
+                ("token", false),
+                ("secret", false),
+                ("full_name", false),
+                ("owner", false)
+            ]
+        );
+        assert!(
+            made.iter().all(|(class, _, _)| class == "Issue"),
+            "{made:?}"
+        );
+    }
+
+    /// A Scala class's constructor `val` past the constructor's access
+    /// (`class RelPath private[os] (segments0: Array[String], val ups:
+    /// Int)`) is a field of the class: `base.ups` on a `RelPath` reads it,
+    /// no implicit class's `ups` (os-lib's `RelPathChunk`, which wraps a
+    /// `RelPath`). And a Kotlin lambda passed (`where { … }`) is no class
+    /// of the project's, of a name two letters long (`Op<Boolean>`): the
+    /// overload taking a function, not `where(predicate: Op<Boolean>)`.
+    /// And a call no method of its class takes is of one it inherits.
+    #[test]
+    fn a_scala_constructors_val_past_its_access_and_a_kotlin_lambda_for_a_short_class() {
+        let path = "package os\ntrait PathChunk { def ups: Int }\nobject PathChunk {\n  implicit class RelPathChunk(r: RelPath) extends PathChunk {\n    def ups = r.ups\n  }\n}\nclass RelPath private[os] (segments0: Array[String], val ups: Int) {\n  def relativeTo(base: RelPath): Int = {\n    if (base.ups < ups) 1 else 2\n  }\n}\n";
+        let query = "package q\nabstract class Op<T>\nclass Query {\n    fun where(predicate: () -> Op<Boolean>): Query = this\n    fun where(predicate: Op<Boolean>): Query = this\n}\n";
+        let usage = "package q\nfun run(q: Query) {\n    q.where { op() }\n}\nfun op(): Op<Boolean> = TODO()\n";
+        let g = graph(&[
+            ("/p/os/Path.scala", path),
+            ("/p/q/Query.kt", query),
+            ("/p/q/Use.kt", usage),
+        ]);
+        for from in ["/p/os/Path.scala:relativeTo", "/p/os/Path.scala:ups"] {
+            assert!(
+                !has(&g, from, "/p/os/Path.scala:ups"),
+                "{from}: {:?}",
+                edges(&g)
+            );
+        }
+        let run = g.id_of(Path::new("/p/q/Use.kt"), "run").unwrap();
+        let lines: Vec<usize> = g
+            .callees_of(run)
+            .iter()
+            .filter(|&&c| g.node(c).name == "where")
+            .map(|&c| g.node(c).line)
+            .collect();
+        assert_eq!(lines, [4], "{:?}", edges(&g));
+        // An overload a class inherits beside its own (`JsonAdapter`'s
+        // `fromJson(String)` an `EnumJsonAdapter` has with its own
+        // `fromJson(JsonReader)`) is what a call no own one takes is of —
+        // and only that.
+        let adapter = "package m\nclass JsonReader\nabstract class JsonAdapter<T> {\n    abstract fun fromJson(reader: JsonReader): T?\n    fun fromJson(string: String): T? = null\n}\nclass EnumJsonAdapter : JsonAdapter<Int>() {\n    override fun fromJson(reader: JsonReader): Int? = 1\n}\n";
+        let usage = "package m\nfun text(adapter: EnumJsonAdapter) {\n    adapter.fromJson(\"x\")\n}\nfun read(adapter: EnumJsonAdapter, r: JsonReader) {\n    adapter.fromJson(r)\n}\n";
+        let g = graph(&[("/p/m/Adapter.kt", adapter), ("/p/m/Use.kt", usage)]);
+        let reached = |from: &str| -> Vec<usize> {
+            let id = g.id_of(Path::new("/p/m/Use.kt"), from).unwrap();
+            let mut lines: Vec<usize> = g
+                .callees_of(id)
+                .iter()
+                .filter(|&&c| g.node(c).name == "fromJson")
+                .map(|&c| g.node(c).line)
+                .collect();
+            lines.sort_unstable();
+            lines
+        };
+        assert_eq!(reached("text"), [5], "{:?}", edges(&g));
+        assert_eq!(reached("read"), [8], "{:?}", edges(&g));
     }
 
     /// A prototype in a C source file declares its name to that file alone:
