@@ -606,6 +606,55 @@ fn c_tests(mut out: Vec<Located>, source: &str) -> Vec<Located> {
     out
 }
 
+/// The argument a C macro that makes a function names it by (`test_stress`
+/// in `TEST_BEGIN(test_stress) {`, read as a function `TEST_BEGIN` of one
+/// parameter of the type `test_stress` and no name — which no function's
+/// definition has): at the function's declarator, or its definition. Only
+/// where the body follows the macro's call: `JEMALLOC_ATTR(malloc)
+/// je_malloc(size_t size) {` is `je_malloc`, and a declaration in a body
+/// (`T ret JEMALLOC_CC_SILENCE_INIT(NULL);`) is none.
+pub(crate) fn c_macro_function_name(def: Node, source: &str) -> Option<String> {
+    let (definition, declarator) = match def.kind() {
+        "function_definition" => (def, def.child_by_field_name("declarator")?),
+        _ => (def.parent()?, def),
+    };
+    if definition.kind() != "function_definition"
+        || declarator.kind() != "function_declarator"
+        || definition.child_by_field_name("declarator")? != declarator
+    {
+        return None;
+    }
+    let body = definition.child_by_field_name("body")?;
+    if !source
+        .get(declarator.end_byte()..body.start_byte())?
+        .trim()
+        .is_empty()
+    {
+        return None;
+    }
+    let name = source.get(declarator.child_by_field_name("declarator")?.byte_range())?;
+    let capitals = name.len() > 2
+        && name
+            .bytes()
+            .all(|c| c == b'_' || c.is_ascii_uppercase() || c.is_ascii_digit())
+        && name.bytes().any(|c| c == b'_');
+    if !capitals {
+        return None;
+    }
+    let parameters = declarator.child_by_field_name("parameters")?;
+    let mut cursor = parameters.walk();
+    let params: Vec<Node> = parameters.named_children(&mut cursor).collect();
+    let [param] = params.as_slice() else {
+        return None;
+    };
+    if param.kind() != "parameter_declaration" || param.child_by_field_name("declarator").is_some()
+    {
+        return None;
+    }
+    let ty = param.child_by_field_name("type")?;
+    (ty.kind() == "type_identifier").then(|| source.get(ty.byte_range()).map(str::to_string))?
+}
+
 /// The name of the Kotlin class (object) a member at `node` is in.
 pub(crate) fn kotlin_class_of(node: Node, source: &str) -> Option<String> {
     let mut at = node.parent();
@@ -1249,6 +1298,16 @@ fn located_in_tree(tree: &Tree, source: &str, lang: Lang) -> Vec<Located> {
             format!("~{name}").into()
         } else {
             name
+        };
+        // A C function a macro makes after another's end (`TEST_END` /
+        // `TEST_BEGIN(test_stress) {`, read as `TEST_BEGIN` of one
+        // parameter of no name): named by the macro's argument.
+        let name: std::borrow::Cow<str> = match matches!(lang, Lang::C | Lang::Cpp)
+            .then(|| c_macro_function_name(def, source))
+            .flatten()
+        {
+            Some(argument) => argument.into(),
+            None => name,
         };
         // A C# operator (`operator +`, a conversion's `operator string`),
         // and a Kotlin constructor or `init` block — its class's, by the

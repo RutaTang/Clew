@@ -11233,6 +11233,11 @@ fn binding_name(parent: Option<Node>, src: &str) -> Option<String> {
 /// The function a C/C++ `function_definition` defines: its declarator chain
 /// (`*foo(void)`, `(&bar)(int)`, `Ns::Cls::baz() const`) down to the name.
 fn c_function_name(def: Node, src: &str) -> Option<String> {
+    // A function a macro makes (`TEST_BEGIN(test_stress) {`): by the
+    // macro's argument, as the outline names it.
+    if let Some(argument) = crate::outline::c_macro_function_name(def, src) {
+        return Some(argument);
+    }
     let mut node = def.child_by_field_name("declarator")?;
     for _ in 0..64 {
         node = match node.kind() {
@@ -15454,6 +15459,14 @@ fn resolve_callees(
         && facts[*only]
             .lang
             .is_some_and(|l| l.shares_namespace_with(site.lang))
+        // A C or C++ prototype in a source file declares the name to that
+        // file alone (`int mallctl(…);` in one jemalloc test, for the libc
+        // one): no other file's call it sees not.
+        && !(facts[*only].bodyless
+            && matches!(facts[*only].lang, Some(Lang::C | Lang::Cpp))
+            && !is_header(&nodes[*only].file)
+            && nodes[*only].file != site.file
+            && !site.sees(&nodes[*only].file))
     {
         return vec![*only];
     }
@@ -21287,6 +21300,48 @@ def main():
         assert_eq!(pooled.len(), 1, "{:?}", edges(&g));
     }
 
+    /// A C function a macro makes (jemalloc's `TEST_BEGIN(test_alloc_max) {
+    /// … } TEST_END`) is named by the macro's argument — the first one, and
+    /// each after another's `TEST_END` — and calls its calls.
+    #[test]
+    fn a_c_function_a_macro_makes_is_named_by_its_argument() {
+        let src = "#include \"test/jemalloc_test.h\"\n\nTEST_BEGIN(test_alloc_max) {\n\ttest_skip_if(!hpa_supported());\n\trun_one(1);\n}\nTEST_END\n\nTEST_BEGIN(test_stress) {\n\trun_two(2);\n}\nTEST_END\n\nint\nmain(void) {\n\treturn test(test_alloc_max, test_stress);\n}\n";
+        let calls = FileCalls::read(Path::new("/p/test/unit/hpa.c"), src)
+            .unwrap()
+            .calls;
+        for (callee, caller) in [
+            ("run_one", "test_alloc_max"),
+            ("run_two", "test_stress"),
+            ("test", "main"),
+        ] {
+            assert!(
+                calls
+                    .iter()
+                    .any(|c| c.callee == callee && c.caller.as_deref() == Some(caller)),
+                "{callee}: {calls:?}"
+            );
+        }
+        let tree = crate::highlight::parse(src, Lang::C).unwrap();
+        let names: Vec<String> = crate::outline::located_in(&tree, src, Lang::C)
+            .into_iter()
+            .map(|l| l.symbol.name)
+            .collect();
+        assert_eq!(names, ["test_alloc_max", "test_stress", "main"]);
+        // Not a function an attribute's macro precedes, nor a declaration a
+        // macro ends in a body.
+        let src = "JEMALLOC_EXPORT void JEMALLOC_NOTHROW *\nJEMALLOC_ATTR(malloc) JEMALLOC_ALLOC_SIZE(1)\nje_malloc(size_t size) {\n\treturn je_malloc_internal(size, NULL);\n}\n\narena_t *\narena_choose_hard(tsd_t *tsd, bool internal) {\n\tarena_t *ret JEMALLOC_CC_SILENCE_INIT(NULL);\n\treturn pick(ret);\n}\n";
+        let tree = crate::highlight::parse(src, Lang::C).unwrap();
+        let names: Vec<String> = crate::outline::located_in(&tree, src, Lang::C)
+            .into_iter()
+            .map(|l| l.symbol.name)
+            .collect();
+        assert!(
+            !names.iter().any(|n| n == "malloc" || n == "NULL"),
+            "{names:?}"
+        );
+        assert!(names.iter().any(|n| n == "arena_choose_hard"), "{names:?}");
+    }
+
     /// More calls nothing held: a Kotlin `init` block's and secondary
     /// constructor's (both its class's, by the class's name, as a call of
     /// the class runs them), a C# operator's, conversion's and destructor's,
@@ -23368,6 +23423,49 @@ function build() {
         assert!(
             !has(&g, "/p/main.c:main", "/p/util.h:helper"),
             "a call landed on the prototype: {:?}",
+            edges(&g)
+        );
+    }
+
+    /// A prototype in a C source file declares its name to that file alone:
+    /// jemalloc's `int mallctl(…);` in one test, for the libc's, is no other
+    /// test's `mallctl` (theirs is the library's, nothing the project
+    /// defines), though it is the project's one declaration of the name.
+    /// The file's own calls still read it, and so does a file that
+    /// includes it.
+    #[test]
+    fn a_prototype_in_a_c_source_file_is_its_files_alone() {
+        let libc = "#undef mallctl\nint mallctl(const char *name, void *oldp);\n\nstatic unsigned\nnthreads(void) {\n\treturn mallctl(\"epoch\", 0);\n}\n";
+        let other = "#include \"test/jemalloc_test.h\"\n\nstatic void\nreset(void) {\n\tmallctl(\"prof.reset\", 0);\n}\n";
+        let including =
+            "#include \"libc.c\"\n\nstatic void\nagain(void) {\n\tmallctl(\"epoch\", 0);\n}\n";
+        let files = [
+            ("/p/test/libc.c", libc),
+            ("/p/test/prof.c", other),
+            ("/p/test/again.c", including),
+        ];
+        let sources: Vec<(PathBuf, String)> = files
+            .iter()
+            .map(|(f, s)| (PathBuf::from(f), s.to_string()))
+            .collect();
+        let scope: HashMap<PathBuf, HashSet<PathBuf>> = HashMap::from([(
+            PathBuf::from("/p/test/again.c"),
+            HashSet::from([PathBuf::from("/p/test/libc.c")]),
+        )]);
+        let g = ProjectCallGraph::build(defs_of(&files), &sources, &scope);
+        assert!(
+            !has(&g, "/p/test/prof.c:reset", "/p/test/libc.c:mallctl"),
+            "{:?}",
+            edges(&g)
+        );
+        assert!(
+            has(&g, "/p/test/libc.c:nthreads", "/p/test/libc.c:mallctl"),
+            "{:?}",
+            edges(&g)
+        );
+        assert!(
+            has(&g, "/p/test/again.c:again", "/p/test/libc.c:mallctl"),
+            "{:?}",
             edges(&g)
         );
     }

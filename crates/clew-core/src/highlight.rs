@@ -551,8 +551,12 @@ impl Lang {
                 DART_TEST_TAGS,
                 DART_CONSTRUCTOR_TAGS,
             ],
-            Lang::C => &[tree_sitter_c::TAGS_QUERY],
-            Lang::Cpp => &[tree_sitter_cpp::TAGS_QUERY, CPP_EXTRA_TAGS],
+            Lang::C => &[tree_sitter_c::TAGS_QUERY, C_MACRO_FUNCTION_TAGS],
+            Lang::Cpp => &[
+                tree_sitter_cpp::TAGS_QUERY,
+                CPP_EXTRA_TAGS,
+                C_MACRO_FUNCTION_TAGS,
+            ],
             Lang::Java => &[tree_sitter_java::TAGS_QUERY, JAVA_EXTRA_TAGS],
             Lang::Sql => &[SQL_TAGS],
             Lang::Lean => &[LEAN_TAGS],
@@ -1545,6 +1549,16 @@ const PYTHON_EXTRA_TAGS: &str = r#"
       (type (identifier) @name)
       (type (generic_type (identifier) @name))
     ]) @definition.type)
+"#;
+
+/// A function a macro makes, named by its argument — jemalloc's
+/// `TEST_BEGIN(test_alloc_max) { … }`, which the grammar reads as a
+/// definition of `(test_alloc_max)` of the type `TEST_BEGIN` (the macro
+/// after a `TEST_END` reads as the function's name, its argument its one
+/// parameter's type: [`crate::outline`] names it by the argument).
+const C_MACRO_FUNCTION_TAGS: &str = r#"
+(function_definition
+  declarator: (parenthesized_declarator (identifier) @name)) @definition.function
 "#;
 
 /// Added to tree-sitter-cpp's own tags query, whose member defined outside

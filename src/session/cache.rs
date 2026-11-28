@@ -232,7 +232,9 @@ use crate::incremental::Version;
 /// 73: C and C++ read past preprocessor groups the grammar cannot: one
 /// way of an unbalanced group, of K&R and ANSI lists, of a statement's
 /// heads; a C file's `__cplusplus` branches; a `#define` in a body.
-pub(crate) const CACHE_VERSION: u32 = 73;
+/// 74: a C function a macro makes (`TEST_BEGIN(test_x) { … }`) is named
+/// by the macro's argument.
+pub(crate) const CACHE_VERSION: u32 = 74;
 
 /// A cached symbol (the index entry minus the paths, which are reconstructed
 /// from the project root + relative path on load).
