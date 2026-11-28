@@ -229,7 +229,10 @@ use crate::incremental::Version;
 /// kinds, and their classes' primary constructors'), C# operators and
 /// destructors, ScalaTest's word and flat specs' tests and suites' own
 /// test helpers as callers.
-pub(crate) const CACHE_VERSION: u32 = 72;
+/// 73: C and C++ read past preprocessor groups the grammar cannot: one
+/// way of an unbalanced group, of K&R and ANSI lists, of a statement's
+/// heads; a C file's `__cplusplus` branches; a `#define` in a body.
+pub(crate) const CACHE_VERSION: u32 = 73;
 
 /// A cached symbol (the index entry minus the paths, which are reconstructed
 /// from the project root + relative path on load).

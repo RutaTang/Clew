@@ -2646,6 +2646,7 @@ fn without_export_macros(source: &str, c: bool) -> Option<String> {
         }
     }
     spans.extend(annotation_macros(source));
+    spans.extend(preprocessor_branches(source, c));
     if spans.is_empty() {
         return None;
     }
@@ -2660,6 +2661,264 @@ fn without_export_macros(source: &str, c: bool) -> Option<String> {
         }
     }
     String::from_utf8(out).ok()
+}
+
+/// The spans of C and C++ preprocessor text the grammar cannot read as
+/// written, to read as the preprocessor leaves one way of it:
+///
+/// - of an `#if` group whose branches leave its braces unbalanced (`#ifdef
+///   X` / `if (a) {` / `#else` / `if (b) {` / `#endif`, each opening the one
+///   block closed after), every branch but the first (but the last, of an
+///   `#if 0`);
+/// - of a group of parameter lists, a K&R one and an ANSI one (`#ifdef
+///   KR_headers` / `(s00, se) char *s00; …` / `#else` / `(const char *s00,
+///   …)`), every one but the first with no `;`;
+/// - of a group of a statement's heads (`#ifdef _WIN32` / `if
+///   (localtime_s(…))` / `#else` / `if (localtime_r(…) == NULL)` /
+///   `#endif`, its body after), every one but the first;
+/// - in a C file, a `__cplusplus` test's C++ branch (`extern "C" {`);
+/// - a `#define` inside a function's body, its continued lines too (`#define
+///   GET_ARG_NUMERIC(val, len) do { … } while (0)`).
+///
+/// Read whole, each made the function it is in end there, or none at all.
+/// A group read one way loses its directives too (its kept branch read as
+/// the code around it, a block it opens closed by another group's); every
+/// other group is left as written, and an `#include` in a branch kept
+/// still names its file.
+fn preprocessor_branches(source: &str, c: bool) -> Vec<(usize, usize)> {
+    struct Branch {
+        start: usize,
+        end: usize,
+        delta: i32,
+        // Its parentheses' too: a branch of a call's head (`#if V < 503` /
+        // `lua_pushnumber(L,` / `#else` / `lua_pushinteger(L,` / `#endif`).
+        parens: i32,
+        code: String,
+    }
+    struct Group {
+        dead_first: bool,
+        // C's reading of a `__cplusplus` test: its first branch C++'s
+        // (`#ifdef __cplusplus`), or its others (`#ifndef`).
+        cplusplus: Option<bool>,
+        branches: Vec<Branch>,
+        // The group's own directives' lines, `[from, to)` each.
+        directives: Vec<(usize, usize)>,
+    }
+    // The lines, with where each starts.
+    let mut lines: Vec<(usize, &str)> = Vec::new();
+    let mut at = 0;
+    for line in source.split_inclusive('\n') {
+        lines.push((at, line));
+        at += line.len();
+    }
+    // A line's braces outside comments, strings and characters.
+    let mut in_comment = false;
+    let mut braces = |line: &str| -> (i32, i32, String) {
+        let bytes = line.as_bytes();
+        let mut delta = 0;
+        let mut parens = 0;
+        let mut code = String::new();
+        let mut i = 0;
+        while i < bytes.len() {
+            let c = bytes[i];
+            if in_comment {
+                if c == b'*' && bytes.get(i + 1) == Some(&b'/') {
+                    in_comment = false;
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+                continue;
+            }
+            match c {
+                b'/' if bytes.get(i + 1) == Some(&b'/') => break,
+                b'/' if bytes.get(i + 1) == Some(&b'*') => {
+                    in_comment = true;
+                    i += 2;
+                    continue;
+                }
+                b'"' | b'\'' => {
+                    let quote = c;
+                    i += 1;
+                    while i < bytes.len() && bytes[i] != quote {
+                        if bytes[i] == b'\\' {
+                            i += 1;
+                        }
+                        i += 1;
+                    }
+                    code.push(' ');
+                }
+                b'{' => delta += 1,
+                b'}' => delta -= 1,
+                b'(' => parens += 1,
+                b')' => parens -= 1,
+                _ => {}
+            }
+            if c != b'"' && c != b'\'' {
+                code.push(c as char);
+            }
+            i += 1;
+        }
+        (delta, parens, code)
+    };
+    fn directive(line: &str) -> Option<(&str, &str)> {
+        let rest = line.trim_start().strip_prefix('#')?.trim_start();
+        let end = rest
+            .find(|c: char| !c.is_ascii_alphabetic())
+            .unwrap_or(rest.len());
+        Some((&rest[..end], rest[end..].trim()))
+    }
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    let blank = |spans: &mut Vec<(usize, usize)>, from: usize, to: usize| {
+        if from < to {
+            spans.push((lines[from].0, lines[to - 1].0 + lines[to - 1].1.len()));
+        }
+    };
+    let mut stack: Vec<Group> = Vec::new();
+    let mut depth = 0i32;
+    let mut n = 0;
+    while n < lines.len() {
+        let (_, line) = lines[n];
+        // A directive's continued lines are its own.
+        let mut last = n;
+        while lines[last].1.trim_end().ends_with('\\') && last + 1 < lines.len() {
+            last += 1;
+        }
+        if let Some((word, rest)) = directive(line) {
+            match word {
+                "if" | "ifdef" | "ifndef" => {
+                    let names_cplusplus = rest == "__cplusplus"
+                        || (word == "if"
+                            && !rest.contains("&&")
+                            && !rest.contains("||")
+                            && (rest.trim_start_matches('!').trim() == "defined(__cplusplus)"
+                                || rest.trim_start_matches('!').trim() == "defined __cplusplus"));
+                    let negated = word == "ifndef" || rest.starts_with('!');
+                    stack.push(Group {
+                        dead_first: word == "if" && matches!(rest, "0" | "(0)"),
+                        cplusplus: (c && names_cplusplus).then_some(!negated),
+                        branches: vec![Branch {
+                            start: last + 1,
+                            end: last + 1,
+                            delta: 0,
+                            parens: 0,
+                            code: String::new(),
+                        }],
+                        directives: vec![(n, last + 1)],
+                    })
+                }
+                "elif" | "else" => {
+                    if let Some(group) = stack.last_mut() {
+                        if let Some(open) = group.branches.last_mut() {
+                            open.end = n;
+                        }
+                        group.branches.push(Branch {
+                            start: last + 1,
+                            end: last + 1,
+                            delta: 0,
+                            parens: 0,
+                            code: String::new(),
+                        });
+                        group.directives.push((n, last + 1));
+                    }
+                }
+                "endif" => {
+                    if let Some(mut group) = stack.pop() {
+                        if let Some(open) = group.branches.last_mut() {
+                            open.end = n;
+                        }
+                        group.directives.push((n, last + 1));
+                        let branches = &group.branches;
+                        let unbalanced = branches.iter().any(|b| b.delta != 0 || b.parens != 0);
+                        let lists = branches.len() > 1
+                            && branches
+                                .iter()
+                                .all(|b| b.code.trim_start().starts_with('('));
+                        // (A statement's heads, its body after the group:
+                        // `#ifdef _WIN32` / `if (localtime_s(tm, &sse))` /
+                        // `#else` / `if (localtime_r(&sse, tm) == NULL)`.)
+                        let heads = branches.len() > 1
+                            && branches.iter().all(|b| {
+                                let code = b.code.trim();
+                                let word = code
+                                    .split(|c: char| !c.is_ascii_alphabetic())
+                                    .next()
+                                    .unwrap_or("");
+                                matches!(word, "if" | "while" | "for" | "switch")
+                                    && code.ends_with(')')
+                            });
+                        // The branch read, or none (`usize::MAX - 1`, a C
+                        // file's `#ifdef __cplusplus` of no `#else`); the
+                        // group left as written where it reads whole.
+                        const NONE: usize = usize::MAX - 1;
+                        let keep = if let Some(first_is_cpp) = group.cplusplus {
+                            match (first_is_cpp, branches.len()) {
+                                (true, 1) => NONE,
+                                (true, _) => 1,
+                                (false, _) => 0,
+                            }
+                        } else if unbalanced || heads {
+                            if group.dead_first {
+                                branches.len() - 1
+                            } else {
+                                0
+                            }
+                        } else if lists {
+                            branches
+                                .iter()
+                                .position(|b| !b.code.contains(';'))
+                                .unwrap_or(0)
+                        } else {
+                            usize::MAX
+                        };
+                        let kept_delta = match keep {
+                            usize::MAX => branches[0].delta,
+                            NONE => 0,
+                            k => branches[k].delta,
+                        };
+                        if keep != usize::MAX {
+                            for (i, b) in branches.iter().enumerate() {
+                                if i != keep {
+                                    blank(&mut spans, b.start, b.end);
+                                }
+                            }
+                            // (Its directives too: what it keeps reads as
+                            // the code around it, its braces theirs.)
+                            for &(from, to) in &group.directives {
+                                blank(&mut spans, from, to);
+                            }
+                        }
+                        // What the kept branch opens and closes is its
+                        // enclosing branch's, or the file's.
+                        match stack.last_mut().and_then(|g| g.branches.last_mut()) {
+                            Some(parent) => parent.delta += kept_delta,
+                            None => depth += kept_delta,
+                        }
+                    }
+                }
+                // A `#define` within a function's body.
+                "define" if depth + stack.iter().map(|g| g.branches[0].delta).sum::<i32>() > 0 => {
+                    blank(&mut spans, n, last + 1);
+                }
+                _ => {}
+            }
+            n = last + 1;
+            continue;
+        }
+        let (delta, parens, code) = braces(line);
+        match stack.last_mut().and_then(|g| g.branches.last_mut()) {
+            Some(branch) => {
+                branch.delta += delta;
+                branch.parens += parens;
+                if branch.code.len() < 200 {
+                    branch.code.push_str(&code);
+                }
+            }
+            None => depth += delta,
+        }
+        n += 1;
+    }
+    spans
 }
 
 /// The spans of the annotation macros after a C or C++ function's
@@ -3271,6 +3530,40 @@ mod tests {
         let flex = "YY_BUFFER_STATE yy_scan_string ( const char *yy_str );\n";
         assert_eq!(without_export_macros(flex, true), None);
         assert!(!parse(flex, Lang::C).unwrap().root_node().has_error());
+    }
+
+    /// C the grammar cannot read for its preprocessor's groups is read as
+    /// the preprocessor leaves one way of it: a block a group opens and
+    /// another closes (decNumber's `#if DECSUBSET` / `if (set->extended) {`
+    /// / `#endif` … `#if DECSUBSET` / `}` / `#endif`), a branch of a call's
+    /// head (`lua_pushnumber(L,`), K&R and ANSI parameter lists, a
+    /// statement's heads, a C file's `extern "C"`, a `#define` in a body —
+    /// every line where it was, a group that reads whole left as written.
+    #[test]
+    fn a_c_function_across_preprocessor_groups_is_read_whole() {
+        let src = "#ifdef __cplusplus\nextern \"C\"\n#endif\nvoid *alloca (size_t);\n#ifdef HAVE_X\n#include <x.h>\n#endif\nint power(int set, int n) {\n  int r = 0;\n#if DECSUBSET\n  if (set) {\n#endif\n    r = invert(n);\n#if DECSUBSET\n  }\n#endif\n#if LUA_VERSION_NUM < 503\n  push_number(n,\n#else\n  push_integer(n,\n#endif\n    r);\n#ifdef _WIN32\n  if (local_s(r))\n#else\n  if (local_r(r) == 0)\n#endif\n    r = 1;\n#define GET(v) do { \\\n    v = next(); \\\n  } while (0)\n  GET(r);\n  return r;\n}\ndouble\nstrtod\n#ifdef KR_headers\n  (s00, se) char *s00; char **se;\n#else\n  (const char *s00, char **se)\n#endif\n{\n  return parse(s00);\n}\n#if 0\nvoid dead() {\n#else\nvoid live() {\n#endif\n  work();\n}\n";
+        let readable = without_export_macros(src, true).expect(src);
+        assert_eq!(readable.len(), src.len());
+        assert_eq!(readable.lines().count(), src.lines().count());
+        assert!(readable.contains("#include <x.h>"), "{readable}");
+        assert!(!readable.contains("extern"), "{readable}");
+        assert!(
+            !readable.contains("KR_headers") && readable.contains("(const char *s00"),
+            "{readable}"
+        );
+        assert!(
+            readable.contains("void live()") && !readable.contains("void dead()"),
+            "{readable}"
+        );
+        let tree = parse(src, Lang::C).unwrap();
+        assert!(!tree.root_node().has_error(), "{readable}");
+        let names: Vec<String> = crate::outline::located_in(&tree, src, Lang::C)
+            .into_iter()
+            .map(|l| l.symbol.name)
+            .collect();
+        for name in ["power", "strtod", "live"] {
+            assert!(names.iter().any(|n| n == name), "{name}: {names:?}");
+        }
     }
 
     /// Audit 22's: an annotation macro after a C++ function's parameter
