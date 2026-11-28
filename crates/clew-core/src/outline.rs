@@ -606,6 +606,24 @@ fn c_tests(mut out: Vec<Located>, source: &str) -> Vec<Located> {
     out
 }
 
+/// The name of the Kotlin class (object) a member at `node` is in.
+pub(crate) fn kotlin_class_of(node: Node, source: &str) -> Option<String> {
+    let mut at = node.parent();
+    while let Some(n) = at {
+        if matches!(
+            n.kind(),
+            "class_declaration" | "object_declaration" | "companion_object"
+        ) {
+            return n
+                .child_by_field_name("name")
+                .and_then(|name| source.get(name.byte_range()))
+                .map(str::to_string);
+        }
+        at = n.parent();
+    }
+    None
+}
+
 /// A function written as several clauses (Erlang) or equations (Haskell) —
 /// each a definition of its own to the grammar — as ONE item: the first's
 /// name and line, running to the last's end. An Erlang function is its name
@@ -1223,7 +1241,7 @@ fn located_in_tree(tree: &Tree, source: &str, lang: Lang) -> Vec<Located> {
         // A destructor a C++ header read as C names by its class's name
         // alone (`~basic_memory_buffer()`): never what a call of the class
         // (a constructor) runs.
-        let name: std::borrow::Cow<str> = if matches!(lang, Lang::C | Lang::Cpp)
+        let name: std::borrow::Cow<str> = if matches!(lang, Lang::C | Lang::Cpp | Lang::CSharp)
             && source
                 .get(..name_at)
                 .is_some_and(|b| b.trim_end().ends_with('~'))
@@ -1231,6 +1249,31 @@ fn located_in_tree(tree: &Tree, source: &str, lang: Lang) -> Vec<Located> {
             format!("~{name}").into()
         } else {
             name
+        };
+        // A C# operator (`operator +`, a conversion's `operator string`),
+        // and a Kotlin constructor or `init` block — its class's, by the
+        // class's name, as a call of the class (`Reader(5)`) runs it.
+        let name: std::borrow::Cow<str> = match lang {
+            Lang::CSharp
+                if matches!(
+                    def.kind(),
+                    "operator_declaration" | "conversion_operator_declaration"
+                ) =>
+            {
+                format!("operator {name}").into()
+            }
+            Lang::Kotlin
+                if matches!(
+                    def.kind(),
+                    "secondary_constructor" | "anonymous_initializer"
+                ) =>
+            {
+                match kotlin_class_of(def, source) {
+                    Some(class) => class.into(),
+                    None => continue,
+                }
+            }
+            _ => name,
         };
         let name = &*name;
         // A Dart named constructor (`factory Temperature.fromJson(…)`) is

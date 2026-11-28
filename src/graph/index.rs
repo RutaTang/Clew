@@ -347,6 +347,7 @@ fn to_cached_calls(calls: &FileCalls) -> CachedCalls {
         modules: calls.context.modules.clone(),
         extension_receivers: calls.context.extension_receivers.clone(),
         namespaces: calls.context.namespaces.clone(),
+        primaries: calls.context.primaries.clone(),
     }
 }
 
@@ -478,6 +479,7 @@ fn from_cached_calls(abs: &Path, cached: &CachedCalls) -> Option<FileCalls> {
             modules: cached.modules.clone(),
             extension_receivers: cached.extension_receivers.clone(),
             namespaces: cached.namespaces.clone(),
+            primaries: cached.primaries.clone(),
         },
     })
 }

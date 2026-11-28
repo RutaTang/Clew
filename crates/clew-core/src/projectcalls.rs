@@ -206,6 +206,12 @@ pub struct FileContext {
     /// details { namespace os {`): what a call naming its scope
     /// (`details::os::gmtime(…)`) reaches.
     pub namespaces: Vec<(usize, String)>,
+    /// Each Kotlin secondary constructor's class's primary constructor's
+    /// parameter kinds ([`parameter_kinds`]), by the secondary's line —
+    /// `""` for one taking none: the overload a call of the class may be
+    /// instead (`SizedCollection(list)` is `(delegate: Collection<T>)`'s,
+    /// never `constructor(vararg values: T)`'s).
+    pub primaries: Vec<(usize, String)>,
     /// The type each Kotlin or C# extension function extends, by its line
     /// (`ExpressionWithColumnType` for `fun <T> ExpressionWithColumnType<T>.eq(…)`,
     /// `IQueryable` for `static … Where(this IQueryable<T> q, …)`): the
@@ -550,6 +556,12 @@ enum Parameters {
 /// `[T]`), with the parenthesis that closes it.
 fn parameter_list(text: &str, name: &str, lang: Lang) -> Option<Parameters> {
     let name = name.rsplit(['.', ':']).next().unwrap_or(name);
+    // (A Kotlin secondary constructor's, named by its class: its list
+    // follows `constructor`.)
+    let name = match lang == Lang::Kotlin && kotlin_constructor(text) {
+        true => "constructor",
+        false => name,
+    };
     // An empty name (`Foo.`) is found everywhere and passes nothing.
     if name.is_empty() {
         return None;
@@ -2248,7 +2260,61 @@ pub fn context_in(src: &str, lang: Lang, symbols: &[Located]) -> FileContext {
             Lang::Cpp => cpp_namespaces(src, symbols),
             _ => Vec::new(),
         },
+        primaries: match lang {
+            Lang::Kotlin => kotlin_primaries(src, symbols),
+            _ => Vec::new(),
+        },
     }
+}
+
+/// Each Kotlin secondary constructor's class's primary constructor's
+/// parameter kinds ([`FileContext::primaries`]).
+fn kotlin_primaries(src: &str, symbols: &[Located]) -> Vec<(usize, String)> {
+    let mut out = Vec::new();
+    for l in symbols.iter().filter(|l| is_callable(&l.symbol.kind)) {
+        let Some(text) = src.get(l.declaration.0..l.declaration.1) else {
+            continue;
+        };
+        if !kotlin_constructor(text) {
+            continue;
+        }
+        let Some(class) = symbols.iter().find(|c| {
+            c.symbol.kind == "class"
+                && c.symbol.name == l.symbol.name
+                && c.declaration.0 < l.declaration.0
+                && l.declaration.1 <= c.declaration.1
+        }) else {
+            continue;
+        };
+        // The class's header, to its body: a primary constructor's list
+        // follows its name (`class Box<T>(val items: List<T>) {`).
+        let Some(header) = src.get(class.declaration.0..class.declaration.1) else {
+            continue;
+        };
+        let header = header.split('{').next().unwrap_or(header);
+        let Some(Parameters::At(open, close)) =
+            parameter_list(header, &class.symbol.name, Lang::Kotlin)
+        else {
+            continue;
+        };
+        let kinds = match header[open + 1..close].trim().is_empty() {
+            true => String::new(),
+            false => match parameter_kinds(src, class, Lang::Kotlin) {
+                Some(kinds) => kinds,
+                None => continue,
+            },
+        };
+        out.push((l.symbol.line, kinds));
+    }
+    out
+}
+
+/// Whether the Kotlin declaration `text` is a secondary constructor's
+/// (`protected constructor(copyFrom: Reader) : this(…) {`).
+fn kotlin_constructor(text: &str) -> bool {
+    text.split('(')
+        .next()
+        .is_some_and(|head| head.trim_end().ends_with("constructor") && !head.contains("fun "))
 }
 
 /// Each C++ function's namespaces ([`FileContext::namespaces`]), read off
@@ -3339,6 +3405,21 @@ impl ProjectCallGraph {
         let node_parameters: Vec<Option<&str>> = nodes
             .iter()
             .map(|n| parameters.get(&(n.file.as_path(), n.line)).copied())
+            .collect();
+        // Each Kotlin secondary constructor's class's primary constructor's
+        // kinds ([`FileContext::primaries`]).
+        let primaries: HashMap<(&Path, usize), &str> = files
+            .iter()
+            .flat_map(|f| {
+                f.context
+                    .primaries
+                    .iter()
+                    .map(|(line, kinds)| ((f.file.as_path(), *line), kinds.as_str()))
+            })
+            .collect();
+        let node_primary: Vec<Option<&str>> = nodes
+            .iter()
+            .map(|n| primaries.get(&(n.file.as_path(), n.line)).copied())
             .collect();
         // Their names ([`FileContext::parameter_names`]).
         let parameter_names: HashMap<(&Path, usize), &str> = files
@@ -4488,9 +4569,9 @@ impl ProjectCallGraph {
                     }
                     _ => Vec::new(),
                 };
-                let literal_rank = |i: usize| -> usize {
+                let literal_rank = |params: Option<&str>| -> usize {
                     if lang == Lang::Cpp {
-                        return node_parameters[i].map_or(0, |params| {
+                        return params.map_or(0, |params| {
                             arguments
                                 .split(',')
                                 .zip(params.split(','))
@@ -4503,7 +4584,7 @@ impl ProjectCallGraph {
                     if !matches!(lang, Lang::Java | Lang::Kotlin | Lang::Scala | Lang::CSharp) {
                         return 0;
                     }
-                    node_parameters[i].map_or(0, |params| {
+                    params.map_or(0, |params| {
                         arguments
                             .split(',')
                             .zip(params.split(','))
@@ -4515,9 +4596,9 @@ impl ProjectCallGraph {
                             .sum()
                     })
                 };
-                let rank = |i: usize| -> usize {
-                    literal_rank(i)
-                        + node_parameters[i].map_or(0, |params| {
+                let rank_of = |params: Option<&str>| -> usize {
+                    literal_rank(params)
+                        + params.map_or(0, |params| {
                             ranking
                                 .split(',')
                                 .zip(params.split(','))
@@ -4585,7 +4666,50 @@ impl ProjectCallGraph {
                                 .sum()
                         })
                 };
+                let rank = |i: usize| rank_of(node_parameters[i]);
                 let own = rank(callee);
+                // A Kotlin secondary constructor's class's primary one, of no
+                // node of its own: the call is the primary's where that takes
+                // its arguments better, or as well as a secondary of a
+                // `vararg` alone — `SizedCollection(list)` is `(delegate:
+                // Collection<T>)`'s, no `constructor(vararg values: T)`'s
+                // (Kotlin's choice of a vararg's last).
+                if lang == Lang::Kotlin
+                    && !named
+                    && !arguments.contains('^')
+                    && let Some(primary) = node_primary[callee]
+                {
+                    let kinds: Vec<&str> = match primary.is_empty() {
+                        true => Vec::new(),
+                        false => primary.split(',').collect(),
+                    };
+                    let given: Vec<&str> = arguments.split(',').collect();
+                    let takes = kinds.contains(&"v") || given.len() <= kinds.len();
+                    let fits_primary = takes
+                        && given.iter().enumerate().all(|(at, a)| {
+                            kinds.get(at).is_none_or(|p| {
+                                passes(
+                                    a,
+                                    p,
+                                    lang,
+                                    &declared,
+                                    &descends_exactly,
+                                    &converts,
+                                    &reaches_library,
+                                )
+                            })
+                        });
+                    // (On a tie, only against a secondary of nothing but a
+                    // `vararg`: an argument of no type known may be the
+                    // primary's as well as a secondary's first parameter's,
+                    // `PrimaryKey(id)` with `id` a `Column`.)
+                    let rival = rank_of(Some(primary));
+                    if fits_primary
+                        && (rival > own || (rival == own && node_parameters[callee] == Some("v")))
+                    {
+                        return false;
+                    }
+                }
                 // Of overloads that fit alike, Kotlin and C# take one that
                 // needs no default value (`vector(name, dimensions)` before
                 // `vector<T>(name, dimensions, format = null)`) — where every
@@ -7921,6 +8045,9 @@ fn lang_spec(lang: Lang) -> Option<LangSpec> {
                 "method_declaration",
                 "constructor_declaration",
                 "local_function_statement",
+                "destructor_declaration",
+                "operator_declaration",
+                "conversion_operator_declaration",
             ],
             &["invocation_expression", "object_creation_expression"],
         ),
@@ -7950,7 +8077,11 @@ fn lang_spec(lang: Lang) -> Option<LangSpec> {
         // `Foo(…)` constructs a class as a function is called; `a.b(…)`
         // is a `navigation_expression` callee.
         Lang::Kotlin => spec(
-            &["function_declaration"],
+            &[
+                "function_declaration",
+                "secondary_constructor",
+                "anonymous_initializer",
+            ],
             &["call_expression", "infix_expression"],
         ),
         // `new Foo(…)` is an `instance_expression`; `Foo(…)` (a case class,
@@ -10913,6 +11044,40 @@ fn fn_names(
         // A constructor's initializer list (`ComplexBloc() :
         // super(ComplexStateA())`), with a body or none (`Headers.empty() :
         // entries = make();`): the constructor's.
+        // A C# destructor (`~Colour`), operator (`operator +`) or conversion
+        // (`operator string`); a Kotlin constructor or `init` block, by its
+        // class's name — as the outline names each.
+        Lang::CSharp
+            if matches!(
+                node.kind(),
+                "destructor_declaration"
+                    | "operator_declaration"
+                    | "conversion_operator_declaration"
+            ) =>
+        {
+            let name = match node.kind() {
+                "destructor_declaration" => node
+                    .child_by_field_name("name")
+                    .map(|n| format!("~{}", node_text(n, src))),
+                "operator_declaration" => node
+                    .child_by_field_name("operator")
+                    .map(|n| format!("operator {}", node_text(n, src))),
+                _ => node
+                    .child_by_field_name("type")
+                    .map(|n| format!("operator {}", node_text(n, src))),
+            };
+            return name.into_iter().collect();
+        }
+        Lang::Kotlin
+            if matches!(
+                node.kind(),
+                "secondary_constructor" | "anonymous_initializer"
+            ) =>
+        {
+            return crate::outline::kotlin_class_of(node, src)
+                .into_iter()
+                .collect();
+        }
         Lang::Dart if matches!(node.kind(), "method_signature" | "declaration") => {
             let mut cursor = node.walk();
             let constructor = node.named_children(&mut cursor).any(|c| {
@@ -21120,6 +21285,82 @@ def main():
             .map(|(_, to)| to)
             .collect();
         assert_eq!(pooled.len(), 1, "{:?}", edges(&g));
+    }
+
+    /// More calls nothing held: a Kotlin `init` block's and secondary
+    /// constructor's (both its class's, by the class's name, as a call of
+    /// the class runs them), a C# operator's, conversion's and destructor's,
+    /// and a ScalaTest word or flat spec's test (`"404s" in { … }`) or a
+    /// suite's own test helper's (cats-effect's `real("pure") { … }`).
+    #[test]
+    fn calls_of_constructors_operators_and_spec_tests_are_their_functions() {
+        let callers = |file: &str, src: &str| -> Vec<(String, Option<String>)> {
+            FileCalls::read(Path::new(file), src)
+                .unwrap()
+                .calls
+                .into_iter()
+                .map(|c| (c.callee, c.caller))
+                .collect()
+        };
+        let check = |got: &[(String, Option<String>)], pairs: &[(&str, &str)]| {
+            for (callee, caller) in pairs {
+                assert!(
+                    got.iter()
+                        .any(|(c, by)| c == callee && by.as_deref() == Some(*caller)),
+                    "{callee}: {got:?}"
+                );
+            }
+        };
+        let kt = "class Reader(val size: Int) {\n    init {\n        require(size > 0)\n    }\n    constructor(copyFrom: Reader) : this(copyFrom.size) {\n        copyAll(copyFrom)\n    }\n}\n";
+        check(
+            &callers("/p/src/main/kotlin/Reader.kt", kt),
+            &[("require", "Reader"), ("copyAll", "Reader")],
+        );
+        let cs = "public class Colour\n{\n    public static implicit operator string(Colour colour)\n    {\n        return colour.Render();\n    }\n    public static Colour operator +(Colour a, Colour b)\n    {\n        return Mix(a, b);\n    }\n    ~Colour() { Release(); }\n}\n";
+        check(
+            &callers("/p/Colour.cs", cs),
+            &[
+                ("Render", "operator string"),
+                ("Mix", "operator +"),
+                ("Release", "~Colour"),
+            ],
+        );
+        let scala = "class ApplicationSpec extends PlaySpec {\n  \"Routes\" should {\n    \"send 404\" in {\n      route(app, FakeRequest(GET, \"/boum\"))\n    }\n  }\n}\nclass StackSpec extends AnyFlatSpec {\n  \"A Stack\" should \"pop values\" in {\n    pop(stack)\n  }\n}\nclass IOSuite extends BaseSuite {\n  real(\"pure\") {\n    IO.pure(42).flatMap(x => check(x))\n  }\n  ticked(\"sleep\") { implicit ticker =>\n    assertCompleteAs(IO.sleep(1.second), ())\n  }\n}\n";
+        check(
+            &callers("/p/test/IOSuite.scala", scala),
+            &[
+                ("route", "send 404"),
+                ("pop", "pop values"),
+                ("check", "pure"),
+                ("assertCompleteAs", "sleep"),
+            ],
+        );
+        // And a Kotlin call of the class reaches them.
+        let with_main = format!("{kt}fun main() {{\n    Reader(5)\n}}\n");
+        let g = graph(&[("/p/src/main/kotlin/Reader.kt", with_main.as_str())]);
+        assert!(
+            edges(&g)
+                .iter()
+                .any(|(from, to)| from.ends_with(":main") && to.ends_with(":Reader")),
+            "{:?}",
+            edges(&g)
+        );
+        // A call its class's primary constructor takes is none of a
+        // secondary's (`SizedCollection(list)`); one only a secondary takes
+        // (`SizedCollection(1, 2, 3)`, `vararg`) is.
+        let sized = "class SizedCollection<out T>(val delegate: Collection<T>) {\n    constructor(vararg values: T) : this(values.asList())\n    fun limit(count: Int) = SizedCollection(delegate.take(count))\n}\nfun many() = SizedCollection(1, 2, 3)\nclass PrimaryKey(val columns: Array<Column>, name: String? = null) {\n    constructor(firstColumn: Column, vararg columns: Column) : this(arrayOf(firstColumn))\n}\nfun keyed(id: Any) = PrimaryKey(id)\n";
+        let g = graph(&[("/p/src/main/kotlin/Sized.kt", sized)]);
+        let reached = |caller: &str| -> usize {
+            let at = (0..g.node_count())
+                .find(|&n| g.node(n).name == caller)
+                .unwrap();
+            g.callees_of(at).len()
+        };
+        assert_eq!(reached("limit"), 0, "{:?}", edges(&g));
+        assert_eq!(reached("many"), 1, "{:?}", edges(&g));
+        // (A tie with a secondary of more than a `vararg`: kept, the
+        // argument's type unknown.)
+        assert_eq!(reached("keyed"), 1, "{:?}", edges(&g));
     }
 
     /// Calls nothing held: a Catch2 test's after a preprocessor's line in

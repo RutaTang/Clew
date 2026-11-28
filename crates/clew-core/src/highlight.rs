@@ -795,6 +795,8 @@ const KOTLIN_TAGS: &str = r#"
 (object_declaration name: (identifier) @name) @definition.class
 (companion_object name: (identifier) @name) @definition.class
 (function_declaration name: (identifier) @name) @definition.function
+(class_body (secondary_constructor "constructor" @name) @definition.method)
+(class_body (anonymous_initializer "init" @name) @definition.method)
 (class_body (property_declaration (variable_declaration (identifier) @name)) @definition.property)
 (source_file (property_declaration (variable_declaration (identifier) @name)) @definition.property)
 (type_alias type: (identifier) @name) @definition.type
@@ -817,7 +819,10 @@ const KOTLIN_TAGS: &str = r#"
 /// classes, objects, functions (an abstract one too), a template's or a
 /// file's `val`s and `var`s, givens and type definitions; and MUnit's and
 /// ScalaTest's tests (`test("adds") { … }`, `it`, `property`) and their
-/// groups (`describe`).
+/// groups (`describe`), ScalaTest's word and flat specs' (`"404s" in { … }`
+/// in `"Routes" should { … }`, `"A Stack" should "pop" in { … }`), and a
+/// suite's own test helpers' (cats-effect's `real("pure") { … }`, `ticked`):
+/// a call of a name with a title and a block, in a class's body.
 const SCALA_TAGS: &str = r#"
 (package_clause name: (package_identifier) @name) @definition.module
 (trait_definition name: (identifier) @name) @definition.interface
@@ -846,6 +851,28 @@ const SCALA_TAGS: &str = r#"
     arguments: (arguments . (string) @name))
   arguments: (block)
   (#eq? @_fn "describe")) @definition.suite
+(template_body
+  (call_expression
+    function: (call_expression
+      function: (identifier) @_fn
+      arguments: (arguments . (string) @name))
+    arguments: (block)
+    (#not-match? @_fn "^(test|it|property|describe)$")) @definition.test)
+(infix_expression
+  left: (string) @name
+  operator: (identifier) @_op
+  right: (block)
+  (#eq? @_op "in")) @definition.test
+(infix_expression
+  left: (infix_expression right: (string) @name)
+  operator: (identifier) @_op
+  right: (block)
+  (#eq? @_op "in")) @definition.test
+(infix_expression
+  left: (string) @name
+  operator: (identifier) @_op
+  right: (block)
+  (#any-of? @_op "should" "must" "when" "can" "which" "-")) @definition.suite
 "#;
 
 /// RSpec's examples (`it "adds" do`, `specify`, `scenario`; `test` of
@@ -1036,7 +1063,10 @@ const PHP_TAGS: &str = r#"
 "#;
 
 /// The C# outline. The crate's own query has classes, interfaces and methods
-/// only: no namespaces, structs, enums, records, properties or fields.
+/// only: no namespaces, structs, enums, records, properties or fields. A
+/// destructor is `~` and its class's name, an operator `operator +`, a
+/// conversion `operator string` ([`crate::outline`]): the calls in them are
+/// theirs.
 const CSHARP_TAGS: &str = r#"
 (namespace_declaration name: (_) @name) @definition.module
 (file_scoped_namespace_declaration name: (_) @name) @definition.module
@@ -1050,6 +1080,9 @@ const CSHARP_TAGS: &str = r#"
 (method_declaration name: (identifier) @name) @definition.method
 (constructor_declaration name: (identifier) @name) @definition.method
 (local_function_statement name: (identifier) @name) @definition.function
+(destructor_declaration name: (identifier) @name) @definition.method
+(operator_declaration operator: _ @name) @definition.method
+(conversion_operator_declaration type: (_) @name) @definition.method
 (property_declaration name: (identifier) @name) @definition.property
 (field_declaration (variable_declaration (variable_declarator name: (identifier) @name))) @definition.field
 "#;

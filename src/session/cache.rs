@@ -225,7 +225,11 @@ use crate::incremental::Version;
 /// names (`ip: Io.net.IpAddress`), in full.
 /// 71: C++ operators as functions; a test's block past a preprocessor's
 /// line; Dart factories, operators and initializer lists as callers.
-pub(crate) const CACHE_VERSION: u32 = 71;
+/// 72: Kotlin `init` blocks and secondary constructors (their parameter
+/// kinds, and their classes' primary constructors'), C# operators and
+/// destructors, ScalaTest's word and flat specs' tests and suites' own
+/// test helpers as callers.
+pub(crate) const CACHE_VERSION: u32 = 72;
 
 /// A cached symbol (the index entry minus the paths, which are reconstructed
 /// from the project root + relative path on load).
@@ -405,6 +409,10 @@ pub struct CachedCalls {
     /// (`clew_core::projectcalls::FileContext::namespaces`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub namespaces: Vec<(usize, String)>,
+    /// Each Kotlin secondary constructor's class's primary constructor's
+    /// parameter kinds (`clew_core::projectcalls::FileContext::primaries`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub primaries: Vec<(usize, String)>,
 }
 
 /// Everything cached about one file: how to confirm it is unchanged (mtime,
@@ -549,6 +557,7 @@ mod tests {
                 modules: vec!["Helpers".into()],
                 extension_receivers: vec![(4, "Column".into())],
                 namespaces: vec![(6, "spdlog::details::os".into())],
+                primaries: vec![(5, "TCollection".into())],
             }),
         }
     }
