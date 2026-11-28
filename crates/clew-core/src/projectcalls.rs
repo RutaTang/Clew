@@ -1075,9 +1075,11 @@ fn zig_fields(src: &str, symbols: &[Located]) -> Vec<(String, String, String)> {
         let ty = rest.split(['=', ',']).next()?.trim();
         Some((name.to_string(), zig_type_name(ty)?))
     };
+    // (A union's too: its fields, `ip: Io.net.IpAddress`, are what a
+    // switch prong's capture is.)
     for l in symbols
         .iter()
-        .filter(|l| is_type_kind(&l.symbol.kind, Lang::Zig))
+        .filter(|l| is_type_kind(&l.symbol.kind, Lang::Zig) || l.symbol.kind == "union")
     {
         let Some(text) = src.get(l.declaration.0..l.declaration.1) else {
             continue;
@@ -2180,7 +2182,25 @@ pub fn context_in(src: &str, lang: Lang, symbols: &[Located]) -> FileContext {
                 }
                 fields
             }
-            Lang::Zig => zig_fields(src, symbols),
+            // (A field of a standard-library type the file names by an
+            // alias, `ip: Io.net.IpAddress` with `const Io = std.Io;`: the
+            // library's, by its path in full, as a function's result is.)
+            Lang::Zig => {
+                let aliases = zig_std_aliases(src);
+                zig_fields(src, symbols)
+                    .into_iter()
+                    .map(|(owner, field, ty)| {
+                        let ty = match ty.split_once('.') {
+                            Some((first, rest)) => match aliases.get(first) {
+                                Some(path) => format!("{path}.{rest}"),
+                                None => ty,
+                            },
+                            None => aliases.get(ty.as_str()).cloned().unwrap_or(ty),
+                        };
+                        (owner, field, ty)
+                    })
+                    .collect()
+            }
             Lang::Cpp => cpp_class_fields(src, symbols),
             Lang::Scala => scala_class_fields(src, symbols),
             Lang::Kotlin => kotlin_class_fields(src, symbols),
@@ -11749,6 +11769,49 @@ fn receiver_of(
         *unbound = Some(receiver.to_string());
         return None;
     }
+    // A Zig path from a name of the file's for the standard library
+    // (`std.Random.DefaultPrng.init(seed)`, `posix.system.close(fd)` with
+    // `const posix = std.posix;`): the library's, never a project
+    // function of the name.
+    if lang == Lang::Zig
+        && let Some((root, path)) = receiver.split_once('.')
+        && is_plain_name(root)
+        && path.split('.').all(is_plain_name)
+        && zig_global_is_std(src, root)
+    {
+        return Some(Receiver::Type("std".to_string()));
+    }
+    // A Zig switch prong's capture (`.ip => |ip| return ip.format(w)` in
+    // `switch (self)`): the union's field of the prong's tag, as the
+    // switched value's type declares it.
+    if lang == Lang::Zig
+        && is_plain_name(receiver)
+        && let Some((subject, tag)) = zig_switch_capture(call, receiver, src)
+    {
+        let places = scope.places;
+        let ty = match subject.as_str() {
+            "self" => zig_container_of(call, src),
+            _ => None,
+        }
+        .or_else(|| {
+            match bindings
+                .entry((scope.from, subject.clone()))
+                .or_insert_with(|| Bindings::from(scope.from, places))
+                .said_before(call.start_byte(), &subject, scope, src, lang)
+            {
+                Said::Type(ty, _) if !ty.starts_with(RETURNED) && !ty.starts_with(THROUGH) => {
+                    match ty.as_str() {
+                        "Self" => zig_container_of(call, src),
+                        _ => Some(ty),
+                    }
+                }
+                _ => None,
+            }
+        });
+        if let Some(ty) = ty {
+            return Some(Receiver::Type(format!("{THROUGH}{ty}|{tag}")));
+        }
+    }
     // A Zig chain of fields: from a value of a known type (`res.headers`
     // with `res: *Response`, `self.pool`), or a file imported by name
     // (`t.arena` with `t = @import("t.zig")`) — the last field's type.
@@ -14677,6 +14740,72 @@ fn still_open(text: &str) -> bool {
         i += 1;
     }
     depth > 0
+}
+
+/// A Zig file's names for standard-library namespaces and types (`const
+/// Io = std.Io;`), each to its path in full.
+fn zig_std_aliases(src: &str) -> HashMap<String, String> {
+    src.lines()
+        .filter_map(|line| {
+            let line = line.strip_prefix("pub ").unwrap_or(line);
+            let (name, value) = line.strip_prefix("const ")?.split_once('=')?;
+            let value = value.trim().strip_suffix(';')?.trim_end();
+            let name = name.trim();
+            (name != "std"
+                && is_plain_name(name)
+                && (value == "std" || value.starts_with("std."))
+                && value
+                    .chars()
+                    .all(|c| c == '_' || c == '.' || c.is_alphanumeric()))
+            .then(|| (name.to_string(), value.to_string()))
+        })
+        .collect()
+}
+
+/// The switched value and the tag of the Zig switch prong whose capture
+/// `name` is, around `node` (`self` and `ip` for `switch (self) { .ip =>
+/// |ip| … }`).
+fn zig_switch_capture(node: Node, name: &str, src: &str) -> Option<(String, String)> {
+    let mut at = node.parent();
+    while let Some(n) = at {
+        if n.kind() == "switch_case" {
+            let mut cursor = n.walk();
+            let children: Vec<Node> = n.named_children(&mut cursor).collect();
+            let captures = children
+                .iter()
+                .find(|c| c.kind() == "payload")
+                .is_some_and(|p| {
+                    let mut c = p.walk();
+                    p.named_children(&mut c)
+                        .any(|i| i.kind() == "identifier" && node_text(i, src) == name)
+                });
+            if captures {
+                // One tag, `.ip` (a list of them is of more than one type).
+                let tags: Vec<&Node> = children
+                    .iter()
+                    .filter(|c| c.kind() == "field_expression")
+                    .collect();
+                let [tag] = tags.as_slice() else {
+                    return None;
+                };
+                if tag.child_by_field_name("object").is_some() {
+                    return None;
+                }
+                let tag = node_text(tag.child_by_field_name("member")?, src);
+                let switch = n.parent().filter(|p| p.kind() == "switch_expression")?;
+                let subject = switch.named_child(0)?;
+                if subject.kind() != "identifier" {
+                    return None;
+                }
+                return Some((node_text(subject, src).to_string(), tag.to_string()));
+            }
+        }
+        if matches!(n.kind(), "function_declaration" | "source_file") {
+            break;
+        }
+        at = n.parent();
+    }
+    None
 }
 
 /// The Zig container a function at `node` is in: the struct (union, enum)
@@ -20932,6 +21061,30 @@ def main():
             .map(|(_, to)| to)
             .collect();
         assert_eq!(pooled.len(), 1, "{:?}", edges(&g));
+    }
+
+    /// Audit 23's Zig misses: a path from the file's name for the standard
+    /// library (`std.Random.DefaultPrng.init(seed)`) is the library's, no
+    /// project `init`; a switch prong's capture (`.ip => |ip| return
+    /// ip.format(w)` in `switch (self)`) is of the union's field, a
+    /// library's `Io.net.IpAddress` — no call of the calling `format`.
+    #[test]
+    fn a_zig_std_path_and_a_switch_capture() {
+        let t = "const std = @import(\"std\");\npub fn getRandom() std.Random.DefaultPrng {\n    var seed: u64 = 0;\n    return std.Random.DefaultPrng.init(seed);\n}\npub const Context = struct {\n    pub fn init() Context {\n        return .{};\n    }\n};\n";
+        let config = "const std = @import(\"std\");\nconst Io = std.Io;\npub const Config = struct {\n    pub const Address = union(enum) {\n        ip: Io.net.IpAddress,\n        unix: []const u8,\n        pub fn format(self: Address, w: *Io.Writer) !void {\n            switch (self) {\n                .ip => |ip| return ip.format(w),\n                .unix => |unix| return w.writeAll(unix),\n            }\n        }\n    };\n};\npub const Route = union(enum) {\n    fixed: Path,\n    pub fn show(route: Route) void {\n        switch (route) {\n            .fixed => |p| p.format(),\n        }\n    }\n};\npub const Path = struct {\n    pub fn format(self: Path) void {\n        _ = self;\n    }\n};\n";
+        let g = graph(&[("/p/src/t.zig", t), ("/p/src/config.zig", config)]);
+        let reached = |caller: &str| -> Vec<usize> {
+            let at = (0..g.node_count())
+                .find(|&n| g.node(n).name == caller)
+                .unwrap();
+            let mut out: Vec<usize> = g.callees_of(at).iter().map(|&c| g.node(c).line).collect();
+            out.sort();
+            out
+        };
+        assert!(reached("getRandom").is_empty(), "{:?}", edges(&g));
+        assert!(reached("format").is_empty(), "{:?}", edges(&g));
+        // (A project type's field: its own method.)
+        assert_eq!(reached("show"), [24], "{:?}", edges(&g));
     }
 
     /// A C++ function returning a reference (`const Action<F>&

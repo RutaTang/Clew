@@ -221,7 +221,9 @@ use crate::incremental::Version;
 /// 69: C and C++ functions before an annotation macro (`… const
 /// GTEST_LOCK_EXCLUDED_(mu) {`); C++ destructors (`~Store`), functions
 /// returning a reference, and chains of fields.
-pub(crate) const CACHE_VERSION: u32 = 69;
+/// 70: Zig unions' fields, and fields of a standard-library type an alias
+/// names (`ip: Io.net.IpAddress`), in full.
+pub(crate) const CACHE_VERSION: u32 = 70;
 
 /// A cached symbol (the index entry minus the paths, which are reconstructed
 /// from the project root + relative path on load).
